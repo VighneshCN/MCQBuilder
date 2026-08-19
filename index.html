@@ -18,9 +18,9 @@
   --ink-900:#0E1720; --ink-800:#16202B; --ink-700:#22303E;
   --paper:#E9EEF2; --surface:#FFFFFF; --surface-2:#F3F6F8; --surface-3:#E3EAEF;
   --rule:#C3D0DA; --rule-soft:#DBE3E9;
-  --txt:#16202B; --txt-2:#48596A; --txt-3:#607284;
+  --txt:#16202B; --txt-2:#48596A; --txt-3:#5A6A7B;
   --blue:#1F4E79; --blue-2:#2C6BA0; --blue-tint:#E4EDF5;
-  --pencil:#C0442B; --pencil-tint:#FAE8E3;
+  --pencil:#BC432A; --pencil-tint:#FAE8E3;
   --green:#12654C; --green-tint:#DFF0E8;
   --amber:#8A5A0B; --amber-tint:#FAEED6;
   --rose:#95203A; --rose-tint:#FBE3E7;
@@ -37,7 +37,7 @@
 [data-theme="dark"]{color-scheme:dark;
   --paper:#0C141C; --surface:#151F29; --surface-2:#1B2733; --surface-3:#23303D;
   --rule:#2E3E4C; --rule-soft:#243240;
-  --txt:#DDE6EC; --txt-2:#9DAEBC; --txt-3:#7A8B99;
+  --txt:#DDE6EC; --txt-2:#9DAEBC; --txt-3:#8898A4;
   --blue:#79B2E0; --blue-2:#9BC9EE; --blue-tint:#16293A;
   --pencil:#E98D76; --pencil-tint:#33201B;
   --green:#6DC5A4; --green-tint:#122C25;
@@ -124,7 +124,7 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   margin-left:auto;font-family:var(--mono);font-size:10.5px;font-weight:600;
   background:#C0442B;color:#fff;border-radius:20px;padding:1px 6px;
 }
-.storagebar{margin-top:auto;padding:9px 10px;border-top:1px solid rgba(255,255,255,.09);display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:11.5px;line-height:1.35}
+.storagebar{margin-top:auto;padding:9px 10px;border-top:1px solid rgba(255,255,255,.09);display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12.5px;line-height:1.45}
 .storagebar .sb-dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--amber)}
 .storagebar .sb-label{color:rgba(255,255,255,.82);flex:1;min-width:0;word-break:break-word}
 .storagebar .sb-sub{width:100%;color:rgba(255,255,255,.6)}
@@ -159,9 +159,12 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   .band-stats{width:100%;margin-left:0;gap:16px;justify-content:flex-start}
   .band-stat{text-align:left}
   .btn{min-height:40px}
-  .btn.sm{min-height:36px;padding:6px 11px}
+  .btn.sm{min-height:36px;min-width:36px;padding:6px 11px}
   .opt{padding:14px 15px}
   .nav-item{min-height:44px}
+  .rail-btn{min-height:40px}
+  .chip{min-height:36px}
+  .palette{grid-template-columns:repeat(auto-fill,minmax(44px,1fr))}
   /* The sticky page header sits under z-index:20; toasts (z-index:200)
      would otherwise land right on top of the title on a narrow screen where
      there is no wide margin to sit in beside it. Push them below it instead. */
@@ -176,6 +179,7 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .card-b{padding:16px}
 .card-b.tight{padding:10px 16px}
 .grid{display:grid;gap:14px;align-items:start}
+.grid.stretch{align-items:stretch}
 .g2{grid-template-columns:repeat(2,minmax(0,1fr))}
 .g3{grid-template-columns:repeat(3,minmax(0,1fr))}
 .g4{grid-template-columns:repeat(4,minmax(0,1fr))}
@@ -197,7 +201,11 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .method-ico{flex:none;width:32px;height:32px;border-radius:var(--r);background:var(--surface-2);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:15px;color:var(--txt-2)}
 .method-row:hover .method-ico,.method-row:focus-visible .method-ico{background:var(--blue-tint);color:var(--blue)}
 .method-title{font-weight:600;font-size:13.5px;color:var(--txt)}
-.method-desc{font-size:12px;color:var(--txt-2);margin-top:2px;line-height:1.4}
+.card-desc{font-size:13.5px;line-height:1.45;color:var(--txt-2);margin-top:2px}
+.method-ico.correct-pick{color:#fff}
+[data-theme="dark"] .method-ico.correct-pick{color:#0B141C}
+.q-prev-lg{font-size:15px;line-height:1.5}
+.evidence{font-size:13.5px;line-height:1.45;color:var(--txt-2)}
 
 /* --- buttons ---------------------------------------------------------- */
 .btn{
@@ -299,10 +307,11 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 .notice.warn{border-left-color:var(--amber);background:var(--amber-tint)}
 .notice.bad{border-left-color:var(--pencil);background:var(--pencil-tint)}
 .notice.ok{border-left-color:var(--green);background:var(--green-tint)}
+.notice.small{font-size:13.5px}
 
 /* --- practice / question rendering ------------------------------------ */
 .q-shell{max-width:840px;margin:0 auto}
-.q-stem{font-size:17.5px;line-height:1.62;margin:4px 0 18px;white-space:pre-wrap}
+.q-stem{font-size:17.5px;line-height:1.62;margin:4px 0 18px;white-space:pre-wrap;overflow-wrap:break-word;word-break:break-word}
 @media(max-width:640px){.q-stem{font-size:16.5px}}
 .opts{display:flex;flex-direction:column;gap:9px}
 .opt{
@@ -310,6 +319,7 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
   background:var(--surface);border:1px solid var(--rule);border-radius:var(--r-lg);
   padding:13px 15px;cursor:pointer;font-size:15.5px;line-height:1.5;
   transition:border-color .12s ease,background .12s ease;
+  overflow-wrap:break-word;word-break:break-word;
 }
 .opt:hover:not(:disabled){border-color:var(--blue);background:var(--blue-tint)}
 .opt:disabled{cursor:default}
@@ -323,8 +333,11 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 .opt.correct .lt{background:var(--green);border-color:var(--green);color:#fff}
 .opt.wrong{border-color:var(--pencil);background:var(--pencil-tint)}
 .opt.wrong .lt{background:var(--pencil);border-color:var(--pencil);color:#fff}
+[data-theme="dark"] .opt[aria-pressed="true"] .lt,
+[data-theme="dark"] .opt.correct .lt,
+[data-theme="dark"] .opt.wrong .lt{color:#0B141C}
 .reveal{margin-top:18px;border-top:1px solid var(--rule);padding-top:16px}
-.exp{background:var(--surface-2);border:1px solid var(--rule-soft);border-radius:var(--r-lg);padding:13px 15px;white-space:pre-wrap;font-size:14.5px;line-height:1.6}
+.exp{background:var(--surface-2);border:1px solid var(--rule-soft);border-radius:var(--r-lg);padding:13px 15px;white-space:pre-wrap;font-size:14.5px;line-height:1.6;overflow-wrap:break-word;word-break:break-word}
 .qmeta{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
 
 /* --- exam palette ----------------------------------------------------- */
@@ -372,7 +385,7 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 .balanced{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
 .conf{display:inline-block;width:34px;height:5px;border-radius:3px;background:var(--surface-3);overflow:hidden;vertical-align:middle}
 .conf > i{display:block;height:100%}
-.diffbox{background:var(--surface-2);border:1px solid var(--rule-soft);border-radius:var(--r);padding:10px;font-size:13.5px;line-height:1.55;white-space:pre-wrap}
+.diffbox{background:var(--surface-2);border:1px solid var(--rule-soft);border-radius:var(--r);padding:10px;font-size:13.5px;line-height:1.55;white-space:pre-wrap;overflow-wrap:break-word;word-break:break-word}
 mark.dif{background:var(--amber-tint);color:var(--amber);border-radius:2px;padding:0 2px;font-weight:600}
 .imgstage{background:var(--surface-3);border:1px solid var(--rule);border-radius:var(--r);overflow:auto;max-height:440px;display:grid;place-items:center;padding:8px}
 .imgstage canvas,.imgstage img{max-width:100%;display:block}
@@ -2852,7 +2865,7 @@ ROUTES.dashboard = async (root) => {
   topics.forEach(x => {
     weakBody.appendChild(h('div', {}, [
       h('div', { class: 'row' }, [h('b', { class: 'small', style: 'flex:1', text: x.g.key }), h('span', { class: 'badge b-review', text: 'score ' + x.w.score })]),
-      h('div', { class: 'tiny muted', style: 'margin-top:3px', text: x.w.why.join(' · ') })
+      h('div', { class: 'evidence', style: 'margin-top:3px', text: x.w.why.join(' · ') })
     ]));
   });
   weakCard.appendChild(weakBody);
@@ -2917,7 +2930,7 @@ ROUTES.practice = async (root, preselect) => {
     root.appendChild(h('div', { class: 'card', style: 'margin-bottom:16px' }, h('div', { class: 'card-b' },
       h('button', { class: 'method-row', onclick: () => go('notes') }, [
         h('span', { class: 'method-ico', text: '▧' }),
-        h('div', {}, [h('div', { class: 'method-title', text: 'Worth a quick look first?' }), h('div', { class: 'method-desc', text: noteCount + ' revision note(s) saved for this course — open Notes' })])
+        h('div', {}, [h('div', { class: 'method-title', text: 'Worth a quick look first?' }), h('div', { class: 'card-desc', text: noteCount + ' revision note(s) saved for this course — open Notes' })])
       ])
     )));
   }
@@ -2933,7 +2946,7 @@ ROUTES.practice = async (root, preselect) => {
     return;
   }
 
-  const grid = h('div', { class: 'grid g3' });
+  const grid = h('div', { class: 'grid g3 stretch' });
   Object.keys(MODES).forEach(m => {
     const info = MODES[m];
     let count = null;
@@ -2945,7 +2958,7 @@ ROUTES.practice = async (root, preselect) => {
     }, [
       h('div', { class: 'card-b' }, [
         h('div', { class: 'row' }, [h('h3', { style: 'font-size:15.5px', text: info.label }), h('div', { class: 'spacer' }), count != null ? h('span', { class: 'badge ' + (count ? 'b-review' : 'b-draft'), text: count + ' ready' }) : null]),
-        h('p', { class: 'muted small', style: 'margin:6px 0 0', text: info.desc })
+        h('p', { class: 'card-desc', style: 'margin:6px 0 0', text: info.desc })
       ])
     ]));
   });
@@ -3655,7 +3668,7 @@ async function openQuestion(uuidStr) {
               h('span', { class: 'docnum', text: letterOf(i) })
             ]),
             h('textarea', { style: 'min-height:40px', value: o.text, oninput: e => o.text = e.target.value }),
-            h('button', { class: 'btn sm ghost', title: 'Remove option', onclick: () => { edit.options.splice(i, 1); drawOpts(); }, text: '✕' })
+            h('button', { class: 'btn sm ghost', style: 'margin-top:8px', title: 'Remove option', onclick: () => { edit.options.splice(i, 1); drawOpts(); }, text: '✕' })
           ]));
         });
         optWrap.appendChild(h('button', { class: 'btn sm', onclick: () => { edit.options.push(makeOption('')); drawOpts(); }, text: '+ Add option' }));
@@ -3924,7 +3937,7 @@ ROUTES.notes = async (root) => {
         modal({
           title: rec.title, wide: true, sticky: true,
           body: h('div', { class: 'stack' }, [
-            h('div', { class: 'tiny dim' }, 'Rendered in an isolated sandbox — no scripts run, and nothing inside can reach the app or your data.'),
+            h('div', { class: 'small muted' }, 'Rendered in an isolated sandbox — no scripts run, and nothing inside can reach the app or your data.'),
             frame
           ]),
           actions: [{ label: 'Close', value: null }]
@@ -4058,7 +4071,7 @@ ROUTES.import = async (root) => {
       h('div', { class: 'card-b stack' }, [
         entry.note ? h('p', { class: 'small', text: entry.note }) : null,
         h('p', { class: 'tiny dim', text: entry.file + (count ? ' · listed as ' + count.toLocaleString() + ' questions; the exact figure is counted from the file itself when you import' : '') }),
-        h('p', { class: 'tiny dim', text: 'This does the same thing as dropping the file above — it just saves you finding it. It goes through the same duplicate check and the same confirmation screen, into the same question bank.' }),
+        h('p', { class: 'small muted', text: 'This does the same thing as dropping the file above — it just saves you finding it. It goes through the same duplicate check and the same confirmation screen, into the same question bank.' }),
         h('button', { class: 'btn primary', onclick: () => loadSuppliedBank(entry), text: 'Add these to my question bank →' })
       ].filter(Boolean))
     ]));
@@ -4084,7 +4097,7 @@ ROUTES.import = async (root) => {
       h('div', { class: 'card-h' }, h('h3', { text: 'Other ways in' })),
       h('div', { class: 'card-b stack' }, IMPORT_METHODS.map(m => h('button', { class: 'method-row', onclick: m.action }, [
         h('span', { class: 'method-ico', text: m.ico }),
-        h('div', {}, [h('div', { class: 'method-title', text: m.title }), h('div', { class: 'method-desc', text: m.desc })])
+        h('div', {}, [h('div', { class: 'method-title', text: m.title }), h('div', { class: 'card-desc', text: m.desc })])
       ])))
     ]),
     h('div', { class: 'card' }, [
@@ -4251,7 +4264,7 @@ async function sourceDialog(files) {
       ]),
       h('div', { class: 'field' }, [h('label', { text: 'Notes' }), notes]),
       h('label', { class: 'check' }, [trust, h('span', {}, ['Treat an answer printed in the source as verified ', h('span', { class: 'dim tiny', text: '— leave off if you want to check each answer yourself' })])]),
-      h('div', { class: 'card' }, [h('div', { class: 'card-b tight small muted' }, files.map(f => h('div', { class: 'row' }, [h('span', { class: 'docnum', text: f.ext }), h('span', { style: 'flex:1', text: f.filename }), h('span', { class: 'tiny dim', text: bytes(f.size) })])))])
+      h('div', { class: 'card' }, [h('div', { class: 'card-b tight small muted' }, files.map(f => h('div', { class: 'row' }, [h('span', { class: 'docnum', text: f.ext }), h('span', { style: 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', title: f.filename, text: f.filename }), h('span', { class: 'tiny dim', text: bytes(f.size) })])))])
     ]),
     actions: [{ label: 'Cancel', value: false }, { label: 'Extract questions', value: true, kind: 'primary' }]
   });
@@ -4559,12 +4572,12 @@ function renderStaging(root) {
       optBox.textContent = '';
       q.options.forEach((o, oi) => {
         optBox.appendChild(h('div', { class: 'row', style: 'gap:8px;align-items:flex-start' }, [
-          h('label', { class: 'check', style: 'margin-top:6px' }, [
+          h('label', { class: 'check', style: 'margin-top:8px' }, [
             h('input', { type: 'radio', name: 'c' + q.uuid, checked: q.correctOptionId === o.id, onchange: () => { q.correctOptionId = o.id; if (q.status === 'needs_answer') q.status = q.domainId ? 'draft' : 'needs_class'; drawAll(); } }),
             h('span', { class: 'docnum', text: letterOf(oi) })
           ]),
           h('input', { type: 'text', value: o.text, oninput: e => o.text = e.target.value }),
-          h('button', { class: 'btn sm ghost', onclick: () => { q.options.splice(oi, 1); drawOpts(); }, text: '✕' })
+          h('button', { class: 'btn sm ghost', style: 'margin-top:3px', onclick: () => { q.options.splice(oi, 1); drawOpts(); }, text: '✕' })
         ]));
       });
       optBox.appendChild(h('button', { class: 'btn sm', onclick: () => { q.options.push(makeOption('')); drawOpts(); }, text: '+ Add option' }));
@@ -4897,7 +4910,7 @@ async function imageWorkflow(fileOrNull) {
     }
   });
 
-  const ocrStatus = h('div', { class: 'tiny dim', text: Settings.get('ocrEnabled') ? 'Local OCR engine enabled.' : 'OCR is off — transcribe on the right, or enable a local OCR engine in Settings.' });
+  const ocrStatus = h('div', { class: 'small muted', text: Settings.get('ocrEnabled') ? 'Local OCR engine enabled.' : 'OCR is off — transcribe on the right, or enable a local OCR engine in Settings.' });
   const textArea = h('textarea', { style: 'min-height:300px;font-family:var(--mono);font-size:13px', placeholder: 'Type or paste what the image says.\n\nExample:\n\nWhich control is MOST effective…?\nA) …\nB) …\nC) …\nD) …\nAnswer: C\nExplanation: …' });
   const parsedInfo = h('div', { class: 'small muted', text: 'Nothing parsed yet.' });
   const reparse = debounce(() => {
@@ -5224,7 +5237,7 @@ async function renderReviewQueue(root) {
       h('div', { class: 'spacer' }),
       h('button', { class: 'btn sm', onclick: () => openQuestion(q.uuid), text: 'Open' })
     ]),
-    h('div', { class: 'small', style: 'margin:5px 0', text: q.stem.slice(0, 200) + (q.stem.length > 200 ? '…' : '') }),
+    h('div', { class: 'q-prev-lg', style: 'margin:5px 0', text: q.stem.slice(0, 200) + (q.stem.length > 200 ? '…' : '') }),
     pairLine(q),
     extra || null
   ]);
@@ -5241,7 +5254,7 @@ async function renderReviewQueue(root) {
         State.invalidate(); toast('Conflict resolved for ' + fresh.qid, 'ok'); go('import');
       }
     }, [
-      h('span', { class: 'method-ico', style: q.correctOptionId === o.id ? 'background:var(--green);color:#fff' : '', text: letterOf(i) }),
+      h('span', { class: 'method-ico' + (q.correctOptionId === o.id ? ' correct-pick' : ''), style: q.correctOptionId === o.id ? 'background:var(--green)' : '', text: letterOf(i) }),
       h('span', { class: 'small', style: 'flex:1;text-align:left', text: o.text })
     ])))));
 
@@ -5284,7 +5297,7 @@ async function renderReviewQueue(root) {
         State.invalidate(); toast(fresh.qid + ' verified', 'ok'); go('import');
       }
     }, [
-      h('span', { class: 'method-ico', style: q.correctOptionId === o.id ? 'background:var(--green);color:#fff' : '', text: letterOf(i) + (q.correctOptionId === o.id ? ' ✓' : '') }),
+      h('span', { class: 'method-ico' + (q.correctOptionId === o.id ? ' correct-pick' : ''), style: q.correctOptionId === o.id ? 'background:var(--green)' : '', text: letterOf(i) + (q.correctOptionId === o.id ? ' ✓' : '') }),
       h('span', { class: 'small', style: 'flex:1;text-align:left', text: o.text })
     ])))));
 
@@ -5464,7 +5477,7 @@ ROUTES.analytics = async (root) => {
     const w = weaknessScore(g, Settings.get('weakMinSample'));
     const acc = per.n ? per.c / per.n : null;
     tb.appendChild(h('tr', {}, [
-      h('td', {}, [h('b', { class: 'small', text: label(g.key) }), w.score == null ? h('div', { class: 'tiny dim', text: 'insufficient evidence' }) : h('div', { class: 'tiny dim', text: w.why[0] })]),
+      h('td', {}, [h('b', { class: 'small', text: label(g.key) }), w.score == null ? h('div', { class: 'evidence', text: 'insufficient evidence' }) : h('div', { class: 'evidence', text: w.why[0] })]),
       h('td', { class: 'num', text: String(g.total) }),
       h('td', { class: 'num', text: pct(g.attempted, g.total) }),
       h('td', { class: 'num', text: g.firstAcc == null ? '—' : Math.round(g.firstAcc * 100) + '%' }),
@@ -5652,7 +5665,7 @@ ROUTES.backup = async (root) => {
       h('div', { class: 'stack' }, [
         h('div', { class: 'eyebrow', text: 'Progress only' }),
         h('button', { class: 'btn', onclick: () => exportProgress(), text: 'Attempts & performance CSV' }),
-        h('div', { class: 'tiny dim', text: 'Question content is excluded, so you can share progress without sharing copyright material.' })
+        h('div', { class: 'small muted', text: 'Question content is excluded, so you can share progress without sharing copyright material.' })
       ]),
       h('div', { class: 'stack' }, [
         h('div', { class: 'eyebrow', text: 'Audit' }),
@@ -5915,7 +5928,7 @@ async function exportPrintable() {
     'body{font:14px/1.55 Georgia,serif;max-width:820px;margin:32px auto;padding:0 18px;color:#16202B}' +
     'h1{font-size:22px}h3{font-size:13px;font-family:ui-monospace,monospace;letter-spacing:.06em;margin:26px 0 6px;color:#1F4E79}' +
     'h3 small{color:#71828F;font-weight:400}.stem{margin:0 0 8px}ol{margin:0 0 8px 22px}li.c{font-weight:700}' +
-    'li.c::after{content:" ✓";color:#12654C}.ex,.lp{font-size:13px;background:#F3F6F8;padding:8px 10px;border-left:3px solid #C3D0DA;margin:6px 0}' +
+    'li.c::after{content:" ✓";color:#12654C}.ex,.lp{font-size:14px;background:#F3F6F8;padding:8px 10px;border-left:3px solid #C3D0DA;margin:6px 0}' +
     '.src{font-family:ui-monospace,monospace;font-size:10.5px;color:#71828F;margin:4px 0 0}article{page-break-inside:avoid}' +
     '</style></head><body><h1>' + esc2(State.course.name) + ' — question bank</h1><p>' + all.length + ' records · exported ' + fmtDate(nowISO(), true) + '</p>' + parts + '</body></html>';
   download(State.course.code + '-question-bank-' + todayKey() + '.html', new Blob([html], { type: 'text/html' }));
@@ -6077,7 +6090,7 @@ ROUTES.settings = async (root) => {
       driveBlock.appendChild(h('div', { class: 'field' }, [
         h('label', { text: 'Google OAuth client ID' }),
         h('input', { type: 'text', placeholder: 'xxxxxxxxxx.apps.googleusercontent.com', value: Settings.get('driveClientId'), onchange: async e => { await Settings.set('driveClientId', e.target.value.trim()); toast('Saved'); } }),
-        h('div', { class: 'tiny dim' }, 'Not a secret — this identifies the app to Google, not any one account — but keep it out of anything you publish anyway. Set this up once for wherever this app is hosted, and it works for everyone who opens that URL — nobody else needs to see this screen.')
+        h('div', { class: 'small muted' }, 'Not a secret — this identifies the app to Google, not any one account — but keep it out of anything you publish anyway. Set this up once for wherever this app is hosted, and it works for everyone who opens that URL — nobody else needs to see this screen.')
       ]));
       driveBlock.appendChild(h('button', { class: 'btn primary', onclick: () => driveConnectFlow(), text: DriveSync.setupError ? 'Retry' : 'Connect Google Drive' }));
       const setup = h('details', { style: 'margin-top:4px' }, [
@@ -6091,7 +6104,7 @@ ROUTES.settings = async (root) => {
             h('li', {}, 'Under "Authorized JavaScript origins", add the exact URL this app is served from. No redirect URI is needed.'),
             h('li', {}, 'Copy the client ID it gives you — ends in ".apps.googleusercontent.com" — and paste it above.')
           ]),
-          h('p', { class: 'tiny dim', style: 'margin:8px 0 0' }, 'No client secret is used anywhere in this app — only the client ID.')
+          h('p', { class: 'small muted', style: 'margin:8px 0 0' }, 'No client secret is used anywhere in this app — only the client ID.')
         ])
       ]);
       driveBlock.appendChild(setup);
@@ -6183,7 +6196,7 @@ ROUTES.settings = async (root) => {
         srField('Correct, knew it', 'highConf'),
         srField('Correct in a timed mock', 'unknown')
       ]),
-      h('div', { class: 'tiny dim', style: 'margin-top:6px', text: 'A timed mock asks for no confidence, so a correct answer there is held to a short interval rather than treated as knowing it.' }),
+      h('div', { class: 'small muted', style: 'margin-top:6px', text: 'A timed mock asks for no confidence, so a correct answer there is held to a short interval rather than treated as knowing it.' }),
       h('div', { class: 'field', style: 'margin-top:10px' }, [
         h('label', { text: 'Ladder for repeated confident answers' }),
         h('input', {
@@ -6195,7 +6208,7 @@ ROUTES.settings = async (root) => {
             await Settings.set('srIntervals', n); toast('Saved');
           }
         }),
-        h('div', { class: 'tiny dim', text: 'Comma-separated days, applied in order as confident correct answers accumulate.' })
+        h('div', { class: 'small muted', text: 'Comma-separated days, applied in order as confident correct answers accumulate.' })
       ])
     ])
   ]));
@@ -6231,7 +6244,7 @@ ROUTES.settings = async (root) => {
       h('button', { class: 'btn', onclick: () => recomputeAll(), text: 'Recompute mastery and fingerprints' }),
       h('button', { class: 'btn', onclick: () => showAudit(), text: 'View audit trail' }),
       h('button', { class: 'btn danger', onclick: () => wipeCourse(), text: 'Delete this course\u2019s questions' }),
-      h('div', { class: 'tiny dim', text: 'Everything lives in this browser (and your file, if connected) by default. Nothing is sent anywhere unless you turn on external OCR or Google Drive above, both off by default.' })
+      h('div', { class: 'small muted', text: 'Everything lives in this browser (and your file, if connected) by default. Nothing is sent anywhere unless you turn on external OCR or Google Drive above, both off by default.' })
     ])
   ]));
   root.appendChild(grid2);
