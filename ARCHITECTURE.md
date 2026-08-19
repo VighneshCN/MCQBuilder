@@ -238,15 +238,39 @@ the running app.
 
 ## Google Drive sync (optional)
 
-An additional, independent copy of the bank in the user's own Google Drive,
-reachable from any device signed into that account — never a replacement for
-the local folder above. Local-folder mode keeps its instant per-answer journal
-regardless of whether this is also on.
+A second possible home for the bank, in the user's own Google Drive,
+reachable from any device signed into that account. Exactly one backend is
+ever the active connection — a local folder or Drive, never both — because
+two backends racing to write the same bank is a conflict machine, not a
+feature. Connecting one disconnects the other: the file or Drive copy being
+left is not touched, only this app's link to it is dropped, and switching
+back at any time picks up right where that side left off. `DriveSync.touch()`
+and `FileStore.touch()` sit behind the same write hook and each bail out
+immediately when their backend is not the connected one, so this is enforced
+at the single choke point every write already passes through
+(`DB._guard`), not scattered across the UI.
 
 Drive's API has no cheap append the way local disk does — every sync is a
-whole-file upload — so this pushes periodic snapshots (session end, the tab
-going hidden, a five-minute timer, and a manual "Sync now") rather than
-syncing every answer as it happens.
+whole-file upload — so writes are debounced (a few seconds after the last
+change, sooner if changes keep arriving) rather than journalled instantly.
+Not as immediate as the local folder's per-answer journal, but close, and a
+long way from a flat five-minute timer. A coarse safety-net timer covers the
+rare case where a debounced push is lost (a backgrounded tab throttling
+`setTimeout`).
+
+Treated as closely as Drive's API allows like the local file: connecting
+reads what is already there, offering the same "keep this / keep that"
+choice the local folder's `connectFlow()` uses (`_reconcileOnConnect()`).
+Every later boot checks Drive's `modifiedTime` — a metadata-only call, not a
+download — against what this browser last recorded; a newer remote copy is
+loaded in automatically, the same way opening the app just reads the local
+file. It only asks first when this browser *also* has changes that never
+reached Drive (tracked as a `driveDirtySince` flag in `fsmeta`, set the
+moment a write is pending and cleared on a successful push) — a genuine
+conflict, not routine catching-up, mirroring how the local folder only asks
+when a file changed under it *and* something was still unsaved. A manual
+"Load from Drive" and "Sync now" remain in Settings for forcing either
+direction early.
 
 Auth is Google Identity Services' token client: no backend server, no client
 secret (a static page cannot keep one confidential), no long-lived refresh
@@ -255,21 +279,32 @@ never written to IndexedDB, the snapshot file, or any export — so it is gone
 on reload and silently re-requested next time, succeeding only if the browser
 still has an active Google session and prior consent. The `drive.file` scope
 requested is Google's narrowest: the app can only ever see files it created
-itself. Only the Drive file's id and a connected flag are persisted (in
-`fsmeta`, alongside the folder handle, exempt from every export for the same
-reason). An OAuth client ID identifies the app to Google, not any one person —
-it is not a secret, and only works from its registered origin(s) — so it needs
-setting up once per deployment, not once per visitor: `DEFAULT_DRIVE_CLIENT_ID`
-holds it for whoever deploys this copy of the app, and every other visitor
-just sees "Connect Google Drive" with no setup screen at all. `effectiveDriveClientId()`
-falls back to a per-browser override in Settings, for a fork running from a
-different origin. Settings → Google Drive has the one-time Cloud Console
+itself. Only the Drive file's id, a connected flag, and the last-synced
+`modifiedTime` are persisted (in `fsmeta`, alongside the folder handle,
+exempt from every export for the same reason). An OAuth client ID identifies
+the app to Google, not any one person — it is not a secret, and only works
+from its registered origin(s) — so it needs setting up once per deployment,
+not once per visitor: `DEFAULT_DRIVE_CLIENT_ID` holds it for whoever deploys
+this copy of the app, and every other visitor just sees "Connect Google
+Drive" with no setup screen at all. `effectiveDriveClientId()` falls back to
+a per-browser override in Settings, for a fork running from a different
+origin. Settings → "Where your data lives" has the one-time Cloud Console
 walkthrough, shown only when no client ID — default or override — is set.
 
-Connecting checks whether Drive already holds something (from another device)
-before ever pushing over it. A manual "Load from Drive" is available for
-catching a browser up on answers made elsewhere; both directions ask first,
-since replacing a whole snapshot can discard whichever side is not chosen.
+Read-only enforcement (`_writeVeto`) stays local-folder-only: a Drive push
+that fails leaves the change sitting in IndexedDB to retry, rather than
+blocking editing outright the way a missing local file does. Drive's failure
+modes are ordinary network flakiness, not the "silently diverging from a
+file you think is being written" risk the local guard exists for, and
+blocking edits over a transient network blip would cost far more than it
+protects. `DriveSync.status()`/`problem` still surface a failed sync clearly
+in the top bar and Settings, so a real, lasting failure is never silent —
+just not a hard stop.
+
+Existing installs from before this backend split — a local folder and Drive
+both recorded as connected — resolve on the first boot after updating: the
+local folder wins, Drive is disconnected (its file is untouched), and a
+one-time toast explains why. Reconnect Drive from Settings to switch.
 
 ## Course notes (optional)
 

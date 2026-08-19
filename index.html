@@ -5991,113 +5991,116 @@ ROUTES.settings = async (root) => {
   await band('Settings', 'How the app behaves', [{ k: 'Courses', v: String(State.courses.length) }]);
 
   /* ---- where the data lives ---- */
-  const st = FileStore.status();
+  const activeMode = FileStore.connected ? 'local' : (DriveSync.connected ? 'drive' : 'none');
+  const modeBadge =
+    activeMode === 'local' ? { c: 'b-active', t: 'Local folder' } :
+    activeMode === 'drive' ? { c: DriveSync.problem ? 'b-conflict' : 'b-active', t: 'Google Drive' } :
+    FileStore.needsReconnect ? { c: 'b-conflict', t: 'Reconnect needed' } : { c: 'b-review', t: 'Browser only' };
   const dataCard = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
     h('div', { class: 'card-h' }, [h('h3', { text: 'Where your data lives' }), h('div', { class: 'spacer' }),
-      h('span', { class: 'badge ' + (st.tone === 'ok' ? 'b-active' : st.tone === 'bad' ? 'b-conflict' : 'b-review'), text: st.label })])
+      h('span', { class: 'badge ' + modeBadge.c, text: modeBadge.t })])
   ]);
   const db = h('div', { class: 'card-b stack' });
+  db.appendChild(h('p', { class: 'small' }, 'One place holds your bank at a time — a local folder, or your own Google Drive — never both. Switch whenever you like; whichever you switch away from keeps everything saved up to that point, untouched.'));
 
+  const localBlock = h('div', { class: 'stack' });
+  const driveBlock = h('div', { class: 'stack' });
+
+  /* -- local folder -- */
   if (FileStore.tier === 'manual') {
-    db.appendChild(h('p', { class: 'small' }, 'Your bank is stored inside this browser. Saving straight to a folder needs the File System Access API, which today only Chrome, Edge and other Chromium browsers have.'));
-    db.appendChild(h('div', { class: 'notice warn small' }, 'Because the only copy is in this browser, clearing browsing data would take it with them. Export a backup regularly from Backup & Restore.'));
+    localBlock.appendChild(h('div', { class: 'eyebrow' }, 'Local folder'));
+    localBlock.appendChild(h('p', { class: 'small muted' }, 'Not available in this browser — saving straight to a folder needs the File System Access API, which today only Chrome, Edge and other Chromium browsers have. Google Drive works here instead, since it only needs the network.'));
   } else if (FileStore.connected) {
-    db.appendChild(h('p', { class: 'small' }, ['Everything is saved to ', h('b', { text: DATA_FILE }), ' in ', h('b', { text: FileStore.locationName || 'the folder you chose' }), '. That file is the real home of your bank; this browser keeps a working copy, rebuilt from the file each time you open the app.']));
+    localBlock.appendChild(h('div', { class: 'eyebrow' }, 'Local folder — active'));
+    localBlock.appendChild(h('p', { class: 'small' }, ['Saved to ', h('b', { text: DATA_FILE }), ' in ', h('b', { text: FileStore.locationName || 'the folder you chose' }), '. This browser keeps a working copy, rebuilt from the file each time you open the app.']));
     if (FileStore.canJournal()) {
-      db.appendChild(h('div', { class: 'notice small' }, ['While you practise, each answer is appended to a small companion file (', h('b', { text: JOURNAL_FILE }), ') instead of rewriting the whole bank. The full file is rewritten when a session ends, after an import, when you close the tab, and every ten minutes. Both files are read on startup, so nothing is lost either way.']));
-      db.appendChild(h('div', { class: 'card', style: 'margin:0' }, [h('div', { class: 'card-b tight small' }, [
-        h('div', { class: 'eyebrow', text: 'What is in your folder' }),
-        h('div', {}, [h('b', { text: DATA_FILE }), ' — your bank. This is the file to keep.']),
-        h('div', {}, [h('b', { text: JOURNAL_FILE }), ' — answers since the last full write. Emptied each time the bank is rewritten.']),
-        h('div', {}, [h('b', { text: BACKUP_FILE }), ' — the previous version, kept automatically so there is always one generation to fall back on.']),
-        h('div', { class: 'tiny dim', style: 'margin-top:6px' }, 'Every save is read back and checked before it is trusted, and a save that would remove a large part of your bank without you asking is refused outright.')
-      ])]));
+      localBlock.appendChild(h('div', { class: 'notice small' }, ['Each answer is appended to a small companion file (', h('b', { text: JOURNAL_FILE }), ') instead of rewriting the whole bank. The full file is rewritten when a session ends, after an import, when you close the tab, and every ten minutes.']));
     } else {
-      db.appendChild(h('div', { class: 'notice warn small' }, 'You picked a single file rather than a folder, so every change rewrites the whole file. Connecting a folder instead lets the app write small updates while you practise.'));
+      localBlock.appendChild(h('div', { class: 'notice warn small' }, 'A single file was picked rather than a folder, so every change rewrites the whole file.'));
     }
     if (FileStore._lastSize > 12 * 1048576) {
-      db.appendChild(h('div', { class: 'notice warn small' }, 'Your data file is ' + bytes(FileStore._lastSize) + '. Full rewrites are getting slow, so they now happen less often and the journal does more of the work. Practice speed is unaffected. If it passes about 50 MB, consider archiving old attempt history.'));
+      localBlock.appendChild(h('div', { class: 'notice warn small' }, 'Your data file is ' + bytes(FileStore._lastSize) + '. Full rewrites happen less often past this size, so practice speed is unaffected.'));
     }
-    db.appendChild(h('p', { class: 'tiny dim', text: FileStore.lastSavedAt ? 'Last saved ' + fmtDate(FileStore.lastSavedAt, true) + (FileStore.lastSnapshotAt ? ' · full file written ' + fmtDate(FileStore.lastSnapshotAt, true) : '') : 'Not saved yet in this session.' }));
-    db.appendChild(h('div', { class: 'row' }, [
-      h('button', { class: 'btn sm', onclick: async () => { const ok = await FileStore.flushNow('snapshot'); toast(ok ? 'Full file written.' : 'Nothing to save.', ok ? 'ok' : 'info'); go('settings'); }, text: 'Write the full file now' }),
+    localBlock.appendChild(h('p', { class: 'tiny dim', text: FileStore.lastSavedAt ? 'Last saved ' + fmtDate(FileStore.lastSavedAt, true) + (FileStore.lastSnapshotAt ? ' · full file written ' + fmtDate(FileStore.lastSnapshotAt, true) : '') : 'Not saved yet in this session.' }));
+    localBlock.appendChild(h('div', { class: 'row wrap', style: 'gap:8px' }, [
+      h('button', { class: 'btn sm', onclick: async () => { const ok = await FileStore.flushNow('snapshot'); toast(ok ? 'Full file written.' : 'Nothing to save.', ok ? 'ok' : 'info'); go('settings'); }, text: 'Write now' }),
       h('button', { class: 'btn sm danger', onclick: () => disconnectFlow().then(() => go('settings')), text: 'Disconnect' })
     ]));
   } else if (FileStore.needsReconnect) {
-    db.appendChild(h('div', { class: 'notice bad small' }, 'The app is read-only. It cannot reach the file it was saving to, so it is refusing to write anywhere rather than let you work into a copy that is not being kept.'));
-    db.appendChild(h('p', { class: 'small', text: 'Reconnect to carry on. Nothing has been lost — your file still holds everything saved up to the last write.' }));
-    db.appendChild(h('button', { class: 'btn primary', onclick: () => reconnectFlow().then(() => go('settings')), text: 'Reconnect' }));
+    localBlock.appendChild(h('div', { class: 'eyebrow' }, 'Local folder'));
+    localBlock.appendChild(h('div', { class: 'notice bad small' }, 'Read-only — cannot reach the file it was saving to. Nothing has been lost; your file still holds everything saved up to the last write.'));
+    localBlock.appendChild(h('button', { class: 'btn primary', onclick: () => reconnectFlow().then(() => go('settings')), text: 'Reconnect' }));
   } else {
-    db.appendChild(h('p', { class: 'small' }, 'Your bank is currently stored only inside this browser. You can move it into a real file on your disk — one file holding questions, attempt history, sources and settings.'));
-    db.appendChild(h('p', { class: 'tiny dim', text: 'Once connected, the file is what counts. Back it up, sync it, or copy it to another machine and open it there.' }));
-    db.appendChild(h('button', { class: 'btn primary', onclick: () => connectFlow().then(() => go('settings')), text: 'Connect a folder' }));
+    localBlock.appendChild(h('div', { class: 'eyebrow' }, 'Local folder'));
+    localBlock.appendChild(h('p', { class: 'small muted' }, activeMode === 'drive'
+      ? 'Currently using Google Drive. Connecting a folder switches to it — your Drive file is left exactly as it is.'
+      : 'Move your bank into a real file on disk — questions, attempt history, sources and settings, all in one place you own.'));
+    localBlock.appendChild(h('button', { class: 'btn primary', onclick: () => connectFlow().then(() => go('settings')), text: activeMode === 'drive' ? 'Switch to a local folder' : 'Connect a folder' }));
   }
-  dataCard.appendChild(db);
-  root.appendChild(dataCard);
 
-  /* ---- Google Drive sync ---- */
-  const driveBadge = DriveSync.connected ? (DriveSync.problem ? { c: 'b-conflict', t: 'Needs attention' } : { c: 'b-active', t: 'Connected' })
-    : DriveSync.setupError ? { c: 'b-conflict', t: 'Signed in — setup incomplete' } : { c: 'b-review', t: 'Not connected' };
-  const driveCard = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
-    h('div', { class: 'card-h' }, [h('h3', { text: 'Google Drive' }), h('div', { class: 'spacer' }),
-      h('span', { class: 'badge ' + driveBadge.c, text: driveBadge.t })])
-  ]);
-  const dr = h('div', { class: 'card-b stack' });
-  dr.appendChild(h('p', { class: 'small' }, 'An additional, separate copy in your own Google Drive — alongside the local folder above, not instead of it — so the bank you build here is also reachable from a phone or a different computer. This is the one thing in the app that leaves this machine other than the opt-in external OCR path; it goes only to your own Google account, using a scope that lets it see nothing in your Drive except the one file it creates.'));
-  // Persisted, not just a toast that vanishes in a few seconds — a failed
-  // setup attempt should still be visible the next time this screen opens.
+  /* -- google drive -- */
+  driveBlock.appendChild(h('div', { class: 'eyebrow' }, DriveSync.connected ? 'Google Drive — active' : 'Google Drive'));
   if (!DriveSync.connected && DriveSync.setupError) {
-    dr.appendChild(h('div', { class: 'notice bad small' }, [
+    driveBlock.appendChild(h('div', { class: 'notice bad small' }, [
       h('b', { text: DriveSync.hasLiveToken() ? 'Signed in to Google — the Drive file itself didn’t set up: ' : 'Could not connect: ' }),
       DriveSync.setupError.replace(/^(Could not sign in to Google: |Signed in to Google, but could not set up the Drive file: )/, '')
     ]));
   }
   if (DriveSync.connected) {
-    dr.appendChild(h('p', { class: 'tiny dim', text: DriveSync.problem ? DriveSync.problem : (DriveSync.lastPushedAt ? 'Last synced ' + fmtDate(DriveSync.lastPushedAt, true) : 'Connected — first sync happens shortly, or click Sync now.') }));
-    dr.appendChild(h('div', { class: 'row wrap', style: 'gap:8px' }, [
+    driveBlock.appendChild(h('p', { class: 'small' }, 'Reachable from any device signed into this Google account. Changes here push within seconds; opening the app elsewhere reads the newer copy in automatically.'));
+    driveBlock.appendChild(h('p', { class: 'tiny dim', text: DriveSync.problem ? DriveSync.problem : (DriveSync.lastPushedAt ? 'Last synced ' + fmtDate(DriveSync.lastPushedAt, true) : 'Connected — first sync happens shortly, or click Sync now.') }));
+    driveBlock.appendChild(h('div', { class: 'row wrap', style: 'gap:8px' }, [
       h('button', { class: 'btn sm primary', onclick: async () => { const ok = await DriveSync.maybePush(true); toast(ok ? 'Synced to Drive.' : 'Could not sync — see the status above.', ok ? 'ok' : 'bad'); go('settings'); }, text: 'Sync now' }),
       h('button', { class: 'btn sm', onclick: async () => { await DriveSync.pullNow(); go('settings'); }, text: 'Load from Drive' }),
       h('button', { class: 'btn sm danger', onclick: async () => { await DriveSync.disconnect(); go('settings'); }, text: 'Disconnect' })
     ]));
-  } else if (DEFAULT_DRIVE_CLIENT_ID && !Settings.get('driveClientId')) {
-    // The deployer has already done the one-time setup — nothing for anyone
-    // else opening this app to configure. Sign in with your own account.
-    // Retry reuses a still-live token instead of prompting Google again —
-    // see DriveSync.connect().
-    dr.appendChild(h('button', { class: 'btn primary', onclick: async () => { await DriveSync.connect(); go('settings'); }, text: DriveSync.setupError ? 'Retry' : 'Connect Google Drive' }));
-    const advanced = h('details', { style: 'margin-top:10px' }, [
-      h('summary', { class: 'tiny dim', style: 'cursor:pointer' }, 'Using a different Google Cloud project? (advanced)'),
-      h('div', { class: 'field', style: 'margin-top:8px' }, [
-        h('label', { text: 'Google OAuth client ID' }),
-        h('input', { type: 'text', placeholder: 'xxxxxxxxxx.apps.googleusercontent.com', value: '', onchange: async e => { await Settings.set('driveClientId', e.target.value.trim()); toast('Saved'); go('settings'); } })
-      ])
-    ]);
-    dr.appendChild(advanced);
+  } else if (activeMode === 'local') {
+    driveBlock.appendChild(h('p', { class: 'small muted' }, 'Currently using a local folder. Connecting Google Drive switches to it — your local file is left exactly as it is.'));
+    driveBlock.appendChild(h('button', { class: 'btn primary', onclick: () => driveConnectFlow(), text: 'Switch to Google Drive' }));
   } else {
-    dr.appendChild(h('div', { class: 'field' }, [
-      h('label', { text: 'Google OAuth client ID' }),
-      h('input', { type: 'text', placeholder: 'xxxxxxxxxx.apps.googleusercontent.com', value: Settings.get('driveClientId'), onchange: async e => { await Settings.set('driveClientId', e.target.value.trim()); toast('Saved'); } }),
-      h('div', { class: 'tiny dim' }, 'Not a secret — this identifies the app to Google, not any one account — but keep it out of anything you publish anyway. Set this up once for wherever this app is hosted, and it works for everyone who opens that URL — nobody else needs to see this screen.')
-    ]));
-    dr.appendChild(h('button', { class: 'btn primary', onclick: async () => { await DriveSync.connect(); go('settings'); }, text: DriveSync.setupError ? 'Retry' : 'Connect Google Drive' }));
-    const setup = h('details', { style: 'margin-top:4px' }, [
-      h('summary', { class: 'small', style: 'cursor:pointer' }, 'One-time setup — about ten minutes, free'),
-      h('div', { class: 'stack small', style: 'margin-top:10px' }, [
-        h('ol', { style: 'padding-left:20px;margin:0' }, [
-          h('li', {}, 'Go to the Google Cloud Console and create a project (any name).'),
-          h('li', {}, '"APIs & Services" → "Library" → enable the "Google Drive API".'),
-          h('li', {}, '"APIs & Services" → "OAuth consent screen" → User type "External" → fill in the required fields → add test users under "Test users" for anyone who should have access before Google reviews it. Small-scale use never needs that review — test users sign in immediately, past an "unverified app" click-through.'),
-          h('li', {}, '"APIs & Services" → "Credentials" → "Create credentials" → "OAuth client ID" → Application type "Web application".'),
-          h('li', {}, 'Under "Authorized JavaScript origins", add the exact URL this app is served from. No redirect URI is needed.'),
-          h('li', {}, 'Copy the client ID it gives you — ends in ".apps.googleusercontent.com" — and paste it above.')
-        ]),
-        h('p', { class: 'tiny dim', style: 'margin:8px 0 0' }, 'No client secret is used anywhere in this app — only the client ID.')
-      ])
-    ]);
-    dr.appendChild(setup);
+    driveBlock.appendChild(h('p', { class: 'small' }, 'Your own Google Drive, reachable from a phone or a different computer. This is the one thing in the app that leaves this machine other than the opt-in external OCR path; it goes only to your own Google account, using a scope that lets it see nothing in your Drive except the one file it creates.'));
+    if (DEFAULT_DRIVE_CLIENT_ID && !Settings.get('driveClientId')) {
+      // The deployer has already done the one-time setup — nothing for
+      // anyone else opening this app to configure. Sign in with your own
+      // account. Retry reuses a still-live token instead of prompting
+      // Google again — see DriveSync.connect().
+      driveBlock.appendChild(h('button', { class: 'btn primary', onclick: () => driveConnectFlow(), text: DriveSync.setupError ? 'Retry' : 'Connect Google Drive' }));
+      const advanced = h('details', { style: 'margin-top:10px' }, [
+        h('summary', { class: 'tiny dim', style: 'cursor:pointer' }, 'Using a different Google Cloud project? (advanced)'),
+        h('div', { class: 'field', style: 'margin-top:8px' }, [
+          h('label', { text: 'Google OAuth client ID' }),
+          h('input', { type: 'text', placeholder: 'xxxxxxxxxx.apps.googleusercontent.com', value: '', onchange: async e => { await Settings.set('driveClientId', e.target.value.trim()); toast('Saved'); go('settings'); } })
+        ])
+      ]);
+      driveBlock.appendChild(advanced);
+    } else {
+      driveBlock.appendChild(h('div', { class: 'field' }, [
+        h('label', { text: 'Google OAuth client ID' }),
+        h('input', { type: 'text', placeholder: 'xxxxxxxxxx.apps.googleusercontent.com', value: Settings.get('driveClientId'), onchange: async e => { await Settings.set('driveClientId', e.target.value.trim()); toast('Saved'); } }),
+        h('div', { class: 'tiny dim' }, 'Not a secret — this identifies the app to Google, not any one account — but keep it out of anything you publish anyway. Set this up once for wherever this app is hosted, and it works for everyone who opens that URL — nobody else needs to see this screen.')
+      ]));
+      driveBlock.appendChild(h('button', { class: 'btn primary', onclick: () => driveConnectFlow(), text: DriveSync.setupError ? 'Retry' : 'Connect Google Drive' }));
+      const setup = h('details', { style: 'margin-top:4px' }, [
+        h('summary', { class: 'small', style: 'cursor:pointer' }, 'One-time setup — about ten minutes, free'),
+        h('div', { class: 'stack small', style: 'margin-top:10px' }, [
+          h('ol', { style: 'padding-left:20px;margin:0' }, [
+            h('li', {}, 'Go to the Google Cloud Console and create a project (any name).'),
+            h('li', {}, '"APIs & Services" → "Library" → enable the "Google Drive API".'),
+            h('li', {}, '"APIs & Services" → "OAuth consent screen" → User type "External" → fill in the required fields → add test users under "Test users" for anyone who should have access before Google reviews it. Small-scale use never needs that review — test users sign in immediately, past an "unverified app" click-through.'),
+            h('li', {}, '"APIs & Services" → "Credentials" → "Create credentials" → "OAuth client ID" → Application type "Web application".'),
+            h('li', {}, 'Under "Authorized JavaScript origins", add the exact URL this app is served from. No redirect URI is needed.'),
+            h('li', {}, 'Copy the client ID it gives you — ends in ".apps.googleusercontent.com" — and paste it above.')
+          ]),
+          h('p', { class: 'tiny dim', style: 'margin:8px 0 0' }, 'No client secret is used anywhere in this app — only the client ID.')
+        ])
+      ]);
+      driveBlock.appendChild(setup);
+    }
   }
-  driveCard.appendChild(dr);
-  root.appendChild(driveCard);
+
+  db.appendChild(h('div', { class: 'grid g2' }, [localBlock, driveBlock]));
+  dataCard.appendChild(db);
+  root.appendChild(dataCard);
 
   /* ---- courses ---- */
   const courseCard = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
@@ -7043,20 +7046,38 @@ _writeHook = (store, op, payload, key) => {
   // Any question write invalidates cached comparison data.
   if (store === 'questions') bumpSimGen();
   FileStore.touch(store, op, payload, key);
+  // Only one backend is ever the active connection, so at most one of these
+  // two touch() calls does anything — each bails out immediately when it is
+  // not the one currently connected.
+  if (typeof DriveSync !== 'undefined') DriveSync.touch(store);
 };
 _writeVeto = (store) => store !== 'fsmeta' && FileStore.isReadOnly();
 
 /* ============================================================================
-   Google Drive sync — an additional, independent copy of your data, reachable
-   from any device signed into the same Google account. This runs ALONGSIDE
-   the local file above, never in place of it: local-folder mode keeps its
-   instant per-answer journal regardless of whether this is also on.
+   Google Drive sync — a second possible home for your data, alongside the
+   local folder above but never AT THE SAME TIME as it: exactly one backend
+   is ever the active connection, and connecting one disconnects the other
+   (its file is left exactly as it is — only the app's connection to it
+   changes). This is what lets the same bank follow you to a phone or a
+   different computer, without two backends racing to write over each other.
 
    Drive's API has no cheap append the way local disk does — every sync is a
-   whole-file upload — so this pushes periodic snapshots (session end, a
-   timer, the tab going hidden, and a manual button) rather than syncing every
-   answer the instant it happens. Opening the app on another device offers to
-   pull whatever was last pushed.
+   whole-file upload — so writes are debounced (a few seconds after the last
+   change, sooner if changes keep coming) rather than journalled instantly
+   like the local folder's per-answer journal. It is not truly instant, but
+   it is close, and it is a world away from the old "every five minutes"
+   timer. A coarse safety-net timer covers the rare case where a debounced
+   push gets lost (a backgrounded tab throttling timers).
+
+   Treated as closely as possible like the local file: connecting reads what
+   is already there (same "keep this / keep that" choice the local folder
+   uses), and every later boot checks whether Drive changed since this
+   browser last touched it — via its modifiedTime, a cheap metadata-only
+   call — loading the newer copy in automatically, the same way opening the
+   app just reads the local file. It only asks when this browser ALSO has
+   changes of its own that never made it to Drive (a crash before a
+   debounced push fired), because that is a genuine conflict rather than
+   routine catching-up.
 
    OAuth is Google Identity Services' token client: no backend server, no
    client secret (a static page cannot keep one confidential — this is the
@@ -7073,7 +7094,9 @@ _writeVeto = (store) => store !== 'fsmeta' && FileStore.isReadOnly();
 
 const DRIVE_FILE_NAME = 'mcq-mastery-data.json';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
-const DRIVE_PUSH_MIN_GAP_MS = 5 * 60 * 1000;
+const DRIVE_PUSH_DEBOUNCE_MS = 6 * 1000;      // push shortly after the last change settles
+const DRIVE_PUSH_MAX_GAP_MS = 20 * 1000;      // never let a burst of activity go unpushed longer than this
+const DRIVE_SAFETY_TIMER_MS = 60 * 1000;      // coarse fallback if a debounced push is ever lost
 
 /**
  * An OAuth client ID identifies this APP to Google, not any one person — it
@@ -7098,28 +7121,72 @@ function effectiveDriveClientId() {
 
 const DriveSync = {
   connected: false, fileId: null, accessToken: null, tokenExpiresAt: 0,
-  lastPushedAt: null, problem: null, setupError: null,
-  _tokenClient: null, _tokenClientId: null, _pushTimer: null, _pushing: false,
+  lastPushedAt: null, lastSyncedModifiedTime: null, problem: null, setupError: null,
+  _tokenClient: null, _tokenClientId: null, _pushTimer: null, _debounceTimer: null,
+  _pushing: false, _pendingChange: false, _firstUnpushedChangeAt: null,
 
   /** A token already in hand, not yet expired — connect() uses this to skip
       a redundant sign-in popup when only the file-setup half failed last
       time, not the Google sign-in itself. */
   hasLiveToken() { return !!(this.accessToken && Date.now() < this.tokenExpiresAt); },
 
-  /** Boot-time: resume a previous connection silently, never with a popup. */
+  /** Boot-time: resume a previous connection silently, never with a popup.
+      If Drive changed since this browser last touched it, load that in —
+      the same way a connected local file is just read on startup — unless
+      this browser also has changes of its own that never reached Drive,
+      which is a real conflict rather than routine catching-up. */
   async init() {
     const clientId = effectiveDriveClientId();
     const fileId = await FileStore.meta('driveFileId');
     const wasConnected = await FileStore.meta('driveConnected');
     if (!clientId || !fileId || !wasConnected) return;
+    if (FileStore.connected) {
+      // Only one backend is ever active. Both being recorded as connected
+      // means a local folder was connected before this version started
+      // enforcing that — the folder wins, and Drive is left disconnected
+      // (its file is untouched; only this app's link to it is dropped).
+      await FileStore.delMeta('driveConnected');
+      setTimeout(() => toast('A local folder and Google Drive were both connected — only one is used at a time, so Drive was disconnected here. Reconnect it from Settings if you meant to switch.', 'info', 10000), 1500);
+      return;
+    }
     this.fileId = fileId;
+    this.lastSyncedModifiedTime = await FileStore.meta('driveModifiedTime');
+    const dirtySince = await FileStore.meta('driveDirtySince');
     try {
       await this._loadGis();
       await this._requestToken(true);
       this.connected = !!this.accessToken;
     } catch (e) { this.connected = false; }
-    if (this.connected) this._startTimer();
+    if (!this.connected) { updateStorageBar(); return; }
+    this._startTimer();
     updateStorageBar();
+
+    try {
+      const remoteModified = await this._fetchModifiedTime();
+      if (!remoteModified || remoteModified === this.lastSyncedModifiedTime) return;
+      if (dirtySince) {
+        const remote = await this.pull();
+        const remoteCount = (remote.stores.questions || []).length;
+        const localCount = (await DB.all('questions')).length;
+        const choice = await modal({
+          title: 'Google Drive changed elsewhere',
+          body: h('div', { class: 'stack' }, [
+            h('p', {}, 'This Drive file was updated from another device, and this browser also has changes of its own that never made it to Drive — probably closed before they could sync.'),
+            h('p', { class: 'small' }, 'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This browser holds ' + localCount + '.'),
+            h('div', { class: 'notice small' }, 'Whichever you discard is not deleted from Drive — take a backup first from Settings if you want to keep both.')
+          ]),
+          actions: [{ label: 'Keep what is here', value: 'browser' }, { label: 'Load the Drive copy', value: 'drive', kind: 'primary' }]
+        });
+        if (choice === 'drive') await this._applyRemote(remote);
+        else await this.push();
+      } else {
+        // The routine case: nothing unsynced here, so the newer Drive copy
+        // is simply loaded in, same as opening a local file that changed.
+        const remote = await this.pull();
+        await this._applyRemote(remote);
+      }
+      await this._recordSyncedStamp();
+    } catch (e) { /* best-effort — this browser just stays on what it has until the next successful check */ }
   },
 
   _loadGis() {
@@ -7162,6 +7229,10 @@ const DriveSync = {
     catch (e) { this.connected = false; this.problem = 'Sign-in expired — reconnect in Settings.'; updateStorageBar(); return false; }
   },
 
+  /** connect() only handles Google auth and the Drive file itself — whether
+      to disconnect a local folder first is a UX decision made one level up,
+      in driveConnectFlow(), the same split FileStore.connectFolder() and
+      connectFlow() already use. */
   async connect() {
     const clientId = effectiveDriveClientId();
     if (!clientId) {
@@ -7180,45 +7251,103 @@ const DriveSync = {
     try {
       let fileId = await FileStore.meta('driveFileId');
       if (!fileId) fileId = (await this._findExisting()) || (await this._createFile());
-      await FileStore.setMeta('driveFileId', fileId);
-      await FileStore.setMeta('driveConnected', true);
       this.fileId = fileId;
       this.connected = true; this.problem = null; this.setupError = null;
+
+      const proceed = await this._reconcileOnConnect();
+      if (!proceed) {
+        this.connected = false; this.fileId = null;
+        updateStorageBar();
+        return;
+      }
+
+      await FileStore.setMeta('driveFileId', fileId);
+      await FileStore.setMeta('driveConnected', true);
       this._startTimer();
+      await this._recordSyncedStamp();
       updateStorageBar();
       toast('Google Drive connected.', 'ok');
-      await this._checkRemoteOnConnect();
     } catch (e) {
+      this.connected = false;
       this.setupError = 'Signed in to Google, but could not set up the Drive file: ' + e.message;
       updateStorageBar();
       toast(this.setupError, 'bad', 8000);
     }
   },
 
+  /** After the file is reachable: reconcile what is already there against
+      this browser, the same "keep this / keep that" choice the local
+      folder's connectFlow() uses. Returns false only if the person cancelled
+      outright — connect() then rolls the whole attempt back rather than
+      leaving a half-decided connection. */
+  async _reconcileOnConnect() {
+    let remote;
+    try { remote = await this.pull(); } catch (e) { await this.push(); return true; }
+    const remoteCount = (remote.stores.questions || []).length;
+    if (!remoteCount) { await this.push(); return true; }
+    const localCount = (await DB.all('questions')).length;
+    const choice = await modal({
+      title: 'There is already a bank in Google Drive',
+      body: h('div', { class: 'stack' }, [
+        h('p', {}, 'That Drive file already holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '.'),
+        h('p', { class: 'small' }, 'This browser currently holds ' + localCount + ' question(s). Which one do you want to keep?'),
+        h('div', { class: 'notice small' }, 'Whichever you discard is not deleted — the Drive file stays where it is, and you can take a backup first from Settings.')
+      ]),
+      actions: [
+        { label: 'Cancel', value: '' },
+        { label: 'Keep what is in Drive', value: 'drive' },
+        { label: 'Overwrite Drive with this browser’s bank', value: 'browser', kind: 'primary' }
+      ]
+    });
+    if (choice === 'drive') { await this._applyRemote(remote); return true; }
+    if (choice === 'browser') { await this.push(); return true; }
+    return false;
+  },
+
   async disconnect() {
     if (this.accessToken && window.google && google.accounts && google.accounts.oauth2) {
       try { google.accounts.oauth2.revoke(this.accessToken, () => { }); } catch (e) { }
     }
-    this.connected = false; this.accessToken = null; this.fileId = null; this.problem = null; this.setupError = null;
+    clearTimeout(this._debounceTimer);
     if (this._pushTimer) { clearInterval(this._pushTimer); this._pushTimer = null; }
+    this.connected = false; this.accessToken = null; this.fileId = null; this.problem = null; this.setupError = null;
+    this._pendingChange = false; this._firstUnpushedChangeAt = null; this.lastSyncedModifiedTime = null;
     await FileStore.delMeta('driveFileId');
     await FileStore.delMeta('driveConnected');
+    await FileStore.delMeta('driveModifiedTime');
+    await FileStore.delMeta('driveDirtySince');
     updateStorageBar();
     toast('Google Drive disconnected — the file stays in your Drive, this only forgets it here.', 'ok');
   },
 
-  _startTimer() {
-    if (this._pushTimer) return;
-    this._pushTimer = setInterval(() => this.maybePush(), DRIVE_PUSH_MIN_GAP_MS);
+  /** Called by the DAL after any successful write, mirroring
+      FileStore.touch() — Drive has no cheap incremental append, so this just
+      schedules a debounced whole-file push rather than journalling. */
+  touch(store) {
+    if (!this.connected || store === 'fsmeta') return;
+    if (!this._firstUnpushedChangeAt) {
+      this._firstUnpushedChangeAt = Date.now();
+      FileStore.setMeta('driveDirtySince', nowISO());
+    }
+    this._pendingChange = true;
+    clearTimeout(this._debounceTimer);
+    const overdue = Date.now() - this._firstUnpushedChangeAt >= DRIVE_PUSH_MAX_GAP_MS;
+    this._debounceTimer = setTimeout(() => this.push(), overdue ? 0 : DRIVE_PUSH_DEBOUNCE_MS);
   },
 
-  /** Push if it has been a while, or always on force (session end, tab
-      hiding, the manual button) — never more often than the minimum gap,
-      so a burst of activity does not turn into a burst of uploads. */
+  /** Coarse safety net in case a debounced push is ever lost — a
+      backgrounded tab can throttle setTimeout well past its delay. */
+  _startTimer() {
+    if (this._pushTimer) return;
+    this._pushTimer = setInterval(() => this.maybePush(), DRIVE_SAFETY_TIMER_MS);
+  },
+
+  /** Push if there is something unpushed, or always on force (session end,
+      tab hiding, the manual button). */
   async maybePush(force) {
     if (!this.connected || this._pushing) return false;
-    const stale = !this.lastPushedAt || (Date.now() - new Date(this.lastPushedAt).getTime() > DRIVE_PUSH_MIN_GAP_MS);
-    if (!force && !stale) return false;
+    if (!force && !this._pendingChange) return false;
+    clearTimeout(this._debounceTimer);
     return await this.push();
   },
 
@@ -7228,14 +7357,18 @@ const DriveSync = {
     try {
       if (!(await this._ensureToken())) return false;
       const payload = await FileStore.buildPayload();
-      const res = await fetch('https://www.googleapis.com/upload/drive/v3/files/' + this.fileId + '?uploadType=media', {
+      const res = await fetch('https://www.googleapis.com/upload/drive/v3/files/' + this.fileId + '?uploadType=media&fields=modifiedTime', {
         method: 'PATCH',
         headers: { 'Authorization': 'Bearer ' + this.accessToken, 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
       if (!res.ok) throw new Error('Drive returned ' + res.status);
+      const meta = await res.json().catch(() => null);
       this.lastPushedAt = nowISO();
       this.problem = null;
+      this._pendingChange = false; this._firstUnpushedChangeAt = null;
+      await this._recordSyncedStamp(meta && meta.modifiedTime);
+      await FileStore.delMeta('driveDirtySince');
       updateStorageBar();
       return true;
     } catch (e) {
@@ -7257,6 +7390,25 @@ const DriveSync = {
     if (!payload || !payload.stores) throw new Error('That file did not look like an MCQ Mastery snapshot.');
     if ((payload.schema || 1) > APP.schema) throw new Error('That snapshot was written by a newer version of the app.');
     return payload;
+  },
+
+  /** Metadata-only — a few bytes, not the whole file — used to notice a
+      change on Drive without downloading it every time. */
+  async _fetchModifiedTime() {
+    if (!(await this._ensureToken())) return null;
+    try {
+      const res = await fetch('https://www.googleapis.com/drive/v3/files/' + this.fileId + '?fields=modifiedTime', {
+        headers: { 'Authorization': 'Bearer ' + this.accessToken }
+      });
+      if (!res.ok) return null;
+      const j = await res.json();
+      return j.modifiedTime || null;
+    } catch (e) { return null; }
+  },
+
+  async _recordSyncedStamp(mt) {
+    const stamp = mt || await this._fetchModifiedTime();
+    if (stamp) { this.lastSyncedModifiedTime = stamp; await FileStore.setMeta('driveModifiedTime', stamp); }
   },
 
   async _findExisting() {
@@ -7318,19 +7470,6 @@ const DriveSync = {
     } catch (e) { return false; }
   },
 
-  /** Right after connecting, Drive might already hold something from another
-      device — never silently fold that over what is sitting in this browser. */
-  async _checkRemoteOnConnect() {
-    let remote;
-    try { remote = await this.pull(); } catch (e) { return; } // nothing usable there yet — first push establishes it
-    const remoteCount = (remote.stores.questions || []).length;
-    if (!remoteCount) return;
-    const localCount = (await DB.all('questions')).length;
-    const ok = await confirmBox('Google Drive already has data',
-      'This Drive file already holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This browser currently has ' + localCount + '. Load the Drive copy in here? Cancel keeps what is in this browser, and overwrites the Drive copy on the next sync.');
-    if (ok) await this._applyRemote(remote);
-  },
-
   async _applyRemote(payload) {
     const names = syncStores();
     for (const s of names) {
@@ -7340,13 +7479,16 @@ const DriveSync = {
     }
     FileStore._cache = null;
     State.invalidate();
+    this._pendingChange = false; this._firstUnpushedChangeAt = null;
+    await FileStore.delMeta('driveDirtySince');
     toast('Loaded the Drive copy.', 'ok');
     if (typeof State !== 'undefined' && State.view) await go(State.view);
   },
 
   /** A manual pull, for "I answered questions on my phone, catch this
       browser up" — offered from Settings, always asks first since it can
-      discard unsynced local changes. */
+      discard unsynced local changes. Boot-time catching-up happens on its
+      own now (see init()); this is for forcing it early. */
   async pullNow() {
     let remote;
     try { remote = await this.pull(); }
@@ -7355,12 +7497,13 @@ const DriveSync = {
     const remoteCount = (remote.stores.questions || []).length;
     const ok = await confirmBox('Load the Drive copy?',
       'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This replaces what is in this browser (' + localCount + ' question(s)) with that copy. Anything answered here since your last sync is lost unless it already reached Drive.', true);
-    if (ok) await this._applyRemote(remote);
+    if (ok) { await this._applyRemote(remote); await this._recordSyncedStamp(); }
   },
 
   status() {
     if (!this.connected) return this.setupError ? { tone: 'bad', label: 'Drive: ' + this.setupError } : null;
     if (this.problem) return { tone: 'bad', label: this.problem };
+    if (this._pendingChange) return { tone: 'ok', label: 'Drive: syncing…' };
     return { tone: 'ok', label: this.lastPushedAt ? 'Drive synced ' + fmtDate(this.lastPushedAt, true) : 'Drive connected — syncing…' };
   }
 };
@@ -7465,7 +7608,10 @@ const NotesStore = {
 function updateStorageBar() {
   const bar = $('#storagebar');
   if (!bar) return;
-  const st = FileStore.status();
+  // Whichever backend is actually active carries the main indicator — only
+  // one ever is, so there is nothing useful left to show about the other.
+  const driveActive = typeof DriveSync !== 'undefined' && DriveSync.connected;
+  const st = driveActive ? { key: 'drive', tone: DriveSync.status().tone, label: DriveSync.status().label } : FileStore.status();
   bar.dataset.tone = st.tone;
   bar.textContent = '';
 
@@ -7473,7 +7619,12 @@ function updateStorageBar() {
   const label = h('span', { class: 'sb-label', text: st.label });
   bar.appendChild(dot); bar.appendChild(label);
 
-  if (FileStore.connected) {
+  if (driveActive) {
+    bar.appendChild(h('span', {
+      class: 'sb-sub tiny',
+      text: DriveSync._pendingChange ? 'unsaved changes…' : (DriveSync.lastPushedAt ? 'synced ' + fmtDate(DriveSync.lastPushedAt, true) : '')
+    }));
+  } else if (FileStore.connected) {
     bar.appendChild(h('span', {
       class: 'sb-sub tiny',
       text: FileStore.dirty ? 'unsaved changes…' : (FileStore.lastSavedAt ? 'saved ' + fmtDate(FileStore.lastSavedAt, true) : '')
@@ -7485,11 +7636,6 @@ function updateStorageBar() {
     bar.appendChild(h('button', { class: 'btn sm primary', onclick: () => reconnectFlow(), text: 'Reconnect' }));
   } else if (st.key === 'local') {
     bar.appendChild(h('button', { class: 'btn sm', onclick: () => connectFlow(), text: 'Connect a folder' }));
-  }
-
-  const drive = typeof DriveSync !== 'undefined' ? DriveSync.status() : null;
-  if (drive) {
-    bar.appendChild(h('span', { class: 'sb-sub tiny', style: drive.tone === 'bad' ? 'color:var(--pencil)' : '', text: drive.label }));
   }
 }
 
@@ -7616,6 +7762,18 @@ async function connectFlow() {
     });
     return;
   }
+  if (DriveSync.connected) {
+    const ok = await modal({
+      title: 'Switch to a local folder?',
+      body: h('div', { class: 'stack' }, [
+        h('p', {}, 'Your bank is currently syncing to Google Drive. Only one place is ever the active connection — connecting a folder here will disconnect Drive.'),
+        h('div', { class: 'notice small' }, 'Your Drive file stays exactly where it is and keeps everything synced up to now — disconnecting only stops this app pushing to it. Switch back at any time.')
+      ]),
+      actions: [{ label: 'Cancel', value: false }, { label: 'Continue', value: true, kind: 'primary' }]
+    });
+    if (!ok) return;
+    await DriveSync.disconnect();
+  }
   const useFolder = FileStore.capability() === 'folder';
   const ok = await modal({
     title: 'Keep your bank in a file you own',
@@ -7702,6 +7860,28 @@ async function disconnectFlow() {
   await FileStore.forget();
   updateStorageBar();
   toast('Disconnected. Your file was saved first.', 'ok');
+}
+
+/** Mirrors connectFlow() for the Drive backend — enforces the same
+    one-active-connection rule from this side, then hands off to
+    DriveSync.connect() for the actual OAuth and file setup. */
+async function driveConnectFlow() {
+  if (FileStore.connected) {
+    const ok = await modal({
+      title: 'Switch to Google Drive?',
+      body: h('div', { class: 'stack' }, [
+        h('p', {}, 'Your bank is currently saved to a local folder. Only one place is ever the active connection — connecting Google Drive will disconnect the folder.'),
+        h('div', { class: 'notice small' }, 'Your local file stays exactly where it is and keeps everything saved up to now — disconnecting only stops this app writing to it. Switch back at any time.')
+      ]),
+      actions: [{ label: 'Cancel', value: false }, { label: 'Switch to Google Drive', value: true, kind: 'primary' }]
+    });
+    if (!ok) return;
+    await FileStore.flushNow();
+    await FileStore.forget();
+    updateStorageBar();
+  }
+  await DriveSync.connect();
+  await go('settings');
 }
 
 
