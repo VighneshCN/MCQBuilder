@@ -395,6 +395,10 @@ function h(tag, attrs, kids) {
     else if (k === 'text') e.textContent = v;
     else if (k.slice(0, 2) === 'on') e.addEventListener(k.slice(2), v);
     else if (k === 'dataset') for (const d in v) e.dataset[d] = v[d];
+    /* A <textarea> has no value *attribute* — its value is its text content.
+       setAttribute('value', …) on one is silently ignored, which is how a
+       populated question can render as an empty box. Set the property. */
+    else if (k === 'value' && tag === 'textarea') { e.value = v; e.defaultValue = v; }
     else e.setAttribute(k, v === true ? '' : v);
   }
   if (kids != null) (Array.isArray(kids) ? kids : [kids]).forEach(k => {
@@ -3964,9 +3968,49 @@ async function runParse(files, meta) {
   go('import');
 }
 
-/* ---------- staging preview ---------- */
+/* ---------- staging preview ----------
+   A batch of a few hundred candidates cannot be reviewed one card at a time,
+   and "Import all / Reject all" is too blunt to be safe. So the list is
+   filterable, tickable and paged, and every batch action applies to the
+   current selection — or, when nothing is ticked, to exactly what the filter
+   is showing. No action ever touches a row the filter has hidden. */
+
+/* Each filter answers one question a reviewer actually asks of a batch. */
+const STAGE_FILTERS = [
+  ['all',      'Everything',        () => true],
+  ['ready',    'Ready to import',   it => !it.dup && !!it.q.correctOptionId && !!it.q.domainId],
+  ['noanswer', 'No answer found',   it => !it.q.correctOptionId],
+  ['unmapped', 'No domain',         it => !it.q.domainId],
+  ['dup',      'Duplicates',        it => !!it.dup && !it.dup.conflict],
+  ['conflict', 'Answer conflicts',  it => !!(it.dup && it.dup.conflict)],
+  ['reject',   'Marked reject',     it => it.decision === 'reject']
+];
+
+/** Apply a decision to one candidate, keeping its status consistent with it. */
+function setStagingDecision(it, d) {
+  // merge / review / conflict only mean anything against a matched record.
+  if ((d === 'merge' || d === 'review' || d === 'conflict') && !it.dup) return false;
+  if (d === 'conflict' && !(it.dup && it.dup.conflict)) return false;
+  it.decision = d;
+  if (d === 'conflict') { it.q.status = 'answer_conflict'; it.q.conflict = true; }
+  else if (d === 'review') { it.q.conflict = false; it.q.status = 'possible_dup'; }
+  else if (d === 'import' || d === 'merge' || d === 'reject') {
+    // Importing a flagged candidate means "this one stands on its own", so the
+    // duplicate and conflict marks come off with it. Otherwise it would be
+    // admitted straight back into the review queue it was just cleared from.
+    if (it.q.status === 'possible_dup' || it.q.status === 'answer_conflict') {
+      it.q.conflict = false;
+      it.q.status = it.q.correctOptionId ? 'draft' : 'needs_answer';
+    }
+  }
+  return true;
+}
+
 function renderStaging(root) {
   const st = State.staging;
+  if (!st.ui) st.ui = { filter: 'all', page: 0, size: 25, sel: new Set() };
+  const ui = st.ui;
+
   const steps = h('div', { class: 'steps' });
   IMPORT_STEPS.forEach(([k, label], i) => steps.appendChild(h('div', { class: 'step', dataset: { on: i === 2 ? '1' : '0', done: i < 2 ? '1' : '0' } }, [h('b', { text: 'Step ' + (i + 1) }), h('span', { text: label })])));
   root.appendChild(steps);
@@ -3979,51 +4023,156 @@ function renderStaging(root) {
     });
     return c;
   };
-  const summary = h('div', { class: 'grid g4', style: 'margin-bottom:14px' });
+  const summary = h('div', { class: 'grid', style: 'grid-template-columns:repeat(5,minmax(0,1fr));margin-bottom:14px' });
   const drawSummary = () => {
     const c = counts();
     summary.textContent = '';
     const t = (k, v, cls) => summary.appendChild(h('div', { class: 'tile ' + (cls || '') }, [h('span', { class: 'eyebrow', text: k }), h('b', { text: String(v) })]));
     t('Detected', st.items.length);
-    t('To import', c.import);
+    t('To import', c.import, c.import ? 'good' : '');
     t('Duplicates to merge', c.merge, c.merge ? 'hot' : '');
     t('Needs review', c.review + c.conflict, (c.review + c.conflict) ? 'hot' : '');
+    t('To reject', c.reject, c.reject ? 'hot' : '');
   };
   drawSummary();
   root.appendChild(summary);
 
   if (st.duplicateFileWarning) root.appendChild(h('div', { class: 'notice warn', style: 'margin-bottom:12px' }, 'One of these files has the same hash as a source already in the register. It has been reused rather than duplicated, and its questions will be matched against what is already in the bank.'));
 
-  const bulk = h('div', { class: 'card', style: 'margin-bottom:14px' }, [h('div', { class: 'card-b tight row wrap' }, [
-    h('span', { class: 'eyebrow', text: 'Batch actions' }),
-    h('button', { class: 'btn sm', onclick: () => bulkSet('import'), text: 'Import all' }),
-    h('button', { class: 'btn sm', onclick: () => bulkSet('reject'), text: 'Reject all' }),
-    h('button', { class: 'btn sm', onclick: () => bulkClass(), text: 'Set classification' }),
-    h('div', { class: 'spacer' }),
-    h('button', { class: 'btn ghost sm', onclick: async () => { if (await confirmBox('Discard this batch?', 'Nothing has been written to the bank yet. The extracted questions will be lost.')) { State.staging = null; go('import'); } }, text: 'Discard batch' }),
-    h('button', { class: 'btn primary', onclick: () => commitBatch(), text: 'Confirm import' })
-  ])]);
-  root.appendChild(bulk);
+  /* ---- what the batch actions currently apply to ---- */
+  const visible = () => {
+    const f = (STAGE_FILTERS.find(x => x[0] === ui.filter) || STAGE_FILTERS[0])[2];
+    return st.items.filter(f);
+  };
+  /** Ticked rows if any are ticked, otherwise everything the filter shows. */
+  const scope = () => ui.sel.size ? st.items.filter(it => ui.sel.has(it.q.uuid)) : visible();
 
+  const bulk = h('div', { class: 'card', style: 'margin-bottom:14px' });
+  root.appendChild(bulk);
   const list = h('div', { class: 'stack' });
   root.appendChild(list);
+  const pager = h('div', { class: 'row', style: 'margin-top:14px;justify-content:center;gap:10px' });
+  root.appendChild(pager);
 
-  function drawList() {
-    list.textContent = '';
-    st.items.forEach((it, i) => list.appendChild(stagingRow(it, i)));
-    drawSummary();
+  function drawAll() { drawBulk(); drawList(); drawSummary(); }
+
+  function drawBulk() {
+    bulk.textContent = '';
+    const shown = visible();
+    const target = scope();
+    const scopeNote = ui.sel.size
+      ? ui.sel.size + ' ticked'
+      : shown.length + ' shown' + (ui.filter === 'all' ? '' : ' by this filter');
+
+    const filterSel = h('select', {
+      onchange: e => { ui.filter = e.target.value; ui.page = 0; drawAll(); }
+    }, STAGE_FILTERS.map(([v, label, fn]) => h('option', { value: v, selected: ui.filter === v }, label + ' (' + st.items.filter(fn).length + ')')));
+
+    const line1 = h('div', { class: 'card-b tight row wrap' }, [
+      h('span', { class: 'eyebrow', text: 'Show' }), filterSel,
+      h('button', { class: 'btn sm', onclick: () => { shown.forEach(it => ui.sel.add(it.q.uuid)); drawAll(); }, text: 'Tick all shown' }),
+      h('button', { class: 'btn sm ghost', disabled: !ui.sel.size, onclick: () => { ui.sel.clear(); drawAll(); }, text: 'Untick all' }),
+      h('div', { class: 'spacer' }),
+      h('span', { class: 'small muted', text: 'Batch actions apply to ' + scopeNote })
+    ]);
+
+    const act = (label, fn, cls) => h('button', { class: 'btn sm ' + (cls || ''), disabled: !target.length, onclick: fn, text: label });
+    const line2 = h('div', { class: 'card-b tight row wrap', style: 'border-top:1px solid var(--rule-soft)' }, [
+      h('span', { class: 'eyebrow', text: 'Decide' }),
+      act('Import', () => applyDecision('import')),
+      act('Merge into existing', () => applyDecision('merge')),
+      act('Send to review queue', () => applyDecision('review')),
+      act('Flag answer conflict', () => applyDecision('conflict')),
+      act('Reject', () => applyDecision('reject'))
+    ]);
+    const line3 = h('div', { class: 'card-b tight row wrap', style: 'border-top:1px solid var(--rule-soft)' }, [
+      h('span', { class: 'eyebrow', text: 'Edit' }),
+      act('Set classification', () => bulkClass()),
+      act('Trust the source answers', () => bulkTrust()),
+      h('div', { class: 'spacer' }),
+      h('button', { class: 'btn ghost sm', onclick: async () => { if (await confirmBox('Discard this batch?', 'Nothing has been written to the bank yet. The extracted questions will be lost.')) { State.staging = null; go('import'); } }, text: 'Discard batch' }),
+      h('button', { class: 'btn primary', onclick: () => commitBatch(), text: 'Confirm import' })
+    ]);
+    bulk.appendChild(line1); bulk.appendChild(line2); bulk.appendChild(line3);
   }
-  function bulkSet(d) { st.items.forEach(it => { if (d === 'import' && (it.decision === 'conflict' || it.decision === 'merge')) return; it.decision = d; }); drawList(); }
+
+  /** Set one decision across the working set, and say what could not take it. */
+  function applyDecision(d) {
+    const target = scope();
+    let done = 0;
+    target.forEach(it => { if (setStagingDecision(it, d)) done++; });
+    const skipped = target.length - done;
+    const why = d === 'merge' || d === 'review' ? ' — they match nothing already in the bank'
+      : d === 'conflict' ? ' — they raise no answer conflict' : '';
+    toast(done + ' set to ' + d + (skipped ? ' · ' + skipped + ' unchanged' + why : ''), skipped ? 'warn' : 'ok');
+    drawAll();
+  }
+
   async function bulkClass() {
+    const target = scope();
     const dom = h('select', {}, [h('option', { value: '' }, '— leave unchanged —')].concat(State.course.blueprint.map(d => h('option', { value: d.id }, d.id + ' · ' + d.name))));
-    const topic = h('input', { type: 'text' });
-    const r = await modal({ title: 'Classify every candidate in this batch', body: h('div', { class: 'grid g2' }, [h('div', { class: 'field' }, [h('label', { text: 'Official domain' }), dom]), h('div', { class: 'field' }, [h('label', { text: 'Topic' }), topic])]), actions: [{ label: 'Cancel', value: false }, { label: 'Apply', value: true, kind: 'primary' }] });
+    const topic = h('input', { type: 'text', placeholder: 'Leave blank to keep existing' });
+    const diff = h('select', {}, [h('option', { value: '' }, '— leave unchanged —')].concat(DIFFICULTY.map(d => h('option', { value: d }, d))));
+    const r = await modal({
+      title: 'Classify ' + target.length + ' candidate(s)',
+      body: h('div', { class: 'grid g2' }, [
+        h('div', { class: 'field' }, [h('label', { text: 'Official domain' }), dom]),
+        h('div', { class: 'field' }, [h('label', { text: 'Topic' }), topic]),
+        h('div', { class: 'field' }, [h('label', { text: 'Difficulty' }), diff])
+      ]),
+      actions: [{ label: 'Cancel', value: false }, { label: 'Apply', value: true, kind: 'primary' }]
+    });
     if (!r) return;
-    st.items.forEach(it => {
+    target.forEach(it => {
       if (dom.value) { it.q.domainId = dom.value; it.q.classVerified = 'verified'; if (it.q.status === 'needs_class') it.q.status = it.q.correctOptionId ? 'draft' : 'needs_answer'; }
       if (topic.value.trim()) it.q.topic = topic.value.trim();
+      if (diff.value) it.q.difficulty = diff.value;
     });
-    drawList();
+    toast('Classification applied to ' + target.length, 'ok');
+    drawAll();
+  }
+
+  /* Marking an answer verified is a claim about the source, so it is asked for
+     explicitly and only ever applies where an answer was actually found. */
+  async function bulkTrust() {
+    const target = scope();
+    const eligible = target.filter(it => it.q.correctOptionId);
+    if (!eligible.length) { toast('None of those have an answer to verify', 'warn'); return; }
+    const ok = await confirmBox('Treat the source answer as verified?',
+      eligible.length + ' of ' + target.length + ' candidate(s) carry an answer from the source. Marking them verified lets them enter practice as Active. Only do this where you trust the source — nothing is fact-checked for you.');
+    if (!ok) return;
+    eligible.forEach(it => {
+      it.q.answerVerified = 'verified'; it.q.verifiedAt = nowISO();
+      it.q.verifyNote = 'Source answer trusted at import';
+      if (it.q.status === 'needs_answer') it.q.status = it.q.domainId ? 'draft' : 'needs_class';
+    });
+    toast(eligible.length + ' answer(s) marked verified', 'ok');
+    drawAll();
+  }
+
+  function drawList() {
+    const shown = visible();
+    const pages = Math.max(1, Math.ceil(shown.length / ui.size));
+    ui.page = clamp(ui.page, 0, pages - 1);
+    const slice = shown.slice(ui.page * ui.size, (ui.page + 1) * ui.size);
+
+    list.textContent = '';
+    if (!shown.length) {
+      list.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, [
+        h('h3', { text: 'Nothing matches that filter' }),
+        h('p', { class: 'muted', text: 'Switch the filter back to Everything to see the whole batch.' })
+      ])));
+    } else {
+      slice.forEach(it => list.appendChild(stagingRow(it, st.items.indexOf(it))));
+    }
+
+    pager.textContent = '';
+    pager.appendChild(h('span', { class: 'small muted', text: shown.length + ' candidate(s) in this view' }));
+    if (pages > 1) {
+      pager.appendChild(h('button', { class: 'btn sm', disabled: ui.page === 0, onclick: () => { ui.page--; drawList(); window.scrollTo(0, 0); }, text: '← Previous' }));
+      pager.appendChild(h('span', { class: 'docnum', text: 'Page ' + (ui.page + 1) + ' of ' + pages }));
+      pager.appendChild(h('button', { class: 'btn sm', disabled: ui.page >= pages - 1, onclick: () => { ui.page++; drawList(); window.scrollTo(0, 0); }, text: 'Next →' }));
+    }
   }
 
   function stagingRow(it, i) {
@@ -4031,9 +4180,11 @@ function renderStaging(root) {
     const card = h('div', { class: 'card' });
     const conf = (v) => h('span', { class: 'conf', title: Math.round((v || 0) * 100) + '% confidence' }, h('i', { style: 'width:' + Math.round((v || 0) * 100) + '%;background:' + ((v || 0) >= 0.8 ? 'var(--green)' : (v || 0) >= 0.5 ? 'var(--amber)' : 'var(--pencil)') }));
     const head = h('div', { class: 'card-h' }, [
+      h('input', { type: 'checkbox', title: 'Tick for batch actions', checked: ui.sel.has(q.uuid), onchange: e => { e.target.checked ? ui.sel.add(q.uuid) : ui.sel.delete(q.uuid); drawBulk(); } }),
       h('span', { class: 'docnum dim', text: '#' + (i + 1) }),
       h('span', { class: 'tick', dataset: { mark: markFor(q) }, style: 'border:0;width:auto', text: (STATUS[q.status] || {}).mark }),
       statusBadge(q),
+      h('span', { class: 'badge ' + (it.decision === 'reject' ? 'b-arch' : it.decision === 'import' ? 'b-active' : 'b-review'), text: 'will ' + it.decision }),
       it.dup ? h('span', { class: 'badge ' + (it.dup.conflict ? 'b-conflict' : 'b-dup'), text: (it.dup.conflict ? 'answer conflict · ' : '') + it.dup.cls + ' duplicate · ' + Math.round(it.dup.sim.score * 100) + '%' }) : null,
       h('div', { class: 'spacer' }),
       h('span', { class: 'tiny dim', text: 'stem' }), conf(q.parseConf && q.parseConf.stem),
@@ -4049,7 +4200,7 @@ function renderStaging(root) {
       q.options.forEach((o, oi) => {
         optBox.appendChild(h('div', { class: 'row', style: 'gap:8px;align-items:flex-start' }, [
           h('label', { class: 'check', style: 'margin-top:6px' }, [
-            h('input', { type: 'radio', name: 'c' + i, checked: q.correctOptionId === o.id, onchange: () => { q.correctOptionId = o.id; if (q.status === 'needs_answer') q.status = q.domainId ? 'draft' : 'needs_class'; drawList(); } }),
+            h('input', { type: 'radio', name: 'c' + q.uuid, checked: q.correctOptionId === o.id, onchange: () => { q.correctOptionId = o.id; if (q.status === 'needs_answer') q.status = q.domainId ? 'draft' : 'needs_class'; drawAll(); } }),
             h('span', { class: 'docnum', text: letterOf(oi) })
           ]),
           h('input', { type: 'text', value: o.text, oninput: e => o.text = e.target.value }),
@@ -4062,21 +4213,21 @@ function renderStaging(root) {
     body.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Options — pick the correct one' }), optBox]));
     if (!q.correctOptionId) body.appendChild(h('div', { class: 'notice warn small' }, 'No answer was found in the source. This will be admitted as “Needs answer verification” and kept out of every test session until you set and verify the answer. Nothing will be invented for you.'));
     const g = h('div', { class: 'grid g4', style: 'margin-top:10px' });
-    g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Domain' }), h('select', { onchange: e => { q.domainId = e.target.value || null; if (q.status === 'needs_class' && q.domainId) q.status = 'draft'; drawList(); } }, [h('option', { value: '' }, 'Unmapped')].concat(State.course.blueprint.map(d => h('option', { value: d.id, selected: q.domainId === d.id }, d.id))))]));
+    g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Domain' }), h('select', { onchange: e => { q.domainId = e.target.value || null; if (q.status === 'needs_class' && q.domainId) q.status = 'draft'; drawAll(); } }, [h('option', { value: '' }, 'Unmapped')].concat(State.course.blueprint.map(d => h('option', { value: d.id, selected: q.domainId === d.id }, d.id))))]));
     g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Topic' }), h('input', { type: 'text', value: q.topic, oninput: e => q.topic = e.target.value })]));
     g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Difficulty' }), h('select', { onchange: e => q.difficulty = e.target.value }, DIFFICULTY.map(d => h('option', { value: d, selected: q.difficulty === d }, d)))]));
     g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Decision' }), h('select', {
-      onchange: e => { it.decision = e.target.value; drawList(); }
+      onchange: e => { setStagingDecision(it, e.target.value); drawAll(); }
     }, [['import', 'Import'], ['reject', 'Reject'], it.dup ? ['merge', 'Merge into existing'] : null, it.dup ? ['review', 'Send to review queue'] : null, it.dup && it.dup.conflict ? ['conflict', 'Record answer conflict'] : null].filter(Boolean).map(([v, l]) => h('option', { value: v, selected: it.decision === v }, l)))]));
     body.appendChild(g);
     if (q.explanation) body.appendChild(h('div', { class: 'field', style: 'margin-top:10px' }, [h('label', { text: 'Explanation' }), h('textarea', { style: 'min-height:46px', value: q.explanation, oninput: e => q.explanation = e.target.value })]));
     if (q.lockOptionOrder) body.appendChild(h('div', { class: 'notice small', style: 'margin-top:10px' }, 'Option order will stay fixed for this question — it refers to a specific position or contains an “all/none of the above” style choice.'));
-    if (it.dup) body.appendChild(h('button', { class: 'btn sm', style: 'margin-top:10px', onclick: () => compareDialog(q, it.dup, it, drawList), text: 'Compare side by side' }));
+    if (it.dup) body.appendChild(h('button', { class: 'btn sm', style: 'margin-top:10px', onclick: () => compareDialog(q, it.dup, it, drawAll), text: 'Compare side by side' }));
     body.appendChild(h('div', { class: 'srcline', style: 'margin-top:8px', text: (q.sourceRefs[0] || {}).filename + ' · ' + (q.locator || '') + (q.originalNumber ? ' · original no. ' + q.originalNumber : '') }));
     card.appendChild(head); card.appendChild(body);
     return card;
   }
-  drawList();
+  drawAll();
 
   if (st.unresolved.length) {
     root.appendChild(h('div', { class: 'card', style: 'margin-top:16px' }, [
