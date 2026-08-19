@@ -158,6 +158,14 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   .view{padding:16px 14px 90px}
   .band-stats{width:100%;margin-left:0;gap:16px;justify-content:flex-start}
   .band-stat{text-align:left}
+  .btn{min-height:40px}
+  .btn.sm{min-height:36px;padding:6px 11px}
+  .opt{padding:14px 15px}
+  .nav-item{min-height:44px}
+  /* The sticky page header sits under z-index:20; toasts (z-index:200)
+     would otherwise land right on top of the title on a narrow screen where
+     there is no wide margin to sit in beside it. Push them below it instead. */
+  .toasts{top:auto;bottom:12px;right:12px;left:12px;width:auto;max-width:none}
 }
 .btn.menu-btn{display:none}
 @media(max-width:880px){.btn.menu-btn{display:inline-flex}}
@@ -389,7 +397,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.1.0', schema: 2 };
+const APP = { name: 'MCQ Mastery', version: '1.2.0', schema: 3 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -542,6 +550,7 @@ const STORES = {
   idRegister:      { keyPath: 'courseId' },
   tombstones:      { keyPath: 'qid' },
   presets:         { keyPath: 'id', idx: ['courseId'] },
+  notes:           { keyPath: 'id', idx: ['courseId', 'domainId'] },
   /** Holds the file/folder handle only. Never exported, never synced. */
   fsmeta:          { keyPath: 'k' }
 };
@@ -658,6 +667,8 @@ const Settings = {
     externalOcrEnabled: false,
     storeSourceImages: true,
     imageMaxKB: 500,
+    driveClientId: '',
+    notesMaxKB: 2000,
     lastBackupAt: null
   },
   async load() {
@@ -2568,6 +2579,7 @@ const Session = {
     // A finished session is a natural checkpoint: fold the journal into a
     // clean snapshot so the file on disk stands alone.
     if (typeof FileStore !== 'undefined' && FileStore.connected) FileStore.flushNow('snapshot');
+    if (typeof DriveSync !== 'undefined' && DriveSync.connected) DriveSync.maybePush(true);
     return s;
   },
   async abandon(s) { s.status = 'abandoned'; s.endedAt = nowISO(); await this.save(s); }
@@ -2603,6 +2615,7 @@ const VIEWS = [
   { id: 'dashboard', label: 'Dashboard',        ico: '▤' },
   { id: 'import',    label: 'Add Questions',    ico: '↧' },
   { id: 'bank',      label: 'Question Bank',    ico: '≡' },
+  { id: 'notes',     label: 'Notes',            ico: '▧' },
   { id: 'practice',  label: 'Practice',         ico: '▶' },
   { id: 'analytics', label: 'Analytics',        ico: '◱' },
   { id: 'backup',    label: 'Backup & Restore', ico: '⧉' },
@@ -2645,6 +2658,11 @@ function renderShell() {
   main.appendChild(h('div', { class: 'view', id: 'view' }));
   app.appendChild(rail);
   app.appendChild(main);
+  app.appendChild(h('div', { class: 'scrim hidden', id: 'scrim', onclick: closeMobileNav }));
+}
+function closeMobileNav() {
+  const railEl = $('#rail'); if (railEl) railEl.classList.remove('open');
+  const scrimEl = $('#scrim'); if (scrimEl) scrimEl.classList.add('hidden');
 }
 
 function setBadge(view, n) {
@@ -2662,7 +2680,7 @@ async function band(title, subtitle, stats, actions) {
     h('h1', { class: 'page-title', text: title })
   ]);
   const top = h('div', { class: 'band-top' }, [
-    h('button', { class: 'btn ghost sm menu-btn', 'aria-label': 'Open navigation', onclick: () => $('#rail').classList.toggle('open'), text: '☰' }),
+    h('button', { class: 'btn ghost sm menu-btn', 'aria-label': 'Open navigation', onclick: () => { $('#rail').classList.toggle('open'); $('#scrim').classList.toggle('hidden'); }, text: '☰' }),
     left
   ]);
   if (actions && actions.length) top.appendChild(h('div', { class: 'row wrap', style: 'margin-left:auto' }, actions));
@@ -2726,7 +2744,7 @@ async function go(view, arg) {
   }
   State.view = view;
   $$('.nav-item').forEach(b => b.setAttribute('aria-current', b.dataset.view === view ? 'page' : 'false'));
-  const railEl = $('#rail'); if (railEl) railEl.classList.remove('open');
+  closeMobileNav();
   const target = $('#view');
   if (!target) return;   // the shell has not rendered yet; nothing to draw into
   target.textContent = '';
@@ -2892,6 +2910,16 @@ ROUTES.practice = async (root, preselect) => {
         h('button', { class: 'btn', onclick: async () => { await Session.abandon(resumable); toast('Session discarded'); go('practice'); }, text: 'Discard' })
       ])
     ]));
+  }
+
+  const noteCount = (await NotesStore.list(State.course.id)).length;
+  if (noteCount) {
+    root.appendChild(h('div', { class: 'card', style: 'margin-bottom:16px' }, h('div', { class: 'card-b' },
+      h('button', { class: 'method-row', onclick: () => go('notes') }, [
+        h('span', { class: 'method-ico', text: '▧' }),
+        h('div', {}, [h('div', { class: 'method-title', text: 'Worth a quick look first?' }), h('div', { class: 'method-desc', text: noteCount + ' revision note(s) saved for this course — open Notes' })])
+      ])
+    )));
   }
 
   if (!pool.length) {
@@ -3821,6 +3849,97 @@ async function loadImageInto(sel, imageId) {
   if (!rec) { box.appendChild(h('div', { class: 'small dim', text: 'Image reference is broken — the stored image is missing.' })); return; }
   box.appendChild(h('img', { src: rec.dataUrl, alt: 'Question image' }));
 }
+
+/* ============================================================================
+   Notes — course revision material, browsable before a practice session
+   ========================================================================== */
+
+ROUTES.notes = async (root) => {
+  const notes = await NotesStore.list(State.course.id);
+  await band('Notes', 'Your own revision material', [
+    { k: 'Notes', v: String(notes.length) }
+  ]);
+
+  root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:14px' },
+    'Handwritten summaries, a module cheat-sheet, anything worth a quick look right before you practise. Stored the same way your question bank is — ' +
+    (NotesStore.target() === 'folder' ? 'a new one right now would go into a "notes" folder next to your connected file.' :
+      NotesStore.target() === 'drive' ? 'a new one right now would upload to your connected Google Drive.' :
+      'a new one right now stays in this browser only, up to ' + Settings.get('notesMaxKB') + ' KB — connect a folder or Google Drive (Settings) for larger files and other devices.')));
+
+  const uploadCard = h('div', { class: 'card', style: 'margin-bottom:16px' }, [h('div', { class: 'card-h' }, h('h3', { text: 'Add a note' }))]);
+  const ub = h('div', { class: 'card-b stack' });
+  const fileInput = h('input', { type: 'file', accept: NOTES_ACCEPT });
+  const titleInput = h('input', { type: 'text', placeholder: 'e.g. Module 3 — Change Management summary' });
+  const domainSel = h('select', {}, [h('option', { value: '' }, 'No domain — general')].concat(State.course.blueprint.map(d => h('option', { value: d.id }, d.id + ' · ' + d.name))));
+  const topicInput = h('input', { type: 'text', placeholder: 'Optional' });
+  ub.appendChild(h('div', { class: 'grid g2' }, [
+    h('div', { class: 'field' }, [h('label', { text: 'File — PDF, image, or text' }), fileInput]),
+    h('div', { class: 'field' }, [h('label', { text: 'Title' }), titleInput]),
+    h('div', { class: 'field' }, [h('label', { text: 'Domain' }), domainSel]),
+    h('div', { class: 'field' }, [h('label', { text: 'Topic' }), topicInput])
+  ]));
+  ub.appendChild(h('button', {
+    class: 'btn primary', onclick: async () => {
+      const f = fileInput.files && fileInput.files[0];
+      if (!f) { toast('Choose a file first', 'bad'); return; }
+      try {
+        await NotesStore.save(f, { courseId: State.course.id, domainId: domainSel.value, topic: topicInput.value, title: titleInput.value });
+        toast('Note added', 'ok');
+        go('notes');
+      } catch (e) { toast('Could not add that note: ' + e.message, 'bad', 8000); }
+    }, text: 'Add note'
+  }));
+  uploadCard.appendChild(ub);
+  root.appendChild(uploadCard);
+
+  if (!notes.length) {
+    root.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, [
+      h('h3', { text: 'No notes yet' }),
+      h('p', { class: 'muted', text: 'Add your revision material above — it will be here, organised by domain, whenever you need a quick look before practising.' })
+    ])));
+    return;
+  }
+
+  const openNote = async (rec) => {
+    try {
+      const blob = await NotesStore.readBlob(rec);
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e) { toast('Could not open that note: ' + e.message, 'bad', 8000); }
+  };
+
+  const byDomain = new Map();
+  notes.forEach(n => { const k = n.domainId || ''; if (!byDomain.has(k)) byDomain.set(k, []); byDomain.get(k).push(n); });
+  const order = [''].concat(State.course.blueprint.map(d => d.id)).filter(k => byDomain.has(k));
+
+  order.forEach(domainId => {
+    const list = byDomain.get(domainId);
+    const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
+      h('div', { class: 'card-h' }, [h('h3', { text: domainId ? State.domainShort(domainId) : 'General' }), h('span', { class: 'badge b-review', text: String(list.length) })])
+    ]);
+    const b = h('div', { class: 'card-b stack' });
+    list.forEach(rec => {
+      b.appendChild(h('div', { class: 'row wrap', style: 'gap:10px' }, [
+        h('span', { class: 'method-ico', text: rec.mimeType.indexOf('pdf') >= 0 ? '▤' : rec.mimeType.indexOf('image') >= 0 ? '▣' : '¶' }),
+        h('div', { style: 'flex:1;min-width:180px' }, [
+          h('div', { style: 'font-weight:600', text: rec.title }),
+          h('div', { class: 'tiny dim', text: (rec.topic ? rec.topic + ' · ' : '') + bytes(rec.sizeKB * 1024) + ' · added ' + fmtDate(rec.createdAt) + ' · ' + (rec.storage === 'folder' ? 'in your folder' : rec.storage === 'drive' ? 'in Google Drive' : 'in this browser') })
+        ]),
+        h('button', { class: 'btn sm', onclick: () => openNote(rec), text: 'View' }),
+        h('button', {
+          class: 'btn sm ghost', onclick: async () => {
+            const ok = await confirmBox('Remove this note?', 'This removes it from the list and, where possible, deletes the underlying file too.', true);
+            if (!ok) return;
+            await NotesStore.remove(rec); toast('Removed'); go('notes');
+          }, text: 'Remove'
+        })
+      ]));
+    });
+    card.appendChild(b);
+    root.appendChild(card);
+  });
+};
 
 
 /* ============================================================================
@@ -5336,7 +5455,7 @@ ROUTES.analytics = async (root) => {
    read your data — that is the migration path, not a promise.
    ========================================================================== */
 
-const BACKUP_STORES = ['courses', 'questions', 'questionVersions', 'sources', 'batches', 'attempts', 'sessions', 'settings', 'audit', 'images', 'idRegister', 'tombstones', 'presets'];
+const BACKUP_STORES = ['courses', 'questions', 'questionVersions', 'sources', 'batches', 'attempts', 'sessions', 'settings', 'audit', 'images', 'idRegister', 'tombstones', 'presets', 'notes'];
 
 /**
  * A backup that must succeed before anything is destroyed.
@@ -5846,6 +5965,47 @@ ROUTES.settings = async (root) => {
   dataCard.appendChild(db);
   root.appendChild(dataCard);
 
+  /* ---- Google Drive sync ---- */
+  const driveCard = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
+    h('div', { class: 'card-h' }, [h('h3', { text: 'Google Drive' }), h('div', { class: 'spacer' }),
+      h('span', { class: 'badge ' + (DriveSync.connected ? (DriveSync.problem ? 'b-conflict' : 'b-active') : 'b-review'), text: DriveSync.connected ? (DriveSync.problem ? 'Needs attention' : 'Connected') : 'Not connected' })])
+  ]);
+  const dr = h('div', { class: 'card-b stack' });
+  dr.appendChild(h('p', { class: 'small' }, 'An additional, separate copy in your own Google Drive — alongside the local folder above, not instead of it — so the bank you build here is also reachable from a phone or a different computer. This is the one thing in the app that leaves this machine other than the opt-in external OCR path; it goes only to your own Google account, using a scope that lets it see nothing in your Drive except the one file it creates.'));
+  if (DriveSync.connected) {
+    dr.appendChild(h('p', { class: 'tiny dim', text: DriveSync.problem ? DriveSync.problem : (DriveSync.lastPushedAt ? 'Last synced ' + fmtDate(DriveSync.lastPushedAt, true) : 'Connected — first sync happens shortly, or click Sync now.') }));
+    dr.appendChild(h('div', { class: 'row wrap', style: 'gap:8px' }, [
+      h('button', { class: 'btn sm primary', onclick: async () => { const ok = await DriveSync.maybePush(true); toast(ok ? 'Synced to Drive.' : 'Could not sync — see the status above.', ok ? 'ok' : 'bad'); go('settings'); }, text: 'Sync now' }),
+      h('button', { class: 'btn sm', onclick: async () => { await DriveSync.pullNow(); go('settings'); }, text: 'Load from Drive' }),
+      h('button', { class: 'btn sm danger', onclick: async () => { await DriveSync.disconnect(); go('settings'); }, text: 'Disconnect' })
+    ]));
+  } else {
+    dr.appendChild(h('div', { class: 'field' }, [
+      h('label', { text: 'Google OAuth client ID' }),
+      h('input', { type: 'text', placeholder: 'xxxxxxxxxx.apps.googleusercontent.com', value: Settings.get('driveClientId'), onchange: async e => { await Settings.set('driveClientId', e.target.value.trim()); toast('Saved'); } }),
+      h('div', { class: 'tiny dim' }, 'This is not a secret — Google’s own design for apps like this one — but keep it out of anything you publish anyway, the same as you would for a course code you had not meant to share.')
+    ]));
+    dr.appendChild(h('button', { class: 'btn primary', onclick: async () => { await DriveSync.connect(); go('settings'); }, text: 'Connect Google Drive' }));
+    const setup = h('details', { style: 'margin-top:4px' }, [
+      h('summary', { class: 'small', style: 'cursor:pointer' }, 'One-time setup — about ten minutes, free, only you can do this step'),
+      h('div', { class: 'stack small', style: 'margin-top:10px' }, [
+        h('p', {}, 'A client ID identifies this app to Google — it is not tied to any one Google account, so you create it once and anyone using this copy of the app can sign in with their own account afterward.'),
+        h('ol', { style: 'padding-left:20px;margin:0' }, [
+          h('li', {}, 'Go to the Google Cloud Console and create a project (any name).'),
+          h('li', {}, '"APIs & Services" → "Library" → enable the "Google Drive API".'),
+          h('li', {}, '"APIs & Services" → "OAuth consent screen" → User type "External" → fill in the required fields → add yourself (and anyone else who’ll use this) under "Test users". You do not need to submit this for Google’s review for personal or small-group use — test users can sign in immediately, they will just see an "unverified app" screen to click through.'),
+          h('li', {}, '"APIs & Services" → "Credentials" → "Create credentials" → "OAuth client ID" → Application type "Web application".'),
+          h('li', {}, 'Under "Authorized JavaScript origins", add the exact URL this app is served from (e.g. your GitHub Pages address). No redirect URI is needed.'),
+          h('li', {}, 'Copy the client ID it gives you — a string ending in ".apps.googleusercontent.com" — and paste it above.')
+        ]),
+        h('p', { class: 'tiny dim', style: 'margin:0' }, 'No client secret is used anywhere in this app — only the client ID, which is safe to have in the open.')
+      ])
+    ]);
+    dr.appendChild(setup);
+  }
+  driveCard.appendChild(dr);
+  root.appendChild(driveCard);
+
   /* ---- courses ---- */
   const courseCard = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
     h('div', { class: 'card-h' }, [h('h3', { text: 'Courses' }), h('div', { class: 'spacer' }), h('button', { class: 'btn sm primary', onclick: () => courseDialog(null), text: 'Add course' })])
@@ -5975,7 +6135,7 @@ ROUTES.settings = async (root) => {
       h('button', { class: 'btn', onclick: () => recomputeAll(), text: 'Recompute mastery and fingerprints' }),
       h('button', { class: 'btn', onclick: () => showAudit(), text: 'View audit trail' }),
       h('button', { class: 'btn danger', onclick: () => wipeCourse(), text: 'Delete this course\u2019s questions' }),
-      h('div', { class: 'tiny dim', text: 'The app stores everything in this browser profile only. Nothing is transmitted anywhere.' })
+      h('div', { class: 'tiny dim', text: 'Everything lives in this browser (and your file, if connected) by default. Nothing is sent anywhere unless you turn on external OCR or Google Drive above, both off by default.' })
     ])
   ]));
   root.appendChild(grid2);
@@ -6793,6 +6953,380 @@ _writeHook = (store, op, payload, key) => {
 };
 _writeVeto = (store) => store !== 'fsmeta' && FileStore.isReadOnly();
 
+/* ============================================================================
+   Google Drive sync — an additional, independent copy of your data, reachable
+   from any device signed into the same Google account. This runs ALONGSIDE
+   the local file above, never in place of it: local-folder mode keeps its
+   instant per-answer journal regardless of whether this is also on.
+
+   Drive's API has no cheap append the way local disk does — every sync is a
+   whole-file upload — so this pushes periodic snapshots (session end, a
+   timer, the tab going hidden, and a manual button) rather than syncing every
+   answer the instant it happens. Opening the app on another device offers to
+   pull whatever was last pushed.
+
+   OAuth is Google Identity Services' token client: no backend server, no
+   client secret (a static page cannot keep one confidential — this is the
+   standard, supported way to do OAuth from a browser-only app), no
+   long-lived refresh token stored anywhere. It asks the browser for a
+   short-lived access token — silently, where the browser still has an
+   active Google session and prior consent, otherwise via a one-click popup.
+   The drive.file scope this requests is Google's narrowest Drive grant: the
+   app can only ever see files it created itself, never anything else in your
+   Drive. Setting this up needs a one-time, free, ten-minute step only you can
+   do — creating an OAuth client ID in Google Cloud Console — because it
+   requires a Google account of your own; see Settings → Google Drive for the
+   walkthrough. */
+
+const DRIVE_FILE_NAME = 'mcq-mastery-data.json';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const DRIVE_PUSH_MIN_GAP_MS = 5 * 60 * 1000;
+
+const DriveSync = {
+  connected: false, fileId: null, accessToken: null, tokenExpiresAt: 0,
+  lastPushedAt: null, problem: null,
+  _tokenClient: null, _pushTimer: null, _pushing: false,
+
+  /** Boot-time: resume a previous connection silently, never with a popup. */
+  async init() {
+    const clientId = Settings.get('driveClientId');
+    const fileId = await FileStore.meta('driveFileId');
+    const wasConnected = await FileStore.meta('driveConnected');
+    if (!clientId || !fileId || !wasConnected) return;
+    this.fileId = fileId;
+    try {
+      await this._loadGis();
+      await this._requestToken(true);
+      this.connected = !!this.accessToken;
+    } catch (e) { this.connected = false; }
+    if (this.connected) this._startTimer();
+    updateStorageBar();
+  },
+
+  _loadGis() {
+    if (window.google && window.google.accounts && window.google.accounts.oauth2) return Promise.resolve();
+    return new Promise((res, rej) => {
+      const s = h('script', { src: 'https://accounts.google.com/gsi/client', onload: res, onerror: () => rej(new Error('Could not load Google Identity Services — check your connection.')) });
+      document.head.appendChild(s);
+    });
+  },
+
+  /** silent=true never shows UI and rejects quietly if a token cannot be had
+      without one; silent=false may show Google's account/consent popup. */
+  _requestToken(silent) {
+    return new Promise((resolve, reject) => {
+      const clientId = Settings.get('driveClientId');
+      if (!clientId) { reject(new Error('No Google OAuth client ID set — see Settings → Google Drive.')); return; }
+      if (!this._tokenClient) {
+        this._tokenClient = google.accounts.oauth2.initTokenClient({ client_id: clientId, scope: DRIVE_SCOPE, callback: () => { } });
+      }
+      this._tokenClient.callback = (resp) => {
+        if (resp.error) { reject(new Error(resp.error)); return; }
+        this.accessToken = resp.access_token;
+        this.tokenExpiresAt = Date.now() + ((resp.expires_in || 3600) * 1000) - 60000;
+        resolve(resp);
+      };
+      this._tokenClient.error_callback = (err) => reject(new Error((err && err.type) || 'could not get permission'));
+      this._tokenClient.requestAccessToken(silent ? { prompt: '' } : {});
+    });
+  },
+
+  async _ensureToken() {
+    if (this.accessToken && Date.now() < this.tokenExpiresAt) return true;
+    try { await this._requestToken(true); return true; }
+    catch (e) { this.connected = false; this.problem = 'Sign-in expired — reconnect in Settings.'; updateStorageBar(); return false; }
+  },
+
+  async connect() {
+    const clientId = Settings.get('driveClientId');
+    if (!clientId) {
+      await modal({ title: 'Add a Google OAuth client ID first', body: h('p', {}, 'Settings → Google Drive has the one-time setup steps — about ten minutes, free, and only you can do it (it needs your own Google account).') });
+      return;
+    }
+    try {
+      await this._loadGis();
+      await this._requestToken(false);
+    } catch (e) { toast('Could not connect to Google Drive: ' + e.message, 'bad', 8000); return; }
+    try {
+      let fileId = await FileStore.meta('driveFileId');
+      if (!fileId) fileId = (await this._findExisting()) || (await this._createFile());
+      await FileStore.setMeta('driveFileId', fileId);
+      await FileStore.setMeta('driveConnected', true);
+      this.fileId = fileId;
+      this.connected = true; this.problem = null;
+      this._startTimer();
+      updateStorageBar();
+      toast('Google Drive connected.', 'ok');
+      await this._checkRemoteOnConnect();
+    } catch (e) { toast('Connected to Google, but could not set up the Drive file: ' + e.message, 'bad', 8000); }
+  },
+
+  async disconnect() {
+    if (this.accessToken && window.google && google.accounts && google.accounts.oauth2) {
+      try { google.accounts.oauth2.revoke(this.accessToken, () => { }); } catch (e) { }
+    }
+    this.connected = false; this.accessToken = null; this.fileId = null; this.problem = null;
+    if (this._pushTimer) { clearInterval(this._pushTimer); this._pushTimer = null; }
+    await FileStore.delMeta('driveFileId');
+    await FileStore.delMeta('driveConnected');
+    updateStorageBar();
+    toast('Google Drive disconnected — the file stays in your Drive, this only forgets it here.', 'ok');
+  },
+
+  _startTimer() {
+    if (this._pushTimer) return;
+    this._pushTimer = setInterval(() => this.maybePush(), DRIVE_PUSH_MIN_GAP_MS);
+  },
+
+  /** Push if it has been a while, or always on force (session end, tab
+      hiding, the manual button) — never more often than the minimum gap,
+      so a burst of activity does not turn into a burst of uploads. */
+  async maybePush(force) {
+    if (!this.connected || this._pushing) return false;
+    const stale = !this.lastPushedAt || (Date.now() - new Date(this.lastPushedAt).getTime() > DRIVE_PUSH_MIN_GAP_MS);
+    if (!force && !stale) return false;
+    return await this.push();
+  },
+
+  async push() {
+    if (!this.connected || this._pushing) return false;
+    this._pushing = true;
+    try {
+      if (!(await this._ensureToken())) return false;
+      const payload = await FileStore.buildPayload();
+      const res = await fetch('https://www.googleapis.com/upload/drive/v3/files/' + this.fileId + '?uploadType=media', {
+        method: 'PATCH',
+        headers: { 'Authorization': 'Bearer ' + this.accessToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error('Drive returned ' + res.status);
+      this.lastPushedAt = nowISO();
+      this.problem = null;
+      updateStorageBar();
+      return true;
+    } catch (e) {
+      this.problem = 'Last sync failed: ' + e.message;
+      updateStorageBar();
+      return false;
+    } finally {
+      this._pushing = false;
+    }
+  },
+
+  async pull() {
+    if (!(await this._ensureToken())) throw new Error('Could not reach Google Drive.');
+    const res = await fetch('https://www.googleapis.com/drive/v3/files/' + this.fileId + '?alt=media', {
+      headers: { 'Authorization': 'Bearer ' + this.accessToken }
+    });
+    if (!res.ok) throw new Error('Drive returned ' + res.status);
+    const payload = await res.json();
+    if (!payload || !payload.stores) throw new Error('That file did not look like an MCQ Mastery snapshot.');
+    if ((payload.schema || 1) > APP.schema) throw new Error('That snapshot was written by a newer version of the app.');
+    return payload;
+  },
+
+  async _findExisting() {
+    const q = encodeURIComponent("name='" + DRIVE_FILE_NAME + "' and trashed=false");
+    const res = await fetch('https://www.googleapis.com/drive/v3/files?q=' + q + '&spaces=drive&fields=files(id)', {
+      headers: { 'Authorization': 'Bearer ' + this.accessToken }
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    return (j.files && j.files[0] && j.files[0].id) || null;
+  },
+
+  async _createFile() {
+    const boundary = 'mcqmastery' + uuid();
+    const metadata = { name: DRIVE_FILE_NAME, mimeType: 'application/json' };
+    const empty = JSON.stringify({ app: 'mcq-mastery', schema: APP.schema, savedAt: nowISO(), stores: {} });
+    const body =
+      '--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify(metadata) + '\r\n' +
+      '--' + boundary + '\r\nContent-Type: application/json\r\n\r\n' + empty + '\r\n' +
+      '--' + boundary + '--';
+    const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + this.accessToken, 'Content-Type': 'multipart/related; boundary=' + boundary },
+      body
+    });
+    if (!res.ok) throw new Error('Could not create the Drive file (status ' + res.status + ').');
+    return (await res.json()).id;
+  },
+
+  /** Upload an arbitrary file (a note — a PDF, a photo of a page, anything)
+      as its own Drive file, distinct from the one data snapshot above. Binary
+      content, so the multipart body is built as a Blob mixing text and raw
+      file bytes, not a string — a naive string join would corrupt anything
+      that is not valid UTF-8 text. */
+  async uploadNoteFile(file, name) {
+    if (!(await this._ensureToken())) throw new Error('Reconnect Google Drive to upload this.');
+    const boundary = 'mcqnote' + uuid();
+    const metadata = { name: name || file.name, mimeType: file.type || 'application/octet-stream' };
+    const head = '--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify(metadata) + '\r\n' +
+      '--' + boundary + '\r\nContent-Type: ' + (file.type || 'application/octet-stream') + '\r\n\r\n';
+    const tail = '\r\n--' + boundary + '--';
+    const body = new Blob([head, file, tail]);
+    const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + this.accessToken, 'Content-Type': 'multipart/related; boundary=' + boundary },
+      body
+    });
+    if (!res.ok) throw new Error('Could not upload to Drive (status ' + res.status + ').');
+    return (await res.json()).id;
+  },
+
+  async deleteDriveFile(fileId) {
+    if (!(await this._ensureToken())) return false;
+    try {
+      const res = await fetch('https://www.googleapis.com/drive/v3/files/' + fileId, {
+        method: 'DELETE', headers: { 'Authorization': 'Bearer ' + this.accessToken }
+      });
+      return res.ok || res.status === 404;
+    } catch (e) { return false; }
+  },
+
+  /** Right after connecting, Drive might already hold something from another
+      device — never silently fold that over what is sitting in this browser. */
+  async _checkRemoteOnConnect() {
+    let remote;
+    try { remote = await this.pull(); } catch (e) { return; } // nothing usable there yet — first push establishes it
+    const remoteCount = (remote.stores.questions || []).length;
+    if (!remoteCount) return;
+    const localCount = (await DB.all('questions')).length;
+    const ok = await confirmBox('Google Drive already has data',
+      'This Drive file already holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This browser currently has ' + localCount + '. Load the Drive copy in here? Cancel keeps what is in this browser, and overwrites the Drive copy on the next sync.');
+    if (ok) await this._applyRemote(remote);
+  },
+
+  async _applyRemote(payload) {
+    const names = syncStores();
+    for (const s of names) {
+      const rows = Array.isArray(payload.stores[s]) ? payload.stores[s] : [];
+      await DB.clearRaw(s);
+      if (rows.length) await DB.putManyRaw(s, rows);
+    }
+    FileStore._cache = null;
+    State.invalidate();
+    toast('Loaded the Drive copy.', 'ok');
+    if (typeof State !== 'undefined' && State.view) await go(State.view);
+  },
+
+  /** A manual pull, for "I answered questions on my phone, catch this
+      browser up" — offered from Settings, always asks first since it can
+      discard unsynced local changes. */
+  async pullNow() {
+    let remote;
+    try { remote = await this.pull(); }
+    catch (e) { toast('Could not reach Google Drive: ' + e.message, 'bad'); return; }
+    const localCount = (await DB.all('questions')).length;
+    const remoteCount = (remote.stores.questions || []).length;
+    const ok = await confirmBox('Load the Drive copy?',
+      'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This replaces what is in this browser (' + localCount + ' question(s)) with that copy. Anything answered here since your last sync is lost unless it already reached Drive.', true);
+    if (ok) await this._applyRemote(remote);
+  },
+
+  status() {
+    if (!this.connected) return null;
+    if (this.problem) return { tone: 'bad', label: this.problem };
+    return { tone: 'ok', label: this.lastPushedAt ? 'Drive synced ' + fmtDate(this.lastPushedAt, true) : 'Drive connected — syncing…' };
+  }
+};
+
+/* ============================================================================
+   Course notes — your own revision material (a scanned handwritten module
+   summary, anything worth a quick look right before a practice session)
+   stored the same way your question bank is: the actual bytes live wherever
+   that already lives — a "notes" subfolder next to your connected folder, or
+   its own file in Drive when that is connected — never duplicated into
+   IndexedDB on top of that, so this cannot make the app itself heavier. Only
+   with neither connected does a note's content sit in IndexedDB directly,
+   capped in size — the same trade-off images already make. ========================================================================== */
+
+const NOTES_SUBFOLDER = 'notes';
+const NOTES_ACCEPT = '.pdf,.png,.jpg,.jpeg,.webp,.txt,.md';
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(new Error('Could not read that file.'));
+    r.readAsDataURL(blob);
+  });
+}
+
+const NotesStore = {
+  /** Where a new note's bytes would land right now, so the UI can say so
+      before the person commits to uploading. Folder wins over Drive when
+      both are connected — it is instant and needs no network round trip. */
+  target() {
+    if (FileStore.dirHandle) return 'folder';
+    if (DriveSync.connected) return 'drive';
+    return 'indexeddb';
+  },
+
+  async save(file, meta) {
+    const target = this.target();
+    const rec = {
+      id: uuid(), courseId: meta.courseId, domainId: meta.domainId || null, topic: (meta.topic || '').trim(),
+      title: (meta.title || file.name).trim(), filename: file.name, mimeType: file.type || 'application/octet-stream',
+      sizeKB: Math.round(file.size / 1024), storage: target, folderFilename: null, driveFileId: null, content: null,
+      createdAt: nowISO(), updatedAt: nowISO()
+    };
+    if (target === 'folder') {
+      const dir = await FileStore.dirHandle.getDirectoryHandle(NOTES_SUBFOLDER, { create: true });
+      const safe = rec.id + '-' + file.name.replace(/[\\/:*?"<>|]/g, '_');
+      const fh = await dir.getFileHandle(safe, { create: true });
+      const w = await fh.createWritable();
+      await w.write(await file.arrayBuffer());
+      await w.close();
+      rec.folderFilename = safe;
+    } else if (target === 'drive') {
+      rec.driveFileId = await DriveSync.uploadNoteFile(file, rec.title);
+    } else {
+      const cap = Settings.get('notesMaxKB');
+      if (rec.sizeKB > cap) throw new Error('That file is ' + rec.sizeKB + ' KB, above the ' + cap + ' KB limit for notes kept in the browser. Connect a folder or Google Drive (Settings) to store larger files.');
+      rec.content = await blobToDataUrl(file);
+    }
+    await DB.put('notes', rec);
+    return rec;
+  },
+
+  async readBlob(rec) {
+    if (rec.storage === 'indexeddb') { const res = await fetch(rec.content); return await res.blob(); }
+    if (rec.storage === 'folder') {
+      if (!FileStore.dirHandle) throw new Error('Connect the same folder this note was saved in to open it.');
+      const dir = await FileStore.dirHandle.getDirectoryHandle(NOTES_SUBFOLDER, { create: false });
+      const fh = await dir.getFileHandle(rec.folderFilename, { create: false });
+      return await fh.getFile();
+    }
+    if (rec.storage === 'drive') {
+      if (!(await DriveSync._ensureToken())) throw new Error('Reconnect Google Drive to open this note.');
+      const res = await fetch('https://www.googleapis.com/drive/v3/files/' + rec.driveFileId + '?alt=media', { headers: { 'Authorization': 'Bearer ' + DriveSync.accessToken } });
+      if (!res.ok) throw new Error('Drive returned ' + res.status);
+      return await res.blob();
+    }
+    throw new Error('This note has no readable storage location.');
+  },
+
+  async remove(rec) {
+    try {
+      if (rec.storage === 'folder' && FileStore.dirHandle) {
+        const dir = await FileStore.dirHandle.getDirectoryHandle(NOTES_SUBFOLDER, { create: false });
+        await dir.removeEntry(rec.folderFilename);
+      } else if (rec.storage === 'drive' && DriveSync.connected) {
+        await DriveSync.deleteDriveFile(rec.driveFileId);
+      }
+    } catch (e) { /* the DB record is what "this note exists" means to the app;
+                     a file that could not be cleaned up (folder disconnected,
+                     Drive unreachable) still leaves the note correctly gone
+                     from here rather than stuck because of an orphaned file */ }
+    await DB.del('notes', rec.id);
+  },
+
+  async list(courseId) {
+    return (await DB.byIndex('notes', 'courseId', courseId)).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  }
+};
+
 /* ---------- storage status bar ---------- */
 function updateStorageBar() {
   const bar = $('#storagebar');
@@ -6817,6 +7351,11 @@ function updateStorageBar() {
     bar.appendChild(h('button', { class: 'btn sm primary', onclick: () => reconnectFlow(), text: 'Reconnect' }));
   } else if (st.key === 'local') {
     bar.appendChild(h('button', { class: 'btn sm', onclick: () => connectFlow(), text: 'Connect a folder' }));
+  }
+
+  const drive = typeof DriveSync !== 'undefined' ? DriveSync.status() : null;
+  if (drive) {
+    bar.appendChild(h('span', { class: 'sb-sub tiny', style: drive.tone === 'bad' ? 'color:var(--pencil)' : '', text: drive.label }));
   }
 }
 
@@ -7874,6 +8413,9 @@ async function boot() {
   renderShell();
   applyTheme();
   updateStorageBar();
+  // Never blocks boot on Google's servers — a silent reconnect attempt that
+  // updates the storage bar whenever (if ever) it resolves.
+  DriveSync.init();
   await go('dashboard');
 
   // When appearance is set to Auto, follow the system if it changes mid-session.
@@ -7894,6 +8436,12 @@ async function boot() {
   });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden' && FileStore.connected && FileStore.dirty) FileStore.flushNow('snapshot');
+    // Not hooked into beforeunload like the local write above: a fetch()
+    // started that late routinely gets killed before it completes, especially
+    // for a payload of any size. Going hidden fires earlier — backgrounding a
+    // tab or switching apps on a phone — and the page usually survives long
+    // enough afterward for the upload to actually finish.
+    if (document.visibilityState === 'hidden' && typeof DriveSync !== 'undefined' && DriveSync.connected) DriveSync.maybePush(true);
   });
   // A blocked write should read as an explanation, not as a stack trace.
   window.addEventListener('unhandledrejection', (e) => {

@@ -1,7 +1,11 @@
 # Architecture
 
 A single HTML file with all JavaScript and CSS inlined. No build step at
-runtime, no dependencies, no network requests once loaded.
+runtime, no dependencies, and no network requests once loaded — except two
+opt-in, off-by-default paths a user can turn on for themselves: external OCR
+(an API key and endpoint of their own, read from a local file — see module 12)
+and Google Drive sync (their own Google account, narrowest possible scope —
+see "Google Drive sync" below). Neither runs unless deliberately switched on.
 
 Source is maintained as 17 modules concatenated in numeric order into the
 `<script>` block of `index.html`. Editing `index.html` directly works; keeping
@@ -164,6 +168,21 @@ the question object rather than rebuilt inside every comparison. The cache is
 non-enumerable, so it never reaches the data file, and a generation counter
 bumped on any question write invalidates it.
 
+**This runs at every point a question's content can change, not only at
+import.** `recheckQuestion()` is called after every save, admission, merge and
+unmerge, and re-evaluates that question against the whole live bank — a
+conflict or duplicate found this way is recorded on *both* sides
+(`conflictWith` / `dupWith`, arrays of uuids), and both are pulled out of
+practice, whichever one triggered the check. Import-time detection is one
+caller of this, not a separate mechanism: a candidate matched against the bank
+during staging gets the same symmetric treatment once admitted. A pair either
+side has explicitly dismissed ("keep separate") is recorded in
+`dismissedPairs` and never re-raised. `rescanCourseForPairs()` (Question Bank
+→ "Rescan for conflicts") sweeps the whole course once, for data that
+predates this or was edited outside the app. The review queue states the
+actual disagreement inline — which option each record claims is correct —
+rather than just naming the other record.
+
 Within a batch, each processed candidate joins the live index, so a batch is
 checked against itself without a growing linear scan.
 
@@ -216,3 +235,48 @@ nonsense questions would be far worse than an error message.
 adding either in a future version is additive and safe on existing databases.
 The data file carries its own schema version and is refused if it is newer than
 the running app.
+
+## Google Drive sync (optional)
+
+An additional, independent copy of the bank in the user's own Google Drive,
+reachable from any device signed into that account — never a replacement for
+the local folder above. Local-folder mode keeps its instant per-answer journal
+regardless of whether this is also on.
+
+Drive's API has no cheap append the way local disk does — every sync is a
+whole-file upload — so this pushes periodic snapshots (session end, the tab
+going hidden, a five-minute timer, and a manual "Sync now") rather than
+syncing every answer as it happens.
+
+Auth is Google Identity Services' token client: no backend server, no client
+secret (a static page cannot keep one confidential), no long-lived refresh
+token stored anywhere. `DriveSync.accessToken` is an in-memory property only —
+never written to IndexedDB, the snapshot file, or any export — so it is gone
+on reload and silently re-requested next time, succeeding only if the browser
+still has an active Google session and prior consent. The `drive.file` scope
+requested is Google's narrowest: the app can only ever see files it created
+itself. Only the Drive file's id and a connected flag are persisted (in
+`fsmeta`, alongside the folder handle, exempt from every export for the same
+reason). Setting this up needs a one-time, free OAuth client ID from Google
+Cloud Console that only the user can create — see Settings → Google Drive for
+the walkthrough.
+
+Connecting checks whether Drive already holds something (from another device)
+before ever pushing over it. A manual "Load from Drive" is available for
+catching a browser up on answers made elsewhere; both directions ask first,
+since replacing a whole snapshot can discard whichever side is not chosen.
+
+## Course notes (optional)
+
+A place for a student's own revision material — a scanned handwritten module
+summary, anything worth a quick look right before a practice session — kept
+per course and optionally tagged to a blueprint domain.
+
+A note's *bytes* live wherever the bank already lives: a `notes` subfolder
+next to a connected local folder, or its own file in Drive when that is
+connected, never duplicated into IndexedDB on top of that. Only with neither
+connected does a note's content sit in IndexedDB directly (as a data URL),
+capped by `notesMaxKB` — the same trade-off images already make. The `notes`
+object store itself holds only metadata (title, domain, topic, size, where the
+bytes actually are) plus that fallback content field, and syncs like any other
+store.
