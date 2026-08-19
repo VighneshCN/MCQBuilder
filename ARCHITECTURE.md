@@ -257,9 +257,14 @@ still has an active Google session and prior consent. The `drive.file` scope
 requested is Google's narrowest: the app can only ever see files it created
 itself. Only the Drive file's id and a connected flag are persisted (in
 `fsmeta`, alongside the folder handle, exempt from every export for the same
-reason). Setting this up needs a one-time, free OAuth client ID from Google
-Cloud Console that only the user can create — see Settings → Google Drive for
-the walkthrough.
+reason). An OAuth client ID identifies the app to Google, not any one person —
+it is not a secret, and only works from its registered origin(s) — so it needs
+setting up once per deployment, not once per visitor: `DEFAULT_DRIVE_CLIENT_ID`
+holds it for whoever deploys this copy of the app, and every other visitor
+just sees "Connect Google Drive" with no setup screen at all. `effectiveDriveClientId()`
+falls back to a per-browser override in Settings, for a fork running from a
+different origin. Settings → Google Drive has the one-time Cloud Console
+walkthrough, shown only when no client ID — default or override — is set.
 
 Connecting checks whether Drive already holds something (from another device)
 before ever pushing over it. A manual "Load from Drive" is available for
