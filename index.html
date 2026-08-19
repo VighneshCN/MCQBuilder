@@ -18,7 +18,7 @@
   --ink-900:#0E1720; --ink-800:#16202B; --ink-700:#22303E;
   --paper:#E9EEF2; --surface:#FFFFFF; --surface-2:#F3F6F8; --surface-3:#E3EAEF;
   --rule:#C3D0DA; --rule-soft:#DBE3E9;
-  --txt:#16202B; --txt-2:#48596A; --txt-3:#71828F;
+  --txt:#16202B; --txt-2:#48596A; --txt-3:#607284;
   --blue:#1F4E79; --blue-2:#2C6BA0; --blue-tint:#E4EDF5;
   --pencil:#C0442B; --pencil-tint:#FAE8E3;
   --green:#12654C; --green-tint:#DFF0E8;
@@ -105,6 +105,7 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .course-pick select{
   width:100%;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);
   color:#E8EFF4;border-radius:var(--r);padding:7px 8px;font-size:13.5px;
+  text-overflow:ellipsis;overflow:hidden;white-space:nowrap;
 }
 .course-pick select option{background:#16202B;color:#E8EFF4}
 .nav{padding:10px 8px;flex:1;overflow:auto}
@@ -126,7 +127,7 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .storagebar{margin-top:auto;padding:9px 10px;border-top:1px solid rgba(255,255,255,.09);display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:11.5px;line-height:1.35}
 .storagebar .sb-dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--amber)}
 .storagebar .sb-label{color:rgba(255,255,255,.82);flex:1;min-width:0;word-break:break-word}
-.storagebar .sb-sub{width:100%;color:rgba(255,255,255,.45)}
+.storagebar .sb-sub{width:100%;color:rgba(255,255,255,.6)}
 .storagebar[data-tone="ok"] .sb-dot{background:var(--green)}
 .storagebar[data-tone="bad"] .sb-dot{background:var(--rose)}
 .storagebar[data-tone="bad"] .sb-label{color:#ffd7de}
@@ -166,12 +167,13 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .card-h{padding:13px 16px;border-bottom:1px solid var(--rule-soft);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .card-b{padding:16px}
 .card-b.tight{padding:10px 16px}
-.grid{display:grid;gap:14px}
+.grid{display:grid;gap:14px;align-items:start}
 .g2{grid-template-columns:repeat(2,minmax(0,1fr))}
 .g3{grid-template-columns:repeat(3,minmax(0,1fr))}
 .g4{grid-template-columns:repeat(4,minmax(0,1fr))}
-@media(max-width:1000px){.g4{grid-template-columns:repeat(2,minmax(0,1fr))}.g3{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:640px){.g2,.g3,.g4{grid-template-columns:1fr}}
+.g5{grid-template-columns:repeat(5,minmax(0,1fr))}
+@media(max-width:1000px){.g4,.g5{grid-template-columns:repeat(2,minmax(0,1fr))}.g3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:640px){.g2,.g3,.g4,.g5{grid-template-columns:1fr}}
 
 /* --- metric tiles ----------------------------------------------------- */
 .tile{background:var(--surface);border:1px solid var(--rule);border-radius:var(--r-lg);padding:13px 15px;position:relative;overflow:hidden}
@@ -181,6 +183,13 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .tile.hot{border-color:var(--pencil)}
 .tile.hot b{color:var(--pencil)}
 .tile.good b{color:var(--green)}
+
+.method-row{display:flex;align-items:flex-start;gap:11px;padding:8px;margin:0 -8px;border-radius:var(--r);cursor:pointer;text-align:left;width:calc(100% + 16px);background:none;border:0;font:inherit;color:inherit}
+.method-row:hover,.method-row:focus-visible{background:var(--surface-2)}
+.method-ico{flex:none;width:32px;height:32px;border-radius:var(--r);background:var(--surface-2);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:15px;color:var(--txt-2)}
+.method-row:hover .method-ico,.method-row:focus-visible .method-ico{background:var(--blue-tint);color:var(--blue)}
+.method-title{font-weight:600;font-size:13.5px;color:var(--txt)}
+.method-desc{font-size:12px;color:var(--txt-2);margin-top:2px;line-height:1.4}
 
 /* --- buttons ---------------------------------------------------------- */
 .btn{
@@ -250,7 +259,7 @@ input:disabled,select:disabled,textarea:disabled{background:var(--surface-3);col
 }
 .tick[data-mark="verified"]{color:var(--green)}
 .tick[data-mark="review"]{color:var(--amber)}
-.tick[data-mark="conflict"]{color:var(--pencil)}
+.tick[data-mark="conflict"]{color:var(--rose)}
 .tick[data-mark="dup"]{color:var(--violet)}
 
 /* --- tables ----------------------------------------------------------- */
@@ -332,7 +341,7 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 .modal-f{padding:12px 18px;border-top:1px solid var(--rule);display:flex;gap:9px;justify-content:flex-end;flex-wrap:wrap}
 
 /* --- toast ------------------------------------------------------------ */
-.toasts{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:200;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none;width:calc(100% - 32px);max-width:460px}
+.toasts{position:fixed;top:18px;right:18px;z-index:200;display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:none;width:calc(100% - 32px);max-width:400px}
 .toast{background:var(--ink-800);color:#EAF1F6;padding:10px 15px;border-radius:var(--r);box-shadow:var(--shadow-lg);font-size:13.5px;border-left:3px solid var(--blue-2);width:100%}
 .toast.ok{border-left-color:#6DC5A4} .toast.bad{border-left-color:#E98D76} .toast.warn{border-left-color:#DFAE5C}
 
@@ -646,6 +655,7 @@ const Settings = {
     confirmLeaveMock: true,
     ocrEnabled: false,
     ocrScriptPath: 'vendor/tesseract.min.js',
+    externalOcrEnabled: false,
     storeSourceImages: true,
     imageMaxKB: 500,
     lastBackupAt: null
@@ -868,6 +878,7 @@ function blankQuestion(courseId) {
     answerVerified: 'unverified', contentVerified: 'unverified', classVerified: 'unverified',
     verifiedAt: null, verifyNote: '', conflict: false,
     dupOf: null, canonicalUuid: null, aliasQids: [], mergedFrom: [],
+    conflictWith: [], dupWith: [], dismissedPairs: [],
     fingerprint: '', normStem: '', tokens: [],
     stats: {
       attempts: 0, correct: 0, incorrect: 0, guessedCorrect: 0,
@@ -923,6 +934,10 @@ const Questions = {
     }
     q.updatedAt = nowISO();
     await recomputeFingerprint(q);
+    // Whatever changed — a typo fix, a corrected answer, a hand-typed
+    // question reaching a stem for the first time — recheck it against the
+    // rest of the bank now, not just at the moment it was imported.
+    await recheckQuestion(q, {});
     await DB.put('questions', q);
     if (prev) await audit('edit', 'question', q.qid || q.uuid, summarise(prev), summarise(q), reason || '');
     return q;
@@ -1206,6 +1221,155 @@ function detectDuplicates(candidates, bank) {
   return results;
 }
 
+/* ---------- bank-wide conflict & duplicate tracking ----------
+   detectDuplicates() above only ever judges the *incoming* side of a match —
+   it was built for the staging screen, where the other side is a read-only
+   snapshot of the bank. Nothing re-checked a question once it was admitted,
+   so an edit that turned two Active questions into an answer conflict, or a
+   hand-typed question that happened to duplicate one already there, could
+   sail through unnoticed — and even a conflict caught at import time only
+   ever benched the newer record, leaving its older, equally-wrong partner
+   sitting in Active. ARCHITECTURE.md promises both sides are held out of
+   practice; recheckQuestion() is what actually makes that true, called
+   after every save, admission, merge and unmerge, on both sides of any pair
+   it finds — not just the record that happened to trigger it. */
+
+/** Add otherUuid to q's pairing list. Pure list mutation — does not touch
+    status or the conflict flag, so it is safe to call from anywhere without
+    worrying what else might be poking those fields. Returns true if new. */
+function flagPairSide(q, otherUuid, kind) {
+  const listKey = kind === 'conflict' ? 'conflictWith' : 'dupWith';
+  const list = q[listKey] || (q[listKey] = []);
+  if (list.indexOf(otherUuid) >= 0) return false;
+  list.push(otherUuid);
+  return true;
+}
+/** Drop a pairing that no longer holds. Pure list mutation, as above. */
+function unflagPairSide(q, otherUuid, kind) {
+  const listKey = kind === 'conflict' ? 'conflictWith' : 'dupWith';
+  const before = q[listKey] || [];
+  const after = before.filter(u => u !== otherUuid);
+  if (after.length === before.length) return false;
+  q[listKey] = after;
+  return true;
+}
+/** The single source of truth for status/conflict given conflictWith and
+    dupWith: unconditionally re-derives both from the two lists every time —
+    q.conflict/q.status are never trusted as input, only as output, so a
+    stale value from a moment ago (a conflict that just resolved into a plain
+    duplicate, a review-queue button presetting fresh.status) can never get
+    stuck. The one case that needs a flag with no pairing behind it — merging
+    two records whose sources disagreed — is intentionally NOT special-cased
+    here; mergeQuestions re-asserts it itself, right after calling this,
+    because only it knows that reason still holds. Always call this after any
+    flagPairSide/unflagPairSide, even when only one pairing among several
+    changed. */
+function normalizePairState(q) {
+  const hasConflict = !!(q.conflictWith && q.conflictWith.length);
+  const hasDup = !!(q.dupWith && q.dupWith.length);
+  if (hasConflict) { q.conflict = true; q.status = 'answer_conflict'; return; }
+  q.conflict = false;
+  if (hasDup) { if (q.status !== 'possible_dup') q.status = 'possible_dup'; return; }
+  if (q.status === 'answer_conflict' || q.status === 'possible_dup') {
+    q.status = (q.correctOptionId && q.answerVerified === 'verified') ? (q.domainId ? 'active' : 'needs_class') : 'needs_answer';
+  }
+}
+
+/**
+ * Bring one question's conflictWith / dupWith up to date against the rest of
+ * its course's live bank, and update BOTH sides of every pairing it finds or
+ * clears — whatever caused the recheck: a manual edit, hand entry, an
+ * admission, or an unmerge. A pair either side has explicitly dismissed
+ * ("keep separate") is never re-raised. Persists q's partners directly (raw
+ * DB.put, never Questions.save) so this can never recurse into itself; the
+ * caller is responsible for persisting q itself.
+ * Pass { bank, index, byUuid } to reuse a pre-built index across a bulk scan.
+ */
+async function recheckQuestion(q, opts) {
+  opts = opts || {};
+  if (!q.stem || !q.stem.trim() || !q.options || q.options.length < 2) {
+    normalizePairState(q);
+    return { changed: false, newConflicts: [], newDups: [], touchedOthers: [] };
+  }
+  const bank = opts.bank || (await Questions.byCourse(q.courseId)).filter(x => x.uuid !== q.uuid);
+  const live = bank.filter(x => x.status !== 'merged' && x.status !== 'rejected');
+  const index = opts.index || buildIndex(live);
+  const byUuid = opts.byUuid || new Map(live.map(x => [x.uuid, x]));
+  const dismissed = new Set(q.dismissedPairs || []);
+
+  const stillConflict = new Set(), stillDup = new Set();
+  for (const other of candidatesFor(q, index, q.uuid)) {
+    if (other.uuid === q.uuid) continue;
+    if (dismissed.has(other.uuid) || (other.dismissedPairs || []).indexOf(q.uuid) >= 0) continue;
+    const sim = similarity(q, other);
+    const cls = classifyPair(q, other, sim);
+    if (cls === 'distinct') continue;
+    if (answersConflict(q, other)) stillConflict.add(other.uuid); else stillDup.add(other.uuid);
+  }
+
+  const wasConflict = new Set(q.conflictWith || []), wasDup = new Set(q.dupWith || []);
+  const added = [], removed = [];
+  wasConflict.forEach(u => { if (!stillConflict.has(u)) removed.push([u, 'conflict']); });
+  wasDup.forEach(u => { if (!stillDup.has(u)) removed.push([u, 'dup']); });
+  stillConflict.forEach(u => { if (!wasConflict.has(u)) added.push([u, 'conflict']); });
+  stillDup.forEach(u => { if (!wasDup.has(u)) added.push([u, 'dup']); });
+
+  removed.forEach(([u, kind]) => unflagPairSide(q, u, kind));
+  added.forEach(([u, kind]) => flagPairSide(q, u, kind));
+  // Re-derive q's own status/conflict every pass, even with nothing added or
+  // removed — a caller may have preset a stale value on q before calling in.
+  normalizePairState(q);
+
+  const touched = new Map();
+  const otherOf = async (u) => byUuid.get(u) || await Questions.get(u);
+  for (const [u, kind] of removed) {
+    const other = await otherOf(u);
+    if (other && unflagPairSide(other, q.uuid, kind)) { normalizePairState(other); touched.set(u, other); }
+  }
+  for (const [u, kind] of added) {
+    const other = await otherOf(u);
+    if (!other) continue;
+    const isNew = flagPairSide(other, q.uuid, kind);
+    normalizePairState(other);
+    touched.set(u, other);
+    if (isNew && kind === 'conflict') await audit('conflict', 'question', other.qid || other.uuid, null, { conflictWith: q.qid || q.uuid }, 'Answer conflict detected against ' + (q.qid || q.uuid) + ' during recheck');
+  }
+  for (const [, other] of touched) { other.updatedAt = nowISO(); await DB.put('questions', other); }
+
+  return {
+    changed: added.length > 0 || removed.length > 0,
+    newConflicts: added.filter(([, k]) => k === 'conflict').map(([u]) => u),
+    newDups: added.filter(([, k]) => k === 'dup').map(([u]) => u),
+    touchedOthers: Array.from(touched.keys())
+  };
+}
+
+/** Full-bank sweep — for data imported before this feature existed, or after
+    edits made outside the normal save path (a restore, a manual DB edit).
+    Always persists q: normalizePairState can correct a record even when its
+    pairing lists themselves did not change. */
+async function rescanCourseForPairs(courseId, onProgress) {
+  const all = await Questions.byCourse(courseId);
+  const live = all.filter(x => x.status !== 'merged' && x.status !== 'rejected');
+  const index = buildIndex(live);
+  const byUuid = new Map(live.map(x => [x.uuid, x]));
+  let newConflicts = 0, newDups = 0, cleared = 0, checked = 0;
+  for (const q of live) {
+    const before = q.status;
+    const r = await recheckQuestion(q, { bank: live, index, byUuid });
+    if (r.changed || q.status !== before) {
+      q.updatedAt = nowISO();
+      await DB.put('questions', q);
+      newConflicts += r.newConflicts.length;
+      newDups += r.newDups.length;
+      if (!r.newConflicts.length && !r.newDups.length && r.changed) cleared++;
+    }
+    checked++;
+    if (onProgress && checked % 25 === 0) onProgress(checked, live.length);
+  }
+  return { checked, newConflicts, newDups, cleared };
+}
+
 /** Word-level diff used by the side-by-side duplicate reviewer. */
 function diffWords(a, b) {
   const A = String(a || '').split(/(\s+)/), B = String(b || '').split(/(\s+)/);
@@ -1247,10 +1411,29 @@ async function mergeQuestions(canonicalUuid, dupUuid, note) {
   if (!canon.explanation && dup.explanation) canon.explanation = dup.explanation;
   if (!canon.topic && dup.topic) canon.topic = dup.topic;
   if (!canon.domainId && dup.domainId) canon.domainId = dup.domainId;
-  if (answersConflict(canon, dup)) { canon.conflict = true; canon.status = 'answer_conflict'; }
-  dup.status = 'merged'; dup.canonicalUuid = canon.uuid; dup.updatedAt = nowISO();
+  const mergeConflict = answersConflict(canon, dup);
+  if (mergeConflict) { canon.conflict = true; canon.status = 'answer_conflict'; }
+  // dup is leaving the live pool — anything still pointing at it as a
+  // conflict or duplicate partner would otherwise be left referencing a
+  // merged record. Clear it from those partners' pairing lists.
+  for (const u of (dup.conflictWith || []).concat(dup.dupWith || [])) {
+    const other = await Questions.get(u);
+    if (!other) continue;
+    const kind = (other.conflictWith || []).indexOf(dup.uuid) >= 0 ? 'conflict' : 'dup';
+    if (unflagPairSide(other, dup.uuid, kind)) { normalizePairState(other); other.updatedAt = nowISO(); await DB.put('questions', other); }
+  }
+  dup.status = 'merged'; dup.canonicalUuid = canon.uuid; dup.conflictWith = []; dup.dupWith = []; dup.updatedAt = nowISO();
   await DB.put('questions', dup);
   await Questions.save(canon, 'merge:' + (dup.qid || dup.uuid), true);
+  // Questions.save's recheck derives status purely from conflictWith/dupWith,
+  // which will never include dup — it is already merged away by the time the
+  // recheck runs. A conflict that exists only because the two records being
+  // merged disagreed on the answer needs to be reasserted here, the one
+  // place that still knows why.
+  if (mergeConflict && (!canon.conflict || canon.status !== 'answer_conflict')) {
+    canon.conflict = true; canon.status = 'answer_conflict'; canon.updatedAt = nowISO();
+    await DB.put('questions', canon);
+  }
   await audit('merge', 'question', canon.qid || canon.uuid, { mergedQid: dup.qid }, summarise(canon), note || '');
   void before;
   State.invalidate();
@@ -1267,6 +1450,9 @@ async function unmergeQuestion(dupUuid) {
   }
   dup.status = dup.answerVerified === 'verified' ? 'active' : 'needs_answer';
   dup.canonicalUuid = null; dup.updatedAt = nowISO();
+  // Re-entering the live pool — the bank may have moved on while this was
+  // merged away, so it needs the same recheck a fresh edit would get.
+  await recheckQuestion(dup, {});
   await DB.put('questions', dup);
   await audit('unmerge', 'question', dup.qid || dup.uuid, null, { restoredStatus: dup.status }, '');
   State.invalidate();
@@ -2435,8 +2621,8 @@ function renderShell() {
     h('div', { class: 'brand-sub', text: 'Controlled question bank' })
   ]));
 
-  const sel = h('select', { id: 'courseSel', onchange: async (e) => { await State.setCourse(e.target.value); go(State.view); } },
-    State.courses.filter(c => !c.archived).map(c => h('option', { value: c.id, selected: State.course && c.id === State.course.id }, c.code + ' — ' + c.name)));
+  const sel = h('select', { id: 'courseSel', title: State.course ? (State.course.code + ' — ' + State.course.name) : '', onchange: async (e) => { await State.setCourse(e.target.value); go(State.view); } },
+    State.courses.filter(c => !c.archived).map(c => h('option', { value: c.id, selected: State.course && c.id === State.course.id, text: c.code + ' — ' + c.name })));
   rail.appendChild(h('div', { class: 'course-pick' }, [h('label', { for: 'courseSel', text: 'Course' }), sel]));
 
   const nav = h('nav', { class: 'nav', id: 'nav' });
@@ -3261,6 +3447,7 @@ ROUTES.bank = async (root) => {
       toolbar.appendChild(h('button', { class: 'btn sm ghost', onclick: () => { BankState.sel.clear(); draw(); }, text: 'Clear' }));
     }
     toolbar.appendChild(h('button', { class: 'btn sm', onclick: () => exportBank(list), text: 'Export view' }));
+    toolbar.appendChild(h('button', { class: 'btn sm ghost', title: 'Check the whole bank for conflicts and duplicates, including records edited or imported before this ran automatically', onclick: () => runBankRescan(), text: 'Rescan for conflicts' }));
 
     listWrap.textContent = '';
     if (!list.length) {
@@ -3410,7 +3597,7 @@ async function openQuestion(uuidStr) {
 
   const body = h('div', { class: 'stack' });
   const tabs = h('div', { class: 'btn-group', style: 'margin-bottom:12px' });
-  const pane = h('div');
+  const pane = h('div', { class: 'stack' });
   const TABS = [['content', 'Content'], ['class', 'Classification'], ['source', 'Provenance'], ['history', 'Attempts'], ['mastery', 'Mastery'], ['versions', 'Versions']];
   let tab = 'content';
   TABS.forEach(([k, label]) => tabs.appendChild(h('button', { 'aria-pressed': String(tab === k), onclick: (e) => { tab = k; $$('button', tabs).forEach(b => b.setAttribute('aria-pressed', 'false')); e.currentTarget.setAttribute('aria-pressed', 'true'); drawPane(); }, text: label })));
@@ -3605,6 +3792,27 @@ async function exportBank(list) {
   toast('Exported ' + list.length + ' question(s) to CSV', 'ok');
 }
 
+/** A full sweep of the course's live bank for conflicts/duplicates that were
+    never caught \u2014 data imported before this feature existed, or edits made
+    outside the normal save path (a restore). Everything imported or edited
+    through the app is already kept current automatically; this is the
+    catch-up tool for what predates that. */
+async function runBankRescan() {
+  const total = (await State.questions()).filter(q => q.status !== 'merged' && q.status !== 'rejected').length;
+  const status = h('div', { class: 'notice' }, 'Checking 0 of ' + total + '\u2026');
+  modal({ title: 'Rescan for duplicates & conflicts', body: h('div', { class: 'stack' }, [status]), sticky: true, actions: [{ label: 'Close', value: null }] });
+  const r = await rescanCourseForPairs(State.course.id, (checked, n) => { status.textContent = 'Checking ' + checked + ' of ' + n + '\u2026'; });
+  State.invalidate();
+  status.className = 'notice ' + ((r.newConflicts || r.newDups) ? 'warn' : 'ok');
+  status.textContent = 'Checked ' + r.checked + ' question(s). ' +
+    (r.newConflicts ? r.newConflicts + ' new answer conflict(s) found. ' : '') +
+    (r.newDups ? r.newDups + ' new possible duplicate(s) found. ' : '') +
+    (r.cleared ? r.cleared + ' pairing(s) cleared that no longer held. ' : '') +
+    (!r.newConflicts && !r.newDups && !r.cleared ? 'Nothing changed \u2014 every pairing already matched the current bank.' : '');
+  if (r.newConflicts || r.newDups) status.appendChild(h('div', { style: 'margin-top:8px' },
+    h('button', { class: 'btn sm', onclick: () => { State.importStep = 'check'; go('import'); }, text: 'Go to the review queue \u2192' })));
+}
+
 async function loadImageInto(sel, imageId) {
   const rec = await DB.get('images', imageId);
   const box = $(sel);
@@ -3695,6 +3903,7 @@ ROUTES.import = async (root) => {
     const count = Number(entry.questions) || 0;
     root.appendChild(h('div', { class: 'card', style: 'margin-top:16px;border-color:var(--blue)' }, [
       h('div', { class: 'card-h' }, [
+        h('span', { class: 'method-ico', style: 'background:var(--blue-tint);color:var(--blue)', text: '⇩' }),
         h('h3', { text: entry.label || entry.file.split('/').pop() }),
         h('div', { class: 'spacer' }),
         h('span', { class: 'badge b-review', text: probe.size ? bytes(probe.size) : 'available' })
@@ -3718,22 +3927,26 @@ ROUTES.import = async (root) => {
   ROUTES.import._paste = paste;
   document.addEventListener('paste', paste);
 
+  const IMPORT_METHODS = [
+    { ico: '▣', title: 'Add from image or camera', desc: 'Photograph or screenshot a page, crop and straighten it, then transcribe it — by hand or with OCR.', action: () => imageWorkflow(null) },
+    { ico: '¶', title: 'Paste raw text', desc: 'Already have the questions as text somewhere? Paste them in and see exactly what gets found before anything is kept.', action: () => pasteTextWorkflow() },
+    { ico: '⇩', title: 'Download CSV / JSON templates', desc: 'A blank spreadsheet or JSON file in the exact shape the parser expects — fill it in and drop it back in above.', action: () => downloadTemplates() }
+  ];
   root.appendChild(h('div', { class: 'grid g2', style: 'margin-top:16px' }, [
     h('div', { class: 'card' }, [
       h('div', { class: 'card-h' }, h('h3', { text: 'Other ways in' })),
-      h('div', { class: 'card-b stack' }, [
-        h('button', { class: 'btn', onclick: () => imageWorkflow(null), text: 'Add from image or camera' }),
-        h('button', { class: 'btn', onclick: () => pasteTextWorkflow(), text: 'Paste raw text' }),
-        h('button', { class: 'btn', onclick: () => downloadTemplates(), text: 'Download CSV / JSON templates' })
-      ])
+      h('div', { class: 'card-b stack' }, IMPORT_METHODS.map(m => h('button', { class: 'method-row', onclick: m.action }, [
+        h('span', { class: 'method-ico', text: m.ico }),
+        h('div', {}, [h('div', { class: 'method-title', text: m.title }), h('div', { class: 'method-desc', text: m.desc })])
+      ])))
     ]),
     h('div', { class: 'card' }, [
-      h('div', { class: 'card-h' }, h('h3', { text: 'Parsing notes' })),
-      h('div', { class: 'card-b small muted' }, [
-        h('p', {}, 'Numbered stems (Q1, 1., 1)) with A/B/C/D, (a)/(b), bulleted or tabular options are all recognised, along with Answer / Ans / Correct answer and Explanation / Rationale labels.'),
-        h('p', {}, 'An answer key printed separately at the end of a chapter is matched back to its questions by original number.'),
-        h('p', {}, 'A lone capital letter is only treated as an option when the surrounding lines support it, so mid-sentence initials do not create phantom choices.'),
-        h('p', { style: 'margin:0' }, 'PDFs work only when they carry a simple text layer. Many do not, and those are refused with an explanation rather than imported as nonsense — open such a file in Word and save it as .docx instead.')
+      h('div', { class: 'card-h' }, h('h3', { text: 'What gets recognised' })),
+      h('div', { class: 'card-b stack', style: 'gap:9px' }, [
+        h('div', { class: 'row', style: 'gap:8px;align-items:flex-start' }, [h('span', { class: 'tick', dataset: { mark: 'verified' }, style: 'border:0;width:auto;flex:none;margin-top:1px', text: '✓' }), h('span', { class: 'small', text: 'Numbered questions, however your source labels them — Q1, 1., or 1) — with lettered, bulleted, or tabular options.' })]),
+        h('div', { class: 'row', style: 'gap:8px;align-items:flex-start' }, [h('span', { class: 'tick', dataset: { mark: 'verified' }, style: 'border:0;width:auto;flex:none;margin-top:1px', text: '✓' }), h('span', { class: 'small', text: 'An answer key printed separately at the end of a chapter, matched back to the right question automatically.' })]),
+        h('div', { class: 'row', style: 'gap:8px;align-items:flex-start' }, [h('span', { class: 'tick', dataset: { mark: 'verified' }, style: 'border:0;width:auto;flex:none;margin-top:1px', text: '✓' }), h('span', { class: 'small', text: 'A stray capital letter mid-sentence won’t be mistaken for an answer option.' })]),
+        h('div', { class: 'notice warn small', style: 'margin-top:2px' }, 'Scanned PDFs with no text layer can’t be read — open the file in Word and save it as .docx instead.')
       ])
     ])
   ]));
@@ -4023,7 +4236,7 @@ function renderStaging(root) {
     });
     return c;
   };
-  const summary = h('div', { class: 'grid', style: 'grid-template-columns:repeat(5,minmax(0,1fr));margin-bottom:14px' });
+  const summary = h('div', { class: 'grid g5', style: 'margin-bottom:14px' });
   const drawSummary = () => {
     const c = counts();
     summary.textContent = '';
@@ -4254,7 +4467,7 @@ function renderStaging(root) {
 async function admitBatch() {
   const st = State.staging;
   for (const s of st.sources) await DB.put('sources', s);
-  const toAdmit = [], toMerge = [], rejected = [];
+  const toAdmit = [], toMerge = [], rejected = [], needsRecheck = [];
   st.items.forEach(it => {
     if (it.decision === 'reject') { rejected.push(it); return; }
     if (it.decision === 'merge' && it.dup && it.dup.other && it.dup.other.qid) { toMerge.push(it); return; }
@@ -4265,6 +4478,7 @@ async function admitBatch() {
     else if (it.q.status === 'draft' && !it.q.correctOptionId) it.q.status = 'needs_answer';
     else if (it.q.status === 'draft' && it.q.answerVerified !== 'verified') it.q.status = 'needs_answer';
     toAdmit.push(it.q);
+    if (it.dup) needsRecheck.push(it.q);
   });
   await Questions.admit(toAdmit, State.course.id, 'batch ' + st.batch.id.slice(0, 8));
 
@@ -4281,6 +4495,22 @@ async function admitBatch() {
     await DB.put('questions', existing);
     await audit('merge', 'question', existing.qid, { sourceRefs: before.sourceRefs.length }, { sourceRefs: existing.sourceRefs.length }, 'Duplicate from batch ' + st.batch.id.slice(0, 8) + ' merged; both sources retained');
     merged++;
+    needsRecheck.push(existing);
+  }
+
+  // Matched candidates were only ever judged from their own side during
+  // staging. Bring the record(s) each one matches up to date too, so a
+  // conflict or duplicate found here holds on both sides permanently, not
+  // just for the newly admitted question — the same rule an edit follows.
+  if (needsRecheck.length) {
+    const live = (await Questions.byCourse(State.course.id)).filter(x => x.status !== 'merged' && x.status !== 'rejected');
+    const index = buildIndex(live);
+    const byUuid = new Map(live.map(x => [x.uuid, x]));
+    for (const q of needsRecheck) {
+      const before = q.status;
+      const r = await recheckQuestion(q, { bank: live, index, byUuid });
+      if (r.changed || q.status !== before) await DB.put('questions', q);
+    }
   }
   for (const it of rejected) {
     await audit('reject', 'question', '(not admitted)', null, { stem: it.q.stem.slice(0, 90) }, 'Rejected during import review');
@@ -4392,9 +4622,32 @@ function compareDialog(q, dup, item, redraw) {
       { label: 'Reject incoming', value: 'rej' },
       { label: 'Merge into existing', value: 'merge', kind: 'primary' }
     ]
-  }).then(v => {
+  }).then(async v => {
     if (!v) return;
-    if (v === 'sep') { item.decision = 'import'; item.q.status = item.q.correctOptionId ? 'draft' : 'needs_answer'; item.q.conflict = false; }
+    if (v === 'sep') {
+      // Record the dismissal on both sides so a future recheck never
+      // re-raises this exact pair, then clear only this one pairing —
+      // either record may still be held out of practice by a different one.
+      const kind = dup.conflict ? 'conflict' : 'dup';
+      item.q.dismissedPairs = Array.from(new Set((item.q.dismissedPairs || []).concat([other.uuid])));
+      unflagPairSide(item.q, other.uuid, kind);
+      // normalizePairState only re-derives conflict from what's still in
+      // conflictWith — clear the flag this specific pairing set so a
+      // different still-live pairing (if any) is what decides it now.
+      item.q.conflict = false;
+      normalizePairState(item.q);
+      item.decision = 'import';
+      const persisted = other.qid ? await Questions.get(other.uuid) : null;
+      if (persisted) {
+        persisted.dismissedPairs = Array.from(new Set((persisted.dismissedPairs || []).concat([item.q.uuid])));
+        unflagPairSide(persisted, item.q.uuid, kind);
+        persisted.conflict = false;
+        normalizePairState(persisted);
+        persisted.updatedAt = nowISO();
+        await DB.put('questions', persisted);
+        State.invalidate();
+      }
+    }
     if (v === 'rej') item.decision = 'reject';
     if (v === 'merge') item.decision = 'merge';
     redraw();
@@ -4513,7 +4766,8 @@ async function imageWorkflow(fileOrNull) {
     h('button', { class: 'btn sm', onclick: () => { st.contrast = clamp(st.contrast + 25, 50, 300); paint(); }, text: 'Contrast +' }),
     h('button', { class: 'btn sm', onclick: () => { st.contrast = clamp(st.contrast - 25, 50, 300); paint(); }, text: 'Contrast −' }),
     h('button', { class: 'btn sm', onclick: () => { st.rotate = 0; st.contrast = 100; st.grayscale = false; paint(); }, text: 'Reset' }),
-    h('button', { class: 'btn sm primary', onclick: () => runOCR(canvas, textArea, ocrStatus), text: 'Run OCR' })
+    h('button', { class: 'btn sm primary', onclick: () => runOCR(canvas, textArea, ocrStatus), text: 'Run OCR' }),
+    h('button', { class: 'btn sm', title: 'Sends this image to an API you configure yourself — see Settings → Images and OCR', onclick: () => runExternalOCR(canvas, textArea, ocrStatus), text: 'Try external OCR' })
   ]);
 
   const res = await modal({
@@ -4606,6 +4860,137 @@ async function runOCR(canvas, textArea, statusEl) {
   }
 }
 
+/* ---------- external OCR: bring your own API key ----------
+   Local Tesseract OCR above is the default because it never leaves this
+   machine. If it isn't set up, or its output is too rough on a hard page,
+   this is the alternative: the user's own API key, read from a plain-text
+   file in the SAME folder they already connected for their question bank —
+   never typed into the app, never stored in IndexedDB, never written into
+   the question bank JSON, and never part of any export or backup. It is
+   read fresh from disk only at the moment the user explicitly clicks
+   "Try external OCR" with the feature switched on in Settings, and the
+   image is sent only to the endpoint that file names — nowhere else. */
+const OCR_ENV_FILE = 'mcq-mastery.env';
+
+/** Parse KEY=VALUE lines from a small text file, tolerating blank lines and
+    # comments. Not a general .env parser — quoting/escaping is deliberately
+    unsupported, so the format stays obvious to read and edit by hand. */
+function parseEnvText(text) {
+  const out = {};
+  String(text || '').split('\n').forEach(raw => {
+    const line = raw.trim();
+    if (!line || line[0] === '#') return;
+    const i = line.indexOf('=');
+    if (i < 0) return;
+    out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  });
+  return out;
+}
+
+/** Read mcq-mastery.env from the connected folder. Read fresh every call —
+    not cached — so editing the file and retrying works without a reload.
+    Returns null if there is nothing to read (no folder connected, single-file
+    tier with no folder handle, the file does not exist, or permission has
+    lapsed) rather than throwing: those are all "unavailable", not errors. */
+async function readOcrEnvFile() {
+  if (!FileStore.dirHandle) return null;
+  let fh;
+  try {
+    fh = await FileStore.dirHandle.getFileHandle(OCR_ENV_FILE, { create: false });
+  } catch (e) {
+    return null; // NotFoundError (no such file) and permission errors alike: just unavailable
+  }
+  const file = await fh.getFile();
+  if (!file.size) return null;
+  return parseEnvText(await file.text());
+}
+
+function downloadOcrEnvTemplate() {
+  const sample = [
+    '# ' + OCR_ENV_FILE + ' — external OCR configuration',
+    '#',
+    '# Save this file, filled in, directly in the same folder you connected',
+    '# for your question bank (Settings -> Where your data lives). MCQ Mastery',
+    '# reads it only when you click "Try external OCR" with that feature',
+    '# switched on in Settings, and only to send that one image to ENDPOINT.',
+    '# It is never written into your question bank file and never leaves',
+    '# this folder any other way.',
+    '#',
+    '# ENDPOINT must accept an OpenAI-compatible chat-completions request with',
+    '# an image_url content part — this covers OpenAI itself and most',
+    '# OpenAI-compatible providers and local servers. Examples:',
+    '#   https://api.openai.com/v1/chat/completions',
+    '#   https://api.groq.com/openai/v1/chat/completions',
+    'ENDPOINT=',
+    '',
+    '# Your API key for that endpoint.',
+    'API_KEY=',
+    '',
+    '# The model name that endpoint expects, e.g. gpt-4o-mini',
+    'MODEL='
+  ].join('\n');
+  download(OCR_ENV_FILE, new Blob([sample], { type: 'text/plain' }));
+  toast('Template downloaded — fill it in and save it in your connected folder', 'ok', 5000);
+}
+
+/** Send the cropped/adjusted canvas to whatever OCR API the user has
+    configured in mcq-mastery.env. Opt-in only, gated on its own Settings
+    flag with its own honest copy — this is the one path in the app that
+    sends anything over the network, and it never runs unless the user has
+    both switched it on and provided their own endpoint and key. */
+async function runExternalOCR(canvas, textArea, statusEl) {
+  if (!Settings.get('externalOcrEnabled')) {
+    await modal({
+      title: 'External OCR is off',
+      body: h('div', { class: 'stack' }, [
+        h('p', {}, 'This sends the image to an API you configure yourself — your own key, your own endpoint — instead of reading it on this machine. That is a real trade: your own judgement on what you trust with exam content, in exchange for OCR that may read a hard page better than the local engine.'),
+        h('p', { class: 'small muted' }, 'Turn it on in Settings → Images and OCR, then save a filled-in ' + OCR_ENV_FILE + ' in your connected folder — a template is one click away there.'),
+        h('p', { class: 'small muted', style: 'margin:0' }, 'Nothing is sent anywhere until you do both and click this again.')
+      ])
+    });
+    return;
+  }
+  if (!FileStore.dirHandle) {
+    statusEl.textContent = 'External OCR needs a connected folder (Settings → Where your data lives) holding ' + OCR_ENV_FILE + '.';
+    return;
+  }
+  statusEl.textContent = 'Reading ' + OCR_ENV_FILE + '…';
+  let cfg;
+  try { cfg = await readOcrEnvFile(); }
+  catch (e) { statusEl.textContent = 'Could not read ' + OCR_ENV_FILE + ': ' + e.message; return; }
+  if (!cfg || !cfg.ENDPOINT || !cfg.API_KEY) {
+    statusEl.textContent = 'No usable ' + OCR_ENV_FILE + ' found — it needs an ENDPOINT= and an API_KEY= line. Download the template in Settings.';
+    return;
+  }
+  statusEl.textContent = 'Sending the image to ' + cfg.ENDPOINT + '…';
+  try {
+    const res = await fetch(cfg.ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.API_KEY },
+      body: JSON.stringify({
+        model: cfg.MODEL || 'gpt-4o-mini',
+        max_tokens: 1200,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Transcribe this multiple-choice exam question exactly as printed: the question stem, then each answer option on its own line prefixed with its letter, then "Answer: X" if the page states which is correct, then any explanation shown. Plain text only — no markdown, no commentary, nothing invented that is not on the page.' },
+            { type: 'image_url', image_url: { url: canvas.toDataURL('image/jpeg', 0.85) } }
+          ]
+        }]
+      })
+    });
+    if (!res.ok) throw new Error('API returned ' + res.status + ' — ' + (await res.text()).slice(0, 200));
+    const json = await res.json();
+    const text = json && json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content;
+    if (!text) throw new Error('The API response did not look like OCR text — check MODEL= and ENDPOINT= in ' + OCR_ENV_FILE + '.');
+    textArea.value = text;
+    textArea.dispatchEvent(new Event('input'));
+    statusEl.textContent = 'External OCR complete. Check it against the image — nothing here is fact-checked for you.';
+  } catch (e) {
+    statusEl.textContent = 'External OCR failed: ' + e.message + ' — transcribe manually instead.';
+  }
+}
+
 /* ============================================================================
    Needs Checking
    ========================================================================== */
@@ -4653,6 +5038,38 @@ async function renderReviewQueue(root) {
     root.appendChild(card);
   };
 
+  const byUuid = new Map(all.map(x => [x.uuid, x]));
+  /** A badge saying "Conflicts with CISA-Q-000042" makes you open that record
+      just to find out what it actually disagrees about. State the two
+      competing answers right here instead — which option each record thinks
+      is correct — so the disagreement is legible without a click, and only
+      opening either one is left to actually resolve it. */
+  const answerOf = (rec) => {
+    const i = (rec.options || []).findIndex(o => o.id === rec.correctOptionId);
+    if (i < 0) return { letter: '?', text: '(no answer set)' };
+    return { letter: letterOf(i), text: rec.options[i].text };
+  };
+  const openLink = (u, label) => h('a', { href: '#', onclick: (e) => { e.preventDefault(); openQuestion(u); }, text: label });
+  const pairLine = (q) => {
+    const conflictUuids = q.conflictWith || [], dupUuids = q.dupWith || [];
+    if (!conflictUuids.length && !dupUuids.length) return null;
+    const mine = answerOf(q);
+    const rows = [];
+    conflictUuids.forEach(u => {
+      const o = byUuid.get(u);
+      if (!o) { rows.push(h('div', { class: 'notice bad small', style: 'margin-top:4px' }, 'Conflicts with a record that no longer exists.')); return; }
+      const theirs = answerOf(o);
+      rows.push(h('div', { class: 'notice bad small', style: 'margin-top:4px' }, [
+        h('b', {}, 'This record'), ' says ', h('b', { text: mine.letter }), ' — “' + mine.text.slice(0, 90) + (mine.text.length > 90 ? '…' : '') + '.” ',
+        openLink(u, o.qid || 'The other record'), ' says ', h('b', { text: theirs.letter }), ' — “' + theirs.text.slice(0, 90) + (theirs.text.length > 90 ? '…' : '') + '.”'
+      ]));
+    });
+    dupUuids.forEach(u => {
+      const o = byUuid.get(u);
+      rows.push(h('div', { class: 'row wrap tiny dim', style: 'gap:6px;margin-top:4px' }, [h('span', { text: 'Possible duplicate of:' }), o ? openLink(u, o.qid || 'unadmitted') : h('span', { text: '(removed)' })]));
+    });
+    return h('div', {}, rows);
+  };
   const quickRow = (q, extra) => h('div', { style: 'border-left:3px solid var(--rule);padding-left:12px' }, [
     h('div', { class: 'row wrap', style: 'gap:8px' }, [
       h('span', { class: 'docnum dim', text: q.qid || '(no id)' }), statusBadge(q),
@@ -4661,6 +5078,7 @@ async function renderReviewQueue(root) {
       h('button', { class: 'btn sm', onclick: () => openQuestion(q.uuid), text: 'Open' })
     ]),
     h('div', { class: 'small', style: 'margin:5px 0', text: q.stem.slice(0, 200) + (q.stem.length > 200 ? '…' : '') }),
+    pairLine(q),
     extra || null
   ]);
 
@@ -4682,8 +5100,24 @@ async function renderReviewQueue(root) {
       h('button', { class: 'btn sm', onclick: () => reviewDuplicate(q), text: 'Compare' }),
       h('button', {
         class: 'btn sm', onclick: async () => {
+          // One click dismisses every current duplicate partner at once —
+          // the button doesn't ask which one, so it clears them all, both
+          // sides, and records each dismissal so a rescan won't re-raise it.
           const fresh = await Questions.get(q.uuid);
-          fresh.status = fresh.answerVerified === 'verified' ? 'active' : 'needs_answer';
+          for (const u of (fresh.dupWith || []).slice()) {
+            fresh.dismissedPairs = Array.from(new Set((fresh.dismissedPairs || []).concat([u])));
+            unflagPairSide(fresh, u, 'dup');
+            const other = await Questions.get(u);
+            if (other) {
+              other.dismissedPairs = Array.from(new Set((other.dismissedPairs || []).concat([fresh.uuid])));
+              unflagPairSide(other, fresh.uuid, 'dup');
+              normalizePairState(other);
+              other.updatedAt = nowISO();
+              await DB.put('questions', other);
+            }
+          }
+          normalizePairState(fresh);
+          fresh.updatedAt = nowISO();
           await DB.put('questions', fresh); State.invalidate(); toast('Kept as a separate question'); (function(){ State.importStep='check'; return go('import'); })();
         }, text: 'Keep separate'
       })
@@ -4717,28 +5151,42 @@ async function renderReviewQueue(root) {
 }
 
 async function reviewDuplicate(q) {
-  const bank = (await State.questions()).filter(x => x.uuid !== q.uuid && x.status !== 'merged' && x.status !== 'rejected');
+  const fresh = await Questions.get(q.uuid);
+  if (!fresh) { toast('That question no longer exists', 'bad'); return; }
+  const bank = (await State.questions()).filter(x => x.uuid !== fresh.uuid && x.status !== 'merged' && x.status !== 'rejected');
   const index = buildIndex(bank);
-  const pool = candidatesFor(q, index, q.uuid);
+  const dismissed = new Set(fresh.dismissedPairs || []);
+  const pool = candidatesFor(fresh, index, fresh.uuid);
   let best = null;
   pool.forEach(o => {
-    const sim = similarity(q, o);
-    const cls = classifyPair(q, o, sim);
+    if (dismissed.has(o.uuid) || (o.dismissedPairs || []).indexOf(fresh.uuid) >= 0) return;
+    const sim = similarity(fresh, o);
+    const cls = classifyPair(fresh, o, sim);
     if (cls === 'distinct') return;
-    if (!best || sim.score > best.sim.score) best = { other: o, sim, cls, conflict: answersConflict(q, o) };
+    if (!best || sim.score > best.sim.score) best = { other: o, sim, cls, conflict: answersConflict(fresh, o) };
   });
   if (!best) {
-    const fresh = await Questions.get(q.uuid);
-    fresh.status = fresh.answerVerified === 'verified' ? 'active' : 'needs_answer';
+    // Nothing left to compare against — recheckQuestion settles the status,
+    // clearing whatever pairing brought this into the queue and picking up
+    // anything else that might still be holding it out of practice.
+    await recheckQuestion(fresh, {});
+    fresh.updatedAt = nowISO();
     await DB.put('questions', fresh); State.invalidate();
     toast('No duplicate remains — released from the queue', 'ok'); (function(){ State.importStep='check'; return go('import'); })(); return;
   }
-  const item = { q, decision: 'review' };
-  compareDialog(q, best, item, async () => {
-    const fresh = await Questions.get(q.uuid);
-    if (item.decision === 'merge') { await mergeQuestions(best.other.uuid, q.uuid, 'Merged from review queue'); toast('Merged into ' + best.other.qid, 'ok'); }
-    else if (item.decision === 'reject') { fresh.status = 'rejected'; await DB.put('questions', fresh); await audit('reject', 'question', fresh.qid, null, null, 'Rejected as duplicate'); toast('Rejected'); }
-    else { fresh.status = fresh.answerVerified === 'verified' ? 'active' : 'needs_answer'; await DB.put('questions', fresh); toast('Kept separate'); }
+  const item = { q: fresh, decision: 'review' };
+  compareDialog(fresh, best, item, async () => {
+    if (item.decision === 'merge') { await mergeQuestions(best.other.uuid, fresh.uuid, 'Merged from review queue'); toast('Merged into ' + best.other.qid, 'ok'); }
+    else if (item.decision === 'reject') { fresh.status = 'rejected'; fresh.updatedAt = nowISO(); await DB.put('questions', fresh); await audit('reject', 'question', fresh.qid, null, null, 'Rejected as duplicate'); toast('Rejected'); }
+    else {
+      // 'sep' already recorded the dismissal and cleared this one pairing in
+      // memory (see compareDialog) — a full recheck confirms nothing else is
+      // still holding it back before persisting.
+      await recheckQuestion(fresh, {});
+      fresh.updatedAt = nowISO();
+      await DB.put('questions', fresh);
+      toast('Kept separate');
+    }
     State.invalidate(); (function(){ State.importStep='check'; return go('import'); })();
   });
 }
@@ -5507,6 +5955,15 @@ ROUTES.settings = async (root) => {
       h('div', { class: 'field' }, [
         h('label', { text: 'Local OCR script path' }),
         h('input', { type: 'text', value: Settings.get('ocrScriptPath'), onchange: async e => { await Settings.set('ocrScriptPath', e.target.value.trim()); toast('Saved'); } })
+      ]),
+      h('div', { class: 'notice small', style: 'margin-top:2px' }, 'External OCR is a separate, opt-in option below — unlike local OCR, it sends the image to an API of your choosing.'),
+      checkField('Allow external OCR', 'externalOcrEnabled', 'Sends the cropped image to an API you configure yourself, only when you click “Try external OCR” on the Add from image screen. Off by default; this is the one thing in the app that can leave your machine.'),
+      h('div', { class: 'field' }, [
+        h('label', { text: 'External OCR setup' }),
+        h('div', { class: 'row wrap', style: 'gap:8px' }, [
+          h('button', { class: 'btn sm', onclick: () => downloadOcrEnvTemplate(), text: 'Download ' + OCR_ENV_FILE + ' template' }),
+          h('span', { class: 'tiny dim', text: FileStore.dirHandle ? 'Save it, filled in, in your connected folder.' : 'Needs a connected folder — see “Where your data lives” above.' })
+        ])
       ])
     ])
   ]));
