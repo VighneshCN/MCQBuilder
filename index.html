@@ -7041,7 +7041,7 @@ function effectiveDriveClientId() {
 const DriveSync = {
   connected: false, fileId: null, accessToken: null, tokenExpiresAt: 0,
   lastPushedAt: null, problem: null,
-  _tokenClient: null, _pushTimer: null, _pushing: false,
+  _tokenClient: null, _tokenClientId: null, _pushTimer: null, _pushing: false,
 
   /** Boot-time: resume a previous connection silently, never with a popup. */
   async init() {
@@ -7073,8 +7073,14 @@ const DriveSync = {
     return new Promise((resolve, reject) => {
       const clientId = effectiveDriveClientId();
       if (!clientId) { reject(new Error('No Google OAuth client ID set — see Settings → Google Drive.')); return; }
-      if (!this._tokenClient) {
+      // Rebuild if this is the first request, or if the effective client ID
+      // has changed since the cached one was built (Settings edited, or the
+      // deployer's default filled in, without a full page reload in
+      // between) — otherwise a corrected ID would silently keep sending the
+      // stale one Google already rejected.
+      if (!this._tokenClient || this._tokenClientId !== clientId) {
         this._tokenClient = google.accounts.oauth2.initTokenClient({ client_id: clientId, scope: DRIVE_SCOPE, callback: () => { } });
+        this._tokenClientId = clientId;
       }
       this._tokenClient.callback = (resp) => {
         if (resp.error) { reject(new Error(resp.error)); return; }
