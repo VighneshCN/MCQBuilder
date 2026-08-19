@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+#  Keep your question bank OUT of the repository.
+#
+#  If you point the app's "Connect a folder" at this folder, it will write
+#  your live database here. Without these rules, the next `git add .` would
+#  commit your entire question bank — including any copyrighted source
+#  material in it — and push it straight back to GitHub.
+#
+#  Safest arrangement: connect a folder OUTSIDE this repo entirely, e.g.
+#  D:\MCQData. These rules are the belt-and-braces for when you don't.
+# ---------------------------------------------------------------------------
+
+# The live database and everything the app maintains next to it
+mcq-mastery-data.json
+mcq-mastery-data.previous.json
+mcq-mastery-journal.jsonl
+mcq-mastery-*.json
+mcq-mastery-*.jsonl
+
+# Backups: the routine ones and the automatic pre-deletion ones
+mcq-mastery-backup-*.zip
+mcq-mastery-safety-backup-*.zip
+*.backup.zip
+
+# Question sets. These are source material, not code, and several are
+# copyrighted by their publishers. Keep them local and import them.
+data/
+starter-questions-*.json
+starter-index.json
+
+# Anything you park here while working
+/private/
+/local/
+*.local.json
+
+# Usual noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+
+# Local helper, not part of the app
+Upload to GitHub.bat
