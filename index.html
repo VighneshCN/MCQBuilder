@@ -3781,7 +3781,11 @@ async function openQuestion(uuidStr) {
     await Questions.save(fresh, 'manual edit');
     State.invalidate();
     toast('Saved as version ' + fresh.version, 'ok');
-    if (State.view === 'bank') go('bank'); else if (State.view === 'review') (function(){ State.importStep='check'; return go('import'); })();
+    // 'review' was the old route name; the check-what-needs-confirming
+    // screen has lived inside 'import' (as importStep='check') for a while
+    // now, so that string never matched — saving from there left the stale
+    // list on screen even though the record itself saved correctly.
+    if (State.view === 'bank') go('bank'); else if (State.view === 'import') go('import');
   } else if (res === 'flag') {
     const fresh = await Questions.get(uuidStr); fresh.flagged = !fresh.flagged; await DB.put('questions', fresh); State.invalidate(); toast(fresh.flagged ? 'Flagged' : 'Unflagged');
   } else if (res === 'archive') {
@@ -5226,17 +5230,20 @@ async function renderReviewQueue(root) {
   ]);
 
   section('Answer conflicts', conflicts, 'Two records disagree on the correct answer', q => quickRow(q,
-    h('div', { class: 'row wrap', style: 'gap:6px' }, q.options.map((o, i) => h('button', {
-      class: 'btn sm', onclick: async () => {
+    h('div', { class: 'stack', style: 'gap:4px' }, q.options.map((o, i) => h('button', {
+      class: 'method-row', style: q.correctOptionId === o.id ? 'background:var(--green-tint)' : '', onclick: async () => {
         const fresh = await Questions.get(q.uuid);
         fresh.correctOptionId = o.id; fresh.conflict = false; fresh.answerVerified = 'verified'; fresh.verifiedAt = nowISO();
         fresh.verifyNote = 'Conflict resolved by hand';
         fresh.status = fresh.domainId ? 'active' : 'needs_class';
         await Questions.save(fresh, 'conflict resolved');
         await audit('verify', 'question', fresh.qid, { conflict: true }, { correctOptionId: o.id }, 'Answer conflict resolved');
-        State.invalidate(); toast('Conflict resolved for ' + fresh.qid, 'ok'); (function(){ State.importStep='check'; return go('import'); })();
-      }, text: letterOf(i) + ' is correct'
-    })))));
+        State.invalidate(); toast('Conflict resolved for ' + fresh.qid, 'ok'); go('import');
+      }
+    }, [
+      h('span', { class: 'method-ico', style: q.correctOptionId === o.id ? 'background:var(--green);color:#fff' : '', text: letterOf(i) }),
+      h('span', { class: 'small', style: 'flex:1;text-align:left', text: o.text })
+    ])))));
 
   section('Possible duplicates', dupes, 'Compare before merging — same concept is not the same question', q => quickRow(q,
     h('div', { class: 'row', style: 'gap:6px' }, [
@@ -5267,17 +5274,19 @@ async function renderReviewQueue(root) {
     ])));
 
   section('Needs answer verification', noAnswer, 'No answer, or an answer nobody has checked', q => quickRow(q,
-    h('div', { class: 'row wrap', style: 'gap:6px' }, q.options.map((o, i) => h('button', {
-      class: 'btn sm', 'aria-pressed': String(q.correctOptionId === o.id),
-      onclick: async () => {
+    h('div', { class: 'stack', style: 'gap:4px' }, q.options.map((o, i) => h('button', {
+      class: 'method-row', style: q.correctOptionId === o.id ? 'background:var(--green-tint)' : '', onclick: async () => {
         const fresh = await Questions.get(q.uuid);
         fresh.correctOptionId = o.id; fresh.answerVerified = 'verified'; fresh.verifiedAt = nowISO();
         fresh.status = fresh.domainId ? 'active' : 'needs_class';
         await Questions.save(fresh, 'answer verified');
         await audit('verify', 'question', fresh.qid, null, { correctOptionId: o.id }, 'Answer set and verified in review queue');
-        State.invalidate(); toast(fresh.qid + ' verified', 'ok'); (function(){ State.importStep='check'; return go('import'); })();
-      }, text: letterOf(i) + (q.correctOptionId === o.id ? ' ✓' : '')
-    })))));
+        State.invalidate(); toast(fresh.qid + ' verified', 'ok'); go('import');
+      }
+    }, [
+      h('span', { class: 'method-ico', style: q.correctOptionId === o.id ? 'background:var(--green);color:#fff' : '', text: letterOf(i) + (q.correctOptionId === o.id ? ' ✓' : '') }),
+      h('span', { class: 'small', style: 'flex:1;text-align:left', text: o.text })
+    ])))));
 
   section('Needs classification', noClass, 'Unmapped questions never guess a domain', q => quickRow(q,
     h('div', { class: 'row wrap', style: 'gap:6px' }, State.course.blueprint.map(d => h('button', {
@@ -5990,12 +5999,22 @@ ROUTES.settings = async (root) => {
   root.appendChild(dataCard);
 
   /* ---- Google Drive sync ---- */
+  const driveBadge = DriveSync.connected ? (DriveSync.problem ? { c: 'b-conflict', t: 'Needs attention' } : { c: 'b-active', t: 'Connected' })
+    : DriveSync.setupError ? { c: 'b-conflict', t: 'Signed in — setup incomplete' } : { c: 'b-review', t: 'Not connected' };
   const driveCard = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
     h('div', { class: 'card-h' }, [h('h3', { text: 'Google Drive' }), h('div', { class: 'spacer' }),
-      h('span', { class: 'badge ' + (DriveSync.connected ? (DriveSync.problem ? 'b-conflict' : 'b-active') : 'b-review'), text: DriveSync.connected ? (DriveSync.problem ? 'Needs attention' : 'Connected') : 'Not connected' })])
+      h('span', { class: 'badge ' + driveBadge.c, text: driveBadge.t })])
   ]);
   const dr = h('div', { class: 'card-b stack' });
   dr.appendChild(h('p', { class: 'small' }, 'An additional, separate copy in your own Google Drive — alongside the local folder above, not instead of it — so the bank you build here is also reachable from a phone or a different computer. This is the one thing in the app that leaves this machine other than the opt-in external OCR path; it goes only to your own Google account, using a scope that lets it see nothing in your Drive except the one file it creates.'));
+  // Persisted, not just a toast that vanishes in a few seconds — a failed
+  // setup attempt should still be visible the next time this screen opens.
+  if (!DriveSync.connected && DriveSync.setupError) {
+    dr.appendChild(h('div', { class: 'notice bad small' }, [
+      h('b', { text: DriveSync.hasLiveToken() ? 'Signed in to Google — the Drive file itself didn’t set up: ' : 'Could not connect: ' }),
+      DriveSync.setupError.replace(/^(Could not sign in to Google: |Signed in to Google, but could not set up the Drive file: )/, '')
+    ]));
+  }
   if (DriveSync.connected) {
     dr.appendChild(h('p', { class: 'tiny dim', text: DriveSync.problem ? DriveSync.problem : (DriveSync.lastPushedAt ? 'Last synced ' + fmtDate(DriveSync.lastPushedAt, true) : 'Connected — first sync happens shortly, or click Sync now.') }));
     dr.appendChild(h('div', { class: 'row wrap', style: 'gap:8px' }, [
@@ -6006,7 +6025,9 @@ ROUTES.settings = async (root) => {
   } else if (DEFAULT_DRIVE_CLIENT_ID && !Settings.get('driveClientId')) {
     // The deployer has already done the one-time setup — nothing for anyone
     // else opening this app to configure. Sign in with your own account.
-    dr.appendChild(h('button', { class: 'btn primary', onclick: async () => { await DriveSync.connect(); go('settings'); }, text: 'Connect Google Drive' }));
+    // Retry reuses a still-live token instead of prompting Google again —
+    // see DriveSync.connect().
+    dr.appendChild(h('button', { class: 'btn primary', onclick: async () => { await DriveSync.connect(); go('settings'); }, text: DriveSync.setupError ? 'Retry' : 'Connect Google Drive' }));
     const advanced = h('details', { style: 'margin-top:10px' }, [
       h('summary', { class: 'tiny dim', style: 'cursor:pointer' }, 'Using a different Google Cloud project? (advanced)'),
       h('div', { class: 'field', style: 'margin-top:8px' }, [
@@ -6021,7 +6042,7 @@ ROUTES.settings = async (root) => {
       h('input', { type: 'text', placeholder: 'xxxxxxxxxx.apps.googleusercontent.com', value: Settings.get('driveClientId'), onchange: async e => { await Settings.set('driveClientId', e.target.value.trim()); toast('Saved'); } }),
       h('div', { class: 'tiny dim' }, 'Not a secret — this identifies the app to Google, not any one account — but keep it out of anything you publish anyway. Set this up once for wherever this app is hosted, and it works for everyone who opens that URL — nobody else needs to see this screen.')
     ]));
-    dr.appendChild(h('button', { class: 'btn primary', onclick: async () => { await DriveSync.connect(); go('settings'); }, text: 'Connect Google Drive' }));
+    dr.appendChild(h('button', { class: 'btn primary', onclick: async () => { await DriveSync.connect(); go('settings'); }, text: DriveSync.setupError ? 'Retry' : 'Connect Google Drive' }));
     const setup = h('details', { style: 'margin-top:4px' }, [
       h('summary', { class: 'small', style: 'cursor:pointer' }, 'One-time setup — about ten minutes, free'),
       h('div', { class: 'stack small', style: 'margin-top:10px' }, [
@@ -7040,8 +7061,13 @@ function effectiveDriveClientId() {
 
 const DriveSync = {
   connected: false, fileId: null, accessToken: null, tokenExpiresAt: 0,
-  lastPushedAt: null, problem: null,
+  lastPushedAt: null, problem: null, setupError: null,
   _tokenClient: null, _tokenClientId: null, _pushTimer: null, _pushing: false,
+
+  /** A token already in hand, not yet expired — connect() uses this to skip
+      a redundant sign-in popup when only the file-setup half failed last
+      time, not the Google sign-in itself. */
+  hasLiveToken() { return !!(this.accessToken && Date.now() < this.tokenExpiresAt); },
 
   /** Boot-time: resume a previous connection silently, never with a popup. */
   async init() {
@@ -7105,29 +7131,38 @@ const DriveSync = {
       await modal({ title: 'Add a Google OAuth client ID first', body: h('p', {}, 'Settings → Google Drive has the one-time setup steps — about ten minutes, free, and only you can do it (it needs your own Google account).') });
       return;
     }
-    try {
-      await this._loadGis();
-      await this._requestToken(false);
-    } catch (e) { toast('Could not connect to Google Drive: ' + e.message, 'bad', 8000); return; }
+    // A previous attempt may have already signed in successfully and failed
+    // only on the Drive-file half — skip a redundant Google popup in that
+    // case rather than making the user sign in twice for one failure.
+    if (!this.hasLiveToken()) {
+      try {
+        await this._loadGis();
+        await this._requestToken(false);
+      } catch (e) { this.setupError = 'Could not sign in to Google: ' + e.message; updateStorageBar(); toast(this.setupError, 'bad', 8000); return; }
+    }
     try {
       let fileId = await FileStore.meta('driveFileId');
       if (!fileId) fileId = (await this._findExisting()) || (await this._createFile());
       await FileStore.setMeta('driveFileId', fileId);
       await FileStore.setMeta('driveConnected', true);
       this.fileId = fileId;
-      this.connected = true; this.problem = null;
+      this.connected = true; this.problem = null; this.setupError = null;
       this._startTimer();
       updateStorageBar();
       toast('Google Drive connected.', 'ok');
       await this._checkRemoteOnConnect();
-    } catch (e) { toast('Connected to Google, but could not set up the Drive file: ' + e.message, 'bad', 8000); }
+    } catch (e) {
+      this.setupError = 'Signed in to Google, but could not set up the Drive file: ' + e.message;
+      updateStorageBar();
+      toast(this.setupError, 'bad', 8000);
+    }
   },
 
   async disconnect() {
     if (this.accessToken && window.google && google.accounts && google.accounts.oauth2) {
       try { google.accounts.oauth2.revoke(this.accessToken, () => { }); } catch (e) { }
     }
-    this.connected = false; this.accessToken = null; this.fileId = null; this.problem = null;
+    this.connected = false; this.accessToken = null; this.fileId = null; this.problem = null; this.setupError = null;
     if (this._pushTimer) { clearInterval(this._pushTimer); this._pushTimer = null; }
     await FileStore.delMeta('driveFileId');
     await FileStore.delMeta('driveConnected');
@@ -7287,7 +7322,7 @@ const DriveSync = {
   },
 
   status() {
-    if (!this.connected) return null;
+    if (!this.connected) return this.setupError ? { tone: 'bad', label: 'Drive: ' + this.setupError } : null;
     if (this.problem) return { tone: 'bad', label: this.problem };
     return { tone: 'ok', label: this.lastPushedAt ? 'Drive synced ' + fmtDate(this.lastPushedAt, true) : 'Drive connected — syncing…' };
   }
