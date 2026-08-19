@@ -4008,7 +4008,7 @@ ROUTES.import = async (root) => {
       class: 'btn' + (step === 'check' ? ' primary' : ''),
       onclick: () => { State.importStep = 'check'; go('import'); }
     }, [
-      h('span', { text: '2 · Check what needs confirming' }),
+      h('span', { text: '2 · Review queue' }),
       waiting ? h('span', { class: 'badge b-review', style: 'margin-left:6px', text: String(waiting) }) : null
     ].filter(Boolean))
   ]);
@@ -4019,7 +4019,7 @@ ROUTES.import = async (root) => {
   if (waiting) {
     root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:14px' }, [
       String(waiting) + ' question(s) from earlier imports are waiting on you and cannot be practised until confirmed. ',
-      h('a', { href: '#', onclick: (e) => { e.preventDefault(); State.importStep = 'check'; go('import'); }, text: 'Check them now →' })
+      h('a', { href: '#', onclick: (e) => { e.preventDefault(); State.importStep = 'check'; go('import'); }, text: 'Review them now →' })
     ]));
   }
 
@@ -5679,17 +5679,54 @@ async function doBackup(scope) {
   try {
     const { blob, manifest } = await buildBackup(scope);
     const name = APP.name.toLowerCase().replace(/\s+/g, '-') + '-backup-' + (scope === 'course' ? State.course.code.toLowerCase() + '-' : '') + todayKey() + '.zip';
-    download(name, blob);
+
+    // Prefer the connected folder, same as the automatic safety backup —
+    // a browser download can land somewhere the person will not find again.
+    let where = 'download';
+    if (FileStore.connected && FileStore.dirHandle) {
+      try {
+        const fh = await FileStore.dirHandle.getFileHandle(name, { create: true });
+        const w = await fh.createWritable();
+        await w.write(blob);
+        await w.close();
+        where = 'folder';
+      } catch (e) {
+        download(name, blob);
+      }
+    } else {
+      download(name, blob);
+    }
+
     await Settings.set('lastBackupAt', nowISO());
     await audit('backup', 'system', '', null, { scope, counts: manifest.counts }, '');
-    toast('Backup saved · ' + bytes(blob.size), 'ok');
+    toast(where === 'folder' ? 'Backup saved to your data folder · ' + bytes(blob.size) : 'Backup saved · ' + bytes(blob.size), 'ok');
     if (State.view === 'backup') go('backup');
   } catch (e) {
     modal({ title: 'Backup failed', body: h('p', { text: e.message }) });
   }
 }
 
-function pickRestore() {
+async function pickRestore() {
+  if ('showOpenFilePicker' in window) {
+    try {
+      const opts = {
+        types: [{ description: 'Backup or import file', accept: { 'application/zip': ['.zip'], 'application/json': ['.json'] } }],
+        excludeAcceptAllOption: false, multiple: false
+      };
+      if (FileStore.connected && FileStore.dirHandle) opts.startIn = FileStore.dirHandle;
+      const [handle] = await window.showOpenFilePicker(opts);
+      const file = await handle.getFile();
+      await restoreFlow(file);
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;   // person cancelled the picker
+      pickRestoreLegacy();
+    }
+    return;
+  }
+  pickRestoreLegacy();
+}
+
+function pickRestoreLegacy() {
   const input = h('input', { type: 'file', accept: '.zip,.json', class: 'hidden', onchange: async e => { const f = e.target.files[0]; input.remove(); if (f) await restoreFlow(f); } });
   document.body.appendChild(input);
   input.click();
