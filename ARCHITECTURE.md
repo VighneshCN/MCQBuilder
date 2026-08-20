@@ -272,6 +272,16 @@ when a file changed under it *and* something was still unsaved. A manual
 "Load from Drive" and "Sync now" remain in Settings for forcing either
 direction early.
 
+Every one of these reconciliation choices backs up whichever side is about
+to be discarded before it acts — not just a note saying nothing was deleted.
+Discarding this browser's bank runs the same `requireSafetyBackup()` used
+before a replace-restore or a course wipe; discarding Drive's copy — which
+was never in this browser's IndexedDB to begin with — runs
+`requireDriveBackup()`, which builds the same backup ZIP shape
+(`buildBackupFromPayload()`) from the pulled Drive payload directly and
+downloads it. Either one blocks the destructive step if the backup fails,
+and asks a final "Continue" before proceeding even when it succeeds.
+
 Auth is Google Identity Services' token client: no backend server, no client
 secret (a static page cannot keep one confidential), no long-lived refresh
 token stored anywhere. `DriveSync.accessToken` is an in-memory property only —

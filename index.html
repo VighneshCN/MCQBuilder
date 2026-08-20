@@ -5582,7 +5582,7 @@ async function requireSafetyBackup(reason) {
   toast('Taking a safety backup first…');
   const res = await safetyBackup(reason);
   if (res.ok) {
-    await modal({
+    const proceed = await modal({
       title: 'Safety backup saved',
       body: h('div', { class: 'stack' }, [
         h('div', { class: 'notice ok small' }, res.where === 'folder'
@@ -5592,7 +5592,7 @@ async function requireSafetyBackup(reason) {
       ]),
       actions: [{ label: 'Stop here', value: false }, { label: 'Continue', value: true, kind: 'danger' }]
     });
-    return true;
+    return !!proceed;
   }
   const proceed = await modal({
     title: 'The safety backup failed',
@@ -5641,6 +5641,87 @@ async function buildBackup(scope) {
     ].join('\n')
   });
   return { blob: await zipFiles(entries), manifest };
+}
+
+/** Same shape as buildBackup(), but sourced from an in-memory payload — a
+    Drive snapshot already pulled down — rather than IndexedDB. Used when a
+    sync decision is about to overwrite Drive's copy: that content was never
+    in this browser's database, so buildBackup() can't reach it. */
+async function buildBackupFromPayload(payload) {
+  const entries = [];
+  const counts = {}, checks = {};
+  for (const name of BACKUP_STORES) {
+    const rows = Array.isArray(payload.stores && payload.stores[name]) ? payload.stores[name] : [];
+    const json = JSON.stringify(rows);
+    counts[name] = rows.length;
+    checks[name] = await sha256(json);
+    entries.push({ name: 'data/' + name + '.json', data: json });
+  }
+  const manifest = {
+    app: APP.name, appVersion: APP.version, schemaVersion: payload.schema || APP.schema,
+    createdAt: nowISO(), scope: 'all', courseId: null,
+    counts, checksums: checks, checksumAlgorithm: 'SHA-256 over the JSON text of each file'
+  };
+  entries.unshift({ name: 'manifest.json', data: JSON.stringify(manifest, null, 2) });
+  entries.push({
+    name: 'README.txt',
+    data: [
+      APP.name + ' backup — the Google Drive copy, saved just before it was overwritten', '',
+      'Created: ' + manifest.createdAt,
+      'Schema version: ' + manifest.schemaVersion,
+      '', 'Every file under data/ is a JSON array from one object store.',
+      'manifest.json lists record counts and a SHA-256 checksum for each file.',
+      'To restore, open the app and use Backup & Restore → Restore from backup.',
+      'To migrate elsewhere, read the JSON directly — no proprietary format is used.'
+    ].join('\n')
+  });
+  return { blob: await zipFiles(entries), manifest };
+}
+
+/** Mirrors safetyBackup(), for a Drive payload about to be overwritten
+    rather than this browser's own IndexedDB. Always downloads — Drive is
+    never the active backend at the same time a local folder is (see
+    "Where your data lives" in Settings), so there is nowhere else to put it. */
+async function backupDrivePayload(payload, reason) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const name = 'mcq-mastery-drive-safety-backup-' + stamp + '.zip';
+  try {
+    const { blob, manifest } = await buildBackupFromPayload(payload);
+    if (!blob || !blob.size) throw new Error('The backup came out empty.');
+    download(name, blob);
+    await audit('backup', 'system', '', null, { scope: 'all', reason, file: name, counts: manifest.counts }, 'Safety backup of the Drive copy before it was overwritten');
+    return { ok: true, name, size: blob.size };
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  }
+}
+
+/** Same "back up first, ask before proceeding without one" shape as
+    requireSafetyBackup(), for the Drive-copy-about-to-be-overwritten case. */
+async function requireDriveBackup(payload, reason) {
+  toast('Backing up the Drive copy first…');
+  const res = await backupDrivePayload(payload, reason);
+  if (res.ok) {
+    const proceed = await modal({
+      title: 'Drive copy backed up',
+      body: h('div', { class: 'stack' }, [
+        h('div', { class: 'notice ok small' }, 'Downloaded as ' + res.name + ' (' + bytes(res.size) + '). Check your downloads folder before continuing.'),
+        h('p', { class: 'small muted' }, 'If anything about the next step goes wrong, restore this file from Backup & Restore.')
+      ]),
+      actions: [{ label: 'Stop here', value: false }, { label: 'Continue', value: true, kind: 'danger' }]
+    });
+    return !!proceed;
+  }
+  const proceed = await modal({
+    title: 'Could not back up the Drive copy',
+    body: h('div', { class: 'stack' }, [
+      h('div', { class: 'notice bad' }, res.error),
+      h('p', {}, 'Nothing has been overwritten. Going ahead now would leave no way back to what is currently in Drive.'),
+      h('p', { class: 'small muted' }, 'The safe course is to stop, fix the backup, and try again.')
+    ]),
+    actions: [{ label: 'Stop — do not overwrite', value: false, kind: 'primary' }, { label: 'Overwrite anyway, without a backup', value: true, kind: 'danger' }]
+  });
+  return !!proceed;
 }
 
 ROUTES.backup = async (root) => {
@@ -7216,12 +7297,15 @@ const DriveSync = {
           body: h('div', { class: 'stack' }, [
             h('p', {}, 'This Drive file was updated from another device, and this browser also has changes of its own that never made it to Drive — probably closed before they could sync.'),
             h('p', { class: 'small' }, 'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This browser holds ' + localCount + '.'),
-            h('div', { class: 'notice small' }, 'Whichever you discard is not deleted from Drive — take a backup first from Settings if you want to keep both.')
+            h('div', { class: 'notice small' }, 'Whichever you discard gets backed up first, automatically, before anything is overwritten.')
           ]),
           actions: [{ label: 'Keep what is here', value: 'browser' }, { label: 'Load the Drive copy', value: 'drive', kind: 'primary' }]
         });
-        if (choice === 'drive') await this._applyRemote(remote);
-        else await this.push();
+        if (choice === 'drive') {
+          if (await requireSafetyBackup('discarding this browser’s unsynced changes for the Drive copy')) await this._applyRemote(remote);
+        } else {
+          if (await requireDriveBackup(remote, 'overwriting the Drive copy with this browser’s bank')) await this.push();
+        }
       } else {
         // The routine case: nothing unsynced here, so the newer Drive copy
         // is simply loaded in, same as opening a local file that changed.
@@ -7334,7 +7418,7 @@ const DriveSync = {
       body: h('div', { class: 'stack' }, [
         h('p', {}, 'That Drive file already holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '.'),
         h('p', { class: 'small' }, 'This browser currently holds ' + localCount + ' question(s). Which one do you want to keep?'),
-        h('div', { class: 'notice small' }, 'Whichever you discard is not deleted — the Drive file stays where it is, and you can take a backup first from Settings.')
+        h('div', { class: 'notice small' }, 'Whichever you discard gets backed up first, automatically, before anything is overwritten.')
       ]),
       actions: [
         { label: 'Cancel', value: '' },
@@ -7342,8 +7426,16 @@ const DriveSync = {
         { label: 'Overwrite Drive with this browser’s bank', value: 'browser', kind: 'primary' }
       ]
     });
-    if (choice === 'drive') { await this._applyRemote(remote); return true; }
-    if (choice === 'browser') { await this.push(); return true; }
+    if (choice === 'drive') {
+      if (!(await requireSafetyBackup('discarding this browser’s bank for the Drive copy'))) return false;
+      await this._applyRemote(remote);
+      return true;
+    }
+    if (choice === 'browser') {
+      if (!(await requireDriveBackup(remote, 'overwriting the Drive copy with this browser’s bank'))) return false;
+      await this.push();
+      return true;
+    }
     return false;
   },
 
@@ -7539,8 +7631,10 @@ const DriveSync = {
     const localCount = (await DB.all('questions')).length;
     const remoteCount = (remote.stores.questions || []).length;
     const ok = await confirmBox('Load the Drive copy?',
-      'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This replaces what is in this browser (' + localCount + ' question(s)) with that copy. Anything answered here since your last sync is lost unless it already reached Drive.', true);
-    if (ok) { await this._applyRemote(remote); await this._recordSyncedStamp(); }
+      'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This replaces what is in this browser (' + localCount + ' question(s)) with that copy. A safety backup of what is in this browser is taken first, automatically.', true);
+    if (ok && (await requireSafetyBackup('loading the Drive copy over this browser’s bank'))) {
+      await this._applyRemote(remote); await this._recordSyncedStamp();
+    }
   },
 
   status() {
