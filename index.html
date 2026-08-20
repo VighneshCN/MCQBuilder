@@ -6921,17 +6921,22 @@ async function courseDialog(course) {
     actions: [
       { label: 'Cancel', value: null },
       !isNew ? { label: course.archived ? 'Unarchive' : 'Archive', value: 'arch' } : null,
+      // Only offered once a course is already archived — permanent deletion
+      // is a second, deliberate step past that reversible one, not a
+      // shortcut available on a course still in active use.
+      !isNew && course.archived ? { label: 'Delete permanently', value: 'delete', kind: 'danger' } : null,
       { label: isNew ? 'Create course' : 'Save', value: 'save', kind: 'primary' }
     ].filter(Boolean)
   });
   if (!res) return;
+  if (res === 'delete') { await deleteCourseForever(course); return; }
   if (res === 'arch') {
     // Toggling this hides the whole course — questions, notes, everything
     // in it — from the sidebar course switcher, with a single unconfirmed
     // click; the equivalent, less consequential action at the question
     // level (Archive one question) already asks first.
     if (!course.archived) {
-      const ok = await confirmBox('Archive ' + course.code + '?', 'It disappears from the course picker, along with everything in it — nothing is deleted, and Settings → Edit → Unarchive brings it straight back.');
+      const ok = await confirmBox('Archive ' + course.code + '?', 'It disappears from the course picker, along with everything in it — nothing is deleted, and Settings → Edit → Unarchive brings it straight back. Once archived, a permanent-delete option also appears here if you really want it gone for good.');
       if (!ok) return;
     }
     course.archived = !course.archived;
@@ -6992,6 +6997,70 @@ async function courseDialog(course) {
   renderShell(); go('settings');
 }
 
+/** Only ever reached on an already-archived course (courseDialog's own
+    action list only offers this once course.archived is true) — archiving
+    is the reversible, one-click step; this is the deliberate second one
+    past it, for a course someone genuinely wants gone rather than hidden. */
+async function deleteCourseForever(course) {
+  const [qs, srcs, batches, atts, sess, presets, notes] = await Promise.all([
+    Questions.byCourse(course.id),
+    DB.byIndex('sources', 'courseId', course.id),
+    DB.byIndex('batches', 'courseId', course.id),
+    DB.byIndex('attempts', 'courseId', course.id),
+    DB.byIndex('sessions', 'courseId', course.id),
+    DB.byIndex('presets', 'courseId', course.id),
+    NotesStore.list(course.id)
+  ]);
+  const ok = await confirmBox('Delete ' + course.code + ' permanently?',
+    'This removes the course itself and everything filed under it — ' + qs.length + ' question(s), ' + notes.length + ' note(s), ' + srcs.length + ' source file(s) — with no way back. A safety backup of everything is taken first, automatically.', true, 'Delete permanently');
+  if (!ok) return;
+  const codeInput = h('input', { type: 'text', id: 'delCourseCode', placeholder: course.code });
+  const again = await modal({
+    title: 'Type the course code to confirm',
+    body: h('div', { class: 'field' }, [h('label', { text: 'Course code' }), codeInput]),
+    actions: [{ label: 'Cancel', value: false }, { label: 'Delete permanently', value: true, kind: 'danger' }]
+  });
+  if (!again) return;
+  // Read codeInput's own live reference, not a fresh $('#id') lookup — by
+  // the time this runs, modal()'s close() has already removed the dialog
+  // (and this input with it) from the document, so a document-wide
+  // querySelector for its id would never find it and always read as blank.
+  const typed = codeInput.value;
+  if (typed !== course.code) { toast('Code did not match — nothing was deleted', 'warn'); return; }
+  if (!await requireSafetyBackup('delete course ' + course.code)) { toast('Nothing was deleted', 'ok'); return; }
+
+  // The bank is about to shrink on purpose, so the file layer must not
+  // mistake it for the catastrophic-loss case it normally refuses to write.
+  FileStore.allowShrink('course delete: ' + course.code);
+
+  for (const q of qs) {
+    if (q.qid) await DB.put('tombstones', { qid: q.qid, uuid: q.uuid, retiredAt: nowISO(), reason: 'course deleted' });
+    await DB.del('questions', q.uuid);
+  }
+  for (const a of atts) await DB.del('attempts', a.id);
+  for (const s of sess) await DB.del('sessions', s.id);
+  for (const s of srcs) await DB.del('sources', s.id);
+  for (const b of batches) await DB.del('batches', b.id);
+  for (const p of presets) await DB.del('presets', p.id);
+  for (const n of notes) await NotesStore.remove(n);
+  await DB.del('idRegister', course.id);
+  await DB.del('courses', course.id);
+  await Settings.clearCourse(course.id);
+  await audit('delete', 'course', course.id, { code: course.code, questions: qs.length }, null, 'Course deleted permanently after a safety backup');
+
+  State.courses = await DB.all('courses');
+  if (State.course && State.course.id === course.id) {
+    const next = State.courses.find(c => !c.archived) || State.courses[0] || null;
+    State.course = next;
+    if (next) await Settings.set('activeCourseId', next.id);
+  }
+  State.invalidate();
+  if (FileStore.connected) await FileStore.flushNow('snapshot');
+  toast(course.code + ' deleted. Your safety backup is saved.', 'ok');
+  renderShell();
+  go('settings');
+}
+
 async function recomputeAll() {
   const all = await State.questions();
   let n = 0;
@@ -7033,13 +7102,19 @@ async function wipeCourse() {
   const ok = await confirmBox('Delete every question in ' + State.course.code + '?',
     all.length + ' question(s), together with their attempts and sessions, will be permanently deleted. A safety backup of everything is taken first, automatically, before anything is removed. Retired question numbers are kept on a list and never reused for a new question.', true);
   if (!ok) return;
+  const codeInput = h('input', { type: 'text', id: 'wipeCode', placeholder: State.course.code });
   const again = await modal({
     title: 'Type the course code to confirm',
-    body: h('div', { class: 'field' }, [h('label', { text: 'Course code' }), h('input', { type: 'text', id: 'wipeCode', placeholder: State.course.code })]),
+    body: h('div', { class: 'field' }, [h('label', { text: 'Course code' }), codeInput]),
     actions: [{ label: 'Cancel', value: false }, { label: 'Delete permanently', value: true, kind: 'danger' }]
   });
   if (!again) return;
-  const typed = ($('#wipeCode') || {}).value;
+  // Read codeInput's own live reference, not a fresh $('#id') lookup — by
+  // the time this runs, modal()'s close() has already removed the dialog
+  // (and this input with it) from the document, so a document-wide
+  // querySelector for its id would never find it and always read as blank.
+  // This is why the check always failed no matter what was typed.
+  const typed = codeInput.value;
   if (typed !== State.course.code) { toast('Code did not match — nothing was deleted', 'warn'); return; }
 
   // Nothing is removed until a backup exists.
