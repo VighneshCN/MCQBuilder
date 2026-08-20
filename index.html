@@ -902,22 +902,39 @@ async function ensureSeedCourse() {
    Human-readable IDs are allocated only at admission, are never reused and
    never change. Retired IDs leave a tombstone.                             */
 const IdRegister = {
-  async next(courseId, count, meta) {
-    let reg = await DB.get('idRegister', courseId);
-    if (!reg) reg = { courseId, lastSeq: 0, allocations: [] };
-    const course = await DB.get('courses', courseId);
-    const prefix = (course && course.qidPrefix) || 'Q';
-    const ids = [];
-    for (let i = 0; i < count; i++) ids.push(prefix + '-Q-' + pad(++reg.lastSeq, 6));
-    reg.allocations.push({ ts: nowISO(), from: ids[0], to: ids[ids.length - 1], count, note: (meta && meta.note) || '' });
-    if (reg.allocations.length > 500) reg.allocations = reg.allocations.slice(-500);
-    await DB.put('idRegister', reg);
-    return ids;
+  // get() and put() below are each their own IndexedDB transaction, so two
+  // calls issued close together (a double-click on "New question", an
+  // admit racing a restore) could both read the same lastSeq before either
+  // writes back and hand out the same "permanent, never reused" Question ID
+  // to two different questions. Chaining every call through this one
+  // in-memory queue makes the read-then-write effectively atomic within
+  // this tab, the same way one shared line at a counter would.
+  _queue: Promise.resolve(),
+  _serialize(fn) {
+    const run = this._queue.then(fn, fn);
+    this._queue = run.then(() => { }, () => { });
+    return run;
+  },
+  next(courseId, count, meta) {
+    return this._serialize(async () => {
+      let reg = await DB.get('idRegister', courseId);
+      if (!reg) reg = { courseId, lastSeq: 0, allocations: [] };
+      const course = await DB.get('courses', courseId);
+      const prefix = (course && course.qidPrefix) || 'Q';
+      const ids = [];
+      for (let i = 0; i < count; i++) ids.push(prefix + '-Q-' + pad(++reg.lastSeq, 6));
+      reg.allocations.push({ ts: nowISO(), from: ids[0], to: ids[ids.length - 1], count, note: (meta && meta.note) || '' });
+      if (reg.allocations.length > 500) reg.allocations = reg.allocations.slice(-500);
+      await DB.put('idRegister', reg);
+      return ids;
+    });
   },
   /** Raise the watermark so a restore can never re-issue an existing ID. */
-  async reserveUpTo(courseId, seq) {
-    let reg = await DB.get('idRegister', courseId) || { courseId, lastSeq: 0, allocations: [] };
-    if (seq > reg.lastSeq) { reg.lastSeq = seq; reg.allocations.push({ ts: nowISO(), from: '', to: '', count: 0, note: 'Watermark raised to ' + seq + ' by restore' }); await DB.put('idRegister', reg); }
+  reserveUpTo(courseId, seq) {
+    return this._serialize(async () => {
+      let reg = await DB.get('idRegister', courseId) || { courseId, lastSeq: 0, allocations: [] };
+      if (seq > reg.lastSeq) { reg.lastSeq = seq; reg.allocations.push({ ts: nowISO(), from: '', to: '', count: 0, note: 'Watermark raised to ' + seq + ' by restore' }); await DB.put('idRegister', reg); }
+    });
   },
   seqOf(qid) { const m = /-Q-(\d+)$/.exec(qid || ''); return m ? parseInt(m[1], 10) : 0; }
 };
@@ -5707,7 +5724,7 @@ async function requireSafetyBackup(reason) {
           : 'Downloaded as ' + res.name + ' (' + bytes(res.size) + '). Check your downloads folder before continuing.'),
         h('p', { class: 'small muted' }, 'If anything about the next step goes wrong, restore this file from Backup & Restore.')
       ]),
-      actions: [{ label: 'Stop here', value: false }, { label: 'Continue', value: true, kind: 'danger' }]
+      actions: [{ label: 'Stop here', value: false }, { label: 'Continue', value: true, kind: 'primary' }]
     });
     return !!proceed;
   }
@@ -5828,7 +5845,7 @@ async function requireExternalBackup(payload, filePrefix, label, reason) {
         h('div', { class: 'notice ok small' }, 'A copy of ' + label + ' was downloaded as ' + res.name + ' (' + bytes(res.size) + '). Check your downloads folder before continuing.'),
         h('p', { class: 'small muted' }, 'If anything about the next step goes wrong, restore this file from Backup & Restore.')
       ]),
-      actions: [{ label: 'Stop here', value: false }, { label: 'Continue', value: true, kind: 'danger' }]
+      actions: [{ label: 'Stop here', value: false }, { label: 'Continue', value: true, kind: 'primary' }]
     });
     return !!proceed;
   }
@@ -6273,9 +6290,10 @@ ROUTES.settings = async (root) => {
     localBlock.appendChild(h('p', { class: 'tiny dim', text: FileStore.lastSavedAt ? 'Last saved ' + fmtDate(FileStore.lastSavedAt, true) + (FileStore.lastSnapshotAt ? ' · full file written ' + fmtDate(FileStore.lastSnapshotAt, true) : '') : 'Not saved yet in this session.' }));
     localBlock.appendChild(h('div', { class: 'row wrap', style: 'gap:8px' }, [
       h('button', { class: 'btn sm', onclick: async () => { const ok = await FileStore.flushNow('snapshot'); toast(ok ? 'Full file written.' : 'Nothing to save.', ok ? 'ok' : 'info'); go('settings'); }, text: 'Write now' }),
-      h('button', { class: 'btn sm', title: 'Merge this file with your Google Drive copy, without switching away from this folder', onclick: async () => { await DriveSync.syncBridge(); go('settings'); }, text: 'Sync with Drive' }),
+      h('button', { class: 'btn sm', onclick: async () => { await DriveSync.syncBridge(); go('settings'); }, text: 'Sync with Drive' }),
       h('button', { class: 'btn sm danger', onclick: () => disconnectFlow().then(() => go('settings')), text: 'Disconnect' })
     ]));
+    localBlock.appendChild(h('p', { class: 'tiny dim' }, '"Sync with Drive" merges a Google Drive copy into this file without switching away from it — different from "Switch to Google Drive" below, which changes the active connection.'));
   } else if (FileStore.needsReconnect) {
     localBlock.appendChild(h('div', { class: 'eyebrow' }, 'Local folder'));
     localBlock.appendChild(h('div', { class: 'notice bad small' }, 'Read-only — cannot reach the file it was saving to. Nothing has been lost; your file still holds everything saved up to the last write.'));
@@ -6699,6 +6717,7 @@ const FileStore = {
   _lastSize: 0,            // bytes of the last snapshot, drives the cadence
   _shrinkOk: null,         // one-shot consent for a deliberate reduction
   _stamp: null,          // size + lastModified of the file as we last wrote it
+  _journalStamp: null,   // size of the journal file as we last wrote it — detects another tab appending to it
   _watching: false,
   _watchTimer: null,
   _recovering: false,
@@ -6793,6 +6812,7 @@ const FileStore = {
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
     this.dirHandle = null; this.fileHandle = null;
     this.connected = false; this.needsReconnect = false; this.locationName = '';
+    this._journalStamp = null;
     await this.delMeta('dirHandle'); await this.delMeta('fileHandle');
     await this.delMeta('everConnected');
     this.everConnected = false;
@@ -7080,11 +7100,23 @@ const FileStore = {
       this.needSnapshot = true;
       return await this._writeSnapshot();
     }
+    // The journal has no stamp of its own the way the data file does — this
+    // tab's own last-known size is the only signal that another tab (or
+    // process) hasn't appended here since. Skipping straight to a position
+    // read fresh from disk, with no check, is exactly how two tabs writing
+    // around the same moment could silently overwrite each other's just-
+    // appended answers: both would read the same size before either lands.
+    if (this._journalStamp != null && existing.size !== this._journalStamp) {
+      this.needSnapshot = true;
+      await this.onProblem('changed');
+      return false;
+    }
     const lines = this._journal.map(e => JSON.stringify(e)).join('\n') + '\n';
     const w = await jh.createWritable({ keepExistingData: true });
     await w.write({ type: 'write', position: existing.size, data: lines });
     await w.close();
     this._journalBytes = existing.size + lines.length;
+    this._journalStamp = this._journalBytes;
     this._journal = [];
     this.dirty = false;
     this.lastSavedAt = nowISO();
@@ -7167,7 +7199,8 @@ const FileStore = {
         const jh = await this.dirHandle.getFileHandle(JOURNAL_FILE, { create: true });
         const w3 = await jh.createWritable();
         await w3.write(''); await w3.close();
-      } catch (e) { }
+        this._journalStamp = 0;
+      } catch (e) { this._journalStamp = null; }
     } else if (this.fileHandle) {
       const w = await this.fileHandle.createWritable();
       await w.write(text); await w.close();
@@ -7430,44 +7463,58 @@ const DriveSync = {
 
     try {
       const remoteModified = await this._fetchModifiedTime();
-      if (!remoteModified || remoteModified === this.lastSyncedModifiedTime) return;
+      if (!remoteModified || remoteModified === this.lastSyncedModifiedTime) {
+        // Drive itself hasn't moved, so the routine "something changed
+        // elsewhere" path below doesn't apply — but if a previous session
+        // left an edit that never actually reached Drive (offline, or the
+        // tab closed mid-push), it needs retrying now rather than sitting
+        // unsynced indefinitely while the status bar still claims "synced".
+        if (dirtySince) { this._pendingChange = true; await this.maybePush(true); }
+        return;
+      }
       if (dirtySince) {
         const remote = await this.pull();
         const remoteCount = (remote.stores.questions || []).length;
         const localCount = (await DB.all('questions')).length;
         const dramaticLoss = localCount === 0 || localCount < remoteCount * 0.5;
-        let choice = await modal({
-          title: 'Google Drive changed elsewhere',
-          body: h('div', { class: 'stack' }, [
-            h('p', {}, 'This Drive file was updated from another device, and this browser also has changes of its own that never made it to Drive — probably closed before they could sync.'),
-            h('p', { class: 'small' }, 'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This browser holds ' + localCount + '.'),
-            h('div', { class: 'notice small' }, 'Merging keeps everything from both — nothing is discarded, and this browser is backed up first, automatically.')
-          ]),
-          actions: [
-            { label: 'Choose one side instead', value: 'choose' },
-            { label: 'Merge both', value: 'merge', kind: 'primary' }
-          ]
-        });
-        if (choice === 'choose') choice = await chooseOneSideDialog('Google Drive', 'drive', remoteCount, localCount, dramaticLoss);
-        if (choice === 'drive') {
-          if (await requireSafetyBackup('discarding this browser’s unsynced changes for the Drive copy')) await this._applyRemote(remote);
-        } else if (choice === 'browser') {
-          if (await requireExternalBackup(remote, 'mcq-mastery-drive', 'the Drive copy', 'overwriting the Drive copy with this browser’s bank')) {
-            this.allowDriveShrink('confirmed by the user, after a backup, in the Drive boot-conflict dialog');
-            await this.push();
+        for (; ;) {
+          let choice = await modal({
+            title: 'Google Drive changed elsewhere',
+            body: h('div', { class: 'stack' }, [
+              h('p', {}, 'This Drive file was updated from another device, and this browser also has changes of its own that never made it to Drive — probably closed before they could sync.'),
+              h('p', { class: 'small' }, 'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This browser holds ' + localCount + '.'),
+              h('div', { class: 'notice small' }, 'Merging keeps everything from both — nothing is discarded, and this browser is backed up first, automatically.')
+            ]),
+            actions: [
+              { label: 'Choose one side instead', value: 'choose' },
+              { label: 'Merge both', value: 'merge', kind: 'primary' }
+            ]
+          });
+          if (choice === 'choose') {
+            choice = await chooseOneSideDialog('Google Drive', 'drive', remoteCount, localCount, dramaticLoss);
+            if (!choice) continue; // "Back" really goes back now
           }
-        } else if (choice === 'merge') {
-          if (await requireSafetyBackup('merging this browser’s unsynced changes with what is in Google Drive')) {
-            const localPayload = await FileStore.buildPayload();
-            const { merged, report } = await mergeBankPayloads(localPayload, remote);
-            await applyMergedBank(merged);
-            await this.push();
-            await showMergeReport(report, 'Merged with Google Drive', 'Both copies were combined and pushed back to Drive — this browser and Drive now match.');
+          if (choice === 'drive') {
+            if (await requireSafetyBackup('discarding this browser’s unsynced changes for the Drive copy')) await this._applyRemote(remote);
+          } else if (choice === 'browser') {
+            if (await requireExternalBackup(remote, 'mcq-mastery-drive', 'the Drive copy', 'overwriting the Drive copy with this browser’s bank')) {
+              this.allowDriveShrink('confirmed by the user, after a backup, in the Drive boot-conflict dialog');
+              await this.push();
+            }
+          } else if (choice === 'merge') {
+            if (await requireSafetyBackup('merging this browser’s unsynced changes with what is in Google Drive')) {
+              const localPayload = await FileStore.buildPayload();
+              const { merged, report } = await mergeBankPayloads(localPayload, remote);
+              await applyMergedBank(merged);
+              await this.push();
+              await showMergeReport(report, 'Merged with Google Drive', 'Both copies were combined and pushed back to Drive — this browser and Drive now match.');
+            }
           }
+          // Escape/✕ (no Cancel button here) leaves the boot conflict
+          // unresolved for now — safe, since nothing was touched, and the
+          // same check runs again on the next boot.
+          break;
         }
-        // 'choose' resolving to nothing (Back/Cancel from either dialog)
-        // leaves the boot conflict unresolved for now — safe, since nothing
-        // was touched, and the same check runs again on the next boot.
       } else {
         // The routine case: nothing unsynced here, so the newer Drive copy
         // is simply loaded in, same as opening a local file that changed.
@@ -7570,47 +7617,60 @@ const DriveSync = {
       outright — connect() then rolls the whole attempt back rather than
       leaving a half-decided connection. */
   async _reconcileOnConnect() {
+    // By this point fileId always names a real Drive file — either found by
+    // search or just created empty — so a pull() failure here is never "no
+    // file yet"; it's a real problem (network error, or a newer app version
+    // wrote a schema this build can't read) and must stop, not overwrite
+    // whatever is actually there.
     let remote;
-    try { remote = await this.pull(); } catch (e) { await this.push(); return true; }
+    try { remote = await this.pull(); } catch (e) {
+      await modal({ title: 'Could not check Google Drive', body: h('p', {}, e.message + ' Try connecting again once that is resolved — nothing here has been changed.') });
+      return false;
+    }
     const remoteCount = (remote.stores.questions || []).length;
     if (!remoteCount) { await this.push(); return true; }
     const localCount = (await DB.all('questions')).length;
     const dramaticLoss = localCount === 0 || localCount < remoteCount * 0.5;
-    let choice = await modal({
-      title: 'There is already a bank in Google Drive',
-      body: h('div', { class: 'stack' }, [
-        h('p', {}, 'That Drive file already holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '.'),
-        h('p', { class: 'small' }, 'This browser currently holds ' + localCount + ' question(s).'),
-        h('div', { class: 'notice small' }, 'Merging keeps everything both copies hold — nothing is discarded, and this browser is backed up first, automatically.')
-      ]),
-      actions: [
-        { label: 'Cancel', value: '' },
-        { label: 'Choose one side instead', value: 'choose' },
-        { label: 'Merge both', value: 'merge', kind: 'primary' }
-      ]
-    });
-    if (choice === 'choose') choice = await chooseOneSideDialog('Google Drive', 'drive', remoteCount, localCount, dramaticLoss);
-    if (choice === 'drive') {
-      if (!(await requireSafetyBackup('discarding this browser’s bank for the Drive copy'))) return false;
-      await this._applyRemote(remote);
-      return true;
+    for (; ;) {
+      let choice = await modal({
+        title: 'There is already a bank in Google Drive',
+        body: h('div', { class: 'stack' }, [
+          h('p', {}, 'That Drive file already holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '.'),
+          h('p', { class: 'small' }, 'This browser currently holds ' + localCount + ' question(s).'),
+          h('div', { class: 'notice small' }, 'Merging keeps everything both copies hold — nothing is discarded, and this browser is backed up first, automatically.')
+        ]),
+        actions: [
+          { label: 'Cancel', value: '' },
+          { label: 'Choose one side instead', value: 'choose' },
+          { label: 'Merge both', value: 'merge', kind: 'primary' }
+        ]
+      });
+      if (choice === 'choose') {
+        choice = await chooseOneSideDialog('Google Drive', 'drive', remoteCount, localCount, dramaticLoss);
+        if (!choice) continue; // "Back" really goes back now, not all the way out
+      }
+      if (choice === 'drive') {
+        if (!(await requireSafetyBackup('discarding this browser’s bank for the Drive copy'))) return false;
+        await this._applyRemote(remote);
+        return true;
+      }
+      if (choice === 'browser') {
+        if (!(await requireExternalBackup(remote, 'mcq-mastery-drive', 'the Drive copy', 'overwriting the Drive copy with this browser’s bank'))) return false;
+        this.allowDriveShrink('confirmed by the user, after a backup, in the Drive reconciliation dialog');
+        await this.push();
+        return true;
+      }
+      if (choice === 'merge') {
+        if (!(await requireSafetyBackup('merging this browser’s bank with what is in Google Drive'))) return false;
+        const localPayload = await FileStore.buildPayload();
+        const { merged, report } = await mergeBankPayloads(localPayload, remote);
+        await applyMergedBank(merged);
+        await this.push();
+        await showMergeReport(report, 'Merged with Google Drive', 'Both copies were combined and pushed back to Drive — this browser and Drive now match.');
+        return true;
+      }
+      return false;
     }
-    if (choice === 'browser') {
-      if (!(await requireExternalBackup(remote, 'mcq-mastery-drive', 'the Drive copy', 'overwriting the Drive copy with this browser’s bank'))) return false;
-      this.allowDriveShrink('confirmed by the user, after a backup, in the Drive reconciliation dialog');
-      await this.push();
-      return true;
-    }
-    if (choice === 'merge') {
-      if (!(await requireSafetyBackup('merging this browser’s bank with what is in Google Drive'))) return false;
-      const localPayload = await FileStore.buildPayload();
-      const { merged, report } = await mergeBankPayloads(localPayload, remote);
-      await applyMergedBank(merged);
-      await this.push();
-      await showMergeReport(report, 'Merged with Google Drive', 'Both copies were combined and pushed back to Drive — this browser and Drive now match.');
-      return true;
-    }
-    return false;
   },
 
   async disconnect() {
@@ -7838,6 +7898,22 @@ const DriveSync = {
       connect(): this never makes Drive the active backend, and never
       disconnects the folder. */
   async syncBridge() {
+    // A double-click (easy on a touchscreen, or while waiting for the
+    // Google popup) would otherwise race two calls' save/restore of
+    // this.connected below, and the loser could leave it stuck true —
+    // silently turning on background pushes to Drive with the local
+    // folder still shown as the active connection. One flag makes a
+    // second call while one is already running a harmless no-op instead.
+    if (this._bridging) { toast('Already syncing with Drive — please wait for it to finish.', 'info'); return; }
+    this._bridging = true;
+    try {
+      await this._syncBridgeRun();
+    } finally {
+      this._bridging = false;
+    }
+  },
+
+  async _syncBridgeRun() {
     const clientId = effectiveDriveClientId();
     if (!clientId) {
       await modal({ title: 'Add a Google OAuth client ID first', body: h('p', {}, 'Settings → "Where your data lives" has the one-time setup steps — about ten minutes, free, and only you can do it (it needs your own Google account).') });
@@ -8276,6 +8352,17 @@ async function mergeBankPayloads(localPayload, remotePayload) {
   merged.stores.settings = ((localNewer ? localPayload : remotePayload).stores.settings || []).slice();
   report.stores.settings = { kept: localNewer ? 'local' : 'remote' };
 
+  // Tombstones first, and ahead of everything else: a retirement recorded
+  // on either side (from the backed-up, danger-styled "Wipe course" flow)
+  // must actually stay retired once merged, or the one device that hasn't
+  // caught up yet would silently resurrect a question — and its old attempt
+  // history — the moment it merges. This is the one exception to "merging
+  // keeps everything both sides hold".
+  const tr = mergeKeyedRowsUnionOnly(localPayload.stores.tombstones || [], remotePayload.stores.tombstones || [], 'qid');
+  merged.stores.tombstones = tr.rows;
+  report.stores.tombstones = { added: tr.added };
+  const retiredUuids = new Set(tr.rows.map(t => t.uuid).filter(Boolean));
+
   ['courses', 'sources', 'batches', 'presets', 'notes', 'sessions'].forEach(s => {
     const r = mergeKeyedRows(localPayload.stores[s] || [], remotePayload.stores[s] || [], 'id');
     merged.stores[s] = r.rows;
@@ -8283,19 +8370,17 @@ async function mergeBankPayloads(localPayload, remotePayload) {
   });
 
   const qr = mergeKeyedRows(localPayload.stores.questions || [], remotePayload.stores.questions || [], 'uuid');
-  merged.stores.questions = qr.rows;
-  report.stores.questions = { added: qr.added, updated: qr.updated };
-  merged.touchedQuestionUuids = qr.touchedKeys;
+  const revivedQuestions = qr.rows.filter(q => retiredUuids.has(q.uuid)).length;
+  merged.stores.questions = qr.rows.filter(q => !retiredUuids.has(q.uuid));
+  report.stores.questions = { added: qr.added, updated: qr.updated, tombstoned: revivedQuestions };
+  merged.touchedQuestionUuids = qr.touchedKeys.filter(k => !retiredUuids.has(k));
 
   ['attempts', 'questionVersions', 'audit'].forEach(s => {
     const r = mergeAppendOnlyRows(s, localPayload.stores[s] || [], remotePayload.stores[s] || []);
-    merged.stores[s] = r.rows;
-    report.stores[s] = { added: r.added };
+    const rows = s === 'attempts' ? r.rows.filter(a => !retiredUuids.has(a.questionUuid)) : r.rows;
+    merged.stores[s] = rows;
+    report.stores[s] = { added: r.added, tombstoned: s === 'attempts' ? (r.rows.length - rows.length) : 0 };
   });
-
-  const tr = mergeKeyedRowsUnionOnly(localPayload.stores.tombstones || [], remotePayload.stores.tombstones || [], 'qid');
-  merged.stores.tombstones = tr.rows;
-  report.stores.tombstones = { added: tr.added };
 
   const ir = mergeIdRegisterRows(localPayload.stores.idRegister || [], remotePayload.stores.idRegister || []);
   merged.stores.idRegister = ir.rows;
@@ -8353,11 +8438,13 @@ async function showMergeReport(report, title, intro) {
       return h('tr', {}, [h('td', { text: s }), h('td', { class: 'small', text: bits.join(' · ') })]);
     })
     .filter(Boolean);
+  const tombstonedQ = (report.stores.questions && report.stores.questions.tombstoned) || 0;
   await modal({
     title: title || 'Merge complete', wide: true,
     body: h('div', { class: 'stack' }, [
       h('div', { class: 'notice ok' }, intro || 'Both copies were combined — nothing either side held was discarded.'),
       h('p', { class: 'small' }, 'Questions: ' + report.questionsBefore.local + ' here, ' + report.questionsBefore.remote + ' on the other side → ' + report.questionsAfter + ' after merging.'),
+      tombstonedQ ? h('div', { class: 'notice warn small' }, tombstonedQ + ' question(s) stayed deleted — they were removed here or on the other side since these last matched, so the merge did not bring them back.') : null,
       rows.length ? h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, [h('th', { text: 'Store' }), h('th', { text: 'Changed' })])), h('tbody', {}, rows)])) : null
     ])
   });
@@ -8438,6 +8525,7 @@ async function connectFlow() {
   if (existing.status === 'has-data') {
     const here = await DB.count('questions');
     const dramaticLoss = here === 0 || here < existing.count * 0.5;
+    for (; ;) {
     let choice = await modal({
       title: 'There is already a bank in that location',
       body: h('div', { class: 'stack' }, [
@@ -8451,11 +8539,18 @@ async function connectFlow() {
         { label: 'Merge both', value: 'merge', kind: 'primary' }
       ]
     });
-    if (choice === 'choose') choice = await chooseOneSideDialog('that file', 'file', existing.count, here, dramaticLoss);
+    if (choice === 'choose') {
+      choice = await chooseOneSideDialog('that file', 'file', existing.count, here, dramaticLoss);
+      if (!choice) continue;
+    }
     if (!choice) { await FileStore.forget(); updateStorageBar(); return; }
     if (choice === 'file') {
+      if (!(await requireSafetyBackup('loading the file over this browser’s bank'))) {
+        await FileStore.forget(); updateStorageBar(); return;
+      }
       await FileStore.loadFromDisk();
       toast('Loaded your bank from the file.', 'ok');
+      break;
     } else if (choice === 'browser') {
       if (!(await requireExternalBackup(existing.payload, 'mcq-mastery-file', 'the existing file', 'overwriting the connected file with this browser\u2019s bank'))) {
         await FileStore.forget(); updateStorageBar(); return;
@@ -8464,6 +8559,7 @@ async function connectFlow() {
       FileStore.allowShrink('confirmed by the user, after a backup, in the connect-folder reconciliation dialog');
       await FileStore.flushNow();
       toast('Your file now holds this browser\u2019s bank.', 'ok');
+      break;
     } else if (choice === 'merge') {
       if (!(await requireSafetyBackup('merging this browser\u2019s bank with the file already in that folder'))) {
         await FileStore.forget(); updateStorageBar(); return;
@@ -8474,7 +8570,23 @@ async function connectFlow() {
       FileStore._diskQuestionCount = existing.count;
       await FileStore.flushNow();
       await showMergeReport(report, 'Merged with your file', 'Both copies were combined and written to the file \u2014 this browser and the file now match.');
+      break;
     }
+    }
+  } else if (existing.status === 'unreadable') {
+    const proceed = await modal({
+      title: 'That folder already has a file, but it can\u2019t be read',
+      body: h('div', { class: 'stack' }, [
+        h('p', {}, 'There is already a file where MCQ Mastery keeps its data in that folder, but its contents aren\u2019t readable \u2014 it may have been caught mid-write by another program (a cloud-sync tool, for example) or edited into a broken state.'),
+        h('div', { class: 'notice warn small' }, 'Continuing saves a copy of exactly what\u2019s there now, then replaces it with this browser\u2019s bank. If it turns out to matter, that copy is downloaded before anything is overwritten.')
+      ]),
+      actions: [{ label: 'Cancel', value: false }, { label: 'Continue', value: true, kind: 'danger' }]
+    });
+    if (!proceed) { await FileStore.forget(); updateStorageBar(); return; }
+    download('mcq-mastery-unreadable-file-' + todayKey() + '.txt', new Blob([existing.rawText || ''], { type: 'text/plain' }));
+    FileStore.allowShrink('confirmed by the user, overwriting an unreadable file in the connected folder');
+    await FileStore.flushNow();
+    toast('Your file now holds this browser\u2019s bank. A copy of what was there before is in your downloads.', 'ok');
   } else {
     await FileStore.flushNow();
     toast('Connected. Your bank is now saved to ' + (FileStore.locationName || 'your file') + '.', 'ok');
@@ -8485,25 +8597,39 @@ async function connectFlow() {
 }
 
 /** Peek at the target without touching IndexedDB.
-    Returns { status, count, payload } — status is 'missing' | 'empty' |
-    'has-data', count is the existing file's question count (0 unless
-    status is 'has-data'), payload is the parsed file content when
-    available. The count matters even before anything is loaded: it is
-    what lets an "overwrite" choice be judged against what it would
-    actually discard, rather than the loss-guard seeing an untouched
+    Returns { status, count, payload, rawText } — status is 'missing' |
+    'empty' | 'unreadable' | 'has-data', count is the existing file's
+    question count (0 unless status is 'has-data'), payload is the parsed
+    file content when available. The count matters even before anything is
+    loaded: it is what lets an "overwrite" choice be judged against what it
+    would actually discard, rather than the loss-guard seeing an untouched
     _diskQuestionCount of 0 and assuming there is nothing to lose. The
-    payload lets that discarded content be backed up before it happens. */
+    payload lets that discarded content be backed up before it happens.
+    'unreadable' means real bytes are there but aren't a readable MCQ
+    Mastery file (mid-write by a sync tool, hand-edited into a broken
+    state) — never treated as 'empty', since that would silently license
+    overwriting something that might actually matter; rawText carries what
+    could be read, so it can still be saved off before being overwritten. */
 FileStore.loadFromDiskPreview = async function () {
   let fh;
   try { fh = await this.fileHandleFor(false); } catch (e) { return { status: 'missing', count: 0, payload: null }; }
   if (!fh) return { status: 'missing', count: 0, payload: null };
   const file = await fh.getFile();
   if (!file.size) return { status: 'empty', count: 0, payload: null };
+  const rawText = await file.text();
   try {
-    const payload = JSON.parse(await file.text());
-    const count = (payload && payload.stores && payload.stores.questions || []).length;
+    const payload = JSON.parse(rawText);
+    if (!payload || !payload.stores) return { status: 'unreadable', count: 0, payload: null, rawText };
+    const count = (payload.stores.questions || []).length;
     return count ? { status: 'has-data', count, payload } : { status: 'empty', count: 0, payload: null };
-  } catch (e) { return { status: 'empty', count: 0, payload: null }; }
+  } catch (e) {
+    // Bytes are there but not valid JSON — a half-synced cloud-drive
+    // conflict, a truncated write, a manual edit gone wrong. This is not
+    // the same as an empty folder and must never be treated as one: an
+    // empty folder is safe to write into silently, but something
+    // unreadable might be a real bank the student can't afford to lose.
+    return { status: 'unreadable', count: 0, payload: null, rawText };
+  }
 };
 
 async function disconnectFlow() {
@@ -9531,10 +9657,23 @@ async function boot() {
     // enough afterward for the upload to actually finish.
     if (document.visibilityState === 'hidden' && typeof DriveSync !== 'undefined' && DriveSync.connected) DriveSync.maybePush(true);
   });
-  // A blocked write should read as an explanation, not as a stack trace.
+  // A blocked write should read as an explanation, not as a stack trace —
+  // and any other DB failure (storage full, the shared connection closed
+  // out from under the tab) must never be silent either: losing an answer
+  // mid-session with zero feedback is exactly the quiet failure this app
+  // exists to prevent. AbortError is excluded since it's the established
+  // signal throughout this app for "the student cancelled a picker/prompt
+  // on purpose", not a failure worth a red toast.
   window.addEventListener('unhandledrejection', (e) => {
     const r = e && e.reason;
-    if (r && r.name === 'ReadOnlyError') { e.preventDefault(); toast(r.message, 'bad', 8000); }
+    if (!r || !r.name || r.name === 'AbortError') return;
+    e.preventDefault();
+    if (r.name === 'ReadOnlyError') { toast(r.message, 'bad', 8000); return; }
+    if (r.name === 'QuotaExceededError' || /quota/i.test(r.message || '')) {
+      toast('Your last change could not be saved — your browser’s storage is full. Free up space (Settings → Backup & Restore) and try again.', 'bad', 10000);
+      return;
+    }
+    toast('Something didn’t save: ' + (r.message || r.name) + '. If this keeps happening, back up from Settings and reload the app.', 'bad', 9000);
   });
 
   if (FileStore.tier !== 'manual' && !FileStore.everConnected) {
