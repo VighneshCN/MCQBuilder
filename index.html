@@ -5627,26 +5627,44 @@ async function renderReviewQueue(root) {
     extra || null
   ]);
 
+  if (conflicts.length) {
+    root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:12px' },
+      'These are pairs of records already in this course’s bank that read as the same question but disagree on the right answer — most often because the same question appears more than once in whatever you imported (common in a bank compiled from several past papers), marked with a different answer each time. Picking an answer below applies it to every record in the pair, not just this one.'));
+  }
   section('Answer conflicts', conflicts, 'Two records disagree on the correct answer', q => quickRow(q,
     h('div', { class: 'stack', style: 'gap:4px' }, q.options.map((o, i) => h('button', {
       class: 'method-row', style: q.correctOptionId === o.id ? 'background:var(--green-tint)' : '', onclick: async () => {
+        // Picking an answer here is a claim that this record and everything
+        // it conflicts with are the same question — so the same answer
+        // belongs on all of them. Fixing only this side used to leave the
+        // pair still disagreeing, snapping this record right back to
+        // "answer conflict" the moment Questions.save()'s own recheck ran.
+        const partnerUuids = (q.conflictWith || []).slice();
+        for (const u of partnerUuids) {
+          const partner = await Questions.get(u);
+          if (!partner) continue;
+          partner.correctOptionId = o.id; partner.answerVerified = 'verified'; partner.verifiedAt = nowISO();
+          partner.verifyNote = 'Conflict resolved by hand, matched to ' + (q.qid || q.uuid);
+          partner.status = partner.domainId ? 'active' : 'needs_class';
+          await Questions.save(partner, 'conflict resolved (paired)');
+        }
         const fresh = await Questions.get(q.uuid);
         fresh.correctOptionId = o.id; fresh.conflict = false; fresh.answerVerified = 'verified'; fresh.verifiedAt = nowISO();
         fresh.verifyNote = 'Conflict resolved by hand';
         fresh.status = fresh.domainId ? 'active' : 'needs_class';
         const saved = await Questions.save(fresh, 'conflict resolved');
-        await audit('verify', 'question', fresh.qid, { conflict: true }, { correctOptionId: o.id }, 'Answer conflict resolved');
+        await audit('verify', 'question', fresh.qid, { conflict: true }, { correctOptionId: o.id },
+          'Answer conflict resolved' + (partnerUuids.length ? ', ' + partnerUuids.length + ' paired record(s) updated to match' : ''));
         State.invalidate();
         // Questions.save() re-checks this record against the rest of the
-        // bank (recheckQuestion) — if the record it disagreed with wasn't
-        // touched here, the two are still an answer conflict and that
-        // recheck puts fresh.status right back to 'answer_conflict', even
-        // though this click just told the student it was fixed. Only the
+        // bank (recheckQuestion) — if some other, untouched record still
+        // disagrees (not one of the partners fixed above), that recheck
+        // puts fresh.status right back to 'answer_conflict'. Only the
         // post-save state, not the click itself, is the truth.
         if (saved.status === 'answer_conflict') {
           toast(fresh.qid + ' still conflicts with another record — open it from Question Bank to resolve both sides.', 'warn', 7000);
         } else {
-          toast('Conflict resolved for ' + fresh.qid, 'ok');
+          toast(partnerUuids.length ? 'Resolved — matching record(s) updated to the same answer' : 'Conflict resolved for ' + fresh.qid, 'ok');
         }
         go('import');
       }
@@ -6675,18 +6693,34 @@ ROUTES.settings = async (root) => {
   const cb = h('div', { class: 'card-b stack' });
   cb.appendChild(h('p', { class: 'small muted', style: 'margin:0' }, 'Each course keeps its own question bank, blueprint, weights and Question ID prefix. Nothing is shared between them, so adding a second qualification cannot disturb the first.'));
   const allQ = await DB.all('questions');
-  for (const c of State.courses) {
+  const courseRow = async (c, isArchivedRow) => {
     const mine = allQ.filter(q => q.courseId === c.id);
     const reg = await DB.get('idRegister', c.id);
-    cb.appendChild(h('div', { class: 'notice' }, [
+    return h('div', { class: 'notice' }, [
       h('div', { class: 'row wrap' }, [
         h('span', { class: 'docnum', text: c.qidPrefix + '-Q-' + pad((reg && reg.lastSeq) || 0, 6) }),
         h('b', { style: 'flex:1', text: c.code + ' — ' + c.name }),
-        c.archived ? h('span', { class: 'badge b-arch', text: 'Archived' }) : null,
-        c.id === State.course.id ? h('span', { class: 'badge b-active', text: 'Selected' }) : h('button', { class: 'btn sm', onclick: async () => { await State.setCourse(c.id); renderShell(); go('settings'); }, text: 'Select' }),
+        // An archived course can't be the active one (it's not even in the
+        // sidebar picker), so a "Select" button here would just create a
+        // mismatched state — Edit → Unarchive is the way back in.
+        isArchivedRow ? null : (c.id === State.course.id ? h('span', { class: 'badge b-active', text: 'Selected' }) : h('button', { class: 'btn sm', onclick: async () => { await State.setCourse(c.id); renderShell(); go('settings'); }, text: 'Select' })),
         h('button', { class: 'btn sm', onclick: () => courseDialog(c), text: 'Edit' })
       ]),
       h('div', { class: 'small muted', style: 'margin-top:4px', text: mine.length + ' question(s) · ' + c.blueprint.length + ' domain(s) · weights ' + c.blueprint.map(d => d.weight + '%').join(' / ') + ' (total ' + c.blueprint.reduce((s, d) => s + (+d.weight || 0), 0) + '%)' })
+    ]);
+  };
+  const activeCourses = State.courses.filter(c => !c.archived);
+  const archivedCourses = State.courses.filter(c => c.archived);
+  for (const c of activeCourses) cb.appendChild(await courseRow(c, false));
+  if (archivedCourses.length) {
+    // Archived means hidden from the course picker — it should look hidden
+    // here too, not sit in the same list wearing only a small badge to tell
+    // it apart from a course still in use.
+    const archBody = h('div', { class: 'stack', style: 'margin-top:8px' });
+    for (const c of archivedCourses) archBody.appendChild(await courseRow(c, true));
+    cb.appendChild(h('details', { style: 'margin-top:4px' }, [
+      h('summary', { class: 'small dim', style: 'cursor:pointer' }, 'Archived (' + archivedCourses.length + ')'),
+      archBody
     ]));
   }
   courseCard.appendChild(cb);
