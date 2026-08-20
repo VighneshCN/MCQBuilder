@@ -4141,17 +4141,27 @@ ROUTES.notes = async (root) => {
     h('div', { class: 'field' }, [h('label', { text: 'Domain' }), domainSel]),
     h('div', { class: 'field' }, [h('label', { text: 'Topic' }), topicInput])
   ]));
-  ub.appendChild(h('button', {
+  let addingNote = false;
+  const addNoteBtn = h('button', {
     class: 'btn primary', onclick: async () => {
+      // NotesStore.save() always creates a fresh record and file — a rapid
+      // double-click (or an impatient re-click while a Drive upload is
+      // still in flight) would otherwise silently save the same file twice.
+      if (addingNote) return;
       const f = fileInput.files && fileInput.files[0];
       if (!f) { toast('Choose a file first', 'bad'); return; }
+      addingNote = true; addNoteBtn.disabled = true;
       try {
         await NotesStore.save(f, { courseId: State.course.id, domainId: domainSel.value, topic: topicInput.value, title: titleInput.value });
         toast('Note added', 'ok');
         go('notes');
-      } catch (e) { toast('Could not add that note: ' + e.message, 'bad', 8000); }
+      } catch (e) {
+        toast('Could not add that note: ' + e.message, 'bad', 8000);
+        addingNote = false; addNoteBtn.disabled = false;
+      }
     }, text: 'Add note'
-  }));
+  });
+  ub.appendChild(addNoteBtn);
   uploadCard.appendChild(ub);
   root.appendChild(uploadCard);
 
@@ -4215,10 +4225,11 @@ ROUTES.notes = async (root) => {
         h('button', { class: 'btn sm', onclick: () => openNote(rec), text: 'View' }),
         h('button', {
           class: 'btn sm ghost', onclick: async () => {
-            const ok = await confirmBox('Remove this note?', 'This removes it from the list and, where possible, deletes the underlying file too.', true);
+            const ok = await confirmBox('Remove this note?', 'A copy is downloaded first, automatically. This then removes it from the list and, where possible, deletes the underlying file too — that part cannot be undone from inside the app.', true);
             if (!ok) return;
+            if (!(await requireNoteBackup(rec))) return;
             const fileDeleted = await NotesStore.remove(rec);
-            toast(fileDeleted === false ? 'Removed — its file could not be deleted; it may still exist there' : 'Removed');
+            toast(fileDeleted === false ? 'Removed — its file could not be deleted; it may still exist there' : 'Removed. A backup copy is in your downloads.');
             go('notes');
           }, text: 'Remove'
         })
@@ -5217,14 +5228,23 @@ async function imageWorkflow(fileOrNull) {
   }, 320);
   textArea.addEventListener('input', reparse);
 
+  // Two separate "Contrast +" / "Contrast −" buttons read as two controls;
+  // grouped under one "Contrast" label they read as one. "Try external
+  // OCR" is only ever useful once it's actually turned on in Settings
+  // (clicking it while off just redirects there) — showing it to every
+  // student, on by default, added a control almost nobody uses yet.
+  const contrastGroup = h('div', { class: 'row', style: 'gap:2px;align-items:center' }, [
+    h('span', { class: 'tiny dim', style: 'margin-right:2px', text: 'Contrast' }),
+    h('button', { class: 'btn sm', title: 'Lower contrast', onclick: () => { st.contrast = clamp(st.contrast - 25, 50, 300); paint(); }, text: '−' }),
+    h('button', { class: 'btn sm', title: 'Higher contrast', onclick: () => { st.contrast = clamp(st.contrast + 25, 50, 300); paint(); }, text: '+' })
+  ]);
   const controls = h('div', { class: 'row wrap', style: 'gap:6px;margin-bottom:8px' }, [
     h('button', { class: 'btn sm', onclick: () => { st.rotate = (st.rotate + 90) % 360; paint(); }, text: '↻ Rotate' }),
     h('button', { class: 'btn sm', onclick: () => { st.grayscale = !st.grayscale; paint(); }, text: 'Grayscale' }),
-    h('button', { class: 'btn sm', onclick: () => { st.contrast = clamp(st.contrast + 25, 50, 300); paint(); }, text: 'Contrast +' }),
-    h('button', { class: 'btn sm', onclick: () => { st.contrast = clamp(st.contrast - 25, 50, 300); paint(); }, text: 'Contrast −' }),
+    contrastGroup,
     h('button', { class: 'btn sm', onclick: () => { img = origImg; st.rotate = 0; st.contrast = 100; st.grayscale = false; st.crop = null; paint(); }, text: 'Reset' }),
     h('button', { class: 'btn sm primary', onclick: () => runOCR(canvas, textArea, ocrStatus), text: 'Run OCR' }),
-    h('button', { class: 'btn sm', title: 'Sends this image to an API you configure yourself — see Settings → Images and OCR', onclick: () => runExternalOCR(canvas, textArea, ocrStatus), text: 'Try external OCR' })
+    Settings.get('externalOcrEnabled') ? h('button', { class: 'btn sm', title: 'Sends this image to an API you configure yourself — see Settings → Images and OCR', onclick: () => runExternalOCR(canvas, textArea, ocrStatus), text: 'Try external OCR' }) : null
   ]);
 
   const bodyContent = h('div', { class: 'stack' }, [
@@ -5237,49 +5257,74 @@ async function imageWorkflow(fileOrNull) {
   // Cancel, the ✕ button and Escape all resolve modal() the same falsy way —
   // loop so any of the three can be walked back from a confirm dialog
   // instead of silently discarding a crop/adjustment/transcription in progress.
-  let res;
-  for (; ;) {
-    res = await modal({
-      title: 'Add from image', wide: true, sticky: true,
-      body: bodyContent,
-      actions: [{ label: 'Cancel', value: false }, { label: 'Continue to import', value: true, kind: 'primary' }]
-    });
-    if (res) break;
-    const hasWork = !!(textArea.value.trim() || st.crop || st.rotate || st.contrast !== 100 || st.grayscale);
-    if (!hasWork) return;
-    const discard = await confirmBox('Discard this image?', 'Your crop, adjustments and transcribed text will be lost.', true, 'Discard');
-    if (discard) return;
-  }
-  if (!textArea.value.trim()) return;
-
-  // keep a compressed copy of the source image for provenance
-  let imageId = null;
-  if (Settings.get('storeSourceImages')) {
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.72);
-    const approxKB = Math.round(dataUrl.length * 0.75 / 1024);
-    if (approxKB <= Settings.get('imageMaxKB')) {
-      imageId = uuid();
-      await DB.put('images', { id: imageId, dataUrl, hash: await sha256(dataUrl), capturedAt: nowISO(), filename: file.name || 'pasted-image', ocrText: textArea.value, sizeKB: approxKB });
-    } else {
-      toast('Image not stored — it is ' + approxKB + ' KB, above the ' + Settings.get('imageMaxKB') + ' KB limit in Settings.', 'warn', 5000);
+  // That guard only ever covers the app's own controls, though — an actual
+  // tab close, refresh, or Back button bypasses it entirely, so the global
+  // beforeunload handler checks this flag too while real work is at risk.
+  window._imageWorkflowOpen = true;
+  try {
+    let res;
+    for (; ;) {
+      res = await modal({
+        title: 'Add from image', wide: true, sticky: true,
+        body: bodyContent,
+        actions: [{ label: 'Cancel', value: false }, { label: 'Continue to import', value: true, kind: 'primary' }]
+      });
+      if (res) break;
+      const hasWork = !!(textArea.value.trim() || st.crop || st.rotate || st.contrast !== 100 || st.grayscale);
+      if (!hasWork) return;
+      const discard = await confirmBox('Discard this image?', 'Your crop, adjustments and transcribed text will be lost.', true, 'Discard');
+      if (discard) return;
     }
+    if (!textArea.value.trim()) return;
+
+    // keep a compressed copy of the source image for provenance
+    let imageId = null;
+    if (Settings.get('storeSourceImages')) {
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.72);
+      const approxKB = Math.round(dataUrl.length * 0.75 / 1024);
+      if (approxKB <= Settings.get('imageMaxKB')) {
+        imageId = uuid();
+        await DB.put('images', { id: imageId, dataUrl, hash: await sha256(dataUrl), capturedAt: nowISO(), filename: file.name || 'pasted-image', ocrText: textArea.value, sizeKB: approxKB });
+      } else {
+        toast('Image not stored — it is ' + approxKB + ' KB, above the ' + Settings.get('imageMaxKB') + ' KB limit in Settings.', 'warn', 5000);
+      }
+    }
+    const blob = new Blob([textArea.value], { type: 'text/plain' });
+    const f = new File([blob], (file.name || 'image') + '.txt', { type: 'text/plain' });
+    const parsedF = await readFile(f);
+    parsedF.sourceType = 'image';
+    parsedF.imageId = imageId;
+    await sourceDialog([parsedF]);
+    // attach the image to the questions of this batch
+    if (imageId && State.staging) State.staging.items.forEach(it => { if (!it.q.imageId) it.q.imageId = imageId; });
+  } finally {
+    window._imageWorkflowOpen = false;
   }
-  const blob = new Blob([textArea.value], { type: 'text/plain' });
-  const f = new File([blob], (file.name || 'image') + '.txt', { type: 'text/plain' });
-  const parsedF = await readFile(f);
-  parsedF.sourceType = 'image';
-  parsedF.imageId = imageId;
-  await sourceDialog([parsedF]);
-  // attach the image to the questions of this batch
-  if (imageId && State.staging) State.staging.items.forEach(it => { if (!it.q.imageId) it.q.imageId = imageId; });
 }
 
 function pickImage() {
   return new Promise(resolve => {
-    const input = h('input', { type: 'file', accept: 'image/*', capture: 'environment', class: 'hidden', onchange: e => { resolve(e.target.files[0] || null); input.remove(); } });
+    let done = false;
+    const finish = (file) => {
+      if (done) return;
+      done = true;
+      window.removeEventListener('focus', onFocus);
+      input.remove();
+      resolve(file);
+    };
+    const input = h('input', { type: 'file', accept: 'image/*', capture: 'environment', class: 'hidden', onchange: e => finish(e.target.files[0] || null) });
+    // No 'change' event fires at all when the picker is dismissed without
+    // choosing a file — cancelling is a completely ordinary thing to do,
+    // and without this the whole workflow just silently sat there with no
+    // error, no retry, nothing. 'cancel' covers browsers that support it;
+    // the window regaining focus after the native picker closes (with no
+    // file chosen in time for 'change' to beat it) is the fallback for
+    // ones that don't.
+    input.addEventListener('cancel', () => finish(null));
     document.body.appendChild(input);
     input.click();
-    setTimeout(() => { if (document.body.contains(input)) { /* left open */ } }, 100);
+    const onFocus = () => setTimeout(() => finish(null), 300);
+    window.addEventListener('focus', onFocus, { once: true });
   });
 }
 function loadImage(file) {
@@ -8280,6 +8325,41 @@ const NotesStore = {
     return (await DB.byIndex('notes', 'courseId', courseId)).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   }
 };
+
+/** Notes stored in a folder or Drive keep their real bytes outside
+    IndexedDB entirely — the ordinary bank backup (requireSafetyBackup)
+    only ever preserves the notes STORE's metadata row, not the file
+    itself, so it can't actually protect against removing one of these.
+    Downloading a real copy of the file, the same way every other
+    permanent-delete flow in this app takes a backup first, is what
+    genuinely works for all three storage kinds uniformly. */
+async function requireNoteBackup(rec) {
+  toast('Backing up “' + rec.title + '” first…');
+  try {
+    const blob = await NotesStore.readBlob(rec);
+    download(rec.filename || (rec.title + '.bin'), blob);
+    const proceed = await modal({
+      title: 'Backup saved',
+      body: h('div', { class: 'stack' }, [
+        h('div', { class: 'notice ok small' }, 'A copy of “' + rec.title + '” was downloaded (' + bytes(rec.sizeKB * 1024) + '). Check your downloads folder before continuing.'),
+        h('p', { class: 'small muted' }, 'Removing it here is permanent — the copy just downloaded is the way back.')
+      ]),
+      actions: [{ label: 'Stop here', value: false }, { label: 'Continue', value: true, kind: 'primary' }]
+    });
+    return !!proceed;
+  } catch (e) {
+    const proceed = await modal({
+      title: 'Could not back up this note',
+      body: h('div', { class: 'stack' }, [
+        h('div', { class: 'notice bad' }, e.message || String(e)),
+        h('p', {}, 'Nothing has been deleted. Removing it now would leave no way back to it.'),
+        h('p', { class: 'small muted' }, 'The safe course is to stop, fix the problem (reconnect the folder or Drive), and try again.')
+      ]),
+      actions: [{ label: 'Stop — do not delete', value: false, kind: 'primary' }, { label: 'Delete anyway, without a backup', value: true, kind: 'danger' }]
+    });
+    return !!proceed;
+  }
+}
 
 /* ---------- storage status bar ---------- */
 function updateStorageBar() {
