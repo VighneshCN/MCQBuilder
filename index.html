@@ -6862,17 +6862,35 @@ async function courseDialog(course) {
           quickAdding = true;
           quickAddBtns.forEach(b => b.disabled = true);
           try {
+            // btn is a live DOM node, unlike an event's currentTarget (which
+            // the browser resets to null once dispatch finishes — invalid
+            // here, since this handler is still running well past that
+            // point) — closest() on it stays valid through every await below.
+            const box = btn.closest('.modal');
+            // A second click on the same template (or having already added
+            // it earlier) used to silently create a second, identically
+            // named course with no warning at all. Course codes have to
+            // stay unique — two courses sharing one also means two
+            // different id registers issuing the same-looking Question IDs.
+            const dup = State.courses.find(x => x.code.trim().toUpperCase() === t.code.trim().toUpperCase());
+            if (dup) {
+              if (box && box._close) box._close(null);
+              if (dup.archived) {
+                toast(dup.code + ' already exists but is archived — unarchive it from Settings instead of adding a new one', 'warn', 6000);
+              } else {
+                await State.setCourse(dup.id);
+                renderShell();
+                toast(dup.code + ' already exists — switched to it instead of creating a duplicate', 'info', 5000);
+                go('settings');
+              }
+              return;
+            }
             const c = makeCourse(t.code, t.name, t.blueprint.map(d => Object.assign({}, d)), Object.assign({}, t.opts, { qidPrefix: t.code }));
             await DB.put('courses', c);
             await DB.put('idRegister', { courseId: c.id, lastSeq: 0, allocations: [] });
             await audit('create', 'course', c.id, null, { code: c.code, domains: c.blueprint.length }, 'Added via quick add');
             State.courses = await DB.all('courses');
             await State.setCourse(c.id);
-            // btn is a live DOM node, unlike an event's currentTarget (which
-            // the browser resets to null once dispatch finishes — invalid
-            // here, since this handler is still running well past that
-            // point) — closest() on it stays valid through every await above.
-            const box = btn.closest('.modal');
             if (box && box._close) box._close(null);
             toast(c.code + ' created — its bank starts empty', 'ok');
             renderShell(); go('settings');
@@ -6923,6 +6941,14 @@ async function courseDialog(course) {
     renderShell(); go('settings'); return;
   }
   if (!code.value.trim() || !name.value.trim()) { toast('A course needs a code and a name', 'bad'); return; }
+  // Two courses sharing a code look identical in the picker and would each
+  // run their own id register issuing the same-looking Question IDs —
+  // renaming into a collision is exactly as unsafe as creating one.
+  const dupCode = State.courses.find(c => c.code.trim().toUpperCase() === code.value.trim().toUpperCase() && (isNew || c.id !== course.id));
+  if (dupCode) {
+    toast('A course with that code already exists' + (dupCode.archived ? ' (archived)' : '') + ' — codes must be unique. Edit ' + dupCode.code + ' instead, or choose a different code.', 'bad', 6000);
+    return;
+  }
   bp = bp.filter(d => d.id && d.name.trim());
   if (!bp.length) { toast('Add at least one domain', 'bad'); return; }
   if (!isNew) {
