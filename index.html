@@ -3567,10 +3567,16 @@ ROUTES.bank = async (root) => {
   const filters = h('div', { class: 'card', style: 'margin-bottom:14px' });
   const fb = h('div', { class: 'card-b' });
   const line1 = h('div', { class: 'grid g4' });
-  const search = h('input', { type: 'search', placeholder: 'Question ID or text…', value: BankState.q, oninput: debounce(e => { BankState.q = e.target.value; BankState.page = 0; draw(); }, 260) });
+  // Changing a filter or the search box leaves an earlier tick-box
+  // selection intact but off-screen — a bulk action taken afterward would
+  // silently still include it, with nothing in the confirmation naming
+  // which records are affected. Clearing on every filter change (like the
+  // clear that already happens once a bulk action completes) keeps "what's
+  // ticked" always matching "what's currently visible".
+  const search = h('input', { type: 'search', placeholder: 'Question ID or text…', value: BankState.q, oninput: debounce(e => { BankState.q = e.target.value; BankState.page = 0; BankState.sel.clear(); draw(); }, 260) });
   line1.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Search' }), search]));
   const mkSel = (label, key, opts) => {
-    const s = h('select', { onchange: e => { BankState[key] = e.target.value; BankState.page = 0; draw(); } },
+    const s = h('select', { onchange: e => { BankState[key] = e.target.value; BankState.page = 0; BankState.sel.clear(); draw(); } },
       opts.map(o => h('option', { value: o.v, selected: BankState[key] === o.v }, o.label)));
     return h('div', { class: 'field' }, [h('label', { text: label }), s]);
   };
@@ -3835,6 +3841,18 @@ async function openQuestion(uuidStr) {
 
   const edit = { stem: q.stem, options: q.options.map(o => ({ id: o.id, text: o.text })), correctOptionId: q.correctOptionId, explanation: q.explanation, learningPoint: q.learningPoint, domainId: q.domainId, topic: q.topic, subtopic: q.subtopic, srcModule: q.srcModule, srcChapter: q.srcChapter, srcSection: q.srcSection, difficulty: q.difficulty, tags: (q.tags || []).join(', '), lockOptionOrder: q.lockOptionOrder, status: q.status, answerVerified: q.answerVerified };
 
+  /** `sticky` on the modal below stops a backdrop click from discarding an
+      edit in progress, but Escape and the ✕ button both bypass that — the
+      most habitual way anyone closes a dialog. Checked wherever the dialog
+      is about to close with nothing saved. */
+  function hasUnsavedChanges() {
+    const simple = ['stem', 'correctOptionId', 'explanation', 'learningPoint', 'domainId', 'topic', 'subtopic', 'srcModule', 'srcChapter', 'srcSection', 'difficulty', 'lockOptionOrder', 'status', 'answerVerified'];
+    if (simple.some(k => edit[k] !== q[k])) return true;
+    if (edit.tags !== (q.tags || []).join(', ')) return true;
+    if (edit.options.length !== q.options.length) return true;
+    return edit.options.some((o, i) => o.text !== ((q.options[i] || {}).text || ''));
+  }
+
   function drawPane() {
     pane.textContent = '';
     if (tab === 'content') {
@@ -3874,7 +3892,20 @@ async function openQuestion(uuidStr) {
       g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Tags (comma separated)' }), h('input', { type: 'text', value: edit.tags, oninput: e => edit.tags = e.target.value })]));
       pane.appendChild(g);
       pane.appendChild(h('div', { class: 'notice small', style: 'margin-top:12px' }, 'Source module numbering is kept separate from the official blueprint. “Module 6” in a book does not create a sixth official domain.'));
-      const st = h('select', { onchange: e => edit.status = e.target.value }, Object.keys(STATUS).map(k => h('option', { value: k, selected: edit.status === k }, STATUS[k].label)));
+      // Only the end states a student can meaningfully choose by hand.
+      // The rest (Parsing incomplete, Needs answer, Possible duplicate,
+      // Answer conflict, Merged duplicate) are states the app assigns
+      // itself, via Needs Checking / the review queue / merge — picking
+      // one here with none of that machinery actually having run creates
+      // exactly the kind of invalid state the integrity check separately
+      // warns about. If the record is currently in one of those states,
+      // it still shows correctly (never a misleading default) but stays
+      // disabled until resolved from where it's meant to be resolved.
+      const MANUAL_STATUSES = ['draft', 'active', 'archived', 'rejected'];
+      const statusOptions = MANUAL_STATUSES.indexOf(q.status) >= 0 ? MANUAL_STATUSES : [q.status].concat(MANUAL_STATUSES);
+      const st = h('select', { onchange: e => edit.status = e.target.value }, statusOptions.map(k => h('option', {
+        value: k, selected: edit.status === k, disabled: MANUAL_STATUSES.indexOf(k) < 0
+      }, STATUS[k].label + (MANUAL_STATUSES.indexOf(k) < 0 ? ' (set automatically — resolve from Needs Checking)' : ''))));
       const av = h('select', { onchange: e => edit.answerVerified = e.target.value }, Object.keys(VERIF).map(k => h('option', { value: k, selected: edit.answerVerified === k }, VERIF[k])));
       pane.appendChild(h('div', { class: 'grid g2', style: 'margin-top:12px' }, [
         h('div', { class: 'field' }, [h('label', { text: 'Record status' }), st]),
@@ -3897,11 +3928,35 @@ async function openQuestion(uuidStr) {
           h('div', { class: 'stack', style: 'margin-top:6px' }, q.mergedFrom.map(mf => h('div', { class: 'row' }, [
             h('span', { class: 'docnum', text: mf.qid || mf.uuid.slice(0, 8) }),
             h('span', { class: 'tiny dim', text: fmtDate(mf.at) }),
-            h('button', { class: 'btn sm', onclick: async () => { await unmergeQuestion(mf.uuid); toast('Unmerged', 'ok'); } , text: 'Unmerge' })
+            h('button', {
+              class: 'btn sm', onclick: async () => {
+                const ok = await confirmBox('Split ' + (mf.qid || 'this record') + ' back out?', 'This reverses whatever the merge changed on ' + (q.qid || 'this record') + ' that hasn’t been edited since — it becomes its own question again, out of the practice pool until reviewed.');
+                if (!ok) return;
+                await unmergeQuestion(mf.uuid);
+                // Save (below) reads its starting point from `edit`, built
+                // once when this dialog first opened — without refreshing
+                // it here, clicking Save after an Unmerge would silently
+                // overwrite every field Unmerge just reverted right back
+                // to their pre-unmerge values.
+                const freshQ = await Questions.get(uuidStr);
+                if (freshQ) {
+                  Object.assign(q, freshQ);
+                  Object.assign(edit, {
+                    stem: freshQ.stem, options: freshQ.options.map(o => ({ id: o.id, text: o.text })),
+                    correctOptionId: freshQ.correctOptionId, explanation: freshQ.explanation, learningPoint: freshQ.learningPoint,
+                    domainId: freshQ.domainId, topic: freshQ.topic, subtopic: freshQ.subtopic,
+                    srcModule: freshQ.srcModule, srcChapter: freshQ.srcChapter, srcSection: freshQ.srcSection,
+                    difficulty: freshQ.difficulty, tags: (freshQ.tags || []).join(', '), lockOptionOrder: freshQ.lockOptionOrder,
+                    status: freshQ.status, answerVerified: freshQ.answerVerified
+                  });
+                }
+                toast('Unmerged', 'ok');
+                drawPane();
+              }, text: 'Unmerge'
+            })
           ])))
         ]));
       }
-      rows.appendChild(h('div', { class: 'small dim', text: 'UUID ' + q.uuid }));
       pane.appendChild(rows);
     }
     if (tab === 'history') {
@@ -3947,15 +4002,23 @@ async function openQuestion(uuidStr) {
   }
   drawPane();
 
-  const res = await modal({
-    title: 'Question detail', body, wide: true, sticky: true,
-    actions: [
-      { label: 'Close', value: null },
-      { label: q.flagged ? 'Unflag' : 'Flag', value: 'flag' },
-      { label: 'Archive', value: 'archive' },
-      { label: 'Save changes', value: 'save', kind: 'primary' }
-    ]
-  });
+  let res;
+  for (; ;) {
+    res = await modal({
+      title: 'Question detail', body, wide: true, sticky: true,
+      actions: [
+        { label: 'Close', value: null },
+        { label: q.flagged ? 'Unflag' : 'Flag', value: 'flag' },
+        { label: 'Archive', value: 'archive' },
+        { label: 'Save changes', value: 'save', kind: 'primary' }
+      ]
+    });
+    if (!res && hasUnsavedChanges()) {
+      const discard = await confirmBox('Discard your changes?', 'Nothing you edited on this question has been saved yet.', true, 'Discard');
+      if (!discard) continue;
+    }
+    break;
+  }
   if (res === 'save') {
     const fresh = await Questions.get(uuidStr);
     fresh.stem = edit.stem.trim();
@@ -5601,7 +5664,16 @@ async function reviewDuplicate(q) {
   }
   const item = { q: fresh, decision: 'review' };
   compareDialog(fresh, best, item, async () => {
-    if (item.decision === 'merge') { await mergeQuestions(best.other.uuid, fresh.uuid, 'Merged from review queue'); toast('Merged into ' + best.other.qid, 'ok'); }
+    if (item.decision === 'merge') {
+      // Merge is a bigger, harder-to-undo write than reject (recovering it
+      // means finding the far less visible Unmerge control in Question
+      // detail → Provenance), yet it sat as one of four equal-weight
+      // buttons with zero confirmation while reject — the smaller change —
+      // already had one.
+      const ok = await confirmBox('Combine these into one record?', 'This merges ' + fresh.qid + ' into ' + best.other.qid + ' — both sources are kept, but ' + fresh.qid + ' stops appearing on its own. You can split them apart again later from Question detail → Provenance.');
+      if (!ok) { State.importStep = 'check'; go('import'); return; }
+      await mergeQuestions(best.other.uuid, fresh.uuid, 'Merged from review queue'); toast('Merged into ' + best.other.qid, 'ok');
+    }
     else if (item.decision === 'reject') {
       // Unlike a staging candidate, this record already has a permanent
       // Question ID and is already in the database — rejecting it here is
