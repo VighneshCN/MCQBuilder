@@ -5640,7 +5640,7 @@ const REVIEW_FILTER_TABS = [
 ];
 // Persists across renders (like BankState) so switching tabs, or a resolve
 // action that redraws the whole queue, doesn't lose what was ticked.
-const ConflictQueueState = { sel: new Set(), choice: new Map() };
+const ConflictQueueState = { sel: new Set() };
 const ReviewQueueState = { filter: 'all' };
 
 async function renderReviewQueue(root) {
@@ -5745,25 +5745,19 @@ async function renderReviewQueue(root) {
     // A row that scrolled out of the visible 40 (resolved, or just paged
     // out) is not a row a bulk action should silently still include.
     Array.from(ConflictQueueState.sel).forEach(u => { if (!visibleUuids.has(u)) ConflictQueueState.sel.delete(u); });
-    Array.from(ConflictQueueState.choice.keys()).forEach(u => { if (!visibleUuids.has(u)) ConflictQueueState.choice.delete(u); });
 
     container.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:12px' },
-      'These are pairs of records already in this course’s bank that read as the same question but disagree on the right answer — most often because the same question appears more than once in whatever you imported (common in a bank compiled from several past papers), marked with a different answer each time. Click an answer to resolve one pair now, or tick several and resolve them together below.'));
+      'These are pairs of records already in this course’s bank that read as the same question but disagree on the right answer — most often because the same question appears more than once in whatever you imported (common in a bank compiled from several past papers), marked with a different answer each time. Click an answer to resolve one pair now, or tick several rows — using whichever answer is already highlighted — and resolve them together below.'));
 
     const card = h('div', { class: 'card', style: 'margin-bottom:16px' });
     container.appendChild(card);
 
-    const select = (q) => {
-      const chosen = ConflictQueueState.choice.get(q.uuid) || q.correctOptionId;
-      return h('select', {
-        style: 'max-width:380px', onchange: e => ConflictQueueState.choice.set(q.uuid, e.target.value)
-      }, q.options.map((o, i) => h('option', { value: o.id, selected: o.id === chosen },
-        letterOf(i) + ' — ' + o.text.slice(0, 60) + (o.text.length > 60 ? '…' : ''))));
-    };
-    const toggle = (q, checked) => {
-      if (checked) { ConflictQueueState.sel.add(q.uuid); if (!ConflictQueueState.choice.has(q.uuid)) ConflictQueueState.choice.set(q.uuid, q.correctOptionId); }
-      else ConflictQueueState.sel.delete(q.uuid);
-    };
+    // Bulk always uses whatever's already highlighted as the row's own
+    // answer — there is nothing to restate or override here. To bulk-resolve
+    // with a DIFFERENT answer than what's shown, click that option directly;
+    // it resolves that one record immediately rather than needing a second,
+    // separate "which answer" control just for the batched path.
+    const toggle = (q, checked) => { if (checked) ConflictQueueState.sel.add(q.uuid); else ConflictQueueState.sel.delete(q.uuid); };
 
     async function resolveOne(uuid, optionId) {
       const r = await resolveConflictPair(uuid, optionId);
@@ -5784,21 +5778,25 @@ async function renderReviewQueue(root) {
       const sel = Array.from(ConflictQueueState.sel);
       if (!sel.length) return;
       const ok = await confirmBox('Resolve ' + sel.length + ' conflict(s)?',
-        'Each ticked record — and everything it currently conflicts with — is set to the answer chosen in its dropdown, and marked verified. Records you didn’t tick are left untouched.');
+        'Each ticked record — and everything it currently conflicts with — is set to its own currently highlighted answer, and marked verified. Records you didn’t tick are left untouched.');
       if (!ok) return;
       let resolved = 0, stuck = 0, skipped = 0, unmatchedPartners = 0;
       for (const u of sel) {
-        const optionId = ConflictQueueState.choice.get(u);
-        if (!optionId) { skipped++; continue; }
-        // Re-fetched fresh inside resolveConflictPair on every call, so a
-        // pair whose other side was already fixed earlier in this same loop
-        // is a no-op here (returns null) instead of flipping it back.
-        const r = await resolveConflictPair(u, optionId);
+        // Read fresh rather than a value captured at tick-time: if an
+        // earlier row in this same batch already resolved this one as a
+        // side effect (both sides of one pair ticked together), its current
+        // correctOptionId reflects that, not whatever it showed when ticked.
+        const fresh = await Questions.get(u);
+        if (!fresh || !fresh.correctOptionId) { skipped++; continue; }
+        // Re-fetched again inside resolveConflictPair, so a pair whose other
+        // side was already fixed earlier in this same loop is a no-op here
+        // (returns null) instead of flipping it back.
+        const r = await resolveConflictPair(u, fresh.correctOptionId);
         if (!r) { skipped++; continue; }
         unmatchedPartners += r.unmatchedCount || 0;
         if (r.saved.status === 'answer_conflict') stuck++; else resolved++;
       }
-      ConflictQueueState.sel.clear(); ConflictQueueState.choice.clear();
+      ConflictQueueState.sel.clear();
       State.invalidate();
       toast(
         resolved + ' resolved' +
@@ -5841,12 +5839,9 @@ async function renderReviewQueue(root) {
           h('span', { class: 'method-ico' + (q.correctOptionId === o.id ? ' correct-pick' : ''), style: q.correctOptionId === o.id ? 'background:var(--green)' : '', text: letterOf(i) }),
           h('span', { class: 'small', style: 'flex:1;text-align:left', text: o.text })
         ]))),
-        h('div', { class: 'row wrap', style: 'gap:8px;align-items:center;margin-top:8px;padding-top:8px;border-top:1px dashed var(--rule)' }, [
-          h('label', { class: 'row small', style: 'gap:6px;align-items:center' }, [
-            h('input', { type: 'checkbox', checked: ConflictQueueState.sel.has(q.uuid), onchange: e => { toggle(q, e.target.checked); refresh(); } }),
-            h('span', { class: 'tiny dim', text: 'Include in bulk resolve, using:' })
-          ]),
-          select(q)
+        h('label', { class: 'row small', style: 'gap:6px;align-items:center;margin-top:8px;padding-top:8px;border-top:1px dashed var(--rule)' }, [
+          h('input', { type: 'checkbox', checked: ConflictQueueState.sel.has(q.uuid), onchange: e => { toggle(q, e.target.checked); refresh(); } }),
+          h('span', { class: 'tiny dim', text: 'Include in bulk resolve' })
         ])
       ]))));
       if (conflicts.length > 40) body.appendChild(h('div', { class: 'small dim', text: 'Showing the first 40 of ' + conflicts.length + '. Resolve or clear some and the rest will appear.' }));
