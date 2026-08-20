@@ -8552,11 +8552,11 @@ function updateStorageBar() {
   } else if (st.key === 'local') {
     // Both places a bank can live are equally one click away here — a local
     // folder used to be the only option visible outside Settings, which
-    // made Google Drive easy to miss entirely.
-    bar.appendChild(h('div', { class: 'row', style: 'gap:6px;width:100%' }, [
-      h('button', { class: 'btn sm', style: 'flex:1', onclick: () => connectFlow(), text: 'Connect folder' }),
-      h('button', { class: 'btn sm', style: 'flex:1', onclick: () => driveConnectFlow(), text: 'Connect Drive' })
-    ]));
+    // made Google Drive easy to miss entirely. Stacked (not side by side):
+    // the rail is too narrow for two full-width-looking buttons to share a
+    // row without crowding right up against the main content next to them.
+    bar.appendChild(h('button', { class: 'btn sm', onclick: () => connectFlow(), text: 'Connect folder' }));
+    bar.appendChild(h('button', { class: 'btn sm', onclick: () => driveConnectFlow(), text: 'Connect Drive' }));
   }
 }
 
