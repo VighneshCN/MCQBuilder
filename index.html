@@ -3916,6 +3916,24 @@ async function openQuestion(uuidStr) {
     q.conflict ? h('span', { class: 'badge b-conflict', text: 'Conflict' }) : null,
     h('span', { class: 'badge b-draft', text: 'v' + q.version })
   ]));
+  // Opening the record directly (rather than through the Answer Conflicts
+  // queue) used to give no way to even see what the other side claims,
+  // let alone resolve it — just a generic Save with no indication that
+  // saving here is how you'd fix it. Show the disagreement here too, with
+  // the same one-click resolve the queue already offers.
+  const conflictPartners = q.conflict && (q.conflictWith || []).length
+    ? (await Promise.all(q.conflictWith.map(u => Questions.get(u)))).filter(Boolean)
+    : [];
+  if (conflictPartners.length) {
+    const answerTextOf = (rec) => (rec.options.find(o => o.id === rec.correctOptionId) || {}).text || '(no answer set)';
+    body.appendChild(h('div', { class: 'notice bad small', style: 'margin-top:8px' }, [
+      h('div', {}, 'Disagrees with ' + conflictPartners.length + ' other record' + (conflictPartners.length > 1 ? 's' : '') + ' on the correct answer:'),
+      ...conflictPartners.map(p => h('div', { style: 'margin-top:4px' }, [
+        h('b', {}, 'This record'), ' says “' + answerTextOf(q) + '.” ',
+        h('b', {}, p.qid || 'The other record'), ' says “' + answerTextOf(p) + '.”'
+      ]))
+    ]));
+  }
   body.appendChild(tabs);
   body.appendChild(pane);
 
@@ -4090,8 +4108,9 @@ async function openQuestion(uuidStr) {
         { label: 'Close', value: null },
         { label: q.flagged ? 'Unflag' : 'Flag', value: 'flag' },
         { label: 'Archive', value: 'archive' },
-        { label: 'Save changes', value: 'save', kind: 'primary' }
-      ]
+        conflictPartners.length ? { label: 'Save & resolve conflict', value: 'save-resolve', kind: 'primary' } : null,
+        { label: 'Save changes', value: 'save', kind: conflictPartners.length ? '' : 'primary' }
+      ].filter(Boolean)
     });
     if (!res && hasUnsavedChanges()) {
       const discard = await confirmBox('Discard your changes?', 'Nothing you edited on this question has been saved yet.', true, 'Discard');
@@ -4099,7 +4118,7 @@ async function openQuestion(uuidStr) {
     }
     break;
   }
-  if (res === 'save') {
+  if (res === 'save' || res === 'save-resolve') {
     const fresh = await Questions.get(uuidStr);
     fresh.stem = edit.stem.trim();
     fresh.options = edit.options.filter(o => o.text.trim()).map(o => ({ id: o.id, text: o.text.trim() }));
@@ -4118,7 +4137,19 @@ async function openQuestion(uuidStr) {
     }
     await Questions.save(fresh, 'manual edit');
     State.invalidate();
-    toast('Saved as version ' + fresh.version, 'ok');
+    // "Save & resolve conflict" is Save plus the same one-click propagation
+    // the Answer Conflicts queue uses — the chosen answer above is applied
+    // to every record this one currently conflicts with, not just saved here.
+    let resolveNote = '';
+    if (res === 'save-resolve' && fresh.correctOptionId) {
+      const r = await resolveConflictPair(uuidStr, fresh.correctOptionId);
+      if (r) {
+        if (r.saved.status === 'answer_conflict') resolveNote = ' Still conflicts with another record — open it to resolve that side too.';
+        else resolveNote = r.partnerCount ? ' Matching record(s) updated to the same answer.' : ' Conflict resolved.';
+        if (r.unmatchedCount) resolveNote += ' ' + r.unmatchedCount + ' paired record(s) don’t offer this wording as one of their own options and were left untouched.';
+      }
+    }
+    toast('Saved as version ' + fresh.version + '.' + resolveNote, resolveNote.indexOf('Still conflicts') >= 0 || resolveNote.indexOf('don’t offer') >= 0 ? 'warn' : 'ok', resolveNote ? 7000 : undefined);
     // 'review' was the old route name; the check-what-needs-confirming
     // screen has lived inside 'import' (as importStep='check') for a while
     // now, so that string never matched — saving from there left the stale
