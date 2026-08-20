@@ -2751,6 +2751,18 @@ function renderShell() {
         go('practice');
         return;
       }
+      // A staged import batch is parsed against one specific course
+      // (source-detected domains, defaults, and the Question IDs about to
+      // be issued all assume it). Switching courses mid-review used to be
+      // possible with no warning at all, and the batch would end up
+      // admitted under whichever course happened to be selected at the
+      // moment "Admit" was clicked — not the one it was actually reviewed
+      // against.
+      if (State.staging) {
+        target.value = prevId;
+        toast('Finish or discard the batch you’re reviewing before switching courses.', 'warn', 6000);
+        return;
+      }
       await State.setCourse(newId); go(State.view);
     }
   },
@@ -4551,6 +4563,10 @@ function setStagingDecision(it, d) {
   return true;
 }
 
+const STAGING_DECISION_LABELS = {
+  import: 'will import', reject: 'will reject',
+  merge: 'will merge into existing', review: 'will go to review queue', conflict: 'will flag answer conflict'
+};
 function renderStaging(root) {
   const st = State.staging;
   if (!st.ui) st.ui = { filter: 'all', page: 0, size: 25, sel: new Set() };
@@ -4621,13 +4637,24 @@ function renderStaging(root) {
       h('span', { class: 'small muted', text: 'Batch actions apply to ' + scopeNote })
     ]);
 
-    const act = (label, fn, cls) => h('button', { class: 'btn sm ' + (cls || ''), disabled: !target.length, onclick: fn, text: label });
+    // Merge/review/conflict only ever mean anything against a matched
+    // record (setStagingDecision's own eligibility rule) — showing them as
+    // live, clickable choices when nothing in scope could actually take
+    // them (the common case: a clean import with only a few duplicates)
+    // is exactly the kind of decision clutter that invites a confused
+    // click on a button that will just silently do nothing to most items.
+    const eligibleFor = (d) => target.some(it => {
+      if ((d === 'merge' || d === 'review' || d === 'conflict') && !it.dup) return false;
+      if (d === 'conflict' && !(it.dup && it.dup.conflict)) return false;
+      return true;
+    });
+    const act = (label, fn, cls, decision) => h('button', { class: 'btn sm ' + (cls || ''), disabled: !target.length || (decision && !eligibleFor(decision)), onclick: fn, text: label });
     const line2 = h('div', { class: 'card-b tight row wrap', style: 'border-top:1px solid var(--rule-soft)' }, [
       h('span', { class: 'eyebrow', text: 'Decide' }),
       act('Import', () => applyDecision('import')),
-      act('Merge into existing', () => applyDecision('merge')),
-      act('Send to review queue', () => applyDecision('review')),
-      act('Flag answer conflict', () => applyDecision('conflict')),
+      act('Merge into existing', () => applyDecision('merge'), '', 'merge'),
+      act('Send to review queue', () => applyDecision('review'), '', 'review'),
+      act('Flag answer conflict', () => applyDecision('conflict'), '', 'conflict'),
       act('Reject', () => applyDecision('reject'))
     ]);
     const line3 = h('div', { class: 'card-b tight row wrap', style: 'border-top:1px solid var(--rule-soft)' }, [
@@ -4729,7 +4756,7 @@ function renderStaging(root) {
       h('span', { class: 'docnum dim', text: '#' + (i + 1) }),
       h('span', { class: 'tick', dataset: { mark: markFor(q) }, style: 'border:0;width:auto', text: (STATUS[q.status] || {}).mark }),
       statusBadge(q),
-      h('span', { class: 'badge ' + (it.decision === 'reject' ? 'b-arch' : it.decision === 'import' ? 'b-active' : 'b-review'), text: 'will ' + it.decision }),
+      h('span', { class: 'badge ' + (it.decision === 'reject' ? 'b-arch' : it.decision === 'import' ? 'b-active' : 'b-review'), text: STAGING_DECISION_LABELS[it.decision] || it.decision }),
       it.dup ? h('span', { class: 'badge ' + (it.dup.conflict ? 'b-conflict' : 'b-dup'), text: (it.dup.conflict ? 'answer conflict · ' : '') + it.dup.cls + ' duplicate · ' + Math.round(it.dup.sim.score * 100) + '%' }) : null,
       h('div', { class: 'spacer' }),
       h('span', { class: 'tiny dim', text: 'stem' }), conf(q.parseConf && q.parseConf.stem),
@@ -4795,7 +4822,22 @@ function renderStaging(root) {
       (c.reject ? c.reject + ' will be rejected. ' : '') +
       'Question IDs, once issued, are permanent, including for review-queue items.');
     if (!ok) return;
-    await admitBatch();
+    try {
+      await admitBatch();
+    } catch (e) {
+      // A DB write failure here (storage full is the realistic one — a
+      // large batch's questions, sources and audit rows all land in one
+      // pass) must never look like the confirm dialog was simply ignored.
+      // State.staging is untouched on failure, so the review is not lost —
+      // the student can try again once the underlying problem is fixed.
+      await modal({
+        title: 'Import could not be saved',
+        body: h('div', { class: 'stack' }, [
+          h('div', { class: 'notice bad' }, e.message || String(e)),
+          h('p', {}, 'Nothing was added — your browser’s storage may be full. Your reviewed batch is still here; free up space (Settings → Backup & Restore) and try Admit again.')
+        ])
+      });
+    }
   }
 }
 
@@ -4834,15 +4876,19 @@ async function admitBatch() {
   // toMerge's fallback path (target deleted mid-review) can still push into
   // toAdmit above, so admit only runs once every candidate's final fate is
   // known — otherwise a late fallback gets counted in the report but never
-  // actually gets a QID or reaches the database.
-  await Questions.admit(toAdmit, State.course.id, 'batch ' + st.batch.id.slice(0, 8));
+  // actually gets a QID or reaches the database. Uses the course the batch
+  // was actually parsed under (st.batch.courseId), not State.course.id —
+  // the two can drift if the course selector was switched mid-review, and
+  // a Question ID's prefix must match the course it was really issued for,
+  // not whatever happens to be selected at the moment "Admit" is clicked.
+  await Questions.admit(toAdmit, st.batch.courseId, 'batch ' + st.batch.id.slice(0, 8));
 
   // Matched candidates were only ever judged from their own side during
   // staging. Bring the record(s) each one matches up to date too, so a
   // conflict or duplicate found here holds on both sides permanently, not
   // just for the newly admitted question — the same rule an edit follows.
   if (needsRecheck.length) {
-    const live = (await Questions.byCourse(State.course.id)).filter(x => x.status !== 'merged' && x.status !== 'rejected');
+    const live = (await Questions.byCourse(st.batch.courseId)).filter(x => x.status !== 'merged' && x.status !== 'rejected');
     const index = buildIndex(live);
     const byUuid = new Map(live.map(x => [x.uuid, x]));
     for (const q of needsRecheck) {
@@ -5451,9 +5497,21 @@ async function renderReviewQueue(root) {
         fresh.correctOptionId = o.id; fresh.conflict = false; fresh.answerVerified = 'verified'; fresh.verifiedAt = nowISO();
         fresh.verifyNote = 'Conflict resolved by hand';
         fresh.status = fresh.domainId ? 'active' : 'needs_class';
-        await Questions.save(fresh, 'conflict resolved');
+        const saved = await Questions.save(fresh, 'conflict resolved');
         await audit('verify', 'question', fresh.qid, { conflict: true }, { correctOptionId: o.id }, 'Answer conflict resolved');
-        State.invalidate(); toast('Conflict resolved for ' + fresh.qid, 'ok'); go('import');
+        State.invalidate();
+        // Questions.save() re-checks this record against the rest of the
+        // bank (recheckQuestion) — if the record it disagreed with wasn't
+        // touched here, the two are still an answer conflict and that
+        // recheck puts fresh.status right back to 'answer_conflict', even
+        // though this click just told the student it was fixed. Only the
+        // post-save state, not the click itself, is the truth.
+        if (saved.status === 'answer_conflict') {
+          toast(fresh.qid + ' still conflicts with another record — open it from Question Bank to resolve both sides.', 'warn', 7000);
+        } else {
+          toast('Conflict resolved for ' + fresh.qid, 'ok');
+        }
+        go('import');
       }
     }, [
       h('span', { class: 'method-ico' + (q.correctOptionId === o.id ? ' correct-pick' : ''), style: q.correctOptionId === o.id ? 'background:var(--green)' : '', text: letterOf(i) }),
@@ -9740,7 +9798,15 @@ async function boot() {
     if (img) { e.preventDefault(); imageWorkflow(img.getAsFile()); }
   });
   window.addEventListener('beforeunload', (e) => {
-    if (State.session && State.session.status === 'active' && State.session.mode === 'mock') { e.preventDefault(); e.returnValue = ''; }
+    if (State.session && State.session.status === 'active' && State.session.mode === 'mock') { e.preventDefault(); e.returnValue = ''; return; }
+    // A staged import batch lives only in memory (State.staging) until
+    // "Admit this batch" is clicked — the in-app Discard button already
+    // warns this is lost on purpose ("nothing has been written to the
+    // bank yet"); an accidental refresh or closed tab must warn just as
+    // clearly, or a long review session (domains assigned, duplicates
+    // resolved question by question) can vanish with zero notice.
+    if (State.staging) { e.preventDefault(); e.returnValue = ''; return; }
+    if (window._imageWorkflowOpen) { e.preventDefault(); e.returnValue = ''; }
   });
   // expose a small surface for debugging without opening the internals
   self.MCQ = { State, DB, Settings, runSelfTests, runIntegrity, APP };
