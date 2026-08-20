@@ -2784,6 +2784,10 @@ function renderShell() {
   app.appendChild(rail);
   app.appendChild(main);
   app.appendChild(h('div', { class: 'scrim hidden', id: 'scrim', onclick: closeMobileNav }));
+  // renderShell() always rebuilds #storagebar from scratch, empty — every
+  // caller needs it populated immediately, not just the boot path, so this
+  // isn't left for each call site to remember on its own.
+  updateStorageBar();
 }
 function closeMobileNav() {
   const railEl = $('#rail'); if (railEl) railEl.classList.remove('open');
@@ -6832,22 +6836,27 @@ async function courseDialog(course) {
   const total = () => { const t = bp.reduce((s, d) => s + (+d.weight || 0), 0); totalEl.textContent = t + '%'; totalEl.style.color = t === 100 ? 'var(--green)' : 'var(--amber)'; };
   drawRows(); total();
 
-  // Optional one-click prefill from a built-in template — purely a shortcut.
-  // Anything not offered a template (or anyone who skips this) fills the
-  // form in blank, with no assumption about which course it is.
-  let templateOpts = null;
+  // Optional one-click starting points — picking one adds that course
+  // immediately, with its blueprint and weights already set. Nothing here
+  // is preselected or required: the blank form below still works for any
+  // other course, unfilled and with no CISA/DISA assumption.
   const quickAdd = isNew ? h('div', { class: 'field' }, [
-    h('label', { text: 'Quick add (optional)' }),
+    h('label', { text: 'Quick add' }),
     h('div', { class: 'row wrap', style: 'gap:6px' }, COURSE_TEMPLATES.map(t => h('button', {
-      class: 'btn sm ghost', onclick: () => {
-        code.value = t.code; name.value = t.name; prefix.value = t.code;
-        bp = t.blueprint.map(d => Object.assign({}, d));
-        templateOpts = t.opts;
-        drawRows(); total();
-        toast(t.code + ' template filled in — edit anything before creating', 'ok');
-      }, text: t.code
+      class: 'btn sm ghost', onclick: async () => {
+        const c = makeCourse(t.code, t.name, t.blueprint.map(d => Object.assign({}, d)), Object.assign({}, t.opts, { qidPrefix: t.code }));
+        await DB.put('courses', c);
+        await DB.put('idRegister', { courseId: c.id, lastSeq: 0, allocations: [] });
+        await audit('create', 'course', c.id, null, { code: c.code, domains: c.blueprint.length }, 'Added via quick add');
+        State.courses = await DB.all('courses');
+        await State.setCourse(c.id);
+        const closeBtn = document.querySelector('.modal button[aria-label="Close"]');
+        if (closeBtn) closeBtn.click();
+        toast(c.code + ' added — its bank starts empty', 'ok');
+        renderShell(); go('settings');
+      }, text: '+ ' + t.code
     }))),
-    h('div', { class: 'tiny dim', text: 'Fills in the fields below so you can adjust before creating — building a course for something else? Just fill the form in yourself.' })
+    h('div', { class: 'tiny dim', text: 'Adds that course right away, with its exam blueprint and weights already set. Building a course for something else? Just fill in the form below.' })
   ]) : null;
 
   const res = await modal({
@@ -6907,7 +6916,7 @@ async function courseDialog(course) {
     }
   }
   if (isNew) {
-    const c = makeCourse(code.value.trim(), name.value.trim(), bp, Object.assign({}, templateOpts, { qidPrefix: (prefix.value.trim() || code.value.trim()).toUpperCase().replace(/[^A-Z0-9]/g, '') }));
+    const c = makeCourse(code.value.trim(), name.value.trim(), bp, { qidPrefix: (prefix.value.trim() || code.value.trim()).toUpperCase().replace(/[^A-Z0-9]/g, '') });
     await DB.put('courses', c);
     await DB.put('idRegister', { courseId: c.id, lastSeq: 0, allocations: [] });
     await audit('create', 'course', c.id, null, { code: c.code, domains: bp.length }, '');
@@ -8512,7 +8521,13 @@ function updateStorageBar() {
   } else if (st.key === 'reconnect') {
     bar.appendChild(h('button', { class: 'btn sm primary', onclick: () => reconnectFlow(), text: 'Reconnect' }));
   } else if (st.key === 'local') {
-    bar.appendChild(h('button', { class: 'btn sm', onclick: () => connectFlow(), text: 'Connect a folder' }));
+    // Both places a bank can live are equally one click away here — a local
+    // folder used to be the only option visible outside Settings, which
+    // made Google Drive easy to miss entirely.
+    bar.appendChild(h('div', { class: 'row', style: 'gap:6px;width:100%' }, [
+      h('button', { class: 'btn sm', style: 'flex:1', onclick: () => connectFlow(), title: 'Save to a folder on this device', text: 'Folder' }),
+      h('button', { class: 'btn sm', style: 'flex:1', onclick: () => driveConnectFlow(), title: 'Sync to your Google Drive', text: 'Google Drive' })
+    ]));
   }
 }
 
@@ -10051,7 +10066,6 @@ async function boot() {
 
   renderShell();
   applyTheme();
-  updateStorageBar();
   // Never blocks boot on Google's servers — a silent reconnect attempt that
   // updates the storage bar whenever (if ever) it resolves.
   DriveSync.init();
