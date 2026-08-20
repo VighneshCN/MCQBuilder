@@ -6273,6 +6273,7 @@ ROUTES.settings = async (root) => {
     localBlock.appendChild(h('p', { class: 'tiny dim', text: FileStore.lastSavedAt ? 'Last saved ' + fmtDate(FileStore.lastSavedAt, true) + (FileStore.lastSnapshotAt ? ' · full file written ' + fmtDate(FileStore.lastSnapshotAt, true) : '') : 'Not saved yet in this session.' }));
     localBlock.appendChild(h('div', { class: 'row wrap', style: 'gap:8px' }, [
       h('button', { class: 'btn sm', onclick: async () => { const ok = await FileStore.flushNow('snapshot'); toast(ok ? 'Full file written.' : 'Nothing to save.', ok ? 'ok' : 'info'); go('settings'); }, text: 'Write now' }),
+      h('button', { class: 'btn sm', title: 'Merge this file with your Google Drive copy, without switching away from this folder', onclick: async () => { await DriveSync.syncBridge(); go('settings'); }, text: 'Sync with Drive' }),
       h('button', { class: 'btn sm danger', onclick: () => disconnectFlow().then(() => go('settings')), text: 'Disconnect' })
     ]));
   } else if (FileStore.needsReconnect) {
@@ -7566,15 +7567,17 @@ const DriveSync = {
       title: 'There is already a bank in Google Drive',
       body: h('div', { class: 'stack' }, [
         h('p', {}, 'That Drive file already holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '.'),
-        h('p', { class: 'small' }, 'This browser currently holds ' + localCount + ' question(s). Which one do you want to keep?'),
+        h('p', { class: 'small' }, 'This browser currently holds ' + localCount + ' question(s).'),
+        h('div', { class: 'notice small' }, 'Merging keeps everything both copies hold — nothing is discarded. Keep only one side if you deliberately want to throw the other away; whichever you discard is backed up first, automatically.'),
         dramaticLoss
-          ? h('div', { class: 'notice bad small' }, 'This browser has far fewer questions than Drive — almost always because Drive is the real bank and this is a new or freshly-cleared browser. Overwriting Drive would very likely be a mistake. When unsure, choose "Keep what is in Drive."')
-          : h('div', { class: 'notice small' }, 'Whichever you discard gets backed up first, automatically, before anything is overwritten.')
+          ? h('div', { class: 'notice bad small' }, 'This browser has far fewer questions than Drive — almost always because Drive is the real bank and this is a new or freshly-cleared browser. When unsure, merge — nothing here would be lost either way.')
+          : null
       ]),
       actions: [
         { label: 'Cancel', value: '' },
-        { label: 'Keep what is in Drive', value: 'drive', kind: 'primary' },
-        { label: 'Overwrite Drive with this browser’s bank', value: 'browser', kind: 'danger' }
+        { label: 'Keep only what is in Drive', value: 'drive', kind: 'danger' },
+        { label: 'Keep only this browser’s', value: 'browser', kind: 'danger' },
+        { label: 'Merge both', value: 'merge', kind: 'primary' }
       ]
     });
     if (choice === 'drive') {
@@ -7586,6 +7589,15 @@ const DriveSync = {
       if (!(await requireExternalBackup(remote, 'mcq-mastery-drive', 'the Drive copy', 'overwriting the Drive copy with this browser’s bank'))) return false;
       this.allowDriveShrink('confirmed by the user, after a backup, in the Drive reconciliation dialog');
       await this.push();
+      return true;
+    }
+    if (choice === 'merge') {
+      if (!(await requireSafetyBackup('merging this browser’s bank with what is in Google Drive'))) return false;
+      const localPayload = await FileStore.buildPayload();
+      const { merged, report } = await mergeBankPayloads(localPayload, remote);
+      await applyMergedBank(merged);
+      await this.push();
+      await showMergeReport(report, 'Merged with Google Drive', 'Both copies were combined and pushed back to Drive — this browser and Drive now match.');
       return true;
     }
     return false;
@@ -7805,6 +7817,64 @@ const DriveSync = {
       'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This replaces what is in this browser (' + localCount + ' question(s)) with that copy. A safety backup of what is in this browser is taken first, automatically.', true, 'Load');
     if (ok && (await requireSafetyBackup('loading the Drive copy over this browser’s bank'))) {
       await this._applyRemote(remote); await this._recordSyncedStamp();
+    }
+  },
+
+  /** A one-off "sync with Drive" while a local folder stays the persistent
+      connection — offered from Settings alongside it, not instead of it.
+      Pulls whatever is on Drive, merges it with what is here, writes the
+      merged bank back to both the local file and Drive, then leaves Drive
+      exactly as disconnected as it was before this call. Distinct from
+      connect(): this never makes Drive the active backend, and never
+      disconnects the folder. */
+  async syncBridge() {
+    const clientId = effectiveDriveClientId();
+    if (!clientId) {
+      await modal({ title: 'Add a Google OAuth client ID first', body: h('p', {}, 'Settings → "Where your data lives" has the one-time setup steps — about ten minutes, free, and only you can do it (it needs your own Google account).') });
+      return;
+    }
+    if (!this.hasLiveToken()) {
+      try { await this._loadGis(); await this._requestToken(false); }
+      catch (e) { toast('Could not sign in to Google: ' + e.message, 'bad', 8000); return; }
+    }
+    // pull()/push() both require this.connected — flip it only for the
+    // duration of this call. The local folder, not Drive, is the real
+    // persistent connection throughout; nothing here changes FileStore.
+    const wasConnected = this.connected;
+    this.connected = true;
+    try {
+      let fileId = this.fileId || await FileStore.meta('driveFileId');
+      try {
+        if (!fileId) fileId = (await this._findExisting()) || (await this._createFile());
+      } catch (e) {
+        toast('Could not reach Google Drive: ' + (e.message || e), 'bad', 8000);
+        return;
+      }
+      this.fileId = fileId;
+
+      let remote;
+      try { remote = await this.pull(); }
+      catch (e) { toast('Could not reach Google Drive: ' + e.message, 'bad'); return; }
+
+      if (!(remote.stores.questions || []).length) {
+        // Nothing on Drive yet — this is a first push, not a merge.
+        const ok = await this.push();
+        toast(ok ? 'Pushed your bank to Google Drive.' : ('Could not sync — ' + (this.problem || 'unknown error')), ok ? 'ok' : 'bad');
+        return;
+      }
+      if (!(await requireSafetyBackup('merging this browser’s bank with Google Drive'))) return;
+      const localPayload = await FileStore.buildPayload();
+      const { merged, report } = await mergeBankPayloads(localPayload, remote);
+      await applyMergedBank(merged);
+      await FileStore.flushNow();
+      const pushOk = await this.push();
+      await showMergeReport(report, 'Synced with Google Drive', pushOk
+        ? 'Both copies were combined, written to your file, and pushed to Drive — all three now match.'
+        : 'Both copies were combined and written to your file, but pushing to Drive failed: ' + (this.problem || 'unknown error') + '. Try Sync again once that is fixed.');
+    } finally {
+      clearTimeout(this._debounceTimer);
+      this.connected = wasConnected;
+      updateStorageBar();
     }
   },
 
@@ -8073,6 +8143,216 @@ async function reconnectFlow() {
   }
 }
 
+/* ============================================================================
+   Bank merge engine
+   Combines this browser's current state with a payload pulled from
+   somewhere else (Google Drive, or an existing local file) into one bank
+   that keeps everything both sides have, instead of the earlier
+   all-or-nothing "keep this / discard that" choice. Used at every point
+   local and remote content meet: first connecting a folder or Drive when
+   both already hold data, switching between backends, and the explicit
+   "Sync with Drive" bridge action — merge is the default there; discarding
+   one whole side remains available only as a secondary, danger-styled
+   escape hatch.
+
+   Strategy per store:
+   - questions, courses, sources, batches, presets, notes: keyed rows —
+     newest `updatedAt` (falling back to `createdAt`) wins per key, with
+     every key unique to one side carried over untouched. questions are
+     then re-checked (rescanCourseForPairs) against the merged bank, so a
+     genuine disagreement between two independently-edited copies lands in
+     the review queue instead of one side silently winning.
+   - sessions: keyed the same way — a session has a real id, not an
+     auto-increment one, and the same id can genuinely be touched from two
+     devices (started on a phone, resumed later on a laptop).
+   - attempts, questionVersions, audit: append-only logs whose keys are
+     auto-increment integers assigned independently by each IndexedDB — the
+     same integer on both sides is almost never the same real event, so
+     these merge by matching content instead, never by colliding key.
+   - tombstones: union by qid. A retirement recorded on either side is
+     retired everywhere; it never needs "newest wins".
+   - idRegister: never "newest wins" — that could roll the Question ID
+     watermark backwards and let an already-used id be re-issued to a
+     different question. The higher lastSeq always wins, with both sides'
+     allocation histories unioned underneath it.
+   - settings: not merged key-by-key — a device's preferences are one
+     coherent set, not independent facts. Whichever whole payload has the
+     newer top-level `savedAt` is adopted wholesale.
+   - images: keyed union — captured once, essentially never edited after.
+   ========================================================================== */
+
+/** Generic keyed-store merge: newest `updatedAt`/`createdAt` wins per key,
+    every key unique to one side is carried over untouched. Ties (including
+    both sides missing a timestamp) keep the local row. */
+function mergeKeyedRows(localRows, remoteRows, keyField) {
+  const byKey = new Map((localRows || []).map(r => [r[keyField], r]));
+  let added = 0, updated = 0;
+  const touchedKeys = [];
+  (remoteRows || []).forEach(r => {
+    const k = r[keyField];
+    const mine = byKey.get(k);
+    if (!mine) { byKey.set(k, r); added++; touchedKeys.push(k); return; }
+    const mineT = Date.parse(mine.updatedAt || mine.createdAt || 0) || 0;
+    const theirT = Date.parse(r.updatedAt || r.createdAt || 0) || 0;
+    if (theirT > mineT) { byKey.set(k, r); updated++; touchedKeys.push(k); }
+  });
+  return { rows: Array.from(byKey.values()), added, updated, touchedKeys };
+}
+
+/** Keyed union with no time comparison — for stores where "newest wins"
+    makes no sense (a retirement is never un-retired; a captured image is
+    never re-captured under the same id). */
+function mergeKeyedRowsUnionOnly(localRows, remoteRows, keyField) {
+  const byKey = new Map((localRows || []).map(r => [r[keyField], r]));
+  let added = 0;
+  (remoteRows || []).forEach(r => { if (!byKey.has(r[keyField])) { byKey.set(r[keyField], r); added++; } });
+  return { rows: Array.from(byKey.values()), added };
+}
+
+/** A stable identity for one append-only row, ignoring its meaningless
+    auto-increment key — two independent IndexedDBs assign that key from
+    their own counters, so the same integer on both sides is almost never
+    the same real event, and the real event's own fields are what make it
+    unique. */
+function appendOnlyContentKey(store, row) {
+  if (store === 'attempts') return row.sessionId + '|' + row.questionUuid + '|' + row.ts;
+  if (store === 'questionVersions') return row.questionUuid + '|' + row.version;
+  if (store === 'audit') return row.ts + '|' + row.action + '|' + row.entityType + '|' + row.entityId;
+  return JSON.stringify(row);
+}
+function mergeAppendOnlyRows(store, localRows, remoteRows) {
+  const seen = new Map((localRows || []).map(r => [appendOnlyContentKey(store, r), r]));
+  let added = 0;
+  (remoteRows || []).forEach(r => {
+    const k = appendOnlyContentKey(store, r);
+    if (!seen.has(k)) { seen.set(k, r); added++; }
+  });
+  return { rows: Array.from(seen.values()), added };
+}
+
+/** idRegister is the one store a plain "newest wins" merge would actively
+    corrupt: rolling lastSeq backwards would let IdRegister.next() re-issue
+    a Question ID already assigned, on either side, to a different
+    question. The watermark can only ever move forward; allocation
+    histories (already capped at 500 entries each) are unioned underneath
+    it and re-capped the same way. */
+function mergeIdRegisterRows(localRows, remoteRows) {
+  const byId = new Map((localRows || []).map(r => [r.courseId, Object.assign({ lastSeq: 0, allocations: [] }, r)]));
+  let touched = 0;
+  const allocKey = a => a.ts + '|' + a.from + '|' + a.to + '|' + a.count;
+  (remoteRows || []).forEach(r => {
+    const mine = byId.get(r.courseId);
+    if (!mine) { byId.set(r.courseId, Object.assign({ lastSeq: 0, allocations: [] }, r)); touched++; return; }
+    const merged = Object.assign({}, mine);
+    merged.lastSeq = Math.max(mine.lastSeq || 0, r.lastSeq || 0);
+    const allocMap = new Map((mine.allocations || []).map(a => [allocKey(a), a]));
+    let allocGrew = false;
+    (r.allocations || []).forEach(a => { if (!allocMap.has(allocKey(a))) { allocMap.set(allocKey(a), a); allocGrew = true; } });
+    merged.allocations = Array.from(allocMap.values()).sort((x, y) => new Date(x.ts) - new Date(y.ts)).slice(-500);
+    if (merged.lastSeq !== mine.lastSeq || allocGrew) touched++;
+    byId.set(r.courseId, merged);
+  });
+  return { rows: Array.from(byId.values()), touched };
+}
+
+/** Merge two whole bank payloads (each shaped like FileStore.buildPayload()
+    / DriveSync.pull()'s result: { savedAt, stores: { <storeName>: [...] } })
+    into one. Pure and DB-free — apply the result with applyMergedBank(). */
+async function mergeBankPayloads(localPayload, remotePayload) {
+  const report = { stores: {} };
+  const merged = { stores: {} };
+
+  const localNewer = (Date.parse(localPayload.savedAt || 0) || 0) >= (Date.parse(remotePayload.savedAt || 0) || 0);
+  merged.stores.settings = ((localNewer ? localPayload : remotePayload).stores.settings || []).slice();
+  report.stores.settings = { kept: localNewer ? 'local' : 'remote' };
+
+  ['courses', 'sources', 'batches', 'presets', 'notes', 'sessions'].forEach(s => {
+    const r = mergeKeyedRows(localPayload.stores[s] || [], remotePayload.stores[s] || [], 'id');
+    merged.stores[s] = r.rows;
+    report.stores[s] = { added: r.added, updated: r.updated };
+  });
+
+  const qr = mergeKeyedRows(localPayload.stores.questions || [], remotePayload.stores.questions || [], 'uuid');
+  merged.stores.questions = qr.rows;
+  report.stores.questions = { added: qr.added, updated: qr.updated };
+  merged.touchedQuestionUuids = qr.touchedKeys;
+
+  ['attempts', 'questionVersions', 'audit'].forEach(s => {
+    const r = mergeAppendOnlyRows(s, localPayload.stores[s] || [], remotePayload.stores[s] || []);
+    merged.stores[s] = r.rows;
+    report.stores[s] = { added: r.added };
+  });
+
+  const tr = mergeKeyedRowsUnionOnly(localPayload.stores.tombstones || [], remotePayload.stores.tombstones || [], 'qid');
+  merged.stores.tombstones = tr.rows;
+  report.stores.tombstones = { added: tr.added };
+
+  const ir = mergeIdRegisterRows(localPayload.stores.idRegister || [], remotePayload.stores.idRegister || []);
+  merged.stores.idRegister = ir.rows;
+  report.stores.idRegister = { touched: ir.touched };
+
+  const imr = mergeKeyedRowsUnionOnly(localPayload.stores.images || [], remotePayload.stores.images || [], 'id');
+  merged.stores.images = imr.rows;
+  report.stores.images = { added: imr.added };
+
+  report.questionsBefore = { local: (localPayload.stores.questions || []).length, remote: (remotePayload.stores.questions || []).length };
+  report.questionsAfter = merged.stores.questions.length;
+  return { merged, report };
+}
+
+/** Write a merged bank into IndexedDB (guarded writes, so whichever backend
+    is currently connected picks the change up through its normal dirty-
+    tracking, the same as any other edit) and re-check every question a
+    merge actually touched against the rest of its course, so a new
+    disagreement the merge surfaced lands in the review queue rather than
+    silently resolving itself. */
+async function applyMergedBank(merged) {
+  for (const s of BACKUP_STORES) {
+    if (s === 'questions') continue;
+    await DB.putMany(s, merged.stores[s] || []);
+  }
+  await DB.putMany('questions', merged.stores.questions || []);
+
+  // FileStore.buildPayload() caches its last snapshot and only refreshes the
+  // stores its own touch() marked dirty — which never fires for a store this
+  // write pass touched while FileStore itself was not the connected backend
+  // (a Drive-only merge). Force the next buildPayload() to rebuild from
+  // scratch so a push right after this never uploads pre-merge data.
+  FileStore._cache = null;
+
+  const touched = new Set(merged.touchedQuestionUuids || []);
+  if (touched.size) {
+    const byCourse = new Map();
+    merged.stores.questions.forEach(q => { if (touched.has(q.uuid)) { if (!byCourse.has(q.courseId)) byCourse.set(q.courseId, []); byCourse.get(q.courseId).push(q.uuid); } });
+    for (const courseId of byCourse.keys()) await rescanCourseForPairs(courseId);
+  }
+  State.invalidate();
+}
+
+/** Shared summary dialog for every merge point below. */
+async function showMergeReport(report, title, intro) {
+  const rows = Object.keys(report.stores)
+    .map(s => {
+      const r = report.stores[s];
+      if (s === 'settings') return null;
+      const bits = [];
+      if (r.added) bits.push(r.added + ' added');
+      if (r.updated) bits.push(r.updated + ' updated');
+      if (r.touched) bits.push(r.touched + ' extended');
+      if (!bits.length) return null;
+      return h('tr', {}, [h('td', { text: s }), h('td', { class: 'small', text: bits.join(' · ') })]);
+    })
+    .filter(Boolean);
+  await modal({
+    title: title || 'Merge complete', wide: true,
+    body: h('div', { class: 'stack' }, [
+      h('div', { class: 'notice ok' }, intro || 'Both copies were combined — nothing either side held was discarded.'),
+      h('p', { class: 'small' }, 'Questions: ' + report.questionsBefore.local + ' here, ' + report.questionsBefore.remote + ' on the other side → ' + report.questionsAfter + ' after merging.'),
+      rows.length ? h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, [h('th', { text: 'Store' }), h('th', { text: 'Changed' })])), h('tbody', {}, rows)])) : null
+    ])
+  });
+}
+
 async function connectFlow() {
   if (FileStore.tier === 'manual') {
     await modal({
@@ -8129,22 +8409,24 @@ async function connectFlow() {
       title: 'There is already a bank in that location',
       body: h('div', { class: 'stack' }, [
         h('p', {}, 'That folder already contains an MCQ Mastery data file, holding ' + existing.count + ' question(s).'),
-        h('p', { class: 'small' }, 'This browser currently holds ' + here + ' question(s). Which one do you want to keep?'),
+        h('p', { class: 'small' }, 'This browser currently holds ' + here + ' question(s).'),
+        h('div', { class: 'notice small' }, 'Merging keeps everything both copies hold — nothing is discarded. Keep only one side if you deliberately want to throw the other away; whichever you discard is backed up first, automatically.'),
         dramaticLoss
-          ? h('div', { class: 'notice bad small' }, 'This browser has far fewer questions than that file — almost always because the file is the real bank and this is a new or freshly-cleared browser. Overwriting it would very likely be a mistake. When unsure, choose "Keep what is in the file."')
-          : h('div', { class: 'notice small' }, 'Whichever you discard gets backed up first, automatically, before anything is overwritten.')
+          ? h('div', { class: 'notice bad small' }, 'This browser has far fewer questions than that file — almost always because the file is the real bank and this is a new or freshly-cleared browser. When unsure, merge — nothing here would be lost either way.')
+          : null
       ]),
       actions: [
         { label: 'Cancel', value: '' },
-        { label: 'Keep what is in the file', value: 'file', kind: 'primary' },
-        { label: 'Overwrite the file with this browser\u2019s bank', value: 'browser', kind: 'danger' }
+        { label: 'Keep only what is in the file', value: 'file', kind: 'danger' },
+        { label: 'Keep only this browser\u2019s bank', value: 'browser', kind: 'danger' },
+        { label: 'Merge both', value: 'merge', kind: 'primary' }
       ]
     });
     if (!choice) { await FileStore.forget(); updateStorageBar(); return; }
     if (choice === 'file') {
       await FileStore.loadFromDisk();
       toast('Loaded your bank from the file.', 'ok');
-    } else {
+    } else if (choice === 'browser') {
       if (!(await requireExternalBackup(existing.payload, 'mcq-mastery-file', 'the existing file', 'overwriting the connected file with this browser\u2019s bank'))) {
         await FileStore.forget(); updateStorageBar(); return;
       }
@@ -8152,6 +8434,16 @@ async function connectFlow() {
       FileStore.allowShrink('confirmed by the user, after a backup, in the connect-folder reconciliation dialog');
       await FileStore.flushNow();
       toast('Your file now holds this browser\u2019s bank.', 'ok');
+    } else if (choice === 'merge') {
+      if (!(await requireSafetyBackup('merging this browser\u2019s bank with the file already in that folder'))) {
+        await FileStore.forget(); updateStorageBar(); return;
+      }
+      const localPayload = await FileStore.buildPayload();
+      const { merged, report } = await mergeBankPayloads(localPayload, existing.payload);
+      await applyMergedBank(merged);
+      FileStore._diskQuestionCount = existing.count;
+      await FileStore.flushNow();
+      await showMergeReport(report, 'Merged with your file', 'Both copies were combined and written to the file \u2014 this browser and the file now match.');
     }
   } else {
     await FileStore.flushNow();
@@ -8858,6 +9150,80 @@ test('An empty or badly shrunken bank cannot overwrite Drive either', () => {
     DriveSync._remoteQuestionCount = 0; DriveSync._driveShrinkOk = null;
     assert(!DriveSync.driveLossCheck(0), 'a first sync to an empty Drive file must not be blocked');
   } finally { DriveSync._remoteQuestionCount = was.c; DriveSync._driveShrinkOk = was.s; }
+});
+
+/* ---- bank merge engine ---- */
+test('mergeKeyedRows keeps every exclusive row and lets the newer one win on a shared key', () => {
+  const local = [
+    { id: 'a', updatedAt: '2026-01-01T00:00:00Z', v: 'local-a' },
+    { id: 'shared', updatedAt: '2026-01-01T00:00:00Z', v: 'local-shared-older' },
+    { id: 'c', updatedAt: '2026-01-01T00:00:00Z', v: 'local-c' }
+  ];
+  const remote = [
+    { id: 'shared', updatedAt: '2026-02-01T00:00:00Z', v: 'remote-shared-newer' },
+    { id: 'b', updatedAt: '2026-01-01T00:00:00Z', v: 'remote-b' }
+  ];
+  const r = mergeKeyedRows(local, remote, 'id');
+  eq(r.rows.length, 4, 'a, b, c and shared must all survive — nothing exclusive to either side is dropped');
+  eq(r.added, 1, 'only b is new from remote');
+  eq(r.updated, 1, 'only shared was actually overwritten');
+  const shared = r.rows.find(x => x.id === 'shared');
+  eq(shared.v, 'remote-shared-newer', 'the newer updatedAt must win on a shared key');
+  assert(r.touchedKeys.indexOf('shared') >= 0 && r.touchedKeys.indexOf('b') >= 0, 'touchedKeys must list every row that came from remote');
+});
+test('mergeKeyedRows keeps the local row on a tie or when neither side has a timestamp', () => {
+  const r1 = mergeKeyedRows([{ id: 'x', v: 'local' }], [{ id: 'x', v: 'remote' }], 'id');
+  eq(r1.rows[0].v, 'local', 'with no updatedAt/createdAt on either side, local must win rather than picking arbitrarily');
+  const r2 = mergeKeyedRows(
+    [{ id: 'x', updatedAt: '2026-01-01T00:00:00Z', v: 'local' }],
+    [{ id: 'x', updatedAt: '2026-01-01T00:00:00Z', v: 'remote' }], 'id');
+  eq(r2.rows[0].v, 'local', 'an exact tie must keep the local row');
+});
+test('mergeAppendOnlyRows dedupes by content, not by the meaningless auto-increment key', () => {
+  const local = [{ id: 1, sessionId: 's1', questionUuid: 'q1', ts: 't1' }, { id: 2, sessionId: 's1', questionUuid: 'q2', ts: 't2' }];
+  // id 2 on the remote side is a completely different real attempt that
+  // happened to get the same auto-increment integer on that device.
+  const remote = [{ id: 1, sessionId: 's1', questionUuid: 'q1', ts: 't1' }, { id: 2, sessionId: 's2', questionUuid: 'q3', ts: 't3' }];
+  const r = mergeAppendOnlyRows('attempts', local, remote);
+  eq(r.rows.length, 3, 'the true duplicate (id 1) must be dropped but the colliding-key-different-event row (remote id 2) must be kept');
+  eq(r.added, 1);
+  assert(r.rows.some(x => x.questionUuid === 'q3'), 'the remote-only attempt must survive despite sharing an id with a local row');
+});
+test('mergeIdRegisterRows never lets the Question ID watermark move backwards', () => {
+  const local = [{ courseId: 'c1', lastSeq: 50, allocations: [{ ts: '2026-01-01T00:00:00Z', from: 'Q-Q-000041', to: 'Q-Q-000050', count: 10 }] }];
+  const remote = [{ courseId: 'c1', lastSeq: 30, allocations: [{ ts: '2025-06-01T00:00:00Z', from: 'Q-Q-000021', to: 'Q-Q-000030', count: 10 }] }];
+  const r = mergeIdRegisterRows(local, remote);
+  eq(r.rows[0].lastSeq, 50, 'the higher watermark must always win, even though remote is the "incoming" side');
+  eq(r.rows[0].allocations.length, 2, 'both allocation histories must be unioned underneath the winning watermark');
+
+  const local2 = [{ courseId: 'c2', lastSeq: 10, allocations: [] }];
+  const remote2 = [{ courseId: 'c2', lastSeq: 75, allocations: [] }];
+  const r2 = mergeIdRegisterRows(local2, remote2);
+  eq(r2.rows[0].lastSeq, 75, 'a higher remote watermark must be adopted, or a later next() could re-issue an id already used on Drive');
+});
+test('mergeBankPayloads merges questions and reports the before/after counts, without touching settings key-by-key', () => {
+  const local = {
+    savedAt: '2026-01-01T00:00:00Z',
+    stores: {
+      questions: [{ uuid: 'q1', updatedAt: '2026-01-01T00:00:00Z', stem: 'local q1' }],
+      courses: [], sources: [], batches: [], attempts: [], sessions: [], settings: [{ k: 'theme', v: 'dark' }],
+      audit: [], images: [], idRegister: [], tombstones: [], presets: [], notes: [], questionVersions: []
+    }
+  };
+  const remote = {
+    savedAt: '2026-03-01T00:00:00Z',
+    stores: {
+      questions: [{ uuid: 'q2', updatedAt: '2026-01-01T00:00:00Z', stem: 'remote q2' }],
+      courses: [], sources: [], batches: [], attempts: [], sessions: [], settings: [{ k: 'theme', v: 'light' }],
+      audit: [], images: [], idRegister: [], tombstones: [], presets: [], notes: [], questionVersions: []
+    }
+  };
+  return mergeBankPayloads(local, remote).then(({ merged, report }) => {
+    eq(merged.stores.questions.length, 2, 'q1 and q2 must both survive the merge');
+    eq(report.questionsBefore.local, 1); eq(report.questionsBefore.remote, 1); eq(report.questionsAfter, 2);
+    eq(merged.stores.settings[0].v, 'light', 'settings must come wholesale from the newer payload (remote here), never merged key-by-key');
+    eq(report.stores.settings.kept, 'remote');
+  });
 });
 
 test('The shrink consent is one-shot, not a standing permission', async () => {

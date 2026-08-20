@@ -259,33 +259,37 @@ rare case where a debounced push is lost (a backgrounded tab throttling
 `setTimeout`).
 
 Treated as closely as Drive's API allows like the local file: connecting
-reads what is already there, offering the same "keep this / keep that"
-choice the local folder's `connectFlow()` uses (`_reconcileOnConnect()`).
-Every later boot checks Drive's `modifiedTime` — a metadata-only call, not a
-download — against what this browser last recorded; a newer remote copy is
-loaded in automatically, the same way opening the app just reads the local
-file. It only asks first when this browser *also* has changes that never
-reached Drive (tracked as a `driveDirtySince` flag in `fsmeta`, set the
-moment a write is pending and cleared on a successful push) — a genuine
-conflict, not routine catching-up, mirroring how the local folder only asks
-when a file changed under it *and* something was still unsaved. A manual
-"Load from Drive" and "Sync now" remain in Settings for forcing either
-direction early.
+reads what is already there, offering the same reconciliation choice the
+local folder's `connectFlow()` uses (`_reconcileOnConnect()`) — see "Merging
+instead of choosing" below; merge is the default there, not an all-or-
+nothing pick. Every later boot checks Drive's `modifiedTime` — a metadata-
+only call, not a download — against what this browser last recorded; a
+newer remote copy is loaded in automatically, the same way opening the app
+just reads the local file. It only asks first when this browser *also* has
+changes that never reached Drive (tracked as a `driveDirtySince` flag in
+`fsmeta`, set the moment a write is pending and cleared on a successful
+push) — a genuine conflict, not routine catching-up, mirroring how the
+local folder only asks when a file changed under it *and* something was
+still unsaved. A manual "Load from Drive" and "Sync now" remain in Settings
+for forcing either direction early, and "Sync with Drive" (below) offers a
+one-off merge without switching away from a connected local folder.
 
-Every one of these reconciliation choices backs up whichever side is about
-to be discarded before it acts — not just a note saying nothing was deleted.
-Discarding this browser's bank runs the same `requireSafetyBackup()` used
-before a replace-restore or a course wipe; discarding Drive's copy, or an
-existing local file connected to without being loaded — content that was
-never in this browser's IndexedDB to begin with — runs
-`requireExternalBackup()`, which builds the same backup ZIP shape
-(`buildBackupFromPayload()`) directly from that content and downloads it.
-Either path blocks the destructive step if the backup fails, and asks a
-final "Continue" before proceeding even when it succeeds. The two buttons
-are styled so the safe choice (keep the existing, larger bank) reads as
-the primary action and the destructive one reads as danger — not the
-other way around, which is what a bare `kind: 'primary'` on "overwrite"
-used to do in both this dialog and the local-folder equivalent.
+Every one of these reconciliation choices backs up whichever side is at
+risk before it acts — not just a note saying nothing was deleted. Discarding
+this browser's bank, or merging (a merge can still overwrite a same-key
+record with the other side's newer version), runs the same
+`requireSafetyBackup()` used before a replace-restore or a course wipe;
+discarding Drive's copy, or an existing local file connected to without
+being loaded — content that was never in this browser's IndexedDB to begin
+with — runs `requireExternalBackup()`, which builds the same backup ZIP
+shape (`buildBackupFromPayload()`) directly from that content and downloads
+it. Every path blocks its next step if the backup fails, and asks a final
+"Continue" before proceeding even when it succeeds. Merge is styled as the
+primary action in these dialogs; the two "keep only one side, discard the
+other" choices are both styled as danger — not "keep the bigger bank is
+primary, overwrite is danger" as a two-choice version of this dialog used
+to be, since merge itself is now the safe default and either single-sided
+choice is a deliberate discard.
 
 `DriveSync.driveLossCheck()` is Drive's mirror of `FileStore.lossCheck()` —
 the last line of defence in `push()` itself, independent of any dialog.
@@ -329,6 +333,80 @@ Existing installs from before this backend split — a local folder and Drive
 both recorded as connected — resolve on the first boot after updating: the
 local folder wins, Drive is disconnected (its file is untouched), and a
 one-time toast explains why. Reconnect Drive from Settings to switch.
+
+## Merging instead of choosing
+
+Every point where this browser's state and a payload from somewhere else
+(Drive, or an existing local file) meet used to force an all-or-nothing
+"keep this / keep that" pick. `mergeBankPayloads()` (and its write-through
+partner `applyMergedBank()`) combine the two into one bank that keeps
+everything both sides hold, and it is the default action in every
+reconciliation dialog that reaches it — "keep only one side" remains
+available in the same dialog, styled as danger, as a deliberate escape
+hatch, not the default.
+
+It covers, without any dialog needing its own bespoke merge logic, every
+point local and remote content can meet:
+
+- First-ever connect to a local folder, or to Drive, when this browser
+  already has data of its own (`connectFlow()`'s "There is already a bank
+  in that location", `DriveSync._reconcileOnConnect()`'s Drive equivalent).
+- Switching backends (local → Drive, Drive → local): the switch flow
+  disconnects the old backend first and lands in one of the two dialogs
+  above, so no separate code path was needed for this case.
+- "Sync with Drive" (`DriveSync.syncBridge()`), a new one-off action next
+  to a connected local folder's other buttons in Settings — pulls Drive,
+  merges, writes the merged bank back to both the local file and Drive,
+  then leaves Drive exactly as disconnected as before the call. The local
+  folder stays the one persistent connection throughout; this never makes
+  Drive the active backend the way `driveConnectFlow()` does.
+
+Merge strategy is deliberately different per store, because "newest wins"
+is not a safe default for every one of them:
+
+- **questions, courses, sources, batches, presets, notes** — keyed rows;
+  newest `updatedAt` (falling back to `createdAt`) wins on a shared key,
+  every key unique to one side is carried over untouched. Merged questions
+  are then re-checked with the existing `rescanCourseForPairs()` sweep, so
+  a genuine disagreement the merge surfaces — the same stem admitted
+  independently on two devices, or two answer keys that now disagree —
+  lands in the review queue via the ordinary conflict/duplicate machinery
+  instead of one side silently winning.
+- **sessions** — the same newest-wins keyed merge, not append-only: a
+  session has a real `id`, not an auto-increment one, and the same session
+  can genuinely be touched from two devices (started on a phone, resumed
+  later on a laptop).
+- **attempts, questionVersions, audit** — append-only logs whose keys are
+  auto-increment integers assigned independently by each IndexedDB, so the
+  same integer on both sides is almost never the same real event. These
+  merge by matching content (`sessionId`+`questionUuid`+`ts` for an
+  attempt, `questionUuid`+`version` for a version snapshot) instead,
+  never by the colliding key.
+- **tombstones** — union by `qid`, no time comparison. A retirement
+  recorded on either side is retired everywhere; it is never un-retired.
+- **idRegister** — deliberately never "newest wins". That could roll the
+  Question ID watermark backwards and let `IdRegister.next()` re-issue an
+  id already assigned, on the other side, to a different question. The
+  higher `lastSeq` always wins; both sides' allocation histories are
+  unioned underneath it and re-capped at 500 entries, same as
+  `IdRegister.next()` itself does.
+- **settings** — not merged key-by-key. A device's preferences are one
+  coherent set, not independent facts, so whichever whole payload has the
+  newer top-level `savedAt` is adopted wholesale.
+- **images** — keyed union, no time comparison — captured once, never
+  edited after.
+
+`applyMergedBank()` writes through the ordinary guarded `DB.putMany()` path
+(not the raw, untracked writes `loadFromDisk()`/`_applyRemote()` use to
+rebuild IndexedDB from a file that is already the source of truth) so
+whichever backend is actually connected at the time picks the change up
+through its normal dirty-tracking and pushes/flushes it out afterward,
+exactly like any other edit. It forces `FileStore._cache` to rebuild from
+scratch immediately after writing, since `FileStore.touch()` — the thing
+that would normally mark stores dirty for the next `buildPayload()` call —
+only fires when `FileStore` itself is the connected backend, which is not
+true for a Drive-only merge; without that reset, a push right after the
+merge could silently upload the pre-merge snapshot.
 
 ## Course notes (optional)
 
