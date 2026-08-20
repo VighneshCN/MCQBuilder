@@ -792,9 +792,14 @@ function modal(opts) {
     setTimeout(() => { const f = box.querySelector('input,textarea,select,button.primary'); if (f) f.focus(); }, 30);
   });
 }
-const confirmBox = (title, msg, danger) => modal({
+/** confirmLabel names what the confirm button actually does — "Delete" is
+    only right when the action is a deletion. Leave it unset for that case;
+    pass it explicitly for anything else styled as dangerous (a replace, a
+    load-and-overwrite), so the button never claims to delete something it
+    is actually loading or replacing. */
+const confirmBox = (title, msg, danger, confirmLabel) => modal({
   title, body: h('p', { text: msg }),
-  actions: [{ label: 'Cancel', value: false }, { label: danger ? 'Delete' : 'Confirm', value: true, kind: danger ? 'danger' : 'primary' }]
+  actions: [{ label: 'Cancel', value: false }, { label: confirmLabel || (danger ? 'Delete' : 'Confirm'), value: true, kind: danger ? 'danger' : 'primary' }]
 });
 
 
@@ -5936,7 +5941,7 @@ async function restoreFlow(file) {
 
   if (mode === 'replace') {
     const ok = await confirmBox('Replace all local data?',
-      'Every question, attempt and session in this browser will be deleted and replaced by the backup. A verified safety backup of the current state is taken first, and the restore is abandoned if that backup cannot be made.', true);
+      'Every question, attempt and session in this browser will be deleted and replaced by the backup. A verified safety backup of the current state is taken first, and the restore is abandoned if that backup cannot be made.', true, 'Replace');
     if (!ok) return;
     if (!await requireSafetyBackup('restore (replace) from ' + file.name)) { toast('Restore cancelled — nothing was changed', 'ok'); return; }
     // Replacing the bank is a deliberate shrink; the file layer must allow it.
@@ -7675,7 +7680,7 @@ const DriveSync = {
     const localCount = (await DB.all('questions')).length;
     const remoteCount = (remote.stores.questions || []).length;
     const ok = await confirmBox('Load the Drive copy?',
-      'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This replaces what is in this browser (' + localCount + ' question(s)) with that copy. A safety backup of what is in this browser is taken first, automatically.', true);
+      'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This replaces what is in this browser (' + localCount + ' question(s)) with that copy. A safety backup of what is in this browser is taken first, automatically.', true, 'Load');
     if (ok && (await requireSafetyBackup('loading the Drive copy over this browser’s bank'))) {
       await this._applyRemote(remote); await this._recordSyncedStamp();
     }
