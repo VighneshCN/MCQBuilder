@@ -7102,7 +7102,7 @@ _writeVeto = (store) => store !== 'fsmeta' && FileStore.isReadOnly();
    app can only ever see files it created itself, never anything else in your
    Drive. Setting this up needs a one-time, free, ten-minute step only you can
    do — creating an OAuth client ID in Google Cloud Console — because it
-   requires a Google account of your own; see Settings → Google Drive for the
+   requires a Google account of your own; see Settings → "Where your data lives" for the
    walkthrough. */
 
 const DRIVE_FILE_NAME = 'mcq-mastery-data.json';
@@ -7117,13 +7117,13 @@ const DRIVE_SAFETY_TIMER_MS = 60 * 1000;      // coarse fallback if a debounced 
  * origin(s) it was registered against. That means it needs setting up once,
  * by whoever deploys this copy of the app, not by every person who opens it.
  * Fill this in after doing the one-time Google Cloud Console steps
- * (Settings → Google Drive has the walkthrough) and every visitor to this
- * deployment gets Drive sync with zero setup of their own. Leave it blank —
- * the default — and each visitor is asked to supply their own, which is the
- * right behaviour for anyone who forks this app to a different URL, where a
- * new origin needs its own registered client ID.
+ * (Settings → "Where your data lives" has the walkthrough) and every visitor
+ * to this deployment gets Drive sync with zero setup of their own. Leave it
+ * blank — the default — and each visitor is asked to supply their own, which
+ * is the right behaviour for anyone who forks this app to a different URL,
+ * where a new origin needs its own registered client ID.
  */
-const DEFAULT_DRIVE_CLIENT_ID = '';
+const DEFAULT_DRIVE_CLIENT_ID = '677745775689-2b5r4ppr1eqshc8aek7gr3df90q061nc.apps.googleusercontent.com';
 
 /** Settings can still override this per-browser (a fork running from a
     different origin, or someone testing their own project) — the baked-in
@@ -7215,7 +7215,7 @@ const DriveSync = {
   _requestToken(silent) {
     return new Promise((resolve, reject) => {
       const clientId = effectiveDriveClientId();
-      if (!clientId) { reject(new Error('No Google OAuth client ID set — see Settings → Google Drive.')); return; }
+      if (!clientId) { reject(new Error('No Google OAuth client ID set — see Settings → "Where your data lives".')); return; }
       // Rebuild if this is the first request, or if the effective client ID
       // has changed since the cached one was built (Settings edited, or the
       // deployer's default filled in, without a full page reload in
@@ -7249,7 +7249,7 @@ const DriveSync = {
   async connect() {
     const clientId = effectiveDriveClientId();
     if (!clientId) {
-      await modal({ title: 'Add a Google OAuth client ID first', body: h('p', {}, 'Settings → Google Drive has the one-time setup steps — about ten minutes, free, and only you can do it (it needs your own Google account).') });
+      await modal({ title: 'Add a Google OAuth client ID first', body: h('p', {}, 'Settings → "Where your data lives" has the one-time setup steps — about ten minutes, free, and only you can do it (it needs your own Google account).') });
       return;
     }
     // A previous attempt may have already signed in successfully and failed
