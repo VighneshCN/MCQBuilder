@@ -3737,9 +3737,6 @@ ROUTES.practice = async (root, preselect) => {
     return;
   }
 
-  if (resumable) {
-    root.appendChild(h('p', { class: 'small muted', style: 'margin:0 0 12px' }, 'Resume or discard the unfinished session above before starting a new one — otherwise it would be silently left behind and hard to find again.'));
-  }
   const grid = h('div', { class: 'grid g3 stretch' });
   Object.keys(MODES).forEach(m => {
     const info = MODES[m];
@@ -3998,8 +3995,7 @@ async function configureMode(mode) {
     });
     body.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Include only' }), flags]));
   }
-  if (mode === 'redo') { f.incorrect = false; body.appendChild(h('div', { class: 'notice' }, 'This mode gathers everything you got wrong, everything you guessed correctly, low-confidence answers and anything flagged.')); }
-  if (mode === 'weak') body.appendChild(h('div', { class: 'notice' }, 'Questions are ranked by topic weakness, recent mistakes, guessed answers and overdue reviews. The ranking reasons are shown on the results screen.'));
+  if (mode === 'redo') { f.incorrect = false; }
 
   const countInput = h('input', { type: 'number', min: '1', max: '250', value: String(cfg.count), onchange: (e) => { cfg.count = clamp(parseInt(e.target.value, 10) || 1, 1, 250); recount(); } });
   const row = h('div', { class: 'grid g2' }, [h('div', { class: 'field' }, [h('label', { text: 'Number of questions' }), countInput])]);
@@ -5181,7 +5177,6 @@ async function openQuestion(uuidStr) {
       g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Source section' }), h('input', { type: 'text', value: edit.srcSection, oninput: e => edit.srcSection = e.target.value })]));
       g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Tags (comma separated)' }), h('input', { type: 'text', value: edit.tags, oninput: e => edit.tags = e.target.value })]));
       pane.appendChild(g);
-      pane.appendChild(h('div', { class: 'notice small', style: 'margin-top:12px' }, 'Source module numbering is kept separate from the official blueprint. “Module 6” in a book does not create a sixth official domain.'));
       // Only the end states a student can meaningfully choose by hand.
       // The rest (Parsing incomplete, Needs answer, Possible duplicate,
       // Answer conflict, Merged duplicate) are states the app assigns
@@ -5287,7 +5282,10 @@ async function openQuestion(uuidStr) {
           h('div', { class: 'small', style: 'margin-top:5px', text: (v.snapshot.stem || '').slice(0, 220) })
         ]));
       });
-      pane.appendChild(h('div', { class: 'small muted', style: 'margin-top:8px' }, 'Past attempts stay linked to the version that was actually answered, so history is never rewritten by an edit.'));
+      pane.appendChild(h('div', { class: 'row', style: 'gap:7px;align-items:center;margin-top:8px' }, [
+        h('span', { class: 'tiny dim', text: 'History is never rewritten by an edit' }),
+        infoTip('Versions and your history', 'Past attempts stay linked to the version that was actually answered, so editing a question never changes what your history says you answered.')
+      ]));
     }
   }
   drawPane();
@@ -5522,7 +5520,6 @@ ROUTES.notes = async (root) => {
         modal({
           title: rec.title, wide: true, sticky: true,
           body: h('div', { class: 'stack' }, [
-            h('div', { class: 'small muted' }, 'Rendered in an isolated sandbox — no scripts run, and nothing inside can reach the app or your data.'),
             frame
           ]),
           actions: [{ label: 'Close', value: null }]
@@ -7718,9 +7715,9 @@ ROUTES.backup = async (root) => {
 
   root.appendChild(h('div', { class: 'grid g2' }, [
     h('div', { class: 'card' }, [
-      h('div', { class: 'card-h' }, h('h3', { text: 'Full backup' })),
+      h('div', { class: 'card-h' }, [h('h3', { text: 'Full backup' }),
+        infoTip('What a backup contains', 'A ZIP holding every store, a schema-versioned manifest, record counts, checksums and your stored images. Restoring it reads the manifest first, so a backup from a different version is checked rather than trusted.')]),
       h('div', { class: 'card-b stack' }, [
-        h('p', { class: 'small muted', style: 'margin:0' }, 'A ZIP containing every store, a schema-versioned manifest, record counts, checksums and stored images.'),
         h('div', { class: 'row wrap' }, [
           h('button', { class: 'btn primary', onclick: () => doBackup('all'), text: 'Back up everything' }),
           h('button', { class: 'btn', onclick: () => doBackup('course'), text: 'This course only' })
@@ -7730,7 +7727,6 @@ ROUTES.backup = async (root) => {
     h('div', { class: 'card' }, [
       h('div', { class: 'card-h' }, h('h3', { text: 'Restore' })),
       h('div', { class: 'card-b stack' }, [
-        h('p', { class: 'small muted', style: 'margin:0' }, 'Preview first, then merge into what is here or replace it. A safety backup is taken automatically before any replacement.'),
         h('div', { class: 'row' }, [h('button', { class: 'btn', onclick: () => pickRestore(), text: 'Restore from backup' })])
       ])
     ])
@@ -8626,7 +8622,10 @@ async function courseDialog(course) {
         h('div', { class: 'field' }, [h('label', { text: 'Question ID prefix' }), prefix, h('div', { class: 'tiny dim', text: isNew ? 'Becomes e.g. DISA-Q-000001' : 'Changing this does not alter IDs already issued.' })])
       ]),
       h('div', { class: 'field' }, [h('label', {}, ['Blueprint — domain code, name, exam weight  ', totalEl]), rows]),
-      h('div', { class: 'notice small' }, 'Weights drive mock and mixed-revision selection. They need not total 100 — the selection is proportional either way — but a 100% total is easier to reason about.'),
+      h('div', { class: 'row', style: 'gap:7px;align-items:center' }, [
+        h('span', { class: 'tiny dim', text: 'Weights drive mock and mixed-revision selection' }),
+        infoTip('Exam weights', 'They need not total 100 — selection is proportional either way — but a 100% total is easier to reason about, and the running total above turns green when it reaches it.')
+      ]),
       h('div', { class: 'field' }, [
         h('label', { text: 'Options per question' }),
         h('div', { class: 'row wrap', style: 'gap:10px;align-items:center' }, [
@@ -8866,7 +8865,10 @@ async function showAudit() {
   modal({
     title: 'Audit trail', wide: true,
     body: h('div', { class: 'stack' }, [
-      h('div', { class: 'small muted' }, 'Most recent 400 events. Every import, edit, verification, activation, merge, restore and bulk change is recorded here.'),
+      h('div', { class: 'row', style: 'gap:7px;align-items:center' }, [
+        h('span', { class: 'tiny dim', text: 'Most recent 400 events' }),
+        infoTip('The audit trail', 'Every import, edit, verification, activation, merge, restore and bulk change is recorded here, with what changed and when. It is written as things happen and is never edited, so it can be used to trace how any question reached its current state.')
+      ]),
       h('div', { class: 'tbl-wrap scroll-y' }, h('table', {}, [h('thead', {}, h('tr', {}, ['When', 'Action', 'Type', 'Entity', 'Previous', 'New', 'Note'].map(t => h('th', { text: t })))), tb]))
     ]),
     actions: [{ label: 'Close', value: null }, { label: 'Export CSV', value: 'x', before: () => { exportAudit(); return false; } }]
