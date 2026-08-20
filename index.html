@@ -5682,14 +5682,14 @@ async function buildBackupFromPayload(payload) {
     rather than this browser's own IndexedDB. Always downloads — Drive is
     never the active backend at the same time a local folder is (see
     "Where your data lives" in Settings), so there is nowhere else to put it. */
-async function backupDrivePayload(payload, reason) {
+async function backupExternalPayload(payload, filePrefix, reason) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const name = 'mcq-mastery-drive-safety-backup-' + stamp + '.zip';
+  const name = filePrefix + '-safety-backup-' + stamp + '.zip';
   try {
     const { blob, manifest } = await buildBackupFromPayload(payload);
     if (!blob || !blob.size) throw new Error('The backup came out empty.');
     download(name, blob);
-    await audit('backup', 'system', '', null, { scope: 'all', reason, file: name, counts: manifest.counts }, 'Safety backup of the Drive copy before it was overwritten');
+    await audit('backup', 'system', '', null, { scope: 'all', reason, file: name, counts: manifest.counts }, 'Safety backup before it was overwritten');
     return { ok: true, name, size: blob.size };
   } catch (e) {
     return { ok: false, error: e.message || String(e) };
@@ -5697,15 +5697,18 @@ async function backupDrivePayload(payload, reason) {
 }
 
 /** Same "back up first, ask before proceeding without one" shape as
-    requireSafetyBackup(), for the Drive-copy-about-to-be-overwritten case. */
-async function requireDriveBackup(payload, reason) {
-  toast('Backing up the Drive copy first…');
-  const res = await backupDrivePayload(payload, reason);
+    requireSafetyBackup(), for content about to be overwritten that was
+    never in this browser's IndexedDB to begin with — a Drive copy, or an
+    existing local file connected to without being loaded. `label` names
+    it in the dialog copy ("the Drive copy", "the existing file"). */
+async function requireExternalBackup(payload, filePrefix, label, reason) {
+  toast('Backing up ' + label + ' first…');
+  const res = await backupExternalPayload(payload, filePrefix, reason);
   if (res.ok) {
     const proceed = await modal({
-      title: 'Drive copy backed up',
+      title: 'Backup saved',
       body: h('div', { class: 'stack' }, [
-        h('div', { class: 'notice ok small' }, 'Downloaded as ' + res.name + ' (' + bytes(res.size) + '). Check your downloads folder before continuing.'),
+        h('div', { class: 'notice ok small' }, 'A copy of ' + label + ' was downloaded as ' + res.name + ' (' + bytes(res.size) + '). Check your downloads folder before continuing.'),
         h('p', { class: 'small muted' }, 'If anything about the next step goes wrong, restore this file from Backup & Restore.')
       ]),
       actions: [{ label: 'Stop here', value: false }, { label: 'Continue', value: true, kind: 'danger' }]
@@ -5713,10 +5716,10 @@ async function requireDriveBackup(payload, reason) {
     return !!proceed;
   }
   const proceed = await modal({
-    title: 'Could not back up the Drive copy',
+    title: 'Could not back up ' + label,
     body: h('div', { class: 'stack' }, [
       h('div', { class: 'notice bad' }, res.error),
-      h('p', {}, 'Nothing has been overwritten. Going ahead now would leave no way back to what is currently in Drive.'),
+      h('p', {}, 'Nothing has been overwritten. Going ahead now would leave no way back to ' + label + '.'),
       h('p', { class: 'small muted' }, 'The safe course is to stop, fix the backup, and try again.')
     ]),
     actions: [{ label: 'Stop — do not overwrite', value: false, kind: 'primary' }, { label: 'Overwrite anyway, without a backup', value: true, kind: 'danger' }]
@@ -7248,6 +7251,22 @@ const DriveSync = {
   lastPushedAt: null, lastSyncedModifiedTime: null, problem: null, setupError: null,
   _tokenClient: null, _tokenClientId: null, _pushTimer: null, _debounceTimer: null,
   _pushing: false, _pendingChange: false, _firstUnpushedChangeAt: null,
+  _remoteQuestionCount: 0, _driveShrinkOk: null,
+
+  /** Mirrors FileStore.lossCheck() — the last line of defence before a push,
+      because nothing upstream of this (a stale local bank, a wrong click, a
+      fresh device that has not caught up yet) should be able to silently
+      collapse what is already on Drive. Returns null to proceed, or a
+      reason to refuse. */
+  driveLossCheck(newCount) {
+    const known = this._remoteQuestionCount || 0;
+    if (known === 0) return null;                 // nothing on Drive to lose yet
+    if (this._driveShrinkOk) return null;          // a deletion you asked for
+    if (newCount === 0) return 'This browser’s bank is empty while Drive holds ' + known + ' question(s).';
+    if (newCount < known * 0.5) return 'This browser’s bank has ' + newCount + ' question(s) while Drive holds ' + known + '.';
+    return null;
+  },
+  allowDriveShrink(reason) { this._driveShrinkOk = reason || true; },
 
   /** A token already in hand, not yet expired — connect() uses this to skip
       a redundant sign-in popup when only the file-setup half failed last
@@ -7275,6 +7294,7 @@ const DriveSync = {
     }
     this.fileId = fileId;
     this.lastSyncedModifiedTime = await FileStore.meta('driveModifiedTime');
+    this._remoteQuestionCount = (await FileStore.meta('driveQuestionCount')) || 0;
     const dirtySince = await FileStore.meta('driveDirtySince');
     try {
       await this._loadGis();
@@ -7292,19 +7312,25 @@ const DriveSync = {
         const remote = await this.pull();
         const remoteCount = (remote.stores.questions || []).length;
         const localCount = (await DB.all('questions')).length;
+        const dramaticLoss = localCount === 0 || localCount < remoteCount * 0.5;
         const choice = await modal({
           title: 'Google Drive changed elsewhere',
           body: h('div', { class: 'stack' }, [
             h('p', {}, 'This Drive file was updated from another device, and this browser also has changes of its own that never made it to Drive — probably closed before they could sync.'),
             h('p', { class: 'small' }, 'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This browser holds ' + localCount + '.'),
-            h('div', { class: 'notice small' }, 'Whichever you discard gets backed up first, automatically, before anything is overwritten.')
+            dramaticLoss
+              ? h('div', { class: 'notice bad small' }, 'This browser has far fewer questions than Drive — keeping what is here would very likely overwrite Drive with much less than it holds. When unsure, load the Drive copy instead.')
+              : h('div', { class: 'notice small' }, 'Whichever you discard gets backed up first, automatically, before anything is overwritten.')
           ]),
-          actions: [{ label: 'Keep what is here', value: 'browser' }, { label: 'Load the Drive copy', value: 'drive', kind: 'primary' }]
+          actions: [{ label: 'Keep what is here', value: 'browser', kind: dramaticLoss ? 'danger' : undefined }, { label: 'Load the Drive copy', value: 'drive', kind: 'primary' }]
         });
         if (choice === 'drive') {
           if (await requireSafetyBackup('discarding this browser’s unsynced changes for the Drive copy')) await this._applyRemote(remote);
         } else {
-          if (await requireDriveBackup(remote, 'overwriting the Drive copy with this browser’s bank')) await this.push();
+          if (await requireExternalBackup(remote, 'mcq-mastery-drive', 'the Drive copy', 'overwriting the Drive copy with this browser’s bank')) {
+            this.allowDriveShrink('confirmed by the user, after a backup, in the Drive boot-conflict dialog');
+            await this.push();
+          }
         }
       } else {
         // The routine case: nothing unsynced here, so the newer Drive copy
@@ -7413,17 +7439,20 @@ const DriveSync = {
     const remoteCount = (remote.stores.questions || []).length;
     if (!remoteCount) { await this.push(); return true; }
     const localCount = (await DB.all('questions')).length;
+    const dramaticLoss = localCount === 0 || localCount < remoteCount * 0.5;
     const choice = await modal({
       title: 'There is already a bank in Google Drive',
       body: h('div', { class: 'stack' }, [
         h('p', {}, 'That Drive file already holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '.'),
         h('p', { class: 'small' }, 'This browser currently holds ' + localCount + ' question(s). Which one do you want to keep?'),
-        h('div', { class: 'notice small' }, 'Whichever you discard gets backed up first, automatically, before anything is overwritten.')
+        dramaticLoss
+          ? h('div', { class: 'notice bad small' }, 'This browser has far fewer questions than Drive — almost always because Drive is the real bank and this is a new or freshly-cleared browser. Overwriting Drive would very likely be a mistake. When unsure, choose "Keep what is in Drive."')
+          : h('div', { class: 'notice small' }, 'Whichever you discard gets backed up first, automatically, before anything is overwritten.')
       ]),
       actions: [
         { label: 'Cancel', value: '' },
-        { label: 'Keep what is in Drive', value: 'drive' },
-        { label: 'Overwrite Drive with this browser’s bank', value: 'browser', kind: 'primary' }
+        { label: 'Keep what is in Drive', value: 'drive', kind: 'primary' },
+        { label: 'Overwrite Drive with this browser’s bank', value: 'browser', kind: 'danger' }
       ]
     });
     if (choice === 'drive') {
@@ -7432,7 +7461,8 @@ const DriveSync = {
       return true;
     }
     if (choice === 'browser') {
-      if (!(await requireDriveBackup(remote, 'overwriting the Drive copy with this browser’s bank'))) return false;
+      if (!(await requireExternalBackup(remote, 'mcq-mastery-drive', 'the Drive copy', 'overwriting the Drive copy with this browser’s bank'))) return false;
+      this.allowDriveShrink('confirmed by the user, after a backup, in the Drive reconciliation dialog');
       await this.push();
       return true;
     }
@@ -7447,10 +7477,12 @@ const DriveSync = {
     if (this._pushTimer) { clearInterval(this._pushTimer); this._pushTimer = null; }
     this.connected = false; this.accessToken = null; this.fileId = null; this.problem = null; this.setupError = null;
     this._pendingChange = false; this._firstUnpushedChangeAt = null; this.lastSyncedModifiedTime = null;
+    this._remoteQuestionCount = 0; this._driveShrinkOk = null;
     await FileStore.delMeta('driveFileId');
     await FileStore.delMeta('driveConnected');
     await FileStore.delMeta('driveModifiedTime');
     await FileStore.delMeta('driveDirtySince');
+    await FileStore.delMeta('driveQuestionCount');
     updateStorageBar();
     toast('Google Drive disconnected — the file stays in your Drive, this only forgets it here.', 'ok');
   },
@@ -7492,6 +7524,14 @@ const DriveSync = {
     try {
       if (!(await this._ensureToken())) return false;
       const payload = await FileStore.buildPayload();
+      const newCount = (payload.stores.questions || []).length;
+      const refuse = this.driveLossCheck(newCount);
+      if (refuse) {
+        this.problem = 'Sync blocked to protect Drive — ' + refuse + ' Reconnect or resolve this from Settings before syncing.';
+        updateStorageBar();
+        toast(this.problem, 'bad', 10000);
+        return false;
+      }
       const res = await fetch('https://www.googleapis.com/upload/drive/v3/files/' + this.fileId + '?uploadType=media&fields=modifiedTime', {
         method: 'PATCH',
         headers: { 'Authorization': 'Bearer ' + this.accessToken, 'Content-Type': 'application/json' },
@@ -7502,6 +7542,8 @@ const DriveSync = {
       this.lastPushedAt = nowISO();
       this.problem = null;
       this._pendingChange = false; this._firstUnpushedChangeAt = null;
+      this._remoteQuestionCount = newCount; this._driveShrinkOk = null;
+      await FileStore.setMeta('driveQuestionCount', newCount);
       await this._recordSyncedStamp(meta && meta.modifiedTime);
       await FileStore.delMeta('driveDirtySince');
       updateStorageBar();
@@ -7615,6 +7657,8 @@ const DriveSync = {
     FileStore._cache = null;
     State.invalidate();
     this._pendingChange = false; this._firstUnpushedChangeAt = null;
+    this._remoteQuestionCount = (payload.stores.questions || []).length;
+    await FileStore.setMeta('driveQuestionCount', this._remoteQuestionCount);
     await FileStore.delMeta('driveDirtySince');
     toast('Loaded the Drive copy.', 'ok');
     if (typeof State !== 'undefined' && State.view) await go(State.view);
@@ -7934,22 +7978,25 @@ async function connectFlow() {
   }
 
   // Decide between adopting an existing file and writing the current bank out.
-  let existing = 'missing';
-  try { existing = await FileStore.loadFromDiskPreview(); } catch (e) { existing = 'missing'; }
+  let existing = { status: 'missing', count: 0, payload: null };
+  try { existing = await FileStore.loadFromDiskPreview(); } catch (e) { existing = { status: 'missing', count: 0, payload: null }; }
 
-  if (existing === 'has-data') {
+  if (existing.status === 'has-data') {
     const here = await DB.count('questions');
+    const dramaticLoss = here === 0 || here < existing.count * 0.5;
     const choice = await modal({
       title: 'There is already a bank in that location',
       body: h('div', { class: 'stack' }, [
-        h('p', {}, 'That folder already contains an MCQ Mastery data file.'),
+        h('p', {}, 'That folder already contains an MCQ Mastery data file, holding ' + existing.count + ' question(s).'),
         h('p', { class: 'small' }, 'This browser currently holds ' + here + ' question(s). Which one do you want to keep?'),
-        h('div', { class: 'notice small' }, 'Whichever you discard is not deleted from disk — the file stays where it is, and you can take a backup first from Settings.')
+        dramaticLoss
+          ? h('div', { class: 'notice bad small' }, 'This browser has far fewer questions than that file — almost always because the file is the real bank and this is a new or freshly-cleared browser. Overwriting it would very likely be a mistake. When unsure, choose "Keep what is in the file."')
+          : h('div', { class: 'notice small' }, 'Whichever you discard gets backed up first, automatically, before anything is overwritten.')
       ]),
       actions: [
         { label: 'Cancel', value: '' },
-        { label: 'Keep what is in the file', value: 'file' },
-        { label: 'Overwrite the file with this browser\u2019s bank', value: 'browser', kind: 'primary' }
+        { label: 'Keep what is in the file', value: 'file', kind: 'primary' },
+        { label: 'Overwrite the file with this browser\u2019s bank', value: 'browser', kind: 'danger' }
       ]
     });
     if (!choice) { await FileStore.forget(); updateStorageBar(); return; }
@@ -7957,6 +8004,11 @@ async function connectFlow() {
       await FileStore.loadFromDisk();
       toast('Loaded your bank from the file.', 'ok');
     } else {
+      if (!(await requireExternalBackup(existing.payload, 'mcq-mastery-file', 'the existing file', 'overwriting the connected file with this browser\u2019s bank'))) {
+        await FileStore.forget(); updateStorageBar(); return;
+      }
+      FileStore._diskQuestionCount = existing.count;
+      FileStore.allowShrink('confirmed by the user, after a backup, in the connect-folder reconciliation dialog');
       await FileStore.flushNow();
       toast('Your file now holds this browser\u2019s bank.', 'ok');
     }
@@ -7969,18 +8021,26 @@ async function connectFlow() {
   await go(State.view || 'dashboard');
 }
 
-/** Peek at the target without touching IndexedDB. */
+/** Peek at the target without touching IndexedDB.
+    Returns { status, count, payload } — status is 'missing' | 'empty' |
+    'has-data', count is the existing file's question count (0 unless
+    status is 'has-data'), payload is the parsed file content when
+    available. The count matters even before anything is loaded: it is
+    what lets an "overwrite" choice be judged against what it would
+    actually discard, rather than the loss-guard seeing an untouched
+    _diskQuestionCount of 0 and assuming there is nothing to lose. The
+    payload lets that discarded content be backed up before it happens. */
 FileStore.loadFromDiskPreview = async function () {
   let fh;
-  try { fh = await this.fileHandleFor(false); } catch (e) { return 'missing'; }
-  if (!fh) return 'missing';
+  try { fh = await this.fileHandleFor(false); } catch (e) { return { status: 'missing', count: 0, payload: null }; }
+  if (!fh) return { status: 'missing', count: 0, payload: null };
   const file = await fh.getFile();
-  if (!file.size) return 'empty';
+  if (!file.size) return { status: 'empty', count: 0, payload: null };
   try {
     const payload = JSON.parse(await file.text());
-    if (payload && payload.stores && (payload.stores.questions || []).length) return 'has-data';
-    return 'empty';
-  } catch (e) { return 'empty'; }
+    const count = (payload && payload.stores && payload.stores.questions || []).length;
+    return count ? { status: 'has-data', count, payload } : { status: 'empty', count: 0, payload: null };
+  } catch (e) { return { status: 'empty', count: 0, payload: null }; }
 };
 
 async function disconnectFlow() {
@@ -8617,6 +8677,30 @@ test('An empty or badly shrunken bank cannot overwrite a full file', () => {
     FileStore._diskQuestionCount = 0; FileStore._shrinkOk = null;
     assert(!FileStore.lossCheck(0), 'a first save to an empty folder must not be blocked');
   } finally { FileStore._diskQuestionCount = was.d; FileStore._shrinkOk = was.s; }
+});
+
+test('An empty or badly shrunken bank cannot overwrite Drive either', () => {
+  const was = { c: DriveSync._remoteQuestionCount, s: DriveSync._driveShrinkOk };
+  try {
+    DriveSync._remoteQuestionCount = 1341;
+    DriveSync._driveShrinkOk = null;
+
+    assert(DriveSync.driveLossCheck(0), 'an empty bank must never overwrite a Drive file with 1341 questions');
+    assert(DriveSync.driveLossCheck(10), 'a collapse from 1341 to 10 must be refused');
+    assert(DriveSync.driveLossCheck(600), 'losing well over half the bank must be refused');
+    assert(!DriveSync.driveLossCheck(1341), 'an unchanged bank must sync normally');
+    assert(!DriveSync.driveLossCheck(1340), 'deleting one question must sync normally');
+    assert(!DriveSync.driveLossCheck(2000), 'a larger bank must sync normally');
+    assert(!DriveSync.driveLossCheck(700), 'a modest reduction must still sync');
+
+    // A deliberate deletion is allowed through, once, and then re-armed.
+    DriveSync.allowDriveShrink('test wipe');
+    assert(!DriveSync.driveLossCheck(0), 'a deletion you asked for must be permitted');
+
+    // Nothing known on Drive yet means nothing to protect.
+    DriveSync._remoteQuestionCount = 0; DriveSync._driveShrinkOk = null;
+    assert(!DriveSync.driveLossCheck(0), 'a first sync to an empty Drive file must not be blocked');
+  } finally { DriveSync._remoteQuestionCount = was.c; DriveSync._driveShrinkOk = was.s; }
 });
 
 test('The shrink consent is one-shot, not a standing permission', async () => {
