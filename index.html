@@ -967,11 +967,24 @@ function makeOption(text, id) { return { id: id || ('o' + uuid().slice(0, 8)), t
 const LETTERS = 'ABCDEFGH';
 const letterOf = (i) => LETTERS[i] || String(i + 1);
 
+/** Whether q's own course expects a fixed number of options per question and
+    enforces it — false only when it does AND this question doesn't match.
+    A course that never set this (the default, and every course that existed
+    before this setting did) never blocks on it. Resolves the course itself
+    from State.courses rather than taking one as a parameter, since every
+    caller already has only the question in hand and this only ever needs
+    to be right for whichever course the question actually belongs to. */
+function optionCountOk(q) {
+  const course = (State.courses || []).find(c => c.id === q.courseId);
+  const expected = course && course.enforceOptionCount ? course.optionCount : null;
+  return !expected || (q.options || []).length === expected;
+}
 /** A question may only enter a test session if it is Active and answer-verified. */
 function isPracticeEligible(q) {
   return q.status === 'active' && q.answerVerified === 'verified' && !q.conflict &&
     !!q.correctOptionId && q.options.length >= 2 &&
-    q.options.some(o => o.id === q.correctOptionId);
+    q.options.some(o => o.id === q.correctOptionId) &&
+    optionCountOk(q);
 }
 function markFor(q) {
   if (q.conflict || q.status === 'answer_conflict') return 'conflict';
@@ -1346,7 +1359,9 @@ function normalizePairState(q) {
   q.conflict = false;
   if (hasDup) { if (q.status !== 'possible_dup') q.status = 'possible_dup'; return; }
   if (q.status === 'answer_conflict' || q.status === 'possible_dup') {
-    q.status = (q.correctOptionId && q.answerVerified === 'verified') ? (q.domainId ? 'active' : 'needs_class') : 'needs_answer';
+    q.status = (q.correctOptionId && q.answerVerified === 'verified')
+      ? (!optionCountOk(q) ? 'needs_content' : (q.domainId ? 'active' : 'needs_class'))
+      : 'needs_answer';
   }
 }
 
@@ -1493,6 +1508,38 @@ async function resolveConflictPair(uuid, optionId) {
     'Answer conflict resolved' + (matched ? ', ' + matched + ' paired record(s) updated to match' : '') +
     (unmatched ? ', ' + unmatched + ' paired record(s) left untouched (no matching option text)' : ''));
   return { saved, partnerCount: matched, unmatchedCount: unmatched };
+}
+
+/** "These aren't actually the same question" — the conflict equivalent of the
+    duplicate queue's "Keep separate", and the only correct resolution when
+    two flagged records turn out to have genuinely different option sets, so
+    no single answer could ever satisfy both. Records the dismissal on BOTH
+    sides so a later rescan never re-raises this exact pair, then re-derives
+    each side's status from whatever pairings are actually left. */
+async function dismissConflictPair(uuid, partnerUuid) {
+  const q = await Questions.get(uuid);
+  if (!q) return null;
+  // No partner named: dismiss every record this one currently conflicts with.
+  const targets = partnerUuid ? [partnerUuid] : (q.conflictWith || []).slice();
+  if (!targets.length) return null;
+  for (const u of targets) {
+    q.dismissedPairs = Array.from(new Set((q.dismissedPairs || []).concat([u])));
+    unflagPairSide(q, u, 'conflict');
+    const other = await Questions.get(u);
+    if (other) {
+      other.dismissedPairs = Array.from(new Set((other.dismissedPairs || []).concat([q.uuid])));
+      unflagPairSide(other, q.uuid, 'conflict');
+      normalizePairState(other);
+      other.updatedAt = nowISO();
+      await DB.put('questions', other);
+    }
+  }
+  normalizePairState(q);
+  q.updatedAt = nowISO();
+  await DB.put('questions', q);
+  await audit('edit', 'question', q.qid || q.uuid, { conflict: true }, { conflictWith: [] },
+    'Marked as not the same question as ' + targets.length + ' record(s); conflict dismissed on both sides');
+  return { dismissed: targets.length, saved: q };
 }
 
 /** Word-level diff used by the side-by-side duplicate reviewer. */
@@ -3820,12 +3867,15 @@ ROUTES.bank = async (root) => {
     ]);
   }
 
+  // Shared with the per-record skip below, so the warning count and what
+  // actually gets skipped can never quietly disagree with each other.
+  const notActivatable = (q) => q.answerVerified !== 'verified' || !q.correctOptionId || q.options.length < 2 || !optionCountOk(q);
   async function bulkStatus(status) {
     const sel = Array.from(BankState.sel);
     if (status === 'active') {
       const bad = [];
-      for (const u of sel) { const q = await Questions.get(u); if (q.answerVerified !== 'verified' || !q.correctOptionId || q.options.length < 2) bad.push(q.qid); }
-      if (bad.length) { const ok = await confirmBox('Some questions cannot be activated', bad.length + ' of ' + sel.length + ' have no verified correct answer, so they will stay in the review queue. Activate the rest?'); if (!ok) return; }
+      for (const u of sel) { const q = await Questions.get(u); if (notActivatable(q)) bad.push(q.qid); }
+      if (bad.length) { const ok = await confirmBox('Some questions cannot be activated', bad.length + ' of ' + sel.length + ' have no verified correct answer (or the wrong number of options for this course), so they will stay in the review queue. Activate the rest?'); if (!ok) return; }
     } else if (status === 'archived') {
       const ok = await confirmBox('Archive ' + sel.length + ' question(s)?', 'They leave the practice pool but keep their Question ID, sources and attempt history. Archiving is reversible.');
       if (!ok) return;
@@ -3833,7 +3883,7 @@ ROUTES.bank = async (root) => {
     let applied = 0;
     for (const u of sel) {
       const q = await Questions.get(u);
-      if (status === 'active' && (q.answerVerified !== 'verified' || !q.correctOptionId || q.options.length < 2)) continue;
+      if (status === 'active' && notActivatable(q)) continue;
       const prev = q.status; q.status = status; q.updatedAt = nowISO();
       await DB.put('questions', q);
       await audit(status === 'archived' ? 'archive' : 'activate', 'question', q.qid, { status: prev }, { status }, 'bulk');
@@ -5034,10 +5084,12 @@ async function admitBatch() {
     if (it.decision === 'merge' && it.dup && it.dup.other && it.dup.other.qid) { toMerge.push(it); return; }
     if (it.decision === 'conflict') { it.q.status = 'answer_conflict'; it.q.conflict = true; }
     if (it.decision === 'review' && it.q.status === 'draft') it.q.status = 'possible_dup';
-    // Promote clean drafts to Active only where the answer is actually verified.
-    if (it.q.status === 'draft' && it.q.correctOptionId && it.q.domainId && it.q.answerVerified === 'verified') it.q.status = 'active';
+    // Promote clean drafts to Active only where the answer is actually
+    // verified and, if this course enforces one, the option count matches.
+    if (it.q.status === 'draft' && it.q.correctOptionId && it.q.domainId && it.q.answerVerified === 'verified' && optionCountOk(it.q)) it.q.status = 'active';
     else if (it.q.status === 'draft' && !it.q.correctOptionId) it.q.status = 'needs_answer';
     else if (it.q.status === 'draft' && it.q.answerVerified !== 'verified') it.q.status = 'needs_answer';
+    else if (it.q.status === 'draft' && !optionCountOk(it.q)) it.q.status = 'needs_content';
     toAdmit.push(it.q);
     if (it.dup) needsRecheck.push(it.q);
   });
@@ -5778,7 +5830,7 @@ async function renderReviewQueue(root) {
     Array.from(ConflictQueueState.sel).forEach(u => { if (!visibleUuids.has(u)) ConflictQueueState.sel.delete(u); });
 
     container.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:12px' },
-      'These are pairs of records already in this course’s bank that read as the same question but disagree on the right answer — most often because the same question appears more than once in whatever you imported (common in a bank compiled from several past papers), marked with a different answer each time. Click an answer to resolve one pair now, or tick several rows — using whichever answer is already highlighted — and resolve them together below.'));
+      'These are pairs of records that read as the same question but disagree on the right answer — usually the same question imported twice from different papers, marked differently each time. Click the correct answer to settle a pair; both records take it. If the two only look alike — different option sets, different intent — use “Not the same question” instead, which clears the flag and leaves both answers untouched. To settle many at once, tick rows and use Resolve selected.'));
 
     const card = h('div', { class: 'card', style: 'margin-bottom:16px' });
     container.appendChild(card);
@@ -5794,15 +5846,29 @@ async function renderReviewQueue(root) {
       const r = await resolveConflictPair(uuid, optionId);
       State.invalidate();
       if (!r) { toast('Already resolved', 'ok'); go('import'); return; }
+      // An unmatched partner is never the user's mistake — it means the two
+      // records don't share this answer's wording at all, so no click on
+      // this row could ever have settled both. Say what to do about it
+      // rather than reporting a dead end.
       const unmatchedNote = r.unmatchedCount
-        ? ' ' + r.unmatchedCount + ' paired record(s) don’t offer this wording as one of their own options and were left untouched — open them from Question Bank to fix by hand.'
+        ? ' ' + r.unmatchedCount + ' paired record(s) don’t offer this wording at all — if they’re not really the same question, use “Not the same question” on this row.'
         : '';
       if (r.saved.status === 'answer_conflict') {
-        toast(r.saved.qid + ' still conflicts with another record — open it from Question Bank to resolve both sides.' + unmatchedNote, 'warn', 8000);
+        toast(r.saved.qid + ' still conflicts with another record.' + unmatchedNote, 'warn', 8000);
       } else {
         toast((r.partnerCount ? 'Resolved — matching record(s) updated to the same answer.' : 'Conflict resolved for ' + r.saved.qid + '.') + unmatchedNote,
           unmatchedNote ? 'warn' : 'ok', unmatchedNote ? 8000 : undefined);
       }
+      go('import');
+    }
+    async function dismissOne(q) {
+      const partners = (q.conflictWith || []).length;
+      const ok = await confirmBox('Not the same question?',
+        'This clears the conflict between ' + (q.qid || 'this record') + ' and ' + partners + ' other record(s), leaving both answers exactly as they are. Use this when the records only look alike — different option sets, different intent — rather than genuinely disagreeing. They won’t be flagged against each other again.');
+      if (!ok) return;
+      const r = await dismissConflictPair(q.uuid);
+      State.invalidate();
+      toast(r ? 'Kept as separate questions — conflict cleared on both sides' : 'Already resolved', 'ok');
       go('import');
     }
     async function resolveSelected() {
@@ -5870,9 +5936,16 @@ async function renderReviewQueue(root) {
           h('span', { class: 'method-ico' + (q.correctOptionId === o.id ? ' correct-pick' : ''), style: q.correctOptionId === o.id ? 'background:var(--green)' : '', text: letterOf(i) }),
           h('span', { class: 'small', style: 'flex:1;text-align:left', text: o.text })
         ]))),
-        h('label', { class: 'row small', style: 'gap:6px;align-items:center;margin-top:8px;padding-top:8px;border-top:1px dashed var(--rule)' }, [
-          h('input', { type: 'checkbox', checked: ConflictQueueState.sel.has(q.uuid), onchange: e => { toggle(q, e.target.checked); refresh(); } }),
-          h('span', { class: 'tiny dim', text: 'Include in bulk resolve' })
+        h('div', { class: 'row wrap', style: 'gap:12px;align-items:center;margin-top:8px;padding-top:8px;border-top:1px dashed var(--rule)' }, [
+          h('label', { class: 'row small', style: 'gap:6px;align-items:center' }, [
+            h('input', { type: 'checkbox', checked: ConflictQueueState.sel.has(q.uuid), onchange: e => { toggle(q, e.target.checked); refresh(); } }),
+            h('span', { class: 'tiny dim', text: 'Include in bulk resolve' })
+          ]),
+          h('div', { class: 'spacer' }),
+          h('button', {
+            class: 'btn sm ghost', title: 'Clear this conflict without changing either answer — for records that only look alike',
+            onclick: () => dismissOne(q), text: 'Not the same question'
+          })
         ])
       ]))));
       if (conflicts.length > 40) body.appendChild(h('div', { class: 'small dim', text: 'Showing the first 40 of ' + conflicts.length + '. Resolve or clear some and the rest will appear.' }));
@@ -7088,6 +7161,12 @@ async function courseDialog(course) {
   const code = h('input', { type: 'text', value: course ? course.code : '', placeholder: 'DISA' });
   const name = h('input', { type: 'text', value: course ? course.name : '', placeholder: 'Diploma in Information Systems Audit' });
   const prefix = h('input', { type: 'text', value: course ? course.qidPrefix : '', placeholder: 'DISA' });
+  // Exams like CISA and DISA always offer exactly four options, so a
+  // two-option record is a parsing failure rather than a real question —
+  // but that is a per-course fact, not a universal one, so it is opt-in
+  // and the expected number is whatever this course actually uses.
+  const optCount = h('input', { type: 'number', min: '2', max: '8', style: 'width:90px', value: String(course && course.optionCount ? course.optionCount : 4) });
+  const enforceOpts = h('input', { type: 'checkbox', checked: !!(course && course.enforceOptionCount) });
   const rows = h('div', { class: 'stack' });
   let bp = course ? course.blueprint.map(d => Object.assign({}, d)) : [{ id: 'D1', name: '', weight: 100 }];
   const totalEl = h('span', { class: 'docnum' });
@@ -7180,7 +7259,15 @@ async function courseDialog(course) {
         h('div', { class: 'field' }, [h('label', { text: 'Question ID prefix' }), prefix, h('div', { class: 'tiny dim', text: isNew ? 'Becomes e.g. DISA-Q-000001' : 'Changing this does not alter IDs already issued.' })])
       ]),
       h('div', { class: 'field' }, [h('label', {}, ['Blueprint — domain code, name, exam weight  ', totalEl]), rows]),
-      h('div', { class: 'notice small' }, 'Weights drive mock and mixed-revision selection. They need not total 100 — the selection is proportional either way — but a 100% total is easier to reason about.')
+      h('div', { class: 'notice small' }, 'Weights drive mock and mixed-revision selection. They need not total 100 — the selection is proportional either way — but a 100% total is easier to reason about.'),
+      h('div', { class: 'field' }, [
+        h('label', { text: 'Options per question' }),
+        h('div', { class: 'row wrap', style: 'gap:10px;align-items:center' }, [
+          optCount,
+          h('label', { class: 'check', style: 'margin:0' }, [enforceOpts, h('span', { class: 'small', text: 'Hold questions that don’t have exactly this many options out of practice' })])
+        ]),
+        h('div', { class: 'tiny dim', text: 'CISA and DISA always give four. With this on, anything with a different count (usually a parsing failure that lost options) is sent to the review queue as “Needs content review” instead of being practised as if it were complete. Leave it off for a course with a mix.' })
+      ])
     ]),
     actions: [
       { label: 'Cancel', value: null },
@@ -7239,8 +7326,10 @@ async function courseDialog(course) {
       }
     }
   }
+  const optionCount = clamp(parseInt(optCount.value, 10) || 4, 2, 8);
+  const enforceOptionCount = !!enforceOpts.checked;
   if (isNew) {
-    const c = makeCourse(code.value.trim(), name.value.trim(), bp, { qidPrefix: (prefix.value.trim() || code.value.trim()).toUpperCase().replace(/[^A-Z0-9]/g, '') });
+    const c = makeCourse(code.value.trim(), name.value.trim(), bp, { qidPrefix: (prefix.value.trim() || code.value.trim()).toUpperCase().replace(/[^A-Z0-9]/g, ''), optionCount, enforceOptionCount });
     await DB.put('courses', c);
     await DB.put('idRegister', { courseId: c.id, lastSeq: 0, allocations: [] });
     await audit('create', 'course', c.id, null, { code: c.code, domains: bp.length }, '');
@@ -7248,17 +7337,63 @@ async function courseDialog(course) {
     await State.setCourse(c.id);
     toast(c.code + ' created — its bank starts empty', 'ok');
   } else {
-    const prev = { code: course.code, blueprint: course.blueprint };
+    const prev = { code: course.code, blueprint: course.blueprint, optionCount: course.optionCount, enforceOptionCount: course.enforceOptionCount };
+    // Questions already Active were admitted under the old rule — turning
+    // enforcement on (or changing the expected number) has to re-check them,
+    // or the setting would only ever apply to whatever is imported next.
+    const ruleChanged = enforceOptionCount && (!prev.enforceOptionCount || prev.optionCount !== optionCount);
     course.code = code.value.trim(); course.name = name.value.trim();
     course.qidPrefix = (prefix.value.trim() || course.code).toUpperCase().replace(/[^A-Z0-9]/g, '');
     course.blueprint = bp;
+    course.optionCount = optionCount; course.enforceOptionCount = enforceOptionCount;
     await DB.put('courses', course);
-    await audit('edit', 'course', course.id, prev, { code: course.code, blueprint: bp }, '');
+    await audit('edit', 'course', course.id, prev, { code: course.code, blueprint: bp, optionCount, enforceOptionCount }, '');
     State.courses = await DB.all('courses');
     State.course = State.courses.find(c => c.id === course.id);
     toast('Course updated', 'ok');
+    if (ruleChanged) await applyOptionCountRule(course);
   }
   renderShell(); go('settings');
+}
+
+/** Re-check every live question in a course against its option-count rule,
+    moving anything that no longer qualifies out of Active. Only ever moves
+    questions OUT of practice — never promotes one back in, since a record
+    sitting in the review queue may be there for reasons of its own that
+    have nothing to do with how many options it has. */
+async function applyOptionCountRule(course) {
+  const all = await Questions.byCourse(course.id);
+  const live = all.filter(q => q.status !== 'merged' && q.status !== 'rejected' && q.status !== 'archived');
+  const offenders = live.filter(q => q.status === 'active' && !optionCountOk(q));
+  if (!offenders.length) {
+    const counts = {};
+    live.forEach(q => { const n = (q.options || []).length; counts[n] = (counts[n] || 0) + 1; });
+    await modal({
+      title: 'Option-count rule applied',
+      body: h('div', { class: 'stack' }, [
+        h('div', { class: 'notice ok small' }, 'Nothing had to move — every Active question already has exactly ' + course.optionCount + ' options.'),
+        h('div', { class: 'tiny dim', text: 'Across all ' + live.length + ' live question(s): ' + Object.keys(counts).sort().map(n => counts[n] + ' with ' + n).join(', ') + '.' })
+      ])
+    });
+    return;
+  }
+  for (const q of offenders) {
+    const prev = q.status;
+    q.status = 'needs_content';
+    q.updatedAt = nowISO();
+    await DB.put('questions', q);
+    await audit('edit', 'question', q.qid || q.uuid, { status: prev }, { status: 'needs_content' },
+      'Held out of practice: ' + (q.options || []).length + ' option(s), but ' + course.code + ' expects ' + course.optionCount);
+  }
+  State.invalidate();
+  await modal({
+    title: 'Option-count rule applied',
+    body: h('div', { class: 'stack' }, [
+      h('div', { class: 'notice warn small' }, offenders.length + ' Active question(s) don’t have exactly ' + course.optionCount + ' options and were moved to the review queue as “Needs content review”.'),
+      h('p', { class: 'small muted' }, 'Nothing was deleted and no answer was changed — they are held out of practice until the missing options are added. Find them under Review queue → Other, or filter the Question Bank by that status.'),
+      h('div', { class: 'srcline', text: offenders.slice(0, 25).map(q => (q.qid || q.uuid.slice(0, 8)) + ' (' + (q.options || []).length + ')').join(', ') + (offenders.length > 25 ? ' …' : '') })
+    ])
+  });
 }
 
 /** Only ever reached on an already-archived course (courseDialog's own
@@ -9769,6 +9904,82 @@ test('Bulk-resolving both sides of the same pair does not flip the answer back',
   } finally {
     await DB.del('questions', a.uuid); await DB.del('questions', b.uuid);
   }
+});
+test('"Not the same question" clears a conflict on both sides without touching either answer', async () => {
+  // The real case this exists for: same stem, entirely different option
+  // sets, so no single answer could ever satisfy both records.
+  const cid = 'test-course-conflict-' + Date.now();
+  const a = mkQ('The best evidence of accuracy is:', ['Re-performance', 'Interview', 'Observation', 'Review of documentation'], 0,
+    { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  const b = mkQ('The best evidence of accuracy is:', ['A review of the source code', 'Simulated transactions', 'An interview with the developer', 'Change control records'], 1,
+    { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  a.conflictWith = [b.uuid]; b.conflictWith = [a.uuid];
+  await recomputeFingerprint(a); await recomputeFingerprint(b);
+  await DB.put('questions', a); await DB.put('questions', b);
+  try {
+    const r = await dismissConflictPair(a.uuid);
+    assert(r, 'dismissing a live conflict must not be a no-op');
+    eq(r.dismissed, 1);
+    const freshA = await DB.get('questions', a.uuid);
+    const freshB = await DB.get('questions', b.uuid);
+    eq(freshA.correctOptionId, a.options[0].id, "a's own answer must be untouched");
+    eq(freshB.correctOptionId, b.options[1].id, "b's own answer must be untouched");
+    eq(freshA.conflictWith.length, 0, 'the conflict must be cleared on this side');
+    eq(freshB.conflictWith.length, 0, 'and on the partner');
+    assert(!freshA.conflict && !freshB.conflict, 'neither may still carry the conflict flag');
+    assert(freshA.status !== 'answer_conflict' && freshB.status !== 'answer_conflict', 'neither may still read as conflicted');
+    // Recorded on both sides, so a later rescan cannot re-raise this pair.
+    assert((freshA.dismissedPairs || []).indexOf(b.uuid) >= 0, 'the dismissal must be recorded on a');
+    assert((freshB.dismissedPairs || []).indexOf(a.uuid) >= 0, 'the dismissal must be recorded on b');
+    const after = await recheckQuestion(freshA, {});
+    eq(after.newConflicts.length, 0, 'a rescan must not re-raise a dismissed pair');
+  } finally {
+    await DB.del('questions', a.uuid); await DB.del('questions', b.uuid);
+  }
+});
+
+/* ---- per-course option count ---- */
+test('A course with no option-count rule never blocks on option count', () => {
+  const q = mkQ('x', ['a', 'b'], 0, { courseId: 'no-rule-course', status: 'active', answerVerified: 'verified' });
+  const prev = State.courses;
+  try {
+    State.courses = [{ id: 'no-rule-course', code: 'NR' }];
+    assert(optionCountOk(q), 'a course that never set the rule must not block anything');
+    assert(isPracticeEligible(q), 'and such a question must stay practisable');
+  } finally { State.courses = prev; }
+});
+test('Enforcing four options holds a two-option question out of practice', () => {
+  const two = mkQ('x', ['a', 'b'], 0, { courseId: 'four-opt-course', status: 'active', answerVerified: 'verified' });
+  const four = mkQ('y', ['a', 'b', 'c', 'd'], 0, { courseId: 'four-opt-course', status: 'active', answerVerified: 'verified' });
+  const prev = State.courses;
+  try {
+    State.courses = [{ id: 'four-opt-course', code: 'CISA', optionCount: 4, enforceOptionCount: true }];
+    assert(!optionCountOk(two), 'two options must fail a four-option rule');
+    assert(!isPracticeEligible(two), 'and must be blocked from practice');
+    assert(optionCountOk(four), 'exactly four must pass');
+    assert(isPracticeEligible(four), 'and must stay practisable');
+    // Setting the number without turning enforcement on must change nothing.
+    State.courses = [{ id: 'four-opt-course', code: 'CISA', optionCount: 4, enforceOptionCount: false }];
+    assert(optionCountOk(two), 'an unenforced rule must not block anything');
+    assert(isPracticeEligible(two), 'and must leave practice eligibility alone');
+  } finally { State.courses = prev; }
+});
+test('An option-count mismatch routes to needs_content, not active', () => {
+  const prev = State.courses;
+  try {
+    State.courses = [{ id: 'oc-course', code: 'OC', optionCount: 4, enforceOptionCount: true }];
+    // normalizePairState is what decides where a record lands once its
+    // conflict/duplicate pairings clear — it must not hand a short question
+    // straight back to Active.
+    const q = mkQ('x', ['a', 'b'], 0, { courseId: 'oc-course', status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+    q.conflictWith = []; q.dupWith = [];
+    normalizePairState(q);
+    eq(q.status, 'needs_content', 'a short question must go to content review, never straight to Active');
+    const ok = mkQ('y', ['a', 'b', 'c', 'd'], 0, { courseId: 'oc-course', status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+    ok.conflictWith = []; ok.dupWith = [];
+    normalizePairState(ok);
+    eq(ok.status, 'active', 'a question meeting the rule must still reach Active as before');
+  } finally { State.courses = prev; }
 });
 
 /* ---- parsing ---- */
