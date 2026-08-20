@@ -781,6 +781,11 @@ function modal(opts) {
     if (typeof opts.body === 'string') body.appendChild(h('div', { html: opts.body })); else if (opts.body) body.appendChild(opts.body);
     const foot = h('div', { class: 'modal-f' });
     const close = (val) => { bg.remove(); document.removeEventListener('keydown', onKey); resolve(val); };
+    // Lets body content close its own dialog directly (e.g. a button that
+    // both commits and dismisses in one click) via e.target.closest('.modal')
+    // ._close(...), scoped to this exact instance — safer than a global
+    // selector if dialogs are ever nested.
+    box._close = close;
     (opts.actions || [{ label: 'Close', value: null }]).forEach(a => {
       foot.appendChild(h('button', { class: 'btn ' + (a.kind || ''), onclick: async () => { if (a.before && (await a.before(body)) === false) return; close(a.value); }, text: a.label }));
     });
@@ -874,8 +879,9 @@ const DISA_BLUEPRINT = [
 ];
 
 // Optional one-click starting points offered from the "Add a course" dialog.
-// Purely a convenience prefill — nothing here is created automatically, and
-// any other course is built from a blank form with no CISA/DISA assumption.
+// Picking one creates and saves that course immediately — it's a shortcut,
+// not a default: any other course is still built from a blank form with no
+// CISA/DISA assumption.
 const COURSE_TEMPLATES = [
   {
     code: 'CISA', name: 'Certified Information Systems Auditor', blueprint: CISA_BLUEPRINT,
@@ -6840,22 +6846,45 @@ async function courseDialog(course) {
   // immediately, with its blueprint and weights already set. Nothing here
   // is preselected or required: the blank form below still works for any
   // other course, unfilled and with no CISA/DISA assumption.
+  let quickAdding = false;
+  const quickAddBtns = [];
   const quickAdd = isNew ? h('div', { class: 'field' }, [
     h('label', { text: 'Quick add' }),
-    h('div', { class: 'row wrap', style: 'gap:6px' }, COURSE_TEMPLATES.map(t => h('button', {
-      class: 'btn sm ghost', onclick: async () => {
-        const c = makeCourse(t.code, t.name, t.blueprint.map(d => Object.assign({}, d)), Object.assign({}, t.opts, { qidPrefix: t.code }));
-        await DB.put('courses', c);
-        await DB.put('idRegister', { courseId: c.id, lastSeq: 0, allocations: [] });
-        await audit('create', 'course', c.id, null, { code: c.code, domains: c.blueprint.length }, 'Added via quick add');
-        State.courses = await DB.all('courses');
-        await State.setCourse(c.id);
-        const closeBtn = document.querySelector('.modal button[aria-label="Close"]');
-        if (closeBtn) closeBtn.click();
-        toast(c.code + ' added — its bank starts empty', 'ok');
-        renderShell(); go('settings');
-      }, text: '+ ' + t.code
-    }))),
+    h('div', { class: 'row wrap', style: 'gap:6px' }, COURSE_TEMPLATES.map(t => {
+      const btn = h('button', {
+        class: 'btn sm', onclick: async () => {
+          // A rapid double-click (or CISA then DISA in quick succession)
+          // would otherwise both run to completion before either one
+          // disables anything, silently creating two courses — same class
+          // of bug the note-adding and Drive-sync-bridge buttons already
+          // guard against elsewhere in this file.
+          if (quickAdding) return;
+          quickAdding = true;
+          quickAddBtns.forEach(b => b.disabled = true);
+          try {
+            const c = makeCourse(t.code, t.name, t.blueprint.map(d => Object.assign({}, d)), Object.assign({}, t.opts, { qidPrefix: t.code }));
+            await DB.put('courses', c);
+            await DB.put('idRegister', { courseId: c.id, lastSeq: 0, allocations: [] });
+            await audit('create', 'course', c.id, null, { code: c.code, domains: c.blueprint.length }, 'Added via quick add');
+            State.courses = await DB.all('courses');
+            await State.setCourse(c.id);
+            // btn is a live DOM node, unlike an event's currentTarget (which
+            // the browser resets to null once dispatch finishes — invalid
+            // here, since this handler is still running well past that
+            // point) — closest() on it stays valid through every await above.
+            const box = btn.closest('.modal');
+            if (box && box._close) box._close(null);
+            toast(c.code + ' created — its bank starts empty', 'ok');
+            renderShell(); go('settings');
+          } finally {
+            quickAdding = false;
+            quickAddBtns.forEach(b => b.disabled = false);
+          }
+        }, text: '+ ' + t.code
+      });
+      quickAddBtns.push(btn);
+      return btn;
+    })),
     h('div', { class: 'tiny dim', text: 'Adds that course right away, with its exam blueprint and weights already set. Building a course for something else? Just fill in the form below.' })
   ]) : null;
 
@@ -8525,8 +8554,8 @@ function updateStorageBar() {
     // folder used to be the only option visible outside Settings, which
     // made Google Drive easy to miss entirely.
     bar.appendChild(h('div', { class: 'row', style: 'gap:6px;width:100%' }, [
-      h('button', { class: 'btn sm', style: 'flex:1', onclick: () => connectFlow(), title: 'Save to a folder on this device', text: 'Folder' }),
-      h('button', { class: 'btn sm', style: 'flex:1', onclick: () => driveConnectFlow(), title: 'Sync to your Google Drive', text: 'Google Drive' })
+      h('button', { class: 'btn sm', style: 'flex:1', onclick: () => connectFlow(), text: 'Connect folder' }),
+      h('button', { class: 'btn sm', style: 'flex:1', onclick: () => driveConnectFlow(), text: 'Connect Drive' })
     ]));
   }
 }
@@ -8914,6 +8943,13 @@ async function chooseOneSideDialog(otherLabel, otherValue, otherCount, hereCount
 }
 
 async function connectFlow() {
+  // Reachable straight from the sidebar on any screen, including mid-exam —
+  // unlike navigating here through go(), which already stops for an active
+  // session, a direct call needs its own copy of that same check before a
+  // folder pick can go on to replace or merge the live question bank.
+  if (State.session && State.session.status === 'active') {
+    if (!State.runnerStop || !(await State.runnerStop())) return;
+  }
   if (FileStore.tier === 'manual') {
     await modal({
       title: 'Not available in this browser',
@@ -9108,6 +9144,12 @@ async function driveDisconnectFlow() {
     one-active-connection rule from this side, then hands off to
     DriveSync.connect() for the actual OAuth and file setup. */
 async function driveConnectFlow() {
+  // Same reasoning as connectFlow()'s copy of this check: reachable straight
+  // from the sidebar mid-exam now, not just from Settings (which already
+  // stops for an active session via go() on the way in).
+  if (State.session && State.session.status === 'active') {
+    if (!State.runnerStop || !(await State.runnerStop())) return;
+  }
   if (FileStore.connected) {
     const ok = await modal({
       title: 'Switch to Google Drive?',
@@ -9123,7 +9165,10 @@ async function driveConnectFlow() {
     updateStorageBar();
   }
   await DriveSync.connect();
-  await go('settings');
+  // Stay wherever this was called from — connectFlow() already does the
+  // same, and forcing Settings specifically only made sense back when this
+  // was reachable only from inside Settings itself.
+  await go(State.view || 'dashboard');
 }
 
 
