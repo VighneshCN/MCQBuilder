@@ -6204,7 +6204,7 @@ async function restoreFlow(file) {
     return;
   }
   if ((manifest.schemaVersion || 0) > APP.schema) {
-    await modal({ title: 'Newer schema', body: h('p', {}, 'That backup was made by a newer version of the app (schema ' + manifest.schemaVersion + ' against this build\'s ' + APP.schema + '). Update the app before restoring, or data could be lost.') });
+    await modal({ title: 'Made by a newer version of the app', body: h('p', {}, 'This backup was made by a newer version of MCQ Mastery than the one you have open. Update the app first, or restoring now may not bring everything back correctly.') });
     return;
   }
 
@@ -6228,12 +6228,12 @@ async function restoreFlow(file) {
   const mode = await modal({
     title: 'Restore preview', wide: true, sticky: true,
     body: h('div', { class: 'stack' }, [
-      h('div', { class: 'notice' }, 'Backup created ' + fmtDate(manifest.createdAt, true) + ' · schema ' + (manifest.schemaVersion || '?') + ' · scope ' + (manifest.scope || 'unknown')),
-      manifest._badChecksums && manifest._badChecksums.length ? h('div', { class: 'notice bad' }, 'Checksum mismatch in: ' + manifest._badChecksums.join(', ') + '. The file may be damaged or edited. Restoring is not recommended.') : h('div', { class: 'notice ok' }, 'Checksums verified.'),
+      h('div', { class: 'notice' }, 'Backup made ' + fmtDate(manifest.createdAt, true) + ' · covers ' + (manifest.scope === 'course' ? 'this course only' : 'everything')),
+      manifest._badChecksums && manifest._badChecksums.length ? h('div', { class: 'notice bad' }, 'Part of this backup looks damaged or edited (' + manifest._badChecksums.join(', ') + '). Restoring it is not recommended.') : h('div', { class: 'notice ok' }, 'This backup checks out — nothing looks damaged or edited.'),
       uuidClash || qidClash ? h('div', { class: 'notice warn' }, [
-        h('b', { text: 'Identifier collisions detected' }),
-        h('div', { class: 'small' }, uuidClash + ' record(s) share a UUID with what is already here — on merge these are treated as the same question and updated in place. ' +
-          qidClash + ' record(s) reuse a Question ID that belongs to a different question here — on merge these are given a fresh ID and the old one is kept as an alias, so no ID is ever reassigned.')
+        h('b', { text: 'Some records already exist here' }),
+        h('div', { class: 'small' }, uuidClash + ' question(s) in the backup are the same question as one already here — on merge, the backup’s version replaces what’s here for those. ' +
+          qidClash + ' question(s) reuse a Question ID that already belongs to a different question here — on merge, those get a new Question ID and the old one is kept as an alias, so no ID is ever reassigned.')
       ]) : null,
       h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, [h('th', { text: 'Store' }), h('th', { class: 'right', text: 'Here now' }), h('th', { class: 'right', text: 'In backup' })])), tb]))
     ]),
@@ -6250,8 +6250,12 @@ async function restoreFlow(file) {
       'Every question, attempt and session in this browser will be deleted and replaced by the backup. A verified safety backup of the current state is taken first, and the restore is abandoned if that backup cannot be made.', true, 'Replace');
     if (!ok) return;
     if (!await requireSafetyBackup('restore (replace) from ' + file.name)) { toast('Restore cancelled — nothing was changed', 'ok'); return; }
-    // Replacing the bank is a deliberate shrink; the file layer must allow it.
+    // Replacing the bank is a deliberate shrink; whichever backend is
+    // actually connected must allow it, or the very next write gets
+    // silently refused forever — a smaller, legitimate, just-confirmed
+    // restore would otherwise permanently stall syncing to Drive.
     FileStore.allowShrink('restore (replace)');
+    if (typeof DriveSync !== 'undefined') DriveSync.allowDriveShrink('restore (replace) from ' + file.name);
   } else if (mode === 'merge') {
     // Merge still overwrites any record that shares a UUID with the backup,
     // so it needs the same safety net replace gets — just no shrink-guard,
@@ -6260,12 +6264,33 @@ async function restoreFlow(file) {
   }
 
   const report = { added: 0, updated: 0, reIded: 0, skipped: 0, stores: {} };
+  const APPEND_ONLY_STORES = ['attempts', 'questionVersions', 'audit'];
   try {
     if (mode === 'replace') for (const s of BACKUP_STORES) await DB.clear(s);
     for (const s of BACKUP_STORES) {
       const rows = payload[s] || [];
       if (s === 'questions') continue;
       if (mode === 'merge' && s === 'settings') { report.stores[s] = 0; continue; }
+      if (mode === 'merge' && APPEND_ONLY_STORES.indexOf(s) >= 0) {
+        // A raw DB.putMany() here would write every incoming row back under
+        // its original auto-increment key — on merge, that key comes from
+        // a different IndexedDB entirely and can collide with an unrelated
+        // local row that happens to share the same number. Same class of
+        // bug the connect/switch merge engine was built to avoid; reuse it.
+        const r = mergeAppendOnlyRows(s, await DB.all(s), rows);
+        await DB.putMany(s, r.rows);
+        report.stores[s] = r.added;
+        continue;
+      }
+      if (mode === 'merge' && s === 'idRegister') {
+        // Never "whichever side's backup happened to have" for this one —
+        // overwriting it could roll the Question ID watermark backwards
+        // and let an id already used since the backup be issued again.
+        const r = mergeIdRegisterRows(await DB.all(s), rows);
+        await DB.putMany(s, r.rows);
+        report.stores[s] = r.rows.length;
+        continue;
+      }
       await DB.putMany(s, rows);
       report.stores[s] = rows.length;
     }
@@ -6379,21 +6404,21 @@ async function integrityChecks() {
 
   const seenQid = new Map(), dupQid = [];
   all.forEach(q => { if (!q.qid) return; if (seenQid.has(q.qid)) dupQid.push(q); else seenQid.set(q.qid, q); });
-  push('dupQid', 'Duplicate Question IDs', dupQid.map(q => q.qid + ' (' + q.uuid.slice(0, 8) + ')'), 'Two records share an ID. Re-issue one from the question detail screen.');
+  push('dupQid', 'Two questions share the same Question ID', dupQid.map(q => q.qid + ' (' + q.uuid.slice(0, 8) + ')'), 'Open one of them from Question detail and give it a new ID.');
   push('noAnswer', 'Missing correct answer', all.filter(q => !q.correctOptionId && q.status !== 'rejected' && q.status !== 'merged').map(q => q.qid || q.uuid.slice(0, 8)), 'Set the answer on the Needs Checking screen.');
-  push('badAnswer', 'Correct Option ID not present in the options', all.filter(q => q.correctOptionId && !q.options.some(o => o.id === q.correctOptionId)).map(q => q.qid), 'Reopen the question and select the correct option again.');
+  push('badAnswer', 'The marked correct answer no longer matches any option', all.filter(q => q.correctOptionId && !q.options.some(o => o.id === q.correctOptionId)).map(q => q.qid), 'Reopen the question and pick the correct option again.');
   push('fewOptions', 'Fewer than two options', all.filter(q => (q.options || []).length < 2 && q.status !== 'rejected').map(q => q.qid || q.uuid.slice(0, 8)), 'Complete the options or reject the record.');
-  push('activeUnverified', 'Active but not answer-verified', all.filter(q => q.status === 'active' && q.answerVerified !== 'verified').map(q => q.qid), 'These are already blocked from sessions; verify or move them to review.');
-  push('orphanSource', 'Source mapping points to a missing source', all.filter(q => q.sourceId && !srcIds.has(q.sourceId)).map(q => q.qid), 'Re-attach a source, or clear the reference.');
-  push('orphanAttempt', 'Attempts referring to a missing question', attempts.filter(a => !qUuids.has(a.questionUuid)).map(a => a.qid || a.questionUuid.slice(0, 8)), 'Harmless but untidy — usually left by a partial restore.');
-  push('brokenImage', 'Broken image reference', all.filter(q => q.imageId && !imgIds.has(q.imageId)).map(q => q.qid), 'The image is gone; clear the reference or re-add the image.');
+  push('activeUnverified', 'Marked Active but the answer isn’t verified', all.filter(q => q.status === 'active' && q.answerVerified !== 'verified').map(q => q.qid), 'These are already blocked from practice; verify the answer or move them to review.');
+  push('orphanSource', 'Linked to a source that no longer exists', all.filter(q => q.sourceId && !srcIds.has(q.sourceId)).map(q => q.qid), 'Re-link it to a source, or clear the link.');
+  push('orphanAttempt', 'Practice history for a question that no longer exists', attempts.filter(a => !qUuids.has(a.questionUuid)).map(a => a.qid || a.questionUuid.slice(0, 8)), 'Harmless but untidy — usually left by a partial restore.');
+  push('brokenImage', 'Linked to a photo that’s gone', all.filter(q => q.imageId && !imgIds.has(q.imageId)).map(q => q.qid), 'The photo is gone — clear the link, or add it again.');
   const uuidSeen = new Set(), dupUuid = [];
   all.forEach(q => { if (uuidSeen.has(q.uuid)) dupUuid.push(q.uuid); uuidSeen.add(q.uuid); });
-  push('dupUuid', 'Conflicting UUIDs', dupUuid, 'Should be impossible — report it if you see it.');
+  push('dupUuid', 'Two records share the same internal identity', dupUuid, 'This should not normally happen. The safest next step is restoring from a recent backup (Backup & Restore).');
   const validDomains = new Set();
   (await DB.all('courses')).forEach(c => (c.blueprint || []).forEach(d => validDomains.add(c.id + '|' + d.id)));
-  push('badDomain', 'Invalid domain classification', all.filter(q => q.domainId && !validDomains.has(q.courseId + '|' + q.domainId)).map(q => q.qid + ' → ' + q.domainId), 'The domain does not exist in that course blueprint. Reclassify.');
-  push('mergedNoCanon', 'Merged record with no canonical target', all.filter(q => q.status === 'merged' && !q.canonicalUuid).map(q => q.qid), 'Unmerge it from the question detail screen.');
+  push('badDomain', 'Filed under a domain that no longer exists in this course', all.filter(q => q.domainId && !validDomains.has(q.courseId + '|' + q.domainId)).map(q => q.qid + ' → ' + q.domainId), 'Reopen it and pick a domain that still exists in the blueprint.');
+  push('mergedNoCanon', 'Marked merged, but the record it merged into is gone', all.filter(q => q.status === 'merged' && !q.canonicalUuid).map(q => q.qid), 'Open it from Question detail and use Unmerge.');
   return issues;
 }
 
@@ -8382,7 +8407,20 @@ async function recoveryFlow(kind) {
     }
 
     if (kind === 'noaccess') {
-      await reconnectFlow();
+      // requestPermission() only succeeds when it runs synchronously from a
+      // real user gesture — this recovery flow is invoked automatically
+      // (setTimeout from onProblem()), so calling it straight away here was
+      // always going to be silently refused by the browser, surfacing as
+      // nothing more than a generic toast. The button below IS the gesture.
+      const choice = await modal({
+        title: 'Your browser needs permission again',
+        body: h('div', { class: 'stack' }, [
+          h('p', {}, 'Access to your data file was lost — often just from the tab being backgrounded for a while, or a browser restart. Nothing has been lost: this browser still holds your full bank, and the app has only stopped writing until permission is granted again.'),
+          h('p', { class: 'small muted' }, 'If you deleted or moved the file on purpose, disconnect instead from Settings → "Where your data lives".')
+        ]),
+        actions: [{ label: 'Stay read-only', value: false }, { label: 'Grant permission', value: true, kind: 'primary' }]
+      });
+      if (choice) await reconnectFlow();
     }
   } finally {
     FileStore._recovering = false;
@@ -8488,7 +8526,17 @@ function mergeAppendOnlyRows(store, localRows, remoteRows) {
   let added = 0;
   (remoteRows || []).forEach(r => {
     const k = appendOnlyContentKey(store, r);
-    if (!seen.has(k)) { seen.set(k, r); added++; }
+    if (!seen.has(k)) {
+      // These stores key by an auto-increment integer assigned
+      // independently by each IndexedDB — writing a genuinely-new remote
+      // row back with its original id could silently overwrite an
+      // unrelated local row that happens to share the same auto-assigned
+      // number, which is exactly the corruption this whole function
+      // exists to avoid. Strip it so IndexedDB hands out a fresh,
+      // guaranteed non-colliding one on write.
+      const clean = Object.assign({}, r); delete clean.id;
+      seen.set(k, clean); added++;
+    }
   });
   return { rows: Array.from(seen.values()), added };
 }
