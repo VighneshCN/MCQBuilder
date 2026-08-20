@@ -963,7 +963,14 @@ function blankQuestion(courseId) {
     difficulty: 'medium', qtype: 'single', tags: [],
     sourceId: null, sourceRefs: [], batchId: null, importedAt: null,
     originalNumber: '', externalId: '', locator: '',
+    // difficulty carries a usable default from the moment a question exists,
+    // so the value alone cannot say whether anyone has actually judged it.
+    // The flag is what separates "medium because a person said so" from
+    // "medium because nobody has looked" — and records written before this
+    // existed have no flag at all, which reads as unverified, so the whole
+    // existing bank becomes gradeable rather than only what is imported next.
     answerVerified: 'unverified', contentVerified: 'unverified', classVerified: 'unverified',
+    difficultyVerified: 'unverified',
     verifiedAt: null, verifyNote: '', conflict: false,
     dupOf: null, canonicalUuid: null, aliasQids: [], mergedFrom: [],
     conflictWith: [], dupWith: [], dismissedPairs: [],
@@ -2822,6 +2829,23 @@ const Session = {
     };
     s.responses[q.uuid] = rec;
     await this.save(s);
+    // A difficulty judged mid-session belongs to the question, not the
+    // attempt — written straight through so it is graded once and never
+    // asked again, in this session or any later one. Guarded on the flag
+    // rather than on the value, so a second answer to the same question
+    // (or a re-run of this) can never quietly overwrite an existing grade.
+    if (meta.difficulty && DIFFICULTY.indexOf(meta.difficulty) >= 0) {
+      const target = await Questions.get(q.uuid);
+      if (target && difficultyUngraded(target)) {
+        target.difficulty = meta.difficulty;
+        target.difficultyVerified = 'verified';
+        target.updatedAt = nowISO();
+        await DB.put('questions', target);
+        q.difficulty = meta.difficulty;
+        q.difficultyVerified = 'verified';
+        State.invalidate();
+      }
+    }
     if (!already && MODES[s.mode].reveal) await this.commit(s, q, rec);
     return rec;
   },
@@ -3596,12 +3620,12 @@ async function runSession(s) {
   async function choose(q, optId) {
     const ms = Date.now() - qStart;
     if (MODES[s.mode].confidence) {
-      const conf = await askConfidence(q, optId);
-      if (conf === null) return;
+      const ans = await askConfidence(q, optId);
+      if (ans === null) return;
       const correct = optId === q.correctOptionId;
       let mistake = null;
       if (!correct) mistake = await askMistake();
-      await Session.answer(s, q, optId, { ms, confidence: conf, mistake });
+      await Session.answer(s, q, optId, { ms, confidence: ans.confidence, mistake, difficulty: ans.difficulty });
       State.invalidate();
       const all2 = await State.questions();
       byId.clear(); all2.forEach(x => byId.set(x.uuid, x));
@@ -3665,13 +3689,45 @@ function learningPointBox(q) {
   return h('div', { class: 'field' }, [h('label', { text: 'My learning point' }), ta]);
 }
 
+/** Whether anyone has actually judged this question's difficulty, as opposed
+    to it still carrying the default every question is born with. */
+function difficultyUngraded(q) { return !q || q.difficultyVerified !== 'verified'; }
+
+/** Asks how the answer was arrived at, and — only while nobody has graded
+    this question's difficulty — how hard it was, in the same dialog.
+    Confidence is a fact about this attempt, so it is asked every time;
+    difficulty is a fact about the question, so it is asked once and then
+    never again. Two separate dialogs per answer would be real friction over
+    a 150-question mock, which is why this is one.
+    Resolves to null if dismissed, otherwise { confidence, difficulty },
+    where difficulty is null when it was not asked or not chosen. */
 function askConfidence(q, optId) {
-  void q; void optId;
+  void optId;
+  const ungraded = difficultyUngraded(q);
+  askConfidence._difficulty = null;
+  const body = h('div', { class: 'stack' }, [
+    h('p', { class: 'muted', style: 'margin:0', text: 'This is what separates knowing from getting lucky, so the mastery score can tell them apart.' })
+  ]);
+  if (ungraded) {
+    const seg = h('div', { class: 'seg' }, DIFFICULTY.map(d => h('button', {
+      class: 'chip', dataset: { d }, 'aria-pressed': 'false',
+      onclick: (e) => {
+        const on = e.currentTarget.getAttribute('aria-pressed') === 'true';
+        $$('.chip', e.currentTarget.parentNode).forEach(c => c.setAttribute('aria-pressed', 'false'));
+        e.currentTarget.setAttribute('aria-pressed', on ? 'false' : 'true');
+        askConfidence._difficulty = on ? null : d;
+      }, text: d
+    })));
+    body.appendChild(h('div', { class: 'field', style: 'margin-top:4px;padding-top:10px;border-top:1px dashed var(--rule)' }, [
+      h('label', { text: 'How hard was this question? (optional)' }),
+      seg,
+      h('div', { class: 'tiny dim', text: 'Saved on the question itself, so you are only asked once. It is what lets later sessions be built around a difficulty mix.' })
+    ]));
+  }
   return modal({
-    title: 'How did you arrive at that?', sticky: true,
-    body: h('p', { class: 'muted', text: 'This is what separates knowing from getting lucky, so the mastery score can tell them apart.' }),
+    title: 'How did you arrive at that?', sticky: true, body,
     actions: CONFIDENCE.map(c => ({ label: c.label, value: c.k, kind: c.k === 'knew' ? 'primary' : '' }))
-  });
+  }).then(v => v === null ? null : { confidence: v, difficulty: ungraded ? askConfidence._difficulty : null });
 }
 function askMistake() {
   return modal({
@@ -3806,7 +3862,7 @@ ROUTES.bank = async (root) => {
   line2.appendChild(mkSel('Source', 'source', [{ v: '', label: 'Any source' }].concat(sources.map(s => ({ v: s.id, label: s.title })))));
   line2.appendChild(mkSel('Import batch', 'batch', [{ v: '', label: 'Any batch' }].concat(batches.slice().reverse().map(b => ({ v: b.id, label: b.label || fmtDate(b.startedAt, true) })))));
   line2.appendChild(mkSel('Verification', 'verif', [{ v: '', label: 'Any' }, { v: 'verified', label: 'Answer verified' }, { v: 'unverified', label: 'Answer unverified' }, { v: 'doubtful', label: 'Answer doubtful' }]));
-  line2.appendChild(mkSel('Difficulty', 'diff', [{ v: '', label: 'Any' }].concat(DIFFICULTY.map(d => ({ v: d, label: d })))));
+  line2.appendChild(mkSel('Difficulty', 'diff', [{ v: '', label: 'Any' }, { v: 'ungraded', label: 'Ungraded — nobody has judged it' }].concat(DIFFICULTY.map(d => ({ v: d, label: d })))));
   fb.appendChild(line2);
   filters.appendChild(fb);
   root.appendChild(filters);
@@ -3827,7 +3883,11 @@ ROUTES.bank = async (root) => {
       if (BankState.source && q.sourceId !== BankState.source) return false;
       if (BankState.batch && q.batchId !== BankState.batch) return false;
       if (BankState.verif && q.answerVerified !== BankState.verif) return false;
-      if (BankState.diff && q.difficulty !== BankState.diff) return false;
+      // "ungraded" filters on the flag, not the value — every question
+      // carries a difficulty from birth, so the value alone cannot say
+      // whether a person ever judged it.
+      if (BankState.diff === 'ungraded') { if (!difficultyUngraded(q)) return false; }
+      else if (BankState.diff && (q.difficulty !== BankState.diff || difficultyUngraded(q))) return false;
       const L = BankState.learn;
       if (L === 'never' && q.stats.attempts) return false;
       if (L === 'attempted' && !q.stats.attempts) return false;
@@ -4021,7 +4081,8 @@ ROUTES.bank = async (root) => {
       if (dom.value) { q.domainId = dom.value; q.classVerified = 'verified'; }
       if (topic.value.trim()) q.topic = topic.value.trim();
       if (mod.value.trim()) q.srcModule = mod.value.trim();
-      if (diff.value) q.difficulty = diff.value;
+      // Setting difficulty in bulk is a person judging it, same as anywhere else.
+      if (diff.value) { q.difficulty = diff.value; q.difficultyVerified = 'verified'; }
       if (q.status === 'needs_class' && q.domainId) q.status = q.answerVerified === 'verified' ? 'active' : 'needs_answer';
       q.updatedAt = nowISO();
       await DB.put('questions', q);
@@ -4074,15 +4135,19 @@ async function openQuestion(uuidStr) {
   body.appendChild(tabs);
   body.appendChild(pane);
 
-  const edit = { stem: q.stem, options: q.options.map(o => ({ id: o.id, text: o.text })), correctOptionId: q.correctOptionId, explanation: q.explanation, learningPoint: q.learningPoint, domainId: q.domainId, topic: q.topic, subtopic: q.subtopic, srcModule: q.srcModule, srcChapter: q.srcChapter, srcSection: q.srcSection, difficulty: q.difficulty, tags: (q.tags || []).join(', '), lockOptionOrder: q.lockOptionOrder, status: q.status, answerVerified: q.answerVerified };
+  const edit = { stem: q.stem, options: q.options.map(o => ({ id: o.id, text: o.text })), correctOptionId: q.correctOptionId, explanation: q.explanation, learningPoint: q.learningPoint, domainId: q.domainId, topic: q.topic, subtopic: q.subtopic, srcModule: q.srcModule, srcChapter: q.srcChapter, srcSection: q.srcSection, difficulty: difficultyUngraded(q) ? 'ungraded' : q.difficulty, tags: (q.tags || []).join(', '), lockOptionOrder: q.lockOptionOrder, status: q.status, answerVerified: q.answerVerified };
 
   /** `sticky` on the modal below stops a backdrop click from discarding an
       edit in progress, but Escape and the ✕ button both bypass that — the
       most habitual way anyone closes a dialog. Checked wherever the dialog
       is about to close with nothing saved. */
   function hasUnsavedChanges() {
-    const simple = ['stem', 'correctOptionId', 'explanation', 'learningPoint', 'domainId', 'topic', 'subtopic', 'srcModule', 'srcChapter', 'srcSection', 'difficulty', 'lockOptionOrder', 'status', 'answerVerified'];
+    const simple = ['stem', 'correctOptionId', 'explanation', 'learningPoint', 'domainId', 'topic', 'subtopic', 'srcModule', 'srcChapter', 'srcSection', 'lockOptionOrder', 'status', 'answerVerified'];
     if (simple.some(k => edit[k] !== q[k])) return true;
+    // difficulty is compared against how it was PRESENTED, not against the
+    // stored value: an ungraded question shows "ungraded" while still
+    // storing a default, and that is not an edit anyone made.
+    if (edit.difficulty !== (difficultyUngraded(q) ? 'ungraded' : q.difficulty)) return true;
     if (edit.tags !== (q.tags || []).join(', ')) return true;
     if (edit.options.length !== q.options.length) return true;
     return edit.options.some((o, i) => o.text !== ((q.options[i] || {}).text || ''));
@@ -4120,7 +4185,14 @@ async function openQuestion(uuidStr) {
       g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Official domain' }), dom]));
       g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Topic' }), h('input', { type: 'text', value: edit.topic, oninput: e => edit.topic = e.target.value })]));
       g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Subtopic' }), h('input', { type: 'text', value: edit.subtopic, oninput: e => edit.subtopic = e.target.value })]));
-      g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Difficulty' }), h('select', { onchange: e => edit.difficulty = e.target.value }, DIFFICULTY.map(d => h('option', { value: d, selected: edit.difficulty === d }, d)))]));
+      // Picking a difficulty here is a person judging it, so it counts as
+      // graded — the same act the in-practice prompt performs. "Ungraded"
+      // stays selectable so a wrong call can be handed back to that prompt.
+      g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Difficulty' }),
+        h('select', { onchange: e => edit.difficulty = e.target.value },
+          [h('option', { value: 'ungraded', selected: edit.difficulty === 'ungraded' }, 'Ungraded — ask me during practice')]
+            .concat(DIFFICULTY.map(d => h('option', { value: d, selected: edit.difficulty === d }, d)))),
+        h('div', { class: 'tiny dim', text: difficultyUngraded(q) ? 'Nobody has judged this one yet.' : '' })]));
       g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Source module' }), h('input', { type: 'text', value: edit.srcModule, oninput: e => edit.srcModule = e.target.value })]));
       g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Source chapter' }), h('input', { type: 'text', value: edit.srcChapter, oninput: e => edit.srcChapter = e.target.value })]));
       g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Source section' }), h('input', { type: 'text', value: edit.srcSection, oninput: e => edit.srcSection = e.target.value })]));
@@ -4263,7 +4335,11 @@ async function openQuestion(uuidStr) {
     fresh.explanation = edit.explanation; fresh.learningPoint = edit.learningPoint;
     fresh.domainId = edit.domainId; fresh.topic = edit.topic.trim(); fresh.subtopic = edit.subtopic.trim();
     fresh.srcModule = edit.srcModule.trim(); fresh.srcChapter = edit.srcChapter.trim(); fresh.srcSection = edit.srcSection.trim();
-    fresh.difficulty = edit.difficulty; fresh.tags = edit.tags.split(',').map(s => s.trim()).filter(Boolean);
+    // Choosing a real difficulty here grades it; choosing "ungraded" hands it
+    // back to the in-practice prompt without disturbing the stored value.
+    if (edit.difficulty === 'ungraded') fresh.difficultyVerified = 'unverified';
+    else { fresh.difficulty = edit.difficulty; fresh.difficultyVerified = 'verified'; }
+    fresh.tags = edit.tags.split(',').map(s => s.trim()).filter(Boolean);
     fresh.lockOptionOrder = edit.lockOptionOrder;
     fresh.answerVerified = edit.answerVerified;
     if (edit.answerVerified === 'verified' && !fresh.verifiedAt) fresh.verifiedAt = nowISO();
@@ -10071,6 +10147,73 @@ test('"Not the same question" clears a conflict on both sides without touching e
     eq(after.newConflicts.length, 0, 'a rescan must not re-raise a dismissed pair');
   } finally {
     await DB.del('questions', a.uuid); await DB.del('questions', b.uuid);
+  }
+});
+
+/* ---- difficulty grading ---- */
+test('Every question starts ungraded, however sensible its default difficulty', () => {
+  const q = mkQ('x', ['a', 'b', 'c', 'd'], 0);
+  eq(q.difficulty, 'medium', 'a usable default is still carried');
+  assert(difficultyUngraded(q), 'but nobody has judged it, so it counts as ungraded');
+  // Records written before this flag existed have no flag at all.
+  const legacy = mkQ('y', ['a', 'b', 'c', 'd'], 0);
+  delete legacy.difficultyVerified;
+  assert(difficultyUngraded(legacy), 'an older record with no flag must read as ungraded, not as graded');
+});
+test('Grading during practice writes to the question and is never asked again', async () => {
+  const cid = 'test-diff-' + Date.now();
+  const q = mkQ('Which is a detective control?', ['Firewall', 'Log review', 'Encryption', 'Training'], 1,
+    { courseId: cid, status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  await recomputeFingerprint(q);
+  await DB.put('questions', q);
+  const s = { id: 'sess-' + Date.now(), courseId: cid, mode: 'learning', responses: {}, flags: {}, optionOrders: {}, questionUuids: [q.uuid], status: 'active' };
+  await DB.put('sessions', s);
+  try {
+    assert(difficultyUngraded(await DB.get('questions', q.uuid)), 'starts ungraded');
+    await Session.answer(s, q, q.options[1].id, { ms: 1000, confidence: 'knew', difficulty: 'hard' });
+    const graded = await DB.get('questions', q.uuid);
+    eq(graded.difficulty, 'hard', 'the grade reaches the question bank');
+    eq(graded.difficultyVerified, 'verified');
+    assert(!difficultyUngraded(graded), 'so it is no longer ungraded, and will not be asked again');
+
+    // A later answer must not be able to overwrite a grade already given.
+    await Session.answer(s, graded, graded.options[1].id, { ms: 900, confidence: 'knew', difficulty: 'easy' });
+    eq((await DB.get('questions', q.uuid)).difficulty, 'hard', 'an already-graded question keeps its grade');
+  } finally {
+    await DB.del('questions', q.uuid); await DB.del('sessions', s.id);
+  }
+});
+test('Answering without grading leaves the question ungraded and unchanged', async () => {
+  const cid = 'test-diff-' + Date.now();
+  const q = mkQ('x', ['a', 'b', 'c', 'd'], 0, { courseId: cid, status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  await recomputeFingerprint(q);
+  await DB.put('questions', q);
+  const s = { id: 'sess-' + Date.now(), courseId: cid, mode: 'learning', responses: {}, flags: {}, optionOrders: {}, questionUuids: [q.uuid], status: 'active' };
+  await DB.put('sessions', s);
+  try {
+    // Skipping the optional difficulty half of the dialog passes null.
+    await Session.answer(s, q, q.options[0].id, { ms: 800, confidence: 'reasoned', difficulty: null });
+    const after = await DB.get('questions', q.uuid);
+    eq(after.difficulty, 'medium', 'the default is untouched');
+    assert(difficultyUngraded(after), 'and it stays ungraded, so it can be asked again later');
+  } finally {
+    await DB.del('questions', q.uuid); await DB.del('sessions', s.id);
+  }
+});
+test('A rubbish difficulty value is refused rather than stored', async () => {
+  const cid = 'test-diff-' + Date.now();
+  const q = mkQ('x', ['a', 'b', 'c', 'd'], 0, { courseId: cid, status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  await recomputeFingerprint(q);
+  await DB.put('questions', q);
+  const s = { id: 'sess-' + Date.now(), courseId: cid, mode: 'learning', responses: {}, flags: {}, optionOrders: {}, questionUuids: [q.uuid], status: 'active' };
+  await DB.put('sessions', s);
+  try {
+    await Session.answer(s, q, q.options[0].id, { ms: 800, confidence: 'knew', difficulty: 'impossible' });
+    const after = await DB.get('questions', q.uuid);
+    eq(after.difficulty, 'medium', 'an unknown value must not reach the record');
+    assert(difficultyUngraded(after), 'and must not count as having graded it');
+  } finally {
+    await DB.del('questions', q.uuid); await DB.del('sessions', s.id);
   }
 });
 
