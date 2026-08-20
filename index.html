@@ -2734,7 +2734,26 @@ function renderShell() {
     h('div', { class: 'brand-sub', text: 'Controlled question bank' })
   ]));
 
-  const sel = h('select', { id: 'courseSel', title: State.course ? (State.course.code + ' — ' + State.course.name) : '', onchange: async (e) => { await State.setCourse(e.target.value); go(State.view); } },
+  const sel = h('select', {
+    id: 'courseSel', title: State.course ? (State.course.code + ' — ' + State.course.name) : '',
+    onchange: async (e) => {
+      const target = e.target, newId = target.value, prevId = State.course.id;
+      // The course selector reuses the current view as go()'s destination
+      // when mid-session (State.view is 'runner'), which used to make
+      // go()'s own leave-guard a no-op (its condition explicitly excludes
+      // view === 'runner') — silently switching courses out from under an
+      // active exam with the old session's timer left ticking in the
+      // background. Route through the same guard explicitly instead of
+      // relying on go() to catch it.
+      if (State.session && State.session.status === 'active') {
+        if (!State.runnerStop || !(await State.runnerStop())) { target.value = prevId; return; }
+        await State.setCourse(newId);
+        go('practice');
+        return;
+      }
+      await State.setCourse(newId); go(State.view);
+    }
+  },
     State.courses.filter(c => !c.archived).map(c => h('option', { value: c.id, selected: State.course && c.id === State.course.id, text: c.code + ' — ' + c.name })));
   rail.appendChild(h('div', { class: 'course-pick' }, [h('label', { for: 'courseSel', text: 'Course' }), sel]));
 
@@ -2839,15 +2858,17 @@ function kbdRow(keys, what) {
 const ROUTES = {};
 async function go(view, arg) {
   if (State.session && State.session.status === 'active' && view !== 'runner') {
-    if (State.session.mode === 'mock' && Settings.get('confirmLeaveMock')) {
-      const ok = await confirmBox('Leave the mock exam?', 'The exam is still running and the timer keeps going. Your answers are already saved — you can resume from the Practice screen.');
-      if (!ok) return;
+    // Route through the exact same confirm-and-clean-up the runner's own
+    // Exit/Pause button uses (State.runnerStop is runSession()'s
+    // leaveGuarded), rather than a second, differently-worded confirm here
+    // that used to skip the real-time gap stamp, the save, and clearing
+    // State.session — which made this same guard re-fire on every later
+    // nav click forever, and let a non-pausable mock's timer effectively
+    // freeze for free while "away".
+    if (State.runnerStop) {
+      const left = await State.runnerStop();
+      if (!left) return;
     }
-    // Navigating away from a live runner without going through its own Exit
-    // button (leave()) must still stop its timer and keyboard listener —
-    // otherwise the abandoned session keeps ticking and autosaving in the
-    // background, racing a second one if this session is later resumed.
-    if (State.runnerStop) State.runnerStop();
   }
   State.view = view;
   $$('.nav-item').forEach(b => b.setAttribute('aria-current', b.dataset.view === view ? 'page' : 'false'));
@@ -3052,6 +3073,9 @@ ROUTES.practice = async (root, preselect) => {
     return;
   }
 
+  if (resumable) {
+    root.appendChild(h('p', { class: 'small muted', style: 'margin:0 0 12px' }, 'Resume or discard the unfinished session above before starting a new one — otherwise it would be silently left behind and hard to find again.'));
+  }
   const grid = h('div', { class: 'grid g3 stretch' });
   Object.keys(MODES).forEach(m => {
     const info = MODES[m];
@@ -3059,7 +3083,9 @@ ROUTES.practice = async (root, preselect) => {
     if (m === 'spaced') count = due.length;
     if (m === 'redo') count = applyFilters(pool, { incorrect: true }).length + applyFilters(pool, { guessed: true }).length;
     grid.appendChild(h('button', {
-      class: 'card clickable', style: 'text-align:left;border:1px solid var(--rule);padding:0',
+      class: 'card clickable', style: 'text-align:left;border:1px solid var(--rule);padding:0' + (resumable ? ';opacity:.5' : ''),
+      disabled: !!resumable,
+      title: resumable ? 'Resume or discard your unfinished session first' : '',
       onclick: () => configureMode(m)
     }, [
       h('div', { class: 'card-b' }, [
@@ -3211,7 +3237,28 @@ async function runSession(s) {
   if (isMock) { tickTimer = setInterval(tick, 1000); }
 
   const stop = () => { if (tickTimer) clearInterval(tickTimer); document.removeEventListener('keydown', onKey); State.runnerStop = null; };
-  State.runnerStop = stop;
+  // Confirm-and-clean-up, shared by the runner's own Exit/Pause button and
+  // by go()'s nav-rail guard below — so leaving via either path behaves
+  // identically: same confirm wording, same real-time gap stamped for a
+  // non-pausable mock, same save, and critically the same State.session =
+  // null, without which every later nav click would re-show this same
+  // confirm forever and a resumed mock's elapsed time would silently stop
+  // advancing while "away" instead of accounting for the real gap.
+  // Returns true once actually left, false if the student declined.
+  const leaveGuarded = async () => {
+    if (isMock && Settings.get('confirmLeaveMock')) {
+      const ok = await confirmBox('Pause the exam?', Settings.get('mockAllowPause')
+        ? 'The timer stops and you can resume from the Practice screen.'
+        : 'Pausing is disabled in Settings, so the timer keeps running. Your answers are saved either way.');
+      if (!ok) return false;
+    }
+    if (isMock && !Settings.get('mockAllowPause')) s.leftAt = Date.now();
+    stop();
+    await Session.save(s);
+    State.session = null;
+    return true;
+  };
+  State.runnerStop = leaveGuarded;
 
   function render() {
     target.textContent = '';
@@ -3231,7 +3278,18 @@ async function runSession(s) {
       isMock ? h('span', { class: 'timer', id: 'mockTimer', text: clock(s.timeLimitMs - (s.elapsedMs || 0)) }) : null,
       h('button', {
         class: 'btn sm', 'aria-pressed': String(!!s.flags[q.uuid]),
-        onclick: async () => { s.flags[q.uuid] = !s.flags[q.uuid]; await Session.save(s); render(); },
+        onclick: async () => {
+          // Persisted to the question record itself, not just this
+          // session's own flag map — otherwise flagging a question after
+          // already answering it (an ordinary "that one was tricky" order)
+          // would quietly vanish the moment this session is discarded,
+          // even though the Discard dialog reassures the student that
+          // "anything already answered is already recorded".
+          s.flags[q.uuid] = !s.flags[q.uuid]; q.flagged = !!s.flags[q.uuid];
+          await Promise.all([Session.save(s), DB.put('questions', q)]);
+          State.invalidate();
+          render();
+        },
         text: s.flags[q.uuid] ? '⚑ Flagged' : '⚐ Flag'
       }),
       h('button', { class: 'btn sm ghost', onclick: () => leave(), text: isMock ? (Settings.get('mockAllowPause') ? 'Pause' : 'Leave') : 'Exit' })
@@ -3333,18 +3391,7 @@ async function runSession(s) {
     s.cursor = idx; Session.save(s); render();
   }
   async function leave() {
-    if (isMock && Settings.get('confirmLeaveMock')) {
-      const ok = await confirmBox('Pause the exam?', Settings.get('mockAllowPause')
-        ? 'The timer stops and you can resume from the Practice screen.'
-        : 'Pausing is disabled in Settings, so the timer keeps running. Your answers are saved either way.');
-      if (!ok) return;
-    }
-    // With pausing disabled, "the timer keeps running" has to mean real
-    // wall-clock time, not just resumed session-open time — stamp when we
-    // left so runSession() can charge the real gap against elapsedMs on
-    // return, the same way a real exam clock would not have waited either.
-    if (isMock && !Settings.get('mockAllowPause')) s.leftAt = Date.now();
-    stop(); await Session.save(s); State.session = null; go('practice');
+    if (await leaveGuarded()) go('practice');
   }
   async function confirmSubmit() {
     const unanswered = s.questionUuids.filter(u => !s.responses[u]).length;
@@ -3369,7 +3416,7 @@ async function runSession(s) {
       if (!s.responses[q.uuid] || !MODES[s.mode].reveal) { e.preventDefault(); choose(q, order[li >= 0 ? li : ni]); }
       return;
     }
-    if (k === 'F') { e.preventDefault(); s.flags[q.uuid] = !s.flags[q.uuid]; Session.save(s).then(render); }
+    if (k === 'F') { e.preventDefault(); s.flags[q.uuid] = !s.flags[q.uuid]; q.flagged = !!s.flags[q.uuid]; Promise.all([Session.save(s), DB.put('questions', q)]).then(() => { State.invalidate(); render(); }); }
     else if (e.key === 'ArrowRight' || k === 'N' || e.key === 'Enter') { e.preventDefault(); if (idx < s.questionUuids.length - 1) move(1); }
     else if (e.key === 'ArrowLeft' || k === 'P') { e.preventDefault(); move(-1); }
     else if (e.key === '?') { e.preventDefault(); showShortcuts(); }
