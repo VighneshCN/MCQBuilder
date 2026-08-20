@@ -442,6 +442,76 @@ progress::-webkit-progress-bar{background:var(--surface-3);border-radius:3px}
 progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
 @media(prefers-reduced-motion:reduce){*{animation:none !important;transition:none !important}}
 @media print{.rail,.control-band,.btn,.toasts{display:none !important}.app{display:block}.view{padding:0;max-width:none}}
+
+/* --- exam centre simulation (timed mock only) -------------------------- */
+.sim{position:fixed;inset:0;z-index:80;background:var(--paper);display:flex;flex-direction:column;overflow:auto}
+.sim-bar{
+  display:flex;align-items:center;gap:12px;padding:10px 18px;
+  border-bottom:1px solid var(--rule);background:var(--surface);flex:none
+}
+.sim-eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--txt-3)}
+.sim-stage{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:28px 20px;gap:18px;text-align:center}
+.sim-scene{max-width:640px;width:100%;display:flex;flex-direction:column;align-items:center;gap:16px;animation:simIn .5s cubic-bezier(.2,.7,.3,1) both}
+@keyframes simIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.sim-cap{font-size:15.5px;line-height:1.55;color:var(--txt);max-width:520px}
+.sim-sub{font-size:13px;color:var(--txt-2);max-width:520px}
+/* The announcement strip — the invigilator's voice. Deliberately the only
+   element that ever speaks in the second person. */
+.sim-say{
+  font-family:var(--display);font-size:17px;line-height:1.5;color:var(--txt);
+  border-left:3px solid var(--blue);padding:8px 0 8px 14px;text-align:left;max-width:520px;align-self:center
+}
+.sim-svg{width:100%;max-width:520px;height:auto;display:block}
+#simDolly{transform-origin:50% 60%;animation:simDolly 5s cubic-bezier(.33,0,.2,1) both}
+@keyframes simDolly{from{transform:scale(1)}to{transform:scale(1.045)}}
+
+/* Hall ticket: real DOM, so it stays selectable and screen-readable, and can
+   be re-rendered on the results page exactly as it was issued. */
+.ticket{
+  position:relative;background:var(--surface);border:1px solid var(--rule);border-radius:var(--r-lg);
+  padding:18px 20px;text-align:left;width:100%;max-width:460px;overflow:hidden;
+  box-shadow:0 10px 30px -18px rgba(0,0,0,.5)
+}
+.ticket::before{
+  content:'';position:absolute;left:0;top:0;bottom:0;width:9px;
+  background:repeating-linear-gradient(var(--paper) 0 5px,transparent 5px 11px)
+}
+.ticket-wm{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  font-family:var(--display);font-size:58px;font-weight:700;letter-spacing:.06em;
+  color:var(--txt);opacity:.07;transform:rotate(-24deg);pointer-events:none;user-select:none
+}
+.ticket h4{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--txt-2);margin:0 0 2px}
+.ticket .tk-centre{font-size:12px;color:var(--txt-3);margin-bottom:12px}
+.tk-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px 16px}
+.tk-k{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--txt-3);display:block}
+.tk-v{font-family:var(--mono);font-size:13px;color:var(--txt);word-break:break-word}
+.tk-foot{margin-top:14px;padding-top:10px;border-top:1px dashed var(--rule);font-size:10.5px;line-height:1.45;color:var(--txt-3)}
+.tk-print{animation:tkPrint 1.6s steps(12) both}
+@keyframes tkPrint{from{max-height:0;opacity:.4}to{max-height:600px;opacity:1}}
+.tk-stamp{
+  position:absolute;right:14px;bottom:44px;width:96px;height:96px;border-radius:50%;
+  border:2.5px solid var(--pencil);color:var(--pencil);opacity:.82;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
+  transform:rotate(-12deg);font-family:var(--mono);text-align:center;pointer-events:none
+}
+.tk-stamp b{font-size:12.5px;letter-spacing:.08em}
+.tk-stamp span{font-size:8px;letter-spacing:.1em}
+.tk-stamp.hit{animation:stampHit .34s cubic-bezier(.2,1.5,.4,1) both}
+@keyframes stampHit{from{transform:rotate(-12deg) scale(1.7);opacity:0}60%{opacity:.95}to{transform:rotate(-12deg) scale(1);opacity:.82}}
+
+/* In-exam invigilator notice — slides in from the top edge, never blocks. */
+.sim-notice{
+  position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:70;
+  background:var(--surface);border:1px solid var(--pencil);border-left-width:4px;
+  border-radius:var(--r);padding:9px 15px;font-size:13.5px;color:var(--txt);
+  box-shadow:0 12px 28px -14px rgba(0,0,0,.45);max-width:min(560px,92vw);
+  animation:simNotice .4s ease both
+}
+@keyframes simNotice{from{opacity:0;transform:translate(-50%,-14px)}to{opacity:1;transform:translate(-50%,0)}}
+.timer.urgent{color:var(--pencil)}
+.timer.critical{color:var(--rose);animation:timerPulse 1.1s ease-in-out infinite}
+@keyframes timerPulse{0%,100%{opacity:1}50%{opacity:.55}}
 </style>
 </head>
 <body>
@@ -714,6 +784,11 @@ const Settings = {
     mockCount: 150,
     mockMinutes: 240,
     mockAllowPause: false,
+    // The exam-centre ceremony before a timed mock. On by default because it
+    // is the point of sitting a mock rather than a practice set; always
+    // skippable from its first frame, and switchable off here entirely.
+    mockSimulation: true,
+    candidateName: '',
     srIntervals: { wrong: 1, guessed: 1, lowConf: 3, medConf: 7, highConf: 14, unknown: 3, ladder: [14, 30, 60, 90] },
     weakMinSample: 5,
     // Default share of a composed paper drawn from questions already
@@ -3937,6 +4012,320 @@ async function configureMode(mode) {
   }
 }
 
+/* ---------- exam centre simulation ----------
+   Shown only for a timed mock, and only when it is switched on. Everything
+   here is theatre in service of one thing: a candidate who has practised
+   under pressure is not surprised by it on the day.
+
+   Three rules it is built to:
+   · It never impersonates a real body. There is no ISACA, Prometric or
+     Pearson VUE branding, no real-looking credential, and every ticket is
+     watermarked SIMULATION and says on its face that it admits you nowhere.
+   · It is always skippable, from the first frame, never as a reward for
+     sitting through it. Someone on their thirtieth mock should be able to
+     reach their seat in one keystroke, or turn it off entirely in Settings.
+   · It never blocks resuming. A session interrupted mid-exam records that
+     the candidate is already seated and returns them straight to the paper.
+*/
+
+const SIM_HALLS = ['A', 'B', 'C', 'D'];
+const SIM_ROWS = ['A', 'B', 'C', 'D', 'E', 'F'];
+
+/** Every identifier on the ticket is derived from the session seed, so the
+    same seed always reproduces the same ticket — a paper you re-run is the
+    same paper, down to the seat you sat in. */
+function examIdentity(session, course) {
+  const rng = mulberry32((session.seed ^ 0x5f3a7c1d) >>> 0);
+  const pick = (arr) => arr[Math.floor(rng() * arr.length) % arr.length];
+  const roll = Math.floor(rng() * 9000) + 1000;
+  const centre = Math.floor(rng() * 40) + 1;
+  return {
+    name: (Settings.get('candidateName') || '').trim() || 'Candidate',
+    roll: 'SIM/' + (course.code || 'EXAM') + '/' + String(new Date(session.startedAt).getFullYear()).slice(2) + '/' + roll,
+    centre: 'Centre ' + String(centre).padStart(2, '0'),
+    hall: pick(SIM_HALLS),
+    row: pick(SIM_ROWS),
+    seat: Math.floor(rng() * 24) + 1,
+    barcode: Array.from({ length: 38 }, () => 1 + Math.floor(rng() * 3))
+  };
+}
+
+function hallTicket(session, course, ident, opts) {
+  opts = opts || {};
+  const mins = Math.round((session.timeLimitMs || 0) / 60000);
+  const dur = Math.floor(mins / 60) + ' h ' + String(mins % 60).padStart(2, '0') + ' m';
+  const field = (k, v) => h('div', {}, [h('span', { class: 'tk-k', text: k }), h('span', { class: 'tk-v', text: v })]);
+  const bars = h('div', { class: 'row', style: 'gap:1px;align-items:flex-end;height:30px;margin-top:14px' },
+    ident.barcode.map(w => h('span', { style: 'display:block;width:' + w + 'px;height:100%;background:var(--txt)' })));
+  return h('div', { class: 'ticket' + (opts.printing ? ' tk-print' : '') }, [
+    h('div', { class: 'ticket-wm', text: 'SIMULATION' }),
+    h('h4', { text: 'Hall ticket · practice simulation' }),
+    h('div', { class: 'tk-centre', text: 'MCQ Mastery Simulated Examination Centre · ' + ident.centre }),
+    h('div', { class: 'tk-grid' }, [
+      field('Candidate', ident.name),
+      field('Roll no.', ident.roll),
+      field('Paper', course.code + ' practice paper'),
+      field('Questions', String(session.questionUuids.length)),
+      field('Duration', dur),
+      field('Hall', ident.hall),
+      field('Row', ident.row),
+      field('Seat', String(ident.seat)),
+      field('Issued', fmtDate(session.startedAt, true))
+    ]),
+    bars,
+    h('div', { class: 'tk-v', style: 'font-size:11px;margin-top:3px', text: 'SIM-' + ident.roll.split('/').pop() + '-' + ident.hall + ident.seat }),
+    opts.stamped ? h('div', { class: 'tk-stamp' + (opts.stampAnimate ? ' hit' : '') }, [
+      h('b', { text: 'VERIFIED' }), h('span', { text: ident.centre.toUpperCase() }), h('span', { text: 'SIMULATION' })
+    ]) : null,
+    h('div', { class: 'tk-foot', text: 'Not an admission document. Not issued by, affiliated with, or endorsed by any certification body or examination authority. Generated by MCQ Mastery for private practice only.' })
+  ]);
+}
+
+/** The exterior of the centre. Line art only — no faces, no logos, nothing
+    that could read as a real place. */
+function simCentreSvg() {
+  const win = [];
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 6; c++) {
+    const lit = (r * 6 + c) % 7 === 0;
+    win.push('<rect x="' + (78 + c * 44) + '" y="' + (74 + r * 46) + '" width="26" height="34" rx="2" fill="var(--blue-tint)" opacity="' + (lit ? '.75' : '.35') + '"/>');
+  }
+  const cols = [0, 1, 2, 3].map(i => '<rect x="' + (120 + i * 60) + '" y="216" width="14" height="46" fill="var(--surface-3)" stroke="var(--rule)"/>').join('');
+  return h('div', {
+    class: 'sim-svg', html:
+      '<svg viewBox="0 0 460 300" role="img" aria-label="A simulated examination centre building at dawn" style="width:100%;height:auto">' +
+      '<defs><linearGradient id="simsky" x1="0" y1="0" x2="0" y2="1">' +
+      '<stop offset="0%" stop-color="var(--surface-2)"/><stop offset="100%" stop-color="var(--paper)"/></linearGradient></defs>' +
+      '<rect width="460" height="300" fill="url(#simsky)"/>' +
+      '<g id="simDolly">' +
+      '<rect x="60" y="52" width="300" height="212" rx="4" fill="var(--surface-2)" stroke="var(--rule)" stroke-width="1.25"/>' +
+      win.join('') + cols +
+      '<rect x="104" y="208" width="212" height="10" fill="var(--surface-3)" stroke="var(--rule)"/>' +
+      '<rect x="176" y="236" width="68" height="28" fill="var(--surface-3)" stroke="var(--rule)"/>' +
+      '<circle cx="392" cy="214" r="24" fill="var(--green)" opacity=".26"/>' +
+      '<circle cx="410" cy="228" r="18" fill="var(--green)" opacity=".22"/>' +
+      '<rect x="398" y="240" width="5" height="24" fill="var(--txt-3)" opacity=".5"/>' +
+      '<rect x="30" y="248" width="400" height="16" fill="var(--surface-3)" opacity=".7"/>' +
+      '</g></svg>'
+  });
+}
+
+/** A queue of people, drawn so it can never read as a caricature of anyone:
+    no faces, no limbs, no skin tone — just receding coat shapes. */
+function simQueueSvg() {
+  const figs = [1, 0.86, 0.74, 0.64, 0.56].map((s, i) => {
+    const x = 250 - i * 42, y = 190 - (1 - s) * 30;
+    return '<g opacity="' + (0.75 - i * 0.12) + '" transform="translate(' + x + ',' + y + ') scale(' + s + ')">' +
+      '<path d="M0 0 q0 -34 24 -34 q24 0 24 34 z" fill="var(--txt-3)"/>' +
+      '<circle cx="24" cy="-44" r="13" fill="var(--txt-3)"/></g>';
+  }).join('');
+  return h('div', {
+    class: 'sim-svg', html:
+      '<svg viewBox="0 0 460 230" role="img" aria-label="A queue of candidates waiting at the hall door" style="width:100%;height:auto">' +
+      '<rect width="460" height="230" fill="none"/>' +
+      '<rect x="300" y="34" width="112" height="158" fill="var(--surface-3)" stroke="var(--rule)" stroke-width="1.25"/>' +
+      '<rect x="316" y="52" width="80" height="122" fill="var(--surface)" stroke="var(--rule)"/>' +
+      '<text x="356" y="26" text-anchor="middle" font-family="var(--mono)" font-size="12" fill="var(--txt-3)">HALL</text>' +
+      figs +
+      '<rect x="20" y="190" width="420" height="2" fill="var(--rule)"/>' +
+      '</svg>'
+  });
+}
+
+/**
+ * Walk the candidate from the gate to their seat. Resolves when the paper
+ * should begin. Records what happened on the session, so a resume returns
+ * straight to the desk rather than replaying the ceremony.
+ */
+async function examDayFlow(session, course) {
+  const ident = examIdentity(session, course);
+  const layer = h('div', { class: 'sim', role: 'dialog', 'aria-label': 'Examination centre simulation' });
+  const stage = h('div', { class: 'sim-stage' });
+  let done = null;
+  const finished = new Promise(res => { done = res; });
+
+  const clockText = () => {
+    const d = new Date();
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  };
+  const skip = h('button', { class: 'btn sm', onclick: () => leave('skipped'), text: 'Skip to seat ⏎' });
+  layer.appendChild(h('div', { class: 'sim-bar' }, [
+    h('span', { class: 'sim-eyebrow', text: clockText() + ' · ' + course.code + ' practice paper · simulation' }),
+    h('div', { class: 'spacer' }),
+    h('span', { class: 'tiny dim', text: 'Nothing here is a real credential' }),
+    skip
+  ]));
+  layer.appendChild(stage);
+
+  const onKey = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); leave('skipped'); }
+  };
+  document.addEventListener('keydown', onKey);
+  function leave(how) {
+    document.removeEventListener('keydown', onKey);
+    layer.remove();
+    if (done) { const d = done; done = null; d(how); }
+  }
+
+  const show = (nodes) => {
+    stage.textContent = '';
+    stage.appendChild(h('div', { class: 'sim-scene' }, nodes.filter(Boolean)));
+  };
+  /** Advance on a click, or automatically after `ms` — whichever first. A
+      scene never traps someone who is ready to move on, and never waits
+      indefinitely on someone who has stepped away.
+
+      The stage-wide click handler is installed one turn late, deliberately.
+      A microtask checkpoint runs between event listeners during bubbling, so
+      resolving this beat from a button's own handler lets the next scene
+      mount and install ITS handler while that very same click is still
+      travelling upwards — which then fires it too, and the scene in between
+      is never seen at all. */
+  const beat = (ms) => new Promise(res => {
+    let t = null, armed = false;
+    const go = () => { if (t) clearTimeout(t); t = null; stage.onclick = null; res(); };
+    if (ms) t = setTimeout(go, ms);
+    stage.onclick = null;
+    stage._advance = go;
+    setTimeout(() => { if (!armed) { armed = true; stage.onclick = go; } }, 0);
+  });
+  const nextBtn = (label) => h('button', {
+    class: 'btn primary',
+    onclick: (e) => { e.stopPropagation(); stage._advance && stage._advance(); },
+    text: label
+  });
+
+  document.body.appendChild(layer);
+
+  try {
+    /* 1 · arrival */
+    show([
+      simCentreSvg(),
+      h('div', { class: 'sim-cap', text: 'You have arrived at the centre. Candidates are being called in batches.' }),
+      h('div', { class: 'sim-sub', text: 'Reporting time has passed. Registration is straight ahead.' }),
+      nextBtn('Go to the registration desk →')
+    ]);
+    await beat(5200);
+
+    /* 2 · registration — the one scene that waits for a person */
+    const known = (Settings.get('candidateName') || '').trim();
+    const nameInput = h('input', {
+      type: 'text', value: known, maxlength: '60',
+      placeholder: 'Your name', style: 'max-width:320px;text-align:center',
+      onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); signAndGo(); } }
+    });
+    let signResolve = null;
+    const signed = new Promise(res => { signResolve = res; });
+    async function signAndGo() {
+      const v = nameInput.value.trim();
+      ident.name = v || 'Candidate';
+      if (v !== known) await Settings.set('candidateName', v);
+      if (signResolve) { const r = signResolve; signResolve = null; r(); }
+    }
+    show([
+      h('div', { class: 'sim-say', text: known ? 'Welcome back, ' + known + '. Sign the register again, please.' : 'Name, please — as it appears on your admission record.' }),
+      nameInput,
+      h('div', { class: 'sim-sub', text: 'Kept only in this browser, on this device. Leave it blank to sit as “Candidate”.' }),
+      h('button', { class: 'btn primary', onclick: signAndGo, text: 'Sign the register →' })
+    ]);
+    setTimeout(() => nameInput.focus(), 60);
+    await signed;
+
+    /* 3 · the ticket prints */
+    show([
+      h('div', { class: 'sim-say', text: 'Your hall ticket. Keep it with you — you will be asked for it at the door.' }),
+      hallTicket(session, course, ident, { printing: true }),
+      nextBtn('Join the queue →')
+    ]);
+    await beat(6000);
+
+    /* 4 · the door check */
+    const stamped = hallTicket(session, course, ident, { stamped: true, stampAnimate: true });
+    show([
+      simQueueSvg(),
+      h('div', { class: 'sim-say', text: 'Hall ticket, please.' }),
+      h('div', { class: 'sim-sub', text: 'The invigilator checks your ticket and stamps it.' })
+    ]);
+    await beat(1700);
+    show([
+      stamped,
+      h('div', { class: 'sim-say', text: 'Verified. Hall ' + ident.hall + '. Down the corridor, second door on the right.' }),
+      nextBtn('Walk to the hall →')
+    ]);
+    await beat(4200);
+
+    /* 5 · belongings — and the honest moment to ask for full screen */
+    const fsBox = h('input', { type: 'checkbox', checked: true });
+    show([
+      h('div', { class: 'sim-say', text: 'All phones, notes and watches in the tray, please.' }),
+      h('div', { class: 'sim-cap', text: 'Your belongings are with the invigilator now. The clock on the wall is the only time you have.' }),
+      h('label', { class: 'check', style: 'justify-content:center' }, [fsBox, h('span', { text: 'Sit the paper in full screen' })]),
+      h('button', {
+        class: 'btn primary', onclick: (e) => {
+          e.stopPropagation();
+          // Called from a real click, which is the only context a browser
+          // will grant full screen in — the metaphor and the mechanism
+          // happen to line up exactly.
+          if (fsBox.checked && document.documentElement.requestFullscreen) {
+            document.documentElement.requestFullscreen().catch(() => { });
+          }
+          stage._advance && stage._advance();
+        }, text: 'Hand over the tray →'
+      })
+    ]);
+    await beat(0);
+
+    /* 6 · seated, and the formal start */
+    show([
+      h('div', { class: 'sim-eyebrow', text: 'Hall ' + ident.hall + ' · Row ' + ident.row + ' · Seat ' + ident.seat }),
+      h('div', { class: 'sim-say', text: 'Take your seat. Do not turn over the paper until you are told.' }),
+      h('div', { class: 'sim-cap', text: 'You have ' + Math.round((session.timeLimitMs || 0) / 60000) + ' minutes for ' + session.questionUuids.length + ' questions.' }),
+      h('div', { class: 'sim-sub', text: 'Once the paper begins the clock does not stop.' })
+    ]);
+    await beat(3400);
+
+    for (const word of ['Three', 'Two', 'One']) {
+      show([h('div', { style: 'font-family:var(--display);font-size:64px;font-weight:700;color:var(--txt-2)', text: word })]);
+      await beat(620);
+    }
+    show([h('div', { class: 'sim-say', style: 'font-size:22px', text: 'You may begin.' })]);
+    await beat(900);
+    leave('completed');
+  } catch (e) {
+    leave('error');
+  }
+  return finished;
+}
+
+/** In-exam announcements. Real invigilators call the time; a clock you watch
+    yourself is a different, lesser kind of pressure. */
+function examAnnouncer(session) {
+  const total = session.timeLimitMs || 0;
+  if (!total) return { tick: () => { } };
+  const marks = [
+    { at: 0.50, text: 'Half your time has gone.' },
+    { at: 0.75, text: 'One quarter of your time remains.' },
+    { at: 0.90, text: 'Ten per cent of your time remains. Begin checking your answers.' },
+    { at: 0.98, text: 'Two minutes. Make sure every question is answered.' }
+  ];
+  const fired = new Set(session.announced || []);
+  return {
+    tick(elapsedMs) {
+      const frac = elapsedMs / total;
+      marks.forEach(m => {
+        if (frac < m.at || fired.has(m.at)) return;
+        fired.add(m.at);
+        session.announced = Array.from(fired);
+        const n = h('div', { class: 'sim-notice', role: 'status' }, [
+          h('b', { style: 'font-family:var(--mono);font-size:11px;letter-spacing:.1em', text: 'INVIGILATOR' }),
+          h('div', { text: m.text })
+        ]);
+        document.body.appendChild(n);
+        setTimeout(() => n.remove(), 6500);
+      });
+    }
+  };
+}
+
 /* ---------- runner ---------- */
 async function runSession(s) {
   State.session = s;
@@ -3949,6 +4338,16 @@ async function runSession(s) {
   let qStart = Date.now();
   let tickTimer = null;
 
+  // The ceremony runs before the clock starts, and only once per session:
+  // resuming after a browser restart returns you to the desk, not the gate.
+  if (isMock && Settings.get('mockSimulation') && !s.seatedAt) {
+    const how = await examDayFlow(s, State.course);
+    s.seatedAt = nowISO();
+    s.simSkipped = how === 'skipped';
+    await Session.save(s);
+  }
+  const announcer = isMock ? examAnnouncer(s) : null;
+
   if (s.leftAt) { s.elapsedMs = (s.elapsedMs || 0) + (Date.now() - s.leftAt); s.leftAt = null; }
   s.lastTickAt = Date.now();
   const tick = async () => {
@@ -3958,7 +4357,15 @@ async function runSession(s) {
     if (isMock) {
       const left = s.timeLimitMs - s.elapsedMs;
       const t = $('#mockTimer');
-      if (t) { t.textContent = clock(left); t.classList.toggle('low', left < 600000); }
+      if (t) {
+        t.textContent = clock(left);
+        t.classList.toggle('low', left < 600000);
+        // The clock itself carries the pressure as it runs down, so a glance
+        // at it says how worried to be without doing arithmetic.
+        t.classList.toggle('urgent', left < 600000 && left >= 120000);
+        t.classList.toggle('critical', left < 120000);
+      }
+      if (announcer) announcer.tick(s.elapsedMs);
       if (left <= 0) { clearInterval(tickTimer); toast('Time is up. The exam has been submitted.', 'warn', 5000); await submitMock(); return; }
       if (s.elapsedMs % 15000 < 1100) await Session.save(s);
     }
@@ -7839,6 +8246,7 @@ ROUTES.settings = async (root) => {
       numField('Default mock length (questions)', 'mockCount', 5, 400),
       numField('Default mock time limit (minutes)', 'mockMinutes', 5, 600),
       checkField('Allow pausing a mock exam', 'mockAllowPause', 'Off by default, because the real exam does not pause.'),
+      checkField('Exam centre simulation before a timed mock', 'mockSimulation', 'Registration, hall ticket and invigilator, so the pressure is familiar before it counts. Skippable from its first frame with Esc.'),
       numField('Mastery target', 'masteryTarget', 40, 100, 'A question counts as mastered at or above this score.'),
       numField('Minimum sample before calling a topic weak or strong', 'weakMinSample', 1, 50)
     ])
