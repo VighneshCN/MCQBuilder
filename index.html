@@ -4608,7 +4608,7 @@ ROUTES.import = async (root) => {
 
   /* Checking is part of adding questions, not a separate destination, so it
      lives here as the second step rather than as its own tab. */
-  const step = State.importStep === 'check' ? 'check' : 'add';
+  const step = ['check', 'registers'].indexOf(State.importStep) >= 0 ? State.importStep : 'add';
   const stepBar = h('div', { class: 'seg', style: 'margin-bottom:16px' }, [
     h('button', {
       class: 'btn' + (step === 'add' ? ' primary' : ''),
@@ -4621,11 +4621,20 @@ ROUTES.import = async (root) => {
     }, [
       h('span', { text: '2 · Review queue' }),
       waiting ? h('span', { class: 'badge b-review', style: 'margin-left:6px', text: String(waiting) }) : null
-    ].filter(Boolean))
+    ].filter(Boolean)),
+    // The two registers are a record of what has already been brought in —
+    // reference material, not a step in bringing anything in. Buried under
+    // the drop zone they were effectively unfindable.
+    h('button', {
+      class: 'btn' + (step === 'registers' ? ' primary' : ''),
+      onclick: () => { State.importStep = 'registers'; go('import'); },
+      text: '3 · Sources & batches'
+    })
   ]);
   root.appendChild(stepBar);
 
   if (step === 'check') { await renderReviewQueue(root); return; }
+  if (step === 'registers') { await renderRegisters(root, sources, batches); return; }
 
   if (waiting) {
     root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:14px' }, [
@@ -4708,9 +4717,25 @@ ROUTES.import = async (root) => {
       ])
     ])
   ]));
+};
 
+/** The source and batch registers: what has already been brought in, and how
+    each import reconciled. Reference material rather than part of importing,
+    so it is its own step instead of a long tail under the drop zone. */
+async function renderRegisters(root, sources, batches) {
+  if (!sources.length && !batches.length) {
+    root.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, [
+      h('h3', { text: 'Nothing has been imported yet' }),
+      h('p', { class: 'muted', text: 'Every file you bring in is recorded here — what it was, how many questions it held, and how the import reconciled — so a bank can always be traced back to where it came from.' }),
+      h('div', { class: 'row', style: 'justify-content:center;margin-top:10px' },
+        h('button', { class: 'btn primary', onclick: () => { State.importStep = 'add'; go('import'); }, text: 'Bring questions in' }))
+    ])));
+    return;
+  }
+  root.appendChild(h('p', { class: 'small muted', style: 'margin:0 0 14px' },
+    'Every file that has been imported into this course, and the reconciliation for each batch — so any question in the bank can be traced back to the file it came from.'));
   if (sources.length) {
-    const card = h('div', { class: 'card', style: 'margin-top:16px' }, [h('div', { class: 'card-h' }, [h('h3', { text: 'Source register' }), h('div', { class: 'spacer' }), h('button', { class: 'btn sm', onclick: () => exportSourceRegister(sources), text: 'Export' })])]);
+    const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [h('div', { class: 'card-h' }, [h('h3', { text: 'Source register' }), h('div', { class: 'spacer' }), h('button', { class: 'btn sm', onclick: () => exportSourceRegister(sources), text: 'Export' })])]);
     const tb = h('tbody');
     const all = await State.questions();
     sources.forEach(s => {
@@ -4730,7 +4755,7 @@ ROUTES.import = async (root) => {
   }
 
   if (batches.length) {
-    const card = h('div', { class: 'card', style: 'margin-top:16px' }, [h('div', { class: 'card-h' }, h('h3', { text: 'Import batches' }))]);
+    const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [h('div', { class: 'card-h' }, h('h3', { text: 'Import batches' }))]);
     const tb = h('tbody');
     batches.slice(0, 25).forEach(b => {
       const r = b.report || {};
@@ -4748,7 +4773,7 @@ ROUTES.import = async (root) => {
     card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, ['Batch', 'Started', 'Label', 'Detected', 'Imported', 'Drafts', 'Reconciled', ''].map(t => h('th', { text: t })))), tb])));
     root.appendChild(card);
   }
-};
+}
 
 /* ---------- bundled starter question sets ----------
    Ships alongside index.html so a brand-new course isn't an empty bank.
