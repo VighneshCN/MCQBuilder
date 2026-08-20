@@ -4078,7 +4078,9 @@ ROUTES.notes = async (root) => {
           class: 'btn sm ghost', onclick: async () => {
             const ok = await confirmBox('Remove this note?', 'This removes it from the list and, where possible, deletes the underlying file too.', true);
             if (!ok) return;
-            await NotesStore.remove(rec); toast('Removed'); go('notes');
+            const fileDeleted = await NotesStore.remove(rec);
+            toast(fileDeleted === false ? 'Removed — its file could not be deleted; it may still exist there' : 'Removed');
+            go('notes');
           }, text: 'Remove'
         })
       ]));
@@ -4720,11 +4722,14 @@ function renderStaging(root) {
 
   async function commitBatch() {
     const c = counts();
+    const admitted = c.import + c.review + c.conflict;
     const ok = await confirmBox('Admit this batch?',
-      c.import + ' question(s) will be admitted and given permanent Question IDs. ' +
+      admitted + ' question(s) will be admitted and issued permanent Question IDs — ' +
+      c.import + ' entering practice immediately' +
+      (c.review + c.conflict ? ', ' + (c.review + c.conflict) + ' staying in the review queue until you confirm them' : '') + '. ' +
       (c.merge ? c.merge + ' will be merged into existing records. ' : '') +
-      (c.review + c.conflict ? (c.review + c.conflict) + ' will go to the review queue and stay out of practice. ' : '') +
-      (c.reject ? c.reject + ' will be rejected. ' : '') + 'Question IDs, once issued, are permanent.');
+      (c.reject ? c.reject + ' will be rejected. ' : '') +
+      'Question IDs, once issued, are permanent, including for review-queue items.');
     if (!ok) return;
     await admitBatch();
   }
@@ -4746,8 +4751,6 @@ async function admitBatch() {
     toAdmit.push(it.q);
     if (it.dup) needsRecheck.push(it.q);
   });
-  await Questions.admit(toAdmit, State.course.id, 'batch ' + st.batch.id.slice(0, 8));
-
   let merged = 0;
   for (const it of toMerge) {
     const target = it.dup.other;
@@ -4763,6 +4766,12 @@ async function admitBatch() {
     merged++;
     needsRecheck.push(existing);
   }
+
+  // toMerge's fallback path (target deleted mid-review) can still push into
+  // toAdmit above, so admit only runs once every candidate's final fate is
+  // known — otherwise a late fallback gets counted in the report but never
+  // actually gets a QID or reaches the database.
+  await Questions.admit(toAdmit, State.course.id, 'batch ' + st.batch.id.slice(0, 8));
 
   // Matched candidates were only ever judged from their own side during
   // staging. Bring the record(s) each one matches up to date too, so a
@@ -4975,7 +4984,8 @@ async function imageWorkflow(fileOrNull) {
     if (!picked) return;
     file = picked;
   }
-  const img = await loadImage(file);
+  let img = await loadImage(file);
+  const origImg = img;
   const st = { rotate: 0, contrast: 100, grayscale: false, crop: null, scale: 1 };
   const canvas = h('canvas');
   const stage = h('div', { class: 'imgstage' }, canvas);
@@ -5009,10 +5019,18 @@ async function imageWorkflow(fileOrNull) {
     const x = Math.min(dragging.x, x2), y = Math.min(dragging.y, y2), w = Math.abs(x2 - dragging.x), hh = Math.abs(y2 - dragging.y);
     dragging = null;
     if (w > 24 && hh > 24) {
+      // Bake the crop into a new source image — rotate/contrast/grayscale
+      // are already reflected in these pixels (the canvas was painted with
+      // them), so later adjustments now apply cleanly on top of the crop
+      // instead of paint() silently redrawing the full original photo.
       const data = ctx.getImageData(x, y, w, hh);
-      canvas.width = w; canvas.height = hh;
-      ctx.putImageData(data, 0, 0);
-      toast('Cropped. Reset the adjustments to start over.');
+      const cropCanvas = document.createElement('canvas');
+      cropCanvas.width = w; cropCanvas.height = hh;
+      cropCanvas.getContext('2d').putImageData(data, 0, 0);
+      img = cropCanvas;
+      st.rotate = 0; st.contrast = 100; st.grayscale = false; st.crop = true;
+      paint();
+      toast('Cropped. Rotate, contrast and grayscale now apply to the cropped image — use Reset to start over from the original photo.');
     }
   });
 
@@ -5031,23 +5049,35 @@ async function imageWorkflow(fileOrNull) {
     h('button', { class: 'btn sm', onclick: () => { st.grayscale = !st.grayscale; paint(); }, text: 'Grayscale' }),
     h('button', { class: 'btn sm', onclick: () => { st.contrast = clamp(st.contrast + 25, 50, 300); paint(); }, text: 'Contrast +' }),
     h('button', { class: 'btn sm', onclick: () => { st.contrast = clamp(st.contrast - 25, 50, 300); paint(); }, text: 'Contrast −' }),
-    h('button', { class: 'btn sm', onclick: () => { st.rotate = 0; st.contrast = 100; st.grayscale = false; paint(); }, text: 'Reset' }),
+    h('button', { class: 'btn sm', onclick: () => { img = origImg; st.rotate = 0; st.contrast = 100; st.grayscale = false; st.crop = null; paint(); }, text: 'Reset' }),
     h('button', { class: 'btn sm primary', onclick: () => runOCR(canvas, textArea, ocrStatus), text: 'Run OCR' }),
     h('button', { class: 'btn sm', title: 'Sends this image to an API you configure yourself — see Settings → Images and OCR', onclick: () => runExternalOCR(canvas, textArea, ocrStatus), text: 'Try external OCR' })
   ]);
 
-  const res = await modal({
-    title: 'Add from image', wide: true, sticky: true,
-    body: h('div', { class: 'stack' }, [
-      h('div', { class: 'notice small' }, 'Drag on the image to crop to the question block. Whatever ends up in the text box on the right is what gets parsed — check it against the image before continuing.'),
-      h('div', { class: 'grid g2' }, [
-        h('div', {}, [controls, stage, ocrStatus]),
-        h('div', { class: 'field' }, [h('label', { text: 'Extracted text — edit freely' }), textArea, parsedInfo])
-      ])
-    ]),
-    actions: [{ label: 'Cancel', value: false }, { label: 'Continue to import', value: true, kind: 'primary' }]
-  });
-  if (!res || !textArea.value.trim()) return;
+  const bodyContent = h('div', { class: 'stack' }, [
+    h('div', { class: 'notice small' }, 'Drag on the image to crop to the question block. Whatever ends up in the text box on the right is what gets parsed — check it against the image before continuing.'),
+    h('div', { class: 'grid g2' }, [
+      h('div', {}, [controls, stage, ocrStatus]),
+      h('div', { class: 'field' }, [h('label', { text: 'Extracted text — edit freely' }), textArea, parsedInfo])
+    ])
+  ]);
+  // Cancel, the ✕ button and Escape all resolve modal() the same falsy way —
+  // loop so any of the three can be walked back from a confirm dialog
+  // instead of silently discarding a crop/adjustment/transcription in progress.
+  let res;
+  for (; ;) {
+    res = await modal({
+      title: 'Add from image', wide: true, sticky: true,
+      body: bodyContent,
+      actions: [{ label: 'Cancel', value: false }, { label: 'Continue to import', value: true, kind: 'primary' }]
+    });
+    if (res) break;
+    const hasWork = !!(textArea.value.trim() || st.crop || st.rotate || st.contrast !== 100 || st.grayscale);
+    if (!hasWork) return;
+    const discard = await confirmBox('Discard this image?', 'Your crop, adjustments and transcribed text will be lost.', true, 'Discard');
+    if (discard) return;
+  }
+  if (!textArea.value.trim()) return;
 
   // keep a compressed copy of the source image for provenance
   let imageId = null;
@@ -5106,6 +5136,7 @@ async function runOCR(canvas, textArea, statusEl) {
     });
     return;
   }
+  if (textArea.value.trim() && !await confirmBox('Replace the current text?', 'Running OCR will overwrite what is already in the box — including anything you typed or corrected by hand.', false, 'Run OCR')) return;
   statusEl.textContent = 'Loading the local OCR engine…';
   try {
     if (!self.Tesseract) {
@@ -5220,6 +5251,7 @@ async function runExternalOCR(canvas, textArea, statusEl) {
     statusEl.textContent = 'External OCR needs a connected folder (Settings → Where your data lives) holding ' + OCR_ENV_FILE + '.';
     return;
   }
+  if (textArea.value.trim() && !await confirmBox('Replace the current text?', 'Running external OCR will overwrite what is already in the box — including anything you typed or corrected by hand.', false, 'Run OCR')) return;
   statusEl.textContent = 'Reading ' + OCR_ENV_FILE + '…';
   let cfg;
   try { cfg = await readOcrEnvFile(); }
@@ -6026,6 +6058,11 @@ async function restoreFlow(file) {
     if (!await requireSafetyBackup('restore (replace) from ' + file.name)) { toast('Restore cancelled — nothing was changed', 'ok'); return; }
     // Replacing the bank is a deliberate shrink; the file layer must allow it.
     FileStore.allowShrink('restore (replace)');
+  } else if (mode === 'merge') {
+    // Merge still overwrites any record that shares a UUID with the backup,
+    // so it needs the same safety net replace gets — just no shrink-guard,
+    // since a merge only ever adds or updates rows, never clears a store.
+    if (!await requireSafetyBackup('restore (merge) from ' + file.name)) { toast('Restore cancelled — nothing was changed', 'ok'); return; }
   }
 
   const report = { added: 0, updated: 0, reIded: 0, skipped: 0, stores: {} };
@@ -6264,7 +6301,7 @@ ROUTES.settings = async (root) => {
     driveBlock.appendChild(h('div', { class: 'row wrap', style: 'gap:8px' }, [
       h('button', { class: 'btn sm primary', onclick: async () => { const ok = await DriveSync.maybePush(true); toast(ok ? 'Synced to Drive.' : 'Could not sync — see the status above.', ok ? 'ok' : 'bad'); go('settings'); }, text: 'Sync now' }),
       h('button', { class: 'btn sm', onclick: async () => { await DriveSync.pullNow(); go('settings'); }, text: 'Load from Drive' }),
-      h('button', { class: 'btn sm danger', onclick: async () => { await DriveSync.disconnect(); go('settings'); }, text: 'Disconnect' })
+      h('button', { class: 'btn sm danger', onclick: async () => { await driveDisconnectFlow(); go('settings'); }, text: 'Disconnect' })
     ]));
   } else if (activeMode === 'local') {
     driveBlock.appendChild(h('p', { class: 'small muted' }, 'Currently using a local folder. Connecting Google Drive switches to it — your local file is left exactly as it is.'));
@@ -7555,6 +7592,11 @@ const DriveSync = {
   },
 
   async disconnect() {
+    // A push is debounced up to DRIVE_PUSH_MAX_GAP_MS after an edit — flush
+    // any pending one now, or an edit made just before disconnecting is
+    // silently lost instead of "kept synced up to now" as every caller's
+    // confirmation dialog promises.
+    if (this._pendingChange) await this.maybePush(true);
     if (this.accessToken && window.google && google.accounts && google.accounts.oauth2) {
       try { google.accounts.oauth2.revoke(this.accessToken, () => { }); } catch (e) { }
     }
@@ -7850,19 +7892,30 @@ const NotesStore = {
     throw new Error('This note has no readable storage location.');
   },
 
+  /** Returns whether the underlying file was actually deleted: true if
+      removed, false if the note has a separate file but it could not be
+      reached or removeEntry/deleteDriveFile threw, null if there was never
+      a separate file to begin with (IndexedDB-only storage). The DB record
+      is always deleted regardless — that is what "this note exists" means
+      to the app, so a file that could not be cleaned up (folder
+      disconnected, Drive unreachable) still leaves the note correctly gone
+      from here rather than stuck because of an orphaned file. */
   async remove(rec) {
+    let fileDeleted = null;
     try {
       if (rec.storage === 'folder' && FileStore.dirHandle) {
         const dir = await FileStore.dirHandle.getDirectoryHandle(NOTES_SUBFOLDER, { create: false });
         await dir.removeEntry(rec.folderFilename);
+        fileDeleted = true;
       } else if (rec.storage === 'drive' && DriveSync.connected) {
         await DriveSync.deleteDriveFile(rec.driveFileId);
+        fileDeleted = true;
+      } else if (rec.storage === 'folder' || rec.storage === 'drive') {
+        fileDeleted = false;
       }
-    } catch (e) { /* the DB record is what "this note exists" means to the app;
-                     a file that could not be cleaned up (folder disconnected,
-                     Drive unreachable) still leaves the note correctly gone
-                     from here rather than stuck because of an orphaned file */ }
+    } catch (e) { fileDeleted = false; }
     await DB.del('notes', rec.id);
+    return fileDeleted;
   },
 
   async list(courseId) {
@@ -7944,10 +7997,11 @@ async function recoveryFlow(kind) {
     }
 
     if (kind === 'changed') {
-      let theirs = null;
+      let theirs = null, theirsPayload = null;
       try {
         const fh = await FileStore.fileHandleFor(false);
         const payload = JSON.parse(await (await fh.getFile()).text());
+        theirsPayload = payload;
         theirs = { savedAt: payload.savedAt, questions: (payload.stores && payload.stores.questions || []).length };
       } catch (e) { /* unreadable — treated as unknown below */ }
 
@@ -7976,6 +8030,7 @@ async function recoveryFlow(kind) {
         ]
       });
       if (choice === 'file') {
+        if (!await requireSafetyBackup('discarding this browser’s bank for the file on disk')) { toast('Nothing was changed.', 'ok'); return; }
         FileStore.connected = true; FileStore.needsReconnect = false; FileStore.problem = null;
         try {
           await FileStore.loadFromDisk();
@@ -7985,6 +8040,7 @@ async function recoveryFlow(kind) {
           FileStore.connected = false; FileStore.needsReconnect = true; FileStore.problem = 'changed';
         }
       } else if (choice === 'browser') {
+        if (theirsPayload && !await requireExternalBackup(theirsPayload, 'mcq-mastery-file', 'the file on disk', 'overwriting the on-disk file with this browser’s bank')) { toast('Nothing was changed.', 'ok'); return; }
         FileStore.connected = true; FileStore.needsReconnect = false; FileStore.problem = null;
         FileStore._stamp = null; FileStore.needSnapshot = true; FileStore.dirty = true;
         const ok = await FileStore.flushNow('snapshot');
@@ -8142,6 +8198,22 @@ async function disconnectFlow() {
   await FileStore.forget();
   updateStorageBar();
   toast('Disconnected. Your file was saved first.', 'ok');
+}
+
+/** Mirrors disconnectFlow() for Google Drive — same confirm step before
+    the standalone Settings button disconnects; any unsynced change is
+    pushed first inside DriveSync.disconnect() itself. */
+async function driveDisconnectFlow() {
+  const ok = await modal({
+    title: 'Stop syncing to Google Drive?',
+    body: h('div', { class: 'stack' }, [
+      h('p', {}, 'Your Drive file stays exactly where it is and keeps everything synced up to now.'),
+      h('p', { class: 'small muted' }, 'The app will go back to keeping your bank only in this browser. If you clear browsing data, that copy goes with it.')
+    ]),
+    actions: [{ label: 'Cancel', value: false }, { label: 'Disconnect', value: true, kind: 'danger' }]
+  });
+  if (!ok) return;
+  await DriveSync.disconnect();
 }
 
 /** Mirrors connectFlow() for the Drive backend — enforces the same
