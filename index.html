@@ -272,6 +272,20 @@ input[type=text],input[type=number],input[type=search],input[type=date],select,t
   padding:7px 9px;font-size:14px;width:100%;
 }
 textarea{resize:vertical;min-height:70px;line-height:1.5}
+/* file was missing from the list above, so a visible file input fell back to
+   the browser's own control — a grey OS "Choose File" button sitting among
+   the app's own, the one place the interface stopped looking like itself. */
+input[type=file]{
+  background:var(--surface);border:1px solid var(--rule);border-radius:var(--r);
+  padding:6px 9px;font-size:13.5px;width:100%;color:var(--txt-2);cursor:pointer;
+}
+input[type=file]::file-selector-button{
+  background:var(--surface-2);border:1px solid var(--rule);color:var(--txt);
+  font:inherit;font-size:13px;padding:5px 11px;margin-right:10px;
+  border-radius:var(--r);cursor:pointer;
+  transition:background .12s ease,border-color .12s ease;
+}
+input[type=file]::file-selector-button:hover{background:var(--surface-3);border-color:var(--txt-3)}
 input:disabled,select:disabled,textarea:disabled{background:var(--surface-3);color:var(--txt-3)}
 .check{display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13.5px;padding:2px 0}
 .check input{margin-top:3px;flex:none;accent-color:var(--blue)}
