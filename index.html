@@ -870,7 +870,7 @@ const CISA_HINTS = {
 };
 
 const DISA_BLUEPRINT = [
-  { id: 'GEN', name: 'General (edit this once you know your own module breakdown)', weight: 100 }
+  { id: 'GEN', name: 'General', weight: 100 }
 ];
 
 async function ensureSeedCourse() {
@@ -2929,6 +2929,15 @@ ROUTES.dashboard = async (root) => {
     { k: 'Due today', v: String(due.length), color: due.length ? 'var(--pencil)' : null }
   ], [h('button', { class: 'btn primary', onclick: () => go('practice'), text: 'Start practice' })]);
 
+  // A course-level note (currently only ever set by the DISA seed, pointing
+  // at its single placeholder domain) is only still relevant while the
+  // blueprint really is just that placeholder — it goes stale the moment
+  // real domains replace it, so it's shown only up to that point, not
+  // forever.
+  if (State.course.notes && State.course.blueprint.length === 1) {
+    root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:16px' }, State.course.notes));
+  }
+
   // recommended next action
   let rec = null;
   if (!all.length) rec = { t: 'Import your first questions', d: 'The bank is empty. Bring in a .docx, .csv, .json, .xlsx or PDF and the Add Questions screen will reconcile every candidate it finds.', a: 'Open Add Questions', go: 'import' };
@@ -4453,8 +4462,7 @@ async function loadSuppliedBank(entry) {
     await modal({
       title: 'Could not load those questions',
       body: h('div', { class: 'stack' }, [
-        h('div', { class: 'notice bad', text: 'Could not fetch ' + entry.file + '.' }),
-        h('p', { class: 'small', text: 'This only works when the app is served over a local web server with the data folder kept alongside index.html — the same setup IndexedDB itself needs. See the README for the one-line command. It will not work if index.html was opened directly by double-clicking it, or if the data folder was separated from it.' })
+        h('p', { class: 'small', text: 'Couldn’t load this bundled question set right now. Use the file picker above instead, or reload the page and try again.' })
       ])
     });
     return;
