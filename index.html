@@ -208,12 +208,20 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   .rail-btn{min-height:40px}
   .chip{min-height:36px}
   .palette{grid-template-columns:repeat(auto-fill,minmax(44px,1fr))}
-  /* The sticky page header sits under z-index:20; toasts (z-index:200)
-     would otherwise land right on top of the title on a narrow screen where
-     there is no wide margin to sit in beside it. Push them below it instead. */
-  .toasts{top:auto;bottom:12px;right:12px;left:12px;width:auto;max-width:none}
 }
 .btn.menu-btn{display:none}
+/* Explanation belongs one tap away, not permanently in front of the content.
+   A page that has to be READ before it can be USED is a page people leave. */
+.info-btn{
+  display:inline-flex;align-items:center;justify-content:center;flex:none;
+  width:19px;height:19px;border-radius:50%;border:1px solid var(--rule);
+  background:var(--surface);color:var(--txt-3);cursor:pointer;
+  font-family:var(--mono);font-size:11px;line-height:1;padding:0;vertical-align:middle;
+  transition:background .12s ease,border-color .12s ease,color .12s ease;
+}
+.info-btn:hover,.info-btn:focus-visible{background:var(--blue-tint);border-color:var(--blue);color:var(--blue)}
+.title-row{display:flex;align-items:center;gap:9px}
+@media(max-width:880px){.info-btn{width:26px;height:26px;font-size:13px}}
 @media(max-width:880px){.btn.menu-btn{display:inline-flex}}
 
 /* --- surfaces --------------------------------------------------------- */
@@ -428,6 +436,14 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 
 /* --- toast ------------------------------------------------------------ */
 .toasts{position:fixed;top:18px;right:18px;z-index:200;display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:none;width:calc(100% - 32px);max-width:400px}
+/* The sticky page header sits under z-index:20; toasts (z-index:200) would
+   otherwise land straight on top of the title on a narrow screen, where there
+   is no wide margin for them to sit in beside it. Push them below instead.
+   This has to come AFTER the base rule above — an earlier copy of it inside
+   the 880px block never applied, being overridden by the very rule it targets. */
+@media(max-width:880px){
+  .toasts{top:auto;bottom:12px;right:12px;left:12px;width:auto;max-width:none;align-items:stretch}
+}
 .toast{background:var(--ink-800);color:#EAF1F6;padding:10px 15px;border-radius:var(--r);box-shadow:var(--shadow-lg);font-size:13.5px;border-left:3px solid var(--blue-2);width:100%}
 .toast.ok{border-left-color:#6DC5A4} .toast.bad{border-left-color:#E98D76} .toast.warn{border-left-color:#DFAE5C}
 
@@ -3389,12 +3405,36 @@ function setBadge(view, n) {
   b.textContent = n > 99 ? '99+' : String(n);
 }
 
-async function band(title, subtitle, stats, actions) {
+/** A small circled i that opens the explanation on demand.
+    `body` may be a string or a node, so a tip can carry a list or a link.
+    Everything this replaced used to sit permanently above the content it
+    described, which cost every user the reading time to save the first-time
+    user a question. This inverts that trade. */
+function infoTip(title, body, opts) {
+  return h('button', {
+    class: 'info-btn' + ((opts && opts.class) ? ' ' + opts.class : ''),
+    'aria-label': 'About ' + title,
+    title: 'What is this?',
+    onclick: (e) => {
+      e.preventDefault(); e.stopPropagation();
+      modal({
+        title, wide: !!(opts && opts.wide),
+        body: typeof body === 'string' ? h('div', { class: 'stack' }, h('div', { class: 'small', text: body })) : body,
+        actions: [{ label: 'Got it', value: null, kind: 'primary' }]
+      });
+    }, text: 'i'
+  });
+}
+
+async function band(title, subtitle, stats, actions, info) {
   const el = $('#band');
   el.textContent = '';
   const left = h('div', {}, [
     h('div', { class: 'eyebrow', text: State.course ? State.course.code + ' · ' + (subtitle || 'Working set') : '' }),
-    h('h1', { class: 'page-title', text: title })
+    h('div', { class: 'title-row' }, [
+      h('h1', { class: 'page-title', text: title }),
+      info ? infoTip(info.title || title, info.body, { wide: info.wide }) : null
+    ])
   ]);
   const top = h('div', { class: 'band-top' }, [
     h('button', { class: 'btn ghost sm menu-btn', 'aria-label': 'Open navigation', onclick: () => { $('#rail').classList.toggle('open'); $('#scrim').classList.toggle('hidden'); }, text: '☰' }),
@@ -4767,8 +4807,8 @@ ROUTES.bank = async (root) => {
   ]);
 
   const filters = h('div', { class: 'card', style: 'margin-bottom:14px' });
-  const fb = h('div', { class: 'card-b' });
-  const line1 = h('div', { class: 'grid g4' });
+  const fb = h('div', { style: 'margin-top:10px' });
+  const line1 = h('div', { class: 'grid g3' });
   // Changing a filter or the search box leaves an earlier tick-box
   // selection intact but off-screen — a bulk action taken afterward would
   // silently still include it, with nothing in the confirmation naming
@@ -4776,7 +4816,7 @@ ROUTES.bank = async (root) => {
   // clear that already happens once a bulk action completes) keeps "what's
   // ticked" always matching "what's currently visible".
   const search = h('input', { type: 'search', placeholder: 'Question ID or text…', value: BankState.q, oninput: debounce(e => { BankState.q = e.target.value; BankState.page = 0; BankState.sel.clear(); draw(); }, 260) });
-  line1.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Search' }), search]));
+  const searchField = h('div', { class: 'field' }, [h('label', { text: 'Search' }), search]);
   const mkSel = (label, key, opts) => {
     const s = h('select', { onchange: e => { BankState[key] = e.target.value; BankState.page = 0; BankState.sel.clear(); draw(); } },
       opts.map(o => h('option', { value: o.v, selected: BankState[key] === o.v }, o.label)));
@@ -4796,7 +4836,18 @@ ROUTES.bank = async (root) => {
   line2.appendChild(mkSel('Verification', 'verif', [{ v: '', label: 'Any' }, { v: 'verified', label: 'Answer verified' }, { v: 'unverified', label: 'Answer unverified' }, { v: 'doubtful', label: 'Answer doubtful' }]));
   line2.appendChild(mkSel('Difficulty', 'diff', [{ v: '', label: 'Any' }, { v: 'ungraded', label: 'Ungraded — nobody has judged it' }].concat(DIFFICULTY.map(d => ({ v: d, label: d })))));
   fb.appendChild(line2);
-  filters.appendChild(fb);
+  // On a phone the seven dropdowns filled the entire first screen, so the
+  // register itself — the thing the page is for — was never visible without
+  // scrolling past controls most visits never touch. Search stays out; the
+  // rest folds away, open by default only where there is room for it.
+  const wideEnough = !window.matchMedia || window.matchMedia('(min-width:881px)').matches;
+  const activeFilters = () => ['status', 'domain', 'learn', 'source', 'batch', 'verif', 'diff'].filter(k => BankState[k]).length;
+  const details = h('details', { open: wideEnough || activeFilters() > 0 });
+  const n = activeFilters();
+  details.appendChild(h('summary', { class: 'small', style: 'cursor:pointer;padding:2px 0' },
+    'More filters' + (n ? ' · ' + n + ' active' : '')));
+  details.appendChild(fb);
+  filters.appendChild(h('div', { class: 'card-b stack' }, [searchField, details]));
   root.appendChild(filters);
 
   const toolbar = h('div', { class: 'row wrap', style: 'margin-bottom:10px' });
@@ -5390,16 +5441,23 @@ async function loadImageInto(sel, imageId) {
 
 ROUTES.notes = async (root) => {
   const notes = await NotesStore.list(State.course.id);
+  const whereNotesGo = NotesStore.target() === 'folder'
+    ? 'They go into a "notes" folder next to your connected file.'
+    : NotesStore.target() === 'drive'
+      ? 'They upload to your connected Google Drive.'
+      : 'They stay in this browser only, up to ' + Settings.get('notesMaxKB') + ' KB each. Connect a folder or Google Drive in Settings for larger files, and to reach them from another device.';
   await band('Notes', 'Your own revision material', [
     { k: 'Notes', v: String(notes.length) }
-  ]);
-
-  root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:14px' },
-    'Handwritten summaries, a module cheat-sheet, anything worth a quick look right before you practise. Stored the same way your question bank is — ' +
-    (NotesStore.target() === 'folder' ? 'a new one right now would go into a "notes" folder next to your connected file.' :
-      NotesStore.target() === 'drive' ? 'a new one right now would upload to your connected Google Drive.' :
-      'a new one right now stays in this browser only, up to ' + Settings.get('notesMaxKB') + ' KB — connect a folder or Google Drive (Settings) for larger files and other devices.') +
-    ' An HTML note is rendered here, not just downloaded — in an isolated sandbox with scripts turned off, so formatting shows but nothing inside it can run or reach the app.'));
+  ], null, {
+    title: 'About notes',
+    body: h('div', { class: 'stack' }, [
+      h('div', { class: 'small' }, 'Handwritten summaries, a module cheat-sheet, anything worth a quick look right before you practise.'),
+      h('div', { class: 'eyebrow', style: 'margin-top:4px', text: 'Where they are kept' }),
+      h('div', { class: 'small' }, whereNotesGo),
+      h('div', { class: 'eyebrow', style: 'margin-top:4px', text: 'HTML notes' }),
+      h('div', { class: 'small' }, 'An HTML note is rendered here rather than just downloaded — inside an isolated sandbox with scripts turned off, so its formatting shows but nothing in it can run or reach the app.')
+    ])
+  });
 
   const uploadCard = h('div', { class: 'card', style: 'margin-bottom:16px' }, [h('div', { class: 'card-h' }, h('h3', { text: 'Add a note' }))]);
   const ub = h('div', { class: 'card-b stack' });
@@ -5664,8 +5722,7 @@ async function renderRegisters(root, sources, batches) {
     ])));
     return;
   }
-  root.appendChild(h('p', { class: 'small muted', style: 'margin:0 0 14px' },
-    'Every file that has been imported into this course, and the reconciliation for each batch — so any question in the bank can be traced back to the file it came from.'));
+  
   if (sources.length) {
     const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [h('div', { class: 'card-h' }, [h('h3', { text: 'Source register' }), h('div', { class: 'spacer' }), h('button', { class: 'btn sm', onclick: () => exportSourceRegister(sources), text: 'Export' })])]);
     const tb = h('tbody');
@@ -6888,8 +6945,6 @@ async function renderReviewQueue(root) {
   const noClass = queue.filter(q => q.status === 'needs_class');
   const rest = queue.filter(q => ['answer_conflict', 'possible_dup', 'needs_answer', 'needs_class'].indexOf(q.status) < 0);
 
-  root.appendChild(h('p', { class: 'small muted', style: 'margin:0 0 14px' },
-    'These are questions the app could not confirm on its own — the source stated no answer, or there was no reliable way to tell the domain. They stay out of practice until you say they are right, because practising a guessed answer is worse than not practising it.'));
 
   if (!queue.length) {
     root.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, [
@@ -7007,8 +7062,6 @@ async function renderReviewQueue(root) {
     visible.forEach(p => { visibleUuids.add(p.q.uuid); p.partners.forEach(x => visibleUuids.add(x.uuid)); });
     Array.from(ConflictQueueState.sel).forEach(u => { if (!visibleUuids.has(u)) ConflictQueueState.sel.delete(u); });
 
-    container.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:12px' },
-      'Each pair below reads as the same question but disagrees on the right answer — usually the same question imported twice from different papers. Both records are shown side by side: pick the correct answer for each (they start on what each one currently says), then press Resolve. That settles the pair for good — whether you brought them into agreement or accepted that they differ.'));
 
     const card = h('div', { class: 'card', style: 'margin-bottom:16px' });
     container.appendChild(card);
@@ -7076,6 +7129,11 @@ async function renderReviewQueue(root) {
       card.textContent = '';
       card.appendChild(h('div', { class: 'card-h' }, [
         h('h3', { text: 'Answer conflicts' }), h('span', { class: 'badge b-review', text: String(pairs.length) }),
+        infoTip('Answer conflicts', h('div', { class: 'stack' }, [
+          h('div', { class: 'small' }, 'Each pair reads as the same question but disagrees on the right answer — usually the same question imported twice from different papers.'),
+          h('div', { class: 'small' }, 'Both records are shown side by side. Pick the correct answer for each, then press Resolve. That settles the pair for good, whether you brought them into agreement or accepted that they differ.'),
+          h('div', { class: 'small' }, '“Not the same question” clears the flag without changing either answer — for records that only look alike.')
+        ])),
         h('div', { class: 'spacer' }),
         h('span', { class: 'tiny dim', text: 'Two records disagree on the correct answer' })
       ]));
@@ -8068,7 +8126,10 @@ ROUTES.settings = async (root) => {
       h('span', { class: 'badge ' + modeBadge.c, text: modeBadge.t })])
   ]);
   const db = h('div', { class: 'card-b stack' });
-  db.appendChild(h('p', { class: 'small' }, 'One place holds your bank at a time — a local folder, or your own Google Drive — never both. Switch whenever you like; whichever you switch away from keeps everything saved up to that point, untouched.'));
+  db.appendChild(h('div', { class: 'row', style: 'gap:8px;align-items:center;margin-bottom:4px' }, [
+    h('span', { class: 'eyebrow', text: 'One place at a time' }),
+    infoTip('Where your data lives', 'One place holds your bank at a time — a local folder, or your own Google Drive — never both. Switch whenever you like; whichever you switch away from keeps everything saved up to that point, untouched.')
+  ]));
 
   const localBlock = h('div', { class: 'stack' });
   const driveBlock = h('div', { class: 'stack' });
@@ -8217,10 +8278,10 @@ ROUTES.settings = async (root) => {
 
   /* ---- courses ---- */
   const courseCard = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
-    h('div', { class: 'card-h' }, [h('h3', { text: 'Courses' }), h('div', { class: 'spacer' }), h('button', { class: 'btn sm primary', onclick: () => courseDialog(null), text: 'Add course' })])
+    h('div', { class: 'card-h' }, [h('h3', { text: 'Courses' }), infoTip('Courses', 'Each course keeps its own question bank, blueprint, weights and Question ID prefix. Nothing is shared between them, so adding a second qualification cannot disturb the first.'), h('div', { class: 'spacer' }), h('button', { class: 'btn sm primary', onclick: () => courseDialog(null), text: 'Add course' })])
   ]);
   const cb = h('div', { class: 'card-b stack' });
-  cb.appendChild(h('p', { class: 'small muted', style: 'margin:0' }, 'Each course keeps its own question bank, blueprint, weights and Question ID prefix. Nothing is shared between them, so adding a second qualification cannot disturb the first.'));
+  
   const allQ = await DB.all('questions');
   const courseRow = async (c, isArchivedRow) => {
     const mine = allQ.filter(q => q.courseId === c.id);
@@ -8301,11 +8362,10 @@ ROUTES.settings = async (root) => {
     })
   ]);
   grid.appendChild(h('div', { class: 'card' }, [
-    h('div', { class: 'card-h' }, [h('h3', { text: 'Spaced repetition (days)' }), h('div', { class: 'spacer' }),
+    h('div', { class: 'card-h' }, [h('h3', { text: 'Spaced repetition (days)' }), infoTip('Spaced repetition', 'Every answer you give, in every mode, sets the date that question comes back. The interval depends on how you actually answered, not on a hidden score. A later mistake resets to the first interval. Spaced Repetition mode is simply the mode that practises whatever has come due.'), h('div', { class: 'spacer' }),
       h('span', { class: 'badge b-active', text: State.course.code + ' only' })]),
     h('div', { class: 'card-b' }, [
-      h('p', { class: 'small muted' }, 'Every answer you give, in every mode, sets the date that question comes back. The interval depends on how you actually answered, not on a hidden score. A later mistake resets to the first interval. Spaced Repetition mode is simply the mode that practises whatever has come due.'),
-      // The defaults are a considered ladder that most people never need to
+            // The defaults are a considered ladder that most people never need to
       // touch, so seven number fields do not need to be the first thing on
       // the page. Folded away, still one click from anyone who wants them.
       h('details', {}, [
