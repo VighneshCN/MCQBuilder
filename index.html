@@ -7436,25 +7436,38 @@ const DriveSync = {
         const remoteCount = (remote.stores.questions || []).length;
         const localCount = (await DB.all('questions')).length;
         const dramaticLoss = localCount === 0 || localCount < remoteCount * 0.5;
-        const choice = await modal({
+        let choice = await modal({
           title: 'Google Drive changed elsewhere',
           body: h('div', { class: 'stack' }, [
             h('p', {}, 'This Drive file was updated from another device, and this browser also has changes of its own that never made it to Drive — probably closed before they could sync.'),
             h('p', { class: 'small' }, 'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This browser holds ' + localCount + '.'),
-            dramaticLoss
-              ? h('div', { class: 'notice bad small' }, 'This browser has far fewer questions than Drive — keeping what is here would very likely overwrite Drive with much less than it holds. When unsure, load the Drive copy instead.')
-              : h('div', { class: 'notice small' }, 'Whichever you discard gets backed up first, automatically, before anything is overwritten.')
+            h('div', { class: 'notice small' }, 'Merging keeps everything from both — nothing is discarded, and this browser is backed up first, automatically.')
           ]),
-          actions: [{ label: 'Keep what is here', value: 'browser', kind: dramaticLoss ? 'danger' : undefined }, { label: 'Load the Drive copy', value: 'drive', kind: 'primary' }]
+          actions: [
+            { label: 'Choose one side instead', value: 'choose' },
+            { label: 'Merge both', value: 'merge', kind: 'primary' }
+          ]
         });
+        if (choice === 'choose') choice = await chooseOneSideDialog('Google Drive', 'drive', remoteCount, localCount, dramaticLoss);
         if (choice === 'drive') {
           if (await requireSafetyBackup('discarding this browser’s unsynced changes for the Drive copy')) await this._applyRemote(remote);
-        } else {
+        } else if (choice === 'browser') {
           if (await requireExternalBackup(remote, 'mcq-mastery-drive', 'the Drive copy', 'overwriting the Drive copy with this browser’s bank')) {
             this.allowDriveShrink('confirmed by the user, after a backup, in the Drive boot-conflict dialog');
             await this.push();
           }
+        } else if (choice === 'merge') {
+          if (await requireSafetyBackup('merging this browser’s unsynced changes with what is in Google Drive')) {
+            const localPayload = await FileStore.buildPayload();
+            const { merged, report } = await mergeBankPayloads(localPayload, remote);
+            await applyMergedBank(merged);
+            await this.push();
+            await showMergeReport(report, 'Merged with Google Drive', 'Both copies were combined and pushed back to Drive — this browser and Drive now match.');
+          }
         }
+        // 'choose' resolving to nothing (Back/Cancel from either dialog)
+        // leaves the boot conflict unresolved for now — safe, since nothing
+        // was touched, and the same check runs again on the next boot.
       } else {
         // The routine case: nothing unsynced here, so the newer Drive copy
         // is simply loaded in, same as opening a local file that changed.
@@ -7563,23 +7576,20 @@ const DriveSync = {
     if (!remoteCount) { await this.push(); return true; }
     const localCount = (await DB.all('questions')).length;
     const dramaticLoss = localCount === 0 || localCount < remoteCount * 0.5;
-    const choice = await modal({
+    let choice = await modal({
       title: 'There is already a bank in Google Drive',
       body: h('div', { class: 'stack' }, [
         h('p', {}, 'That Drive file already holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '.'),
         h('p', { class: 'small' }, 'This browser currently holds ' + localCount + ' question(s).'),
-        h('div', { class: 'notice small' }, 'Merging keeps everything both copies hold — nothing is discarded. Keep only one side if you deliberately want to throw the other away; whichever you discard is backed up first, automatically.'),
-        dramaticLoss
-          ? h('div', { class: 'notice bad small' }, 'This browser has far fewer questions than Drive — almost always because Drive is the real bank and this is a new or freshly-cleared browser. When unsure, merge — nothing here would be lost either way.')
-          : null
+        h('div', { class: 'notice small' }, 'Merging keeps everything both copies hold — nothing is discarded, and this browser is backed up first, automatically.')
       ]),
       actions: [
         { label: 'Cancel', value: '' },
-        { label: 'Keep only what is in Drive', value: 'drive', kind: 'danger' },
-        { label: 'Keep only this browser’s', value: 'browser', kind: 'danger' },
+        { label: 'Choose one side instead', value: 'choose' },
         { label: 'Merge both', value: 'merge', kind: 'primary' }
       ]
     });
+    if (choice === 'choose') choice = await chooseOneSideDialog('Google Drive', 'drive', remoteCount, localCount, dramaticLoss);
     if (choice === 'drive') {
       if (!(await requireSafetyBackup('discarding this browser’s bank for the Drive copy'))) return false;
       await this._applyRemote(remote);
@@ -8353,6 +8363,29 @@ async function showMergeReport(report, title, intro) {
   });
 }
 
+/** The rare "I want to discard one whole copy instead of merging" path.
+    Deliberately kept out of the main reconciliation dialog's own footer —
+    reached only via that dialog's plain "Choose one side instead" button —
+    so the common, always-safe choice (merge) is the only thing competing
+    for attention there, and this destructive, rarely-needed pair of
+    choices takes one extra, deliberate step to even reach. */
+async function chooseOneSideDialog(otherLabel, otherValue, otherCount, hereCount, dramaticLoss) {
+  return await modal({
+    title: 'Keep only one copy?',
+    body: h('div', { class: 'stack' }, [
+      h('p', { class: 'small' }, otherLabel + ' holds ' + otherCount + ' question(s); this browser holds ' + hereCount + '.'),
+      dramaticLoss
+        ? h('div', { class: 'notice bad small' }, 'This browser has far fewer questions — almost always because ' + otherLabel + ' is the real bank. When unsure, go back and merge instead.')
+        : h('div', { class: 'notice small' }, 'Whichever you discard is backed up first, automatically, before anything is overwritten.')
+    ]),
+    actions: [
+      { label: 'Back', value: '' },
+      { label: 'Keep only ' + otherLabel, value: otherValue, kind: 'danger' },
+      { label: 'Keep only this browser’s', value: 'browser', kind: 'danger' }
+    ]
+  });
+}
+
 async function connectFlow() {
   if (FileStore.tier === 'manual') {
     await modal({
@@ -8405,23 +8438,20 @@ async function connectFlow() {
   if (existing.status === 'has-data') {
     const here = await DB.count('questions');
     const dramaticLoss = here === 0 || here < existing.count * 0.5;
-    const choice = await modal({
+    let choice = await modal({
       title: 'There is already a bank in that location',
       body: h('div', { class: 'stack' }, [
         h('p', {}, 'That folder already contains an MCQ Mastery data file, holding ' + existing.count + ' question(s).'),
         h('p', { class: 'small' }, 'This browser currently holds ' + here + ' question(s).'),
-        h('div', { class: 'notice small' }, 'Merging keeps everything both copies hold — nothing is discarded. Keep only one side if you deliberately want to throw the other away; whichever you discard is backed up first, automatically.'),
-        dramaticLoss
-          ? h('div', { class: 'notice bad small' }, 'This browser has far fewer questions than that file — almost always because the file is the real bank and this is a new or freshly-cleared browser. When unsure, merge — nothing here would be lost either way.')
-          : null
+        h('div', { class: 'notice small' }, 'Merging keeps everything both copies hold — nothing is discarded, and this browser is backed up first, automatically.')
       ]),
       actions: [
         { label: 'Cancel', value: '' },
-        { label: 'Keep only what is in the file', value: 'file', kind: 'danger' },
-        { label: 'Keep only this browser\u2019s bank', value: 'browser', kind: 'danger' },
+        { label: 'Choose one side instead', value: 'choose' },
         { label: 'Merge both', value: 'merge', kind: 'primary' }
       ]
     });
+    if (choice === 'choose') choice = await chooseOneSideDialog('that file', 'file', existing.count, here, dramaticLoss);
     if (!choice) { await FileStore.forget(); updateStorageBar(); return; }
     if (choice === 'file') {
       await FileStore.loadFromDisk();
