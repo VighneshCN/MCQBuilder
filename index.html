@@ -1445,6 +1445,37 @@ async function rescanCourseForPairs(courseId, onProgress) {
   return { checked, newConflicts, newDups, cleared };
 }
 
+/** Apply optionId as the correct, verified answer for uuid and every record
+    it currently conflicts with — the Answer Conflicts queue's individual
+    click and its bulk "Resolve selected" action both funnel through here so
+    the two paths can never quietly diverge. Returns null if there was
+    nothing to resolve (already settled — e.g. a bulk batch that includes
+    both sides of the same pair fixes it on the first one and the second is
+    then a no-op instead of flipping the answer back), otherwise
+    { saved, partnerCount }. saved.status stays 'answer_conflict' if the
+    record also disagrees with some other, untouched record. */
+async function resolveConflictPair(uuid, optionId) {
+  const q = await Questions.get(uuid);
+  if (!q || (!q.conflict && q.status !== 'answer_conflict')) return null;
+  const partnerUuids = (q.conflictWith || []).slice();
+  for (const u of partnerUuids) {
+    const partner = await Questions.get(u);
+    if (!partner) continue;
+    partner.correctOptionId = optionId; partner.answerVerified = 'verified'; partner.verifiedAt = nowISO();
+    partner.verifyNote = 'Conflict resolved by hand, matched to ' + (q.qid || q.uuid);
+    partner.status = partner.domainId ? 'active' : 'needs_class';
+    await Questions.save(partner, 'conflict resolved (paired)');
+  }
+  const fresh = await Questions.get(uuid);
+  fresh.correctOptionId = optionId; fresh.conflict = false; fresh.answerVerified = 'verified'; fresh.verifiedAt = nowISO();
+  fresh.verifyNote = 'Conflict resolved by hand';
+  fresh.status = fresh.domainId ? 'active' : 'needs_class';
+  const saved = await Questions.save(fresh, 'conflict resolved');
+  await audit('verify', 'question', fresh.qid, { conflict: true }, { correctOptionId: optionId },
+    'Answer conflict resolved' + (partnerUuids.length ? ', ' + partnerUuids.length + ' paired record(s) updated to match' : ''));
+  return { saved, partnerCount: partnerUuids.length };
+}
+
 /** Word-level diff used by the side-by-side duplicate reviewer. */
 function diffWords(a, b) {
   const A = String(a || '').split(/(\s+)/), B = String(b || '').split(/(\s+)/);
@@ -5005,14 +5036,23 @@ async function admitBatch() {
   }
 
   const drafts = toAdmit.filter(q => q.status !== 'active').length;
+  // The three "of which" lines below only ever itemised needs_answer/parsing,
+  // possible_dup and answer_conflict — any other non-active status (needs_class,
+  // draft left as-is, needs_content) silently vanished into the "drafts" total
+  // with no line of its own, so the sub-rows never actually summed to it. Keyed
+  // by every status actually present instead, so the breakdown is exhaustive by
+  // construction and the report can render one row per status it finds.
+  const byStatus = {};
+  toAdmit.forEach(q => { if (q.status !== 'active') byStatus[q.status] = (byStatus[q.status] || 0) + 1; });
   const report = {
     detected: st.items.length,
     imported: toAdmit.filter(q => q.status === 'active').length,
     drafts,
+    byStatus,
     merged,
-    possibleDup: toAdmit.filter(q => q.status === 'possible_dup').length,
-    conflicts: toAdmit.filter(q => q.status === 'answer_conflict').length,
-    incomplete: toAdmit.filter(q => q.status === 'needs_answer' || q.status === 'parsing').length,
+    possibleDup: byStatus.possible_dup || 0,
+    conflicts: byStatus.answer_conflict || 0,
+    incomplete: (byStatus.needs_answer || 0) + (byStatus.parsing || 0),
     rejected: rejected.length,
     unresolved: st.unresolved.length,
     sources: st.sources.map(s => ({ id: s.id, title: s.title, filename: s.filename, detected: s.detected }))
@@ -5030,6 +5070,12 @@ async function admitBatch() {
   showReconciliation(st.batch);
 }
 
+// Statuses already covered by their own named row in the reconciliation
+// report — anything in byStatus outside this set gets an "of which" row of
+// its own instead of vanishing into the drafts total. Shared by the modal
+// and the CSV export so the two can never itemise differently.
+const RECONCILIATION_NAMED_STATUSES = ['needs_answer', 'parsing', 'possible_dup', 'answer_conflict', 'active'];
+
 function showReconciliation(batch) {
   const r = batch.report || {};
   const tbl = h('table', { class: 'recon' });
@@ -5042,6 +5088,19 @@ function showReconciliation(batch) {
   row('  of which — needs answer verification', r.incomplete, '');
   row('  of which — possible duplicate', r.possibleDup, '');
   row('  of which — answer conflict', r.conflicts, '');
+  // byStatus covers every non-active status, so anything left over after the
+  // three named lines above gets its own row too — the "of which" rows always
+  // sum to the drafts total above them, nothing is silently folded in.
+  if (r.byStatus) {
+    Object.keys(r.byStatus)
+      .filter(k => RECONCILIATION_NAMED_STATUSES.indexOf(k) < 0)
+      .sort((a, b) => r.byStatus[b] - r.byStatus[a])
+      .forEach(k => row('  of which — ' + ((STATUS[k] || {}).label || k).toLowerCase(), r.byStatus[k], ''));
+  } else if (r.drafts > r.incomplete + r.possibleDup + r.conflicts) {
+    tb.appendChild(h('tr', {}, [h('td', { colspan: '3', class: 'tiny dim', style: 'padding:4px 0 0 12px' },
+      'This import ran before per-status breakdowns were recorded, so the remaining ' +
+      (r.drafts - r.incomplete - r.possibleDup - r.conflicts) + ' aren’t itemised here — open the Review Queue for their current status.')]));
+  }
   row('Merged into existing records', r.merged, 'Both source references retained');
   row('Rejected during review', r.rejected, 'Logged in the audit trail');
   tb.appendChild(h('tr', { class: 'total' }, [h('td', { text: 'Total accounted for' }), h('td', { class: 'amt', text: String(r.accounted || 0) }), h('td', {})]));
@@ -5063,11 +5122,16 @@ function showReconciliation(batch) {
 }
 function exportReconciliation(batch) {
   const r = batch.report || {};
+  const extraRows = r.byStatus
+    ? Object.keys(r.byStatus).filter(k => RECONCILIATION_NAMED_STATUSES.indexOf(k) < 0).sort((a, b) => r.byStatus[b] - r.byStatus[a])
+      .map(k => [((STATUS[k] || {}).label || k), r.byStatus[k]])
+    : [];
   const rows = [['Batch', batch.id], ['Label', batch.label || ''], ['Started', batch.startedAt], ['Finished', batch.finishedAt || ''], [], ['Line', 'Count'],
   ['Detected candidates', r.detected], ['Admitted active', r.imported], ['Admitted as drafts/review', r.drafts],
-  ['Needs answer verification', r.incomplete], ['Possible duplicates', r.possibleDup], ['Answer conflicts', r.conflicts],
-  ['Merged into existing', r.merged], ['Rejected', r.rejected], ['Total accounted for', r.accounted],
-  ['Unresolved text blocks', r.unresolved], ['Reconciled', r.balanced ? 'YES' : 'NO']];
+  ['Needs answer verification', r.incomplete], ['Possible duplicates', r.possibleDup], ['Answer conflicts', r.conflicts]]
+    .concat(extraRows)
+    .concat([['Merged into existing', r.merged], ['Rejected', r.rejected], ['Total accounted for', r.accounted],
+    ['Unresolved text blocks', r.unresolved], ['Reconciled', r.balanced ? 'YES' : 'NO']]);
   download('reconciliation-' + batch.id.slice(0, 8) + '.csv', new Blob([toCSV(rows)], { type: 'text/csv' }));
 }
 function exportSourceRegister(sources) {
@@ -5547,6 +5611,19 @@ ROUTES.review = async (root) => {
 };
 
 /** The checking queue itself, rendered inside Add Questions. */
+const REVIEW_FILTER_TABS = [
+  ['all', 'All'],
+  ['answer_conflict', 'Answer conflicts'],
+  ['possible_dup', 'Possible duplicates'],
+  ['needs_answer', 'Needs answer verification'],
+  ['needs_class', 'Needs classification'],
+  ['other', 'Other']
+];
+// Persists across renders (like BankState) so switching tabs, or a resolve
+// action that redraws the whole queue, doesn't lose what was ticked.
+const ConflictQueueState = { sel: new Set(), choice: new Map() };
+const ReviewQueueState = { filter: 'all' };
+
 async function renderReviewQueue(root) {
   const all = await State.questions();
   const queue = all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0);
@@ -5571,7 +5648,18 @@ async function renderReviewQueue(root) {
     return;
   }
 
-  const section = (title, list, note, renderer) => {
+  // A tab a person isn't even looking at any more is not a filter worth
+  // keeping — if it emptied out entirely, drop back to All rather than show
+  // a picker with nothing selected under it.
+  const counts = { all: queue.length, answer_conflict: conflicts.length, possible_dup: dupes.length, needs_answer: noAnswer.length, needs_class: noClass.length, other: rest.length };
+  if (ReviewQueueState.filter !== 'all' && !counts[ReviewQueueState.filter]) ReviewQueueState.filter = 'all';
+
+  const tabsBar = h('div', { class: 'seg', style: 'margin-bottom:14px' });
+  root.appendChild(tabsBar);
+  const sectionsBox = h('div');
+  root.appendChild(sectionsBox);
+
+  const section = (container, title, list, note, renderer) => {
     if (!list.length) return;
     const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
       h('div', { class: 'card-h' }, [h('h3', { text: title }), h('span', { class: 'badge b-review', text: String(list.length) }), h('div', { class: 'spacer' }), h('span', { class: 'tiny dim', text: note })])
@@ -5580,7 +5668,7 @@ async function renderReviewQueue(root) {
     list.slice(0, 40).forEach(q => b.appendChild(renderer(q)));
     if (list.length > 40) b.appendChild(h('div', { class: 'small dim', text: 'Showing the first 40 of ' + list.length + '. Clear these and the rest will appear.' }));
     card.appendChild(b);
-    root.appendChild(card);
+    container.appendChild(card);
   };
 
   const byUuid = new Map(all.map(x => [x.uuid, x]));
@@ -5627,107 +5715,196 @@ async function renderReviewQueue(root) {
     extra || null
   ]);
 
-  if (conflicts.length) {
-    root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:12px' },
-      'These are pairs of records already in this course’s bank that read as the same question but disagree on the right answer — most often because the same question appears more than once in whatever you imported (common in a bank compiled from several past papers), marked with a different answer each time. Picking an answer below applies it to every record in the pair, not just this one.'));
+  /** The only section with its own card/toolbar instead of the generic
+      `section` helper — it needs a checkbox + answer picker per row and a
+      bulk toolbar above them, and its own local refresh so ticking a box
+      doesn't re-fetch the whole queue. */
+  function renderConflictsSection(container) {
+    if (!conflicts.length) return;
+    const visible = conflicts.slice(0, 40);
+    const visibleUuids = new Set(visible.map(q => q.uuid));
+    // A row that scrolled out of the visible 40 (resolved, or just paged
+    // out) is not a row a bulk action should silently still include.
+    Array.from(ConflictQueueState.sel).forEach(u => { if (!visibleUuids.has(u)) ConflictQueueState.sel.delete(u); });
+    Array.from(ConflictQueueState.choice.keys()).forEach(u => { if (!visibleUuids.has(u)) ConflictQueueState.choice.delete(u); });
+
+    container.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:12px' },
+      'These are pairs of records already in this course’s bank that read as the same question but disagree on the right answer — most often because the same question appears more than once in whatever you imported (common in a bank compiled from several past papers), marked with a different answer each time. Click an answer to resolve one pair now, or tick several and resolve them together below.'));
+
+    const card = h('div', { class: 'card', style: 'margin-bottom:16px' });
+    container.appendChild(card);
+
+    const select = (q) => {
+      const chosen = ConflictQueueState.choice.get(q.uuid) || q.correctOptionId;
+      return h('select', {
+        style: 'max-width:380px', onchange: e => ConflictQueueState.choice.set(q.uuid, e.target.value)
+      }, q.options.map((o, i) => h('option', { value: o.id, selected: o.id === chosen },
+        letterOf(i) + ' — ' + o.text.slice(0, 60) + (o.text.length > 60 ? '…' : ''))));
+    };
+    const toggle = (q, checked) => {
+      if (checked) { ConflictQueueState.sel.add(q.uuid); if (!ConflictQueueState.choice.has(q.uuid)) ConflictQueueState.choice.set(q.uuid, q.correctOptionId); }
+      else ConflictQueueState.sel.delete(q.uuid);
+    };
+
+    async function resolveOne(uuid, optionId) {
+      const r = await resolveConflictPair(uuid, optionId);
+      State.invalidate();
+      if (!r) { toast('Already resolved', 'ok'); go('import'); return; }
+      if (r.saved.status === 'answer_conflict') {
+        toast(r.saved.qid + ' still conflicts with another record — open it from Question Bank to resolve both sides.', 'warn', 7000);
+      } else {
+        toast(r.partnerCount ? 'Resolved — matching record(s) updated to the same answer' : 'Conflict resolved for ' + r.saved.qid, 'ok');
+      }
+      go('import');
+    }
+    async function resolveSelected() {
+      const sel = Array.from(ConflictQueueState.sel);
+      if (!sel.length) return;
+      const ok = await confirmBox('Resolve ' + sel.length + ' conflict(s)?',
+        'Each ticked record — and everything it currently conflicts with — is set to the answer chosen in its dropdown, and marked verified. Records you didn’t tick are left untouched.');
+      if (!ok) return;
+      let resolved = 0, stuck = 0, skipped = 0;
+      for (const u of sel) {
+        const optionId = ConflictQueueState.choice.get(u);
+        if (!optionId) { skipped++; continue; }
+        // Re-fetched fresh inside resolveConflictPair on every call, so a
+        // pair whose other side was already fixed earlier in this same loop
+        // is a no-op here (returns null) instead of flipping it back.
+        const r = await resolveConflictPair(u, optionId);
+        if (!r) { skipped++; continue; }
+        if (r.saved.status === 'answer_conflict') stuck++; else resolved++;
+      }
+      ConflictQueueState.sel.clear(); ConflictQueueState.choice.clear();
+      State.invalidate();
+      toast(
+        resolved + ' resolved' +
+        (stuck ? ', ' + stuck + ' still conflict with another record' : '') +
+        (skipped ? ', ' + skipped + ' already settled' : ''),
+        stuck ? 'warn' : 'ok', 7000
+      );
+      go('import');
+    }
+
+    function refresh() {
+      card.textContent = '';
+      card.appendChild(h('div', { class: 'card-h' }, [
+        h('h3', { text: 'Answer conflicts' }), h('span', { class: 'badge b-review', text: String(conflicts.length) }),
+        h('div', { class: 'spacer' }), h('span', { class: 'tiny dim', text: 'Two records disagree on the correct answer' })
+      ]));
+
+      const toolbar = h('div', { class: 'row wrap', style: 'gap:10px;align-items:center;padding:0 16px 12px' });
+      const allChecked = visible.length > 0 && visible.every(q => ConflictQueueState.sel.has(q.uuid));
+      toolbar.appendChild(h('label', { class: 'row small', style: 'gap:6px;align-items:center' }, [
+        h('input', {
+          type: 'checkbox', checked: allChecked, onchange: e => { visible.forEach(q => toggle(q, e.target.checked)); refresh(); }
+        }),
+        h('span', { text: 'Select all shown (' + visible.length + ')' })
+      ]));
+      if (ConflictQueueState.sel.size) {
+        toolbar.appendChild(h('span', { class: 'tiny dim', text: ConflictQueueState.sel.size + ' selected' }));
+        toolbar.appendChild(h('button', { class: 'btn sm primary', onclick: resolveSelected, text: 'Resolve selected (' + ConflictQueueState.sel.size + ')' }));
+        toolbar.appendChild(h('button', { class: 'btn sm ghost', onclick: () => { ConflictQueueState.sel.clear(); refresh(); }, text: 'Clear selection' }));
+      }
+      card.appendChild(toolbar);
+
+      const body = h('div', { class: 'card-b stack' });
+      visible.forEach(q => body.appendChild(quickRow(q, h('div', {}, [
+        h('div', { class: 'stack', style: 'gap:4px' }, q.options.map((o, i) => h('button', {
+          class: 'method-row', style: q.correctOptionId === o.id ? 'background:var(--green-tint)' : '',
+          onclick: () => resolveOne(q.uuid, o.id)
+        }, [
+          h('span', { class: 'method-ico' + (q.correctOptionId === o.id ? ' correct-pick' : ''), style: q.correctOptionId === o.id ? 'background:var(--green)' : '', text: letterOf(i) }),
+          h('span', { class: 'small', style: 'flex:1;text-align:left', text: o.text })
+        ]))),
+        h('div', { class: 'row wrap', style: 'gap:8px;align-items:center;margin-top:8px;padding-top:8px;border-top:1px dashed var(--rule)' }, [
+          h('label', { class: 'row small', style: 'gap:6px;align-items:center' }, [
+            h('input', { type: 'checkbox', checked: ConflictQueueState.sel.has(q.uuid), onchange: e => { toggle(q, e.target.checked); refresh(); } }),
+            h('span', { class: 'tiny dim', text: 'Include in bulk resolve, using:' })
+          ]),
+          select(q)
+        ])
+      ]))));
+      if (conflicts.length > 40) body.appendChild(h('div', { class: 'small dim', text: 'Showing the first 40 of ' + conflicts.length + '. Resolve or clear some and the rest will appear.' }));
+      card.appendChild(body);
+    }
+    refresh();
   }
-  section('Answer conflicts', conflicts, 'Two records disagree on the correct answer', q => quickRow(q,
-    h('div', { class: 'stack', style: 'gap:4px' }, q.options.map((o, i) => h('button', {
-      class: 'method-row', style: q.correctOptionId === o.id ? 'background:var(--green-tint)' : '', onclick: async () => {
-        // Picking an answer here is a claim that this record and everything
-        // it conflicts with are the same question — so the same answer
-        // belongs on all of them. Fixing only this side used to leave the
-        // pair still disagreeing, snapping this record right back to
-        // "answer conflict" the moment Questions.save()'s own recheck ran.
-        const partnerUuids = (q.conflictWith || []).slice();
-        for (const u of partnerUuids) {
-          const partner = await Questions.get(u);
-          if (!partner) continue;
-          partner.correctOptionId = o.id; partner.answerVerified = 'verified'; partner.verifiedAt = nowISO();
-          partner.verifyNote = 'Conflict resolved by hand, matched to ' + (q.qid || q.uuid);
-          partner.status = partner.domainId ? 'active' : 'needs_class';
-          await Questions.save(partner, 'conflict resolved (paired)');
-        }
-        const fresh = await Questions.get(q.uuid);
-        fresh.correctOptionId = o.id; fresh.conflict = false; fresh.answerVerified = 'verified'; fresh.verifiedAt = nowISO();
-        fresh.verifyNote = 'Conflict resolved by hand';
-        fresh.status = fresh.domainId ? 'active' : 'needs_class';
-        const saved = await Questions.save(fresh, 'conflict resolved');
-        await audit('verify', 'question', fresh.qid, { conflict: true }, { correctOptionId: o.id },
-          'Answer conflict resolved' + (partnerUuids.length ? ', ' + partnerUuids.length + ' paired record(s) updated to match' : ''));
-        State.invalidate();
-        // Questions.save() re-checks this record against the rest of the
-        // bank (recheckQuestion) — if some other, untouched record still
-        // disagrees (not one of the partners fixed above), that recheck
-        // puts fresh.status right back to 'answer_conflict'. Only the
-        // post-save state, not the click itself, is the truth.
-        if (saved.status === 'answer_conflict') {
-          toast(fresh.qid + ' still conflicts with another record — open it from Question Bank to resolve both sides.', 'warn', 7000);
-        } else {
-          toast(partnerUuids.length ? 'Resolved — matching record(s) updated to the same answer' : 'Conflict resolved for ' + fresh.qid, 'ok');
-        }
-        go('import');
-      }
-    }, [
-      h('span', { class: 'method-ico' + (q.correctOptionId === o.id ? ' correct-pick' : ''), style: q.correctOptionId === o.id ? 'background:var(--green)' : '', text: letterOf(i) }),
-      h('span', { class: 'small', style: 'flex:1;text-align:left', text: o.text })
-    ])))));
 
-  section('Possible duplicates', dupes, 'Compare before merging — same concept is not the same question', q => quickRow(q,
-    h('div', { class: 'row', style: 'gap:6px' }, [
-      h('button', { class: 'btn sm', onclick: () => reviewDuplicate(q), text: 'Compare' }),
-      h('button', {
-        class: 'btn sm', onclick: async () => {
-          // One click dismisses every current duplicate partner at once —
-          // the button doesn't ask which one, so it clears them all, both
-          // sides, and records each dismissal so a rescan won't re-raise it.
-          const fresh = await Questions.get(q.uuid);
-          for (const u of (fresh.dupWith || []).slice()) {
-            fresh.dismissedPairs = Array.from(new Set((fresh.dismissedPairs || []).concat([u])));
-            unflagPairSide(fresh, u, 'dup');
-            const other = await Questions.get(u);
-            if (other) {
-              other.dismissedPairs = Array.from(new Set((other.dismissedPairs || []).concat([fresh.uuid])));
-              unflagPairSide(other, fresh.uuid, 'dup');
-              normalizePairState(other);
-              other.updatedAt = nowISO();
-              await DB.put('questions', other);
+  function drawTabs() {
+    tabsBar.textContent = '';
+    REVIEW_FILTER_TABS.forEach(([key, label]) => {
+      tabsBar.appendChild(h('button', {
+        class: 'chip', 'aria-pressed': String(ReviewQueueState.filter === key),
+        onclick: () => { ReviewQueueState.filter = key; drawTabs(); drawSections(); },
+        text: label + ' (' + counts[key] + ')'
+      }));
+    });
+  }
+  function drawSections() {
+    sectionsBox.textContent = '';
+    const show = (key) => ReviewQueueState.filter === 'all' || ReviewQueueState.filter === key;
+
+    if (show('answer_conflict')) renderConflictsSection(sectionsBox);
+
+    if (show('possible_dup')) section(sectionsBox, 'Possible duplicates', dupes, 'Compare before merging — same concept is not the same question', q => quickRow(q,
+      h('div', { class: 'row', style: 'gap:6px' }, [
+        h('button', { class: 'btn sm', onclick: () => reviewDuplicate(q), text: 'Compare' }),
+        h('button', {
+          class: 'btn sm', onclick: async () => {
+            // One click dismisses every current duplicate partner at once —
+            // the button doesn't ask which one, so it clears them all, both
+            // sides, and records each dismissal so a rescan won't re-raise it.
+            const fresh = await Questions.get(q.uuid);
+            for (const u of (fresh.dupWith || []).slice()) {
+              fresh.dismissedPairs = Array.from(new Set((fresh.dismissedPairs || []).concat([u])));
+              unflagPairSide(fresh, u, 'dup');
+              const other = await Questions.get(u);
+              if (other) {
+                other.dismissedPairs = Array.from(new Set((other.dismissedPairs || []).concat([fresh.uuid])));
+                unflagPairSide(other, fresh.uuid, 'dup');
+                normalizePairState(other);
+                other.updatedAt = nowISO();
+                await DB.put('questions', other);
+              }
             }
-          }
-          normalizePairState(fresh);
-          fresh.updatedAt = nowISO();
-          await DB.put('questions', fresh); State.invalidate(); toast('Kept as a separate question'); (function(){ State.importStep='check'; return go('import'); })();
-        }, text: 'Keep separate'
-      })
-    ])));
+            normalizePairState(fresh);
+            fresh.updatedAt = nowISO();
+            await DB.put('questions', fresh); State.invalidate(); toast('Kept as a separate question'); (function(){ State.importStep='check'; return go('import'); })();
+          }, text: 'Keep separate'
+        })
+      ])));
 
-  section('Needs answer verification', noAnswer, 'No answer, or an answer nobody has checked', q => quickRow(q,
-    h('div', { class: 'stack', style: 'gap:4px' }, q.options.map((o, i) => h('button', {
-      class: 'method-row', style: q.correctOptionId === o.id ? 'background:var(--green-tint)' : '', onclick: async () => {
-        const fresh = await Questions.get(q.uuid);
-        fresh.correctOptionId = o.id; fresh.answerVerified = 'verified'; fresh.verifiedAt = nowISO();
-        fresh.status = fresh.domainId ? 'active' : 'needs_class';
-        await Questions.save(fresh, 'answer verified');
-        await audit('verify', 'question', fresh.qid, null, { correctOptionId: o.id }, 'Answer set and verified in review queue');
-        State.invalidate(); toast(fresh.qid + ' verified', 'ok'); go('import');
-      }
-    }, [
-      h('span', { class: 'method-ico' + (q.correctOptionId === o.id ? ' correct-pick' : ''), style: q.correctOptionId === o.id ? 'background:var(--green)' : '', text: letterOf(i) + (q.correctOptionId === o.id ? ' ✓' : '') }),
-      h('span', { class: 'small', style: 'flex:1;text-align:left', text: o.text })
-    ])))));
+    if (show('needs_answer')) section(sectionsBox, 'Needs answer verification', noAnswer, 'No answer, or an answer nobody has checked', q => quickRow(q,
+      h('div', { class: 'stack', style: 'gap:4px' }, q.options.map((o, i) => h('button', {
+        class: 'method-row', style: q.correctOptionId === o.id ? 'background:var(--green-tint)' : '', onclick: async () => {
+          const fresh = await Questions.get(q.uuid);
+          fresh.correctOptionId = o.id; fresh.answerVerified = 'verified'; fresh.verifiedAt = nowISO();
+          fresh.status = fresh.domainId ? 'active' : 'needs_class';
+          await Questions.save(fresh, 'answer verified');
+          await audit('verify', 'question', fresh.qid, null, { correctOptionId: o.id }, 'Answer set and verified in review queue');
+          State.invalidate(); toast(fresh.qid + ' verified', 'ok'); go('import');
+        }
+      }, [
+        h('span', { class: 'method-ico' + (q.correctOptionId === o.id ? ' correct-pick' : ''), style: q.correctOptionId === o.id ? 'background:var(--green)' : '', text: letterOf(i) + (q.correctOptionId === o.id ? ' ✓' : '') }),
+        h('span', { class: 'small', style: 'flex:1;text-align:left', text: o.text })
+      ])))));
 
-  section('Needs classification', noClass, 'Unmapped questions never guess a domain', q => quickRow(q,
-    h('div', { class: 'row wrap', style: 'gap:6px' }, State.course.blueprint.map(d => h('button', {
-      class: 'btn sm', onclick: async () => {
-        const fresh = await Questions.get(q.uuid);
-        fresh.domainId = d.id; fresh.classVerified = 'verified';
-        fresh.status = fresh.answerVerified === 'verified' ? 'active' : 'needs_answer';
-        await Questions.save(fresh, 'classified');
-        State.invalidate(); toast('Classified as ' + d.id, 'ok'); (function(){ State.importStep='check'; return go('import'); })();
-      }, text: d.id
-    })))));
+    if (show('needs_class')) section(sectionsBox, 'Needs classification', noClass, 'Unmapped questions never guess a domain', q => quickRow(q,
+      h('div', { class: 'row wrap', style: 'gap:6px' }, State.course.blueprint.map(d => h('button', {
+        class: 'btn sm', onclick: async () => {
+          const fresh = await Questions.get(q.uuid);
+          fresh.domainId = d.id; fresh.classVerified = 'verified';
+          fresh.status = fresh.answerVerified === 'verified' ? 'active' : 'needs_answer';
+          await Questions.save(fresh, 'classified');
+          State.invalidate(); toast('Classified as ' + d.id, 'ok'); (function(){ State.importStep='check'; return go('import'); })();
+        }, text: d.id
+      })))));
 
-  section('Other review items', rest, 'Drafts and incomplete parses', q => quickRow(q));
+    if (show('other')) section(sectionsBox, 'Other review items', rest, 'Drafts and incomplete parses', q => quickRow(q));
+  }
+
+  drawTabs();
+  drawSections();
 }
 
 async function reviewDuplicate(q) {
@@ -9394,6 +9571,98 @@ test('Same question from two sources merges to one canonical record', async () =
   await recomputeFingerprint(b);
   const merged = { sourceRefs: a.sourceRefs.concat(b.sourceRefs) };
   eq(merged.sourceRefs.length, 2, 'both source references must survive a merge');
+});
+
+/* ---- conflict resolution (writes to a scratch course, cleaned up after) ---- */
+test('resolveConflictPair fixes both sides of a pair and marks them verified', async () => {
+  const cid = 'test-course-conflict-' + Date.now();
+  const opts = ['Firewall', 'Log review', 'Encryption', 'Training'];
+  const a = mkQ('Which is a detective control?', opts, 1, { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  const b = mkQ('Which is a detective control?', opts, 0, { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  a.conflictWith = [b.uuid]; b.conflictWith = [a.uuid];
+  await recomputeFingerprint(a); await recomputeFingerprint(b);
+  await DB.put('questions', a); await DB.put('questions', b);
+  try {
+    const r = await resolveConflictPair(a.uuid, a.options[1].id);
+    assert(r, 'resolving a live conflict must not be a no-op');
+    eq(r.partnerCount, 1);
+    eq(r.saved.correctOptionId, a.options[1].id, 'the resolved record must carry the chosen answer');
+    eq(r.saved.conflictWith.length, 0, 'the conflict itself must be cleared');
+    assert(!r.saved.conflict, 'the conflict flag must be cleared');
+    const freshB = await DB.get('questions', b.uuid);
+    eq(freshB.correctOptionId, a.options[1].id, 'the partner must be updated to the same answer');
+    eq(freshB.answerVerified, 'verified');
+    eq(freshB.conflictWith.length, 0, 'the partner must no longer list the now-resolved conflict');
+    // Two records this similar can legitimately re-surface as a plain
+    // duplicate once they agree on the answer too — a separate, correct
+    // concern for the reviewer to merge or dismiss, not something
+    // resolveConflictPair itself decides.
+    assert(freshB.status !== 'answer_conflict', 'the partner must not still read as conflicted');
+  } finally {
+    await DB.del('questions', a.uuid); await DB.del('questions', b.uuid);
+  }
+});
+test('resolveConflictPair on a record that is not in conflict is a safe no-op', async () => {
+  const cid = 'test-course-conflict-' + Date.now();
+  const a = mkQ('Standalone question, no conflict', ['a', 'b'], 0, { courseId: cid, status: 'active', answerVerified: 'verified', domainId: 'D1', conflict: false, conflictWith: [] });
+  await DB.put('questions', a);
+  try {
+    const r = await resolveConflictPair(a.uuid, a.options[1].id);
+    eq(r, null, 'a record that is not flagged as conflicting must not be touched');
+    const fresh = await DB.get('questions', a.uuid);
+    eq(fresh.correctOptionId, a.options[0].id, 'the answer must be left exactly as it was');
+  } finally {
+    await DB.del('questions', a.uuid);
+  }
+});
+test('Resolving a conflict that recheck still finds elsewhere reports it as still conflicted', async () => {
+  const cid = 'test-course-conflict-' + Date.now();
+  const opts = ['Firewall', 'Log review', 'Encryption', 'Training'];
+  const a = mkQ('Which is a detective control?', opts, 1, { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  const b = mkQ('Which is a detective control?', opts, 0, { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  const d = mkQ('Which is a detective control?', opts, 2, { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  // a only knows about b — d's disagreement is stale/missing from a's own
+  // conflictWith and has to be rediscovered live by Questions.save's recheck,
+  // the same way the original single-click resolver already relied on.
+  a.conflictWith = [b.uuid]; b.conflictWith = [a.uuid]; d.conflictWith = [];
+  await recomputeFingerprint(a); await recomputeFingerprint(b); await recomputeFingerprint(d);
+  await DB.put('questions', a); await DB.put('questions', b); await DB.put('questions', d);
+  try {
+    const r = await resolveConflictPair(a.uuid, a.options[1].id);
+    assert(r, 'must not be a no-op');
+    eq(r.saved.status, 'answer_conflict', 'recheck must find the still-live disagreement with d and re-flag it');
+    const freshB = await DB.get('questions', b.uuid);
+    eq(freshB.correctOptionId, a.options[1].id, 'the explicitly-listed partner must still be fixed');
+  } finally {
+    await DB.del('questions', a.uuid); await DB.del('questions', b.uuid); await DB.del('questions', d.uuid);
+  }
+});
+test('Bulk-resolving both sides of the same pair does not flip the answer back', async () => {
+  const cid = 'test-course-conflict-' + Date.now();
+  const opts = ['Firewall', 'Log review', 'Encryption', 'Training'];
+  const a = mkQ('Which is a detective control?', opts, 1, { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  const b = mkQ('Which is a detective control?', opts, 0, { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  a.conflictWith = [b.uuid]; b.conflictWith = [a.uuid];
+  await recomputeFingerprint(a); await recomputeFingerprint(b);
+  await DB.put('questions', a); await DB.put('questions', b);
+  try {
+    // Simulates ticking "select all" in the bulk conflicts UI, where every
+    // row defaults to ITS OWN original answer — a and b disagree, so the
+    // batch queues two different target answers for what is, underneath,
+    // one pair. Processing a's row first must settle b too; processing b's
+    // row second — still carrying its own stale original answer — must be a
+    // no-op rather than flipping the pair back to disagreeing.
+    const r1 = await resolveConflictPair(a.uuid, a.options[1].id);
+    assert(r1, 'the first row in the batch must resolve');
+    const r2 = await resolveConflictPair(b.uuid, b.options[0].id);
+    eq(r2, null, 'the second row must be a no-op — b was already settled by the first');
+    const freshA = await DB.get('questions', a.uuid);
+    const freshB = await DB.get('questions', b.uuid);
+    eq(freshA.correctOptionId, a.options[1].id, 'a must keep the answer the batch actually resolved to');
+    eq(freshB.correctOptionId, a.options[1].id, 'b must not have been flipped back to its own stale answer');
+  } finally {
+    await DB.del('questions', a.uuid); await DB.del('questions', b.uuid);
+  }
 });
 
 /* ---- parsing ---- */
