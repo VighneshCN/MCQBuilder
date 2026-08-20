@@ -1032,6 +1032,7 @@ const State = {
   courses: [], course: null, view: 'dashboard',
   cache: { questions: null, dirty: true },
   session: null,
+  runnerStop: null,   // active runSession()'s cleanup, if any — never on State.session itself, which is IndexedDB-persisted and can't hold a function
   staging: null,      // in-flight import batch
   async setCourse(id) {
     this.course = this.courses.find(c => c.id === id) || this.courses[0];
@@ -2786,9 +2787,16 @@ function kbdRow(keys, what) {
 /* ---------- router ---------- */
 const ROUTES = {};
 async function go(view, arg) {
-  if (State.session && State.session.status === 'active' && State.session.mode === 'mock' && view !== 'runner' && Settings.get('confirmLeaveMock')) {
-    const ok = await confirmBox('Leave the mock exam?', 'The exam is still running and the timer keeps going. Your answers are already saved — you can resume from the Practice screen.');
-    if (!ok) return;
+  if (State.session && State.session.status === 'active' && view !== 'runner') {
+    if (State.session.mode === 'mock' && Settings.get('confirmLeaveMock')) {
+      const ok = await confirmBox('Leave the mock exam?', 'The exam is still running and the timer keeps going. Your answers are already saved — you can resume from the Practice screen.');
+      if (!ok) return;
+    }
+    // Navigating away from a live runner without going through its own Exit
+    // button (leave()) must still stop its timer and keyboard listener —
+    // otherwise the abandoned session keeps ticking and autosaving in the
+    // background, racing a second one if this session is later resumed.
+    if (State.runnerStop) State.runnerStop();
   }
   State.view = view;
   $$('.nav-item').forEach(b => b.setAttribute('aria-current', b.dataset.view === view ? 'page' : 'false'));
@@ -2955,7 +2963,19 @@ ROUTES.practice = async (root, preselect) => {
           h('div', { class: 'small muted', text: done + ' of ' + resumable.questionUuids.length + ' answered · started ' + fmtDate(resumable.startedAt, true) })
         ]),
         h('button', { class: 'btn primary', onclick: () => runSession(resumable), text: 'Resume' }),
-        h('button', { class: 'btn', onclick: async () => { await Session.abandon(resumable); toast('Session discarded'); go('practice'); }, text: 'Discard' })
+        h('button', {
+          class: 'btn', onclick: async () => {
+            // A mock exam never commits answers until it is submitted, so
+            // discarding one mid-way genuinely loses everything answered —
+            // unlike other modes, which record each answer as it happens.
+            const mockLoss = resumable.mode === 'mock' && done > 0;
+            const ok = await confirmBox('Discard this session?', mockLoss
+              ? done + ' answered question(s) will be lost — a timed mock only records results when you submit it, so nothing so far has been saved to your history.'
+              : 'This just ends the unfinished session — anything already answered is already recorded in your history.', mockLoss);
+            if (!ok) return;
+            await Session.abandon(resumable); toast('Session discarded'); go('practice');
+          }, text: 'Discard'
+        })
       ])
     ]));
   }
@@ -3123,6 +3143,7 @@ async function runSession(s) {
   let qStart = Date.now();
   let tickTimer = null;
 
+  if (s.leftAt) { s.elapsedMs = (s.elapsedMs || 0) + (Date.now() - s.leftAt); s.leftAt = null; }
   s.lastTickAt = Date.now();
   const tick = async () => {
     const nowT = Date.now();
@@ -3138,7 +3159,8 @@ async function runSession(s) {
   };
   if (isMock) { tickTimer = setInterval(tick, 1000); }
 
-  const stop = () => { if (tickTimer) clearInterval(tickTimer); document.removeEventListener('keydown', onKey); };
+  const stop = () => { if (tickTimer) clearInterval(tickTimer); document.removeEventListener('keydown', onKey); State.runnerStop = null; };
+  State.runnerStop = stop;
 
   function render() {
     target.textContent = '';
@@ -3161,7 +3183,7 @@ async function runSession(s) {
         onclick: async () => { s.flags[q.uuid] = !s.flags[q.uuid]; await Session.save(s); render(); },
         text: s.flags[q.uuid] ? '⚑ Flagged' : '⚐ Flag'
       }),
-      h('button', { class: 'btn sm ghost', onclick: () => leave(), text: isMock ? 'Pause' : 'Exit' })
+      h('button', { class: 'btn sm ghost', onclick: () => leave(), text: isMock ? (Settings.get('mockAllowPause') ? 'Pause' : 'Leave') : 'Exit' })
     ]);
 
     const shell = h('div', { class: 'q-shell' });
@@ -3266,7 +3288,11 @@ async function runSession(s) {
         : 'Pausing is disabled in Settings, so the timer keeps running. Your answers are saved either way.');
       if (!ok) return;
     }
-    if (isMock && Settings.get('mockAllowPause')) { /* elapsed already banked */ }
+    // With pausing disabled, "the timer keeps running" has to mean real
+    // wall-clock time, not just resumed session-open time — stamp when we
+    // left so runSession() can charge the real gap against elapsedMs on
+    // return, the same way a real exam clock would not have waited either.
+    if (isMock && !Settings.get('mockAllowPause')) s.leftAt = Date.now();
     stop(); await Session.save(s); State.session = null; go('practice');
   }
   async function confirmSubmit() {
