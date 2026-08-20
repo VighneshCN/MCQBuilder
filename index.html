@@ -2737,15 +2737,21 @@ function weightedPick(pool, blueprint, count, rng) {
   const notes = [];
   let picked = [];
   const shortfalls = [];
+  // Two blueprint rows can end up sharing a domain id — deleting a middle
+  // domain and adding another re-issues an id already in use — and both rows
+  // then draw from the same bucket, putting the same question in the paper
+  // twice. Guarding here rather than only fixing the editor, because a bank
+  // saved before that validation existed still carries the collision.
+  const used = new Set();
   alloc.forEach(a => {
-    const bucket = shuffle(byDom.get(a.id) || [], rng);
+    const bucket = shuffle((byDom.get(a.id) || []).filter(q => !used.has(q.uuid)), rng);
     const take = bucket.slice(0, a.n);
+    take.forEach(q => used.add(q.uuid));
     picked = picked.concat(take);
     if (take.length < a.n) shortfalls.push({ id: a.id, want: a.n, got: take.length });
     notes.push({ domainId: a.id, requested: a.n, supplied: take.length });
   });
   if (picked.length < count) {
-    const used = new Set(picked.map(q => q.uuid));
     const rest = shuffle(pool.filter(q => !used.has(q.uuid)), rng);
     picked = picked.concat(rest.slice(0, count - picked.length));
   }
@@ -2788,32 +2794,34 @@ function apportion(shares, total) {
 /** The enabled dimensions of a spec, each as a list of {key, pct, label, match}. */
 function compositionDimensions(spec, blueprint) {
   const dims = [];
+  const usable = (parts) => parts.reduce((s, p) => s + Math.max(0, p.pct || 0), 0) > 0 ? parts : null;
   if (spec.domainMix && spec.domainMix.length) {
-    dims.push({
-      name: 'domain',
-      parts: spec.domainMix.map(d => ({
-        key: d.id, pct: d.pct,
-        label: d.id ? (d.id + ' · ' + ((blueprint.find(b => b.id === d.id) || {}).name || d.id)) : 'Unmapped',
-        match: q => (q.domainId || null) === (d.id || null)
-      }))
-    });
+    const parts = usable(spec.domainMix.map(d => ({
+      key: 'dom:' + d.id, pct: d.pct,
+      label: d.id ? (d.id + ' · ' + ((blueprint.find(b => b.id === d.id) || {}).name || d.id)) : 'Unmapped',
+      match: q => (q.domainId || null) === (d.id || null)
+    })));
+    if (parts) dims.push({ name: 'domain', label: 'domain', parts });
   }
   if (spec.difficultyMix && spec.difficultyMix.length) {
-    dims.push({
-      name: 'difficulty',
-      parts: spec.difficultyMix.map(d => ({
-        key: d.key, pct: d.pct, label: d.key,
-        match: q => (q.difficulty || 'medium') === d.key
-      }))
-    });
+    // Difficulty is only meaningful where a person actually judged it. Every
+    // question carries a stored default of 'medium' from the moment it
+    // exists, so matching on the value alone would count an entire ungraded
+    // bank as genuine mediums and hand back a confident "this mix is fine"
+    // for a difficulty profile the bank cannot support.
+    const parts = usable(spec.difficultyMix.map(d => ({
+      key: 'dif:' + d.key, pct: d.pct, label: d.key,
+      match: q => q.difficultyVerified === 'verified' && (q.difficulty || 'medium') === d.key
+    })));
+    if (parts) dims.push({ name: 'difficulty', label: 'difficulty', parts });
   }
   if (spec.seenMix && spec.seenMix.seenPct != null) {
-    const seen = Math.max(0, Math.min(100, spec.seenMix.seenPct));
+    const seen = clamp(spec.seenMix.seenPct, 0, 100);
     dims.push({
-      name: 'seen',
+      name: 'seen', label: 'familiarity',
       parts: [
-        { key: 'seen', pct: seen, label: 'seen before', match: q => q.stats.attempts > 0 },
-        { key: 'unseen', pct: 100 - seen, label: 'never attempted', match: q => q.stats.attempts === 0 }
+        { key: 'seen:y', pct: seen, label: 'seen before', match: q => q.stats.attempts > 0 },
+        { key: 'seen:n', pct: 100 - seen, label: 'never attempted', match: q => q.stats.attempts === 0 }
       ]
     });
   }
@@ -2822,71 +2830,136 @@ function compositionDimensions(spec, blueprint) {
 
 /**
  * Select `count` questions from `pool` honouring every enabled quota.
- * Returns { questions, buckets, shortfalls, substituted }.
- * Never throws — the caller decides what an unmet quota means, because the
- * same shortfall is an error when composing a test and merely information
- * when previewing one.
+ * Returns { questions, parts, shortfalls, substituted, unreachable }.
+ *
+ * The percentages on each dimension are MARGINAL targets, not a demand on
+ * every intersection. "Half the paper from Domain 1" and "half the paper
+ * hard" together mean exactly that — half and half — and are satisfied
+ * perfectly by ten easy Domain 1 questions and ten hard Domain 2 ones. An
+ * earlier version multiplied the shares into a cross-product and demanded a
+ * quarter of the paper in each corner, which refused that request as
+ * impossible even though the bank could fill it exactly. Enforcing the
+ * product is both wrong and far more likely to be unsatisfiable, since a
+ * bank's domains and difficulties are usually correlated.
+ *
+ * Filling marginals from a finite pool is a transportation problem, and in
+ * three dimensions deciding it exactly is NP-hard, so this fills greedily
+ * from the most constrained cell and retries from several seeded orderings,
+ * keeping the best. That can fall a question or two short of a theoretically
+ * perfect fit in adversarial cases — which is why what it reports is the
+ * deficit it actually ended with, never an assumption that greedy succeeded.
  */
 function composeTest(pool, spec, count, rng, blueprint) {
   const dims = compositionDimensions(spec || {}, blueprint || []);
   if (!dims.length) {
-    return { questions: shuffle(pool, rng).slice(0, count), buckets: [], shortfalls: [], substituted: 0 };
+    return { questions: shuffle(pool, rng).slice(0, count), parts: [], shortfalls: [], substituted: 0, unreachable: 0 };
   }
 
-  // Cross-product of the enabled dimensions. Each cell carries its target
-  // share as the product of its share on every dimension, so a two-dimension
-  // spec of 40% D1 and 20% easy targets 8% of the paper at (D1, easy).
-  let cells = [{ parts: [], share: 1 }];
+  // Integer target per part, apportioned within its own dimension so every
+  // dimension's own percentages hold exactly whatever the others ask for.
   dims.forEach(dim => {
-    const total = dim.parts.reduce((s, p) => s + Math.max(0, p.pct || 0), 0) || 1;
-    const next = [];
-    cells.forEach(c => dim.parts.forEach(p => {
-      next.push({ parts: c.parts.concat([{ dim: dim.name, part: p }]), share: c.share * (Math.max(0, p.pct || 0) / total) });
-    }));
-    cells = next;
+    const alloc = apportion(dim.parts.map(p => ({ key: p.key, pct: p.pct })), count);
+    const byKey = new Map(alloc.map(a => [a.key, a.n]));
+    dim.parts.forEach(p => { p.target = byKey.get(p.key) || 0; });
   });
-  cells = cells.filter(c => c.share > 0);
 
-  const alloc = apportion(cells.map((c, i) => ({ key: i, pct: c.share * 100 })), count);
-  const allocByCell = new Map(alloc.map(a => [a.key, a.n]));
+  // A question sits in exactly one cell: its part on each dimension. Anything
+  // that matches no part of some enabled dimension cannot serve that quota at
+  // all — an ungraded question under a difficulty mix, for instance — so it is
+  // held back rather than being counted towards a bucket it does not belong to.
+  const cellOf = (q) => {
+    const parts = [];
+    for (const dim of dims) {
+      const p = dim.parts.find(x => x.match(q));
+      if (!p) return null;
+      parts.push(p);
+    }
+    return parts;
+  };
+  const cells = new Map();
+  let unreachable = 0;
+  pool.forEach(q => {
+    const parts = cellOf(q);
+    if (!parts) { unreachable++; return; }
+    const key = parts.map(p => p.key).join('|');
+    if (!cells.has(key)) cells.set(key, { parts, questions: [] });
+    cells.get(key).questions.push(q);
+  });
 
-  const used = new Set();
-  const buckets = [];
+  const attempt = (attemptRng) => {
+    const got = new Map();
+    dims.forEach(d => d.parts.forEach(p => got.set(p.key, 0)));
+    const remaining = new Map();
+    cells.forEach((c, k) => remaining.set(k, shuffle(c.questions, attemptRng)));
+    const picked = [];
+    while (picked.length < count) {
+      // Only cells that are short on EVERY dimension can be taken, so a quota
+      // is never overshot to fill another. Among those, drain the scarcest
+      // first: a cell with few questions left is the one most likely to have
+      // nothing to give later, so spending a general-purpose question on
+      // it now is what a naive fill order gets wrong.
+      let bestKey = null, bestScarcity = Infinity;
+      cells.forEach((c, k) => {
+        const left = remaining.get(k);
+        if (!left.length) return;
+        for (const p of c.parts) if (got.get(p.key) >= p.target) return;
+        if (left.length < bestScarcity) { bestScarcity = left.length; bestKey = k; }
+      });
+      if (bestKey == null) break;
+      const q = remaining.get(bestKey).pop();
+      cells.get(bestKey).parts.forEach(p => got.set(p.key, got.get(p.key) + 1));
+      picked.push(q);
+    }
+    let deficit = 0;
+    dims.forEach(d => d.parts.forEach(p => { deficit += Math.max(0, p.target - got.get(p.key)); }));
+    return { picked, got, deficit };
+  };
+
+  // Greedy can paint itself into a corner, and which corner depends entirely
+  // on the order it drew in. Several seeded orderings cost almost nothing at
+  // this scale and routinely recover a perfect fit that a single pass missed.
+  let best = null;
+  for (let i = 0; i < 8; i++) {
+    const r = attempt(mulberry32((Math.floor(rng() * 0xFFFFFFFF) >>> 0) ^ (i * 2654435761)));
+    if (!best || r.deficit < best.deficit) best = r;
+    if (best.deficit === 0) break;
+  }
+
+  const parts = [];
   const shortfalls = [];
-  let picked = [];
-  cells.forEach((c, i) => {
-    const want = allocByCell.get(i) || 0;
-    const label = c.parts.map(p => p.part.label).join(' · ');
-    // A question belongs to exactly one cell, so `used` only guards against a
-    // pool that somehow contains the same record twice.
-    const available = pool.filter(q => !used.has(q.uuid) && c.parts.every(p => p.part.match(q)));
-    const take = shuffle(available, rng).slice(0, want);
-    take.forEach(q => used.add(q.uuid));
-    picked = picked.concat(take);
-    buckets.push({ label, want, got: take.length, available: available.length });
-    if (take.length < want) shortfalls.push({ label, want, got: take.length, available: available.length });
-  });
+  dims.forEach(dim => dim.parts.forEach(p => {
+    const supplied = best.got.get(p.key) || 0;
+    const available = pool.filter(p.match).length;
+    const row = { dimension: dim.label, label: p.label, want: p.target, got: supplied, available };
+    parts.push(row);
+    if (supplied < p.target) shortfalls.push(row);
+  }));
 
+  let picked = best.picked;
   let substituted = 0;
   if (picked.length < count) {
-    const rest = shuffle(pool.filter(q => !used.has(q.uuid)), rng);
-    const fill = rest.slice(0, count - picked.length);
+    const used = new Set(picked.map(q => q.uuid));
+    const fill = shuffle(pool.filter(q => !used.has(q.uuid)), rng).slice(0, count - picked.length);
     substituted = fill.length;
     picked = picked.concat(fill);
   }
-  return { questions: shuffle(picked, rng).slice(0, count), buckets, shortfalls, substituted };
+  return { questions: shuffle(picked, rng).slice(0, count), parts, shortfalls, substituted, unreachable };
 }
 
-/** The message a refused composition shows. Written to be actionable: every
-    line names the bucket, what was asked of it and what the bank can supply,
-    because "not enough questions" alone leaves nothing to correct. */
+/** The rows a refused composition shows. Structured rather than prose: the
+    caller renders them as a table, because a wall of text is exactly what a
+    person cannot act on when they need to know which number to change. */
+function shortfallRows(shortfalls) {
+  return shortfalls.map(s => ({
+    label: s.label,
+    dimension: s.dimension,
+    detail: 'asked for ' + s.want + ', the bank can supply ' + s.available
+  }));
+}
 function describeShortfalls(shortfalls, count) {
-  const lines = shortfalls.map(s =>
-    '· ' + s.label + ' — asked for ' + s.want + ', only ' + s.available + ' available');
   const missing = shortfalls.reduce((n, s) => n + (s.want - s.got), 0);
-  return 'This mix cannot be filled from your bank. ' + missing + ' of the ' + count +
-    ' question(s) have nowhere to come from:\n\n' + lines.join('\n') +
-    '\n\nAdjust the percentages, widen the filters, or reduce the number of questions.';
+  return missing + ' of the ' + count + ' question(s) cannot be found: ' +
+    shortfalls.map(s => s.label + ' (asked ' + s.want + ', available ' + s.available + ')').join('; ');
 }
 
 function weakFirstPick(pool, count, rng, minSample) {
@@ -2934,22 +3007,45 @@ const Session = {
     let chosen, notes = [], shortfalls = [];
 
     let composition = null;
-    const spec = config.composition;
+    let spec = config.composition;
     const hasSpec = spec && ((spec.domainMix && spec.domainMix.length) || (spec.difficultyMix && spec.difficultyMix.length) || (spec.seenMix && spec.seenMix.seenPct != null));
 
     if (hasSpec) {
       // An explicit mix always wins over the mode's default selection: the
       // candidate has said exactly what paper they want.
+      //
+      // But a mock is blueprint-weighted whether or not anyone says so, and
+      // the mix dimensions are independent — ticking only "control how much I
+      // have seen before" used to take the composed path and drop the
+      // blueprint entirely, quietly turning a weighted mock into one shaped by
+      // however the bank happened to be imported. The weighting is a quota in
+      // its own right, so it is supplied here when the candidate has not
+      // overridden it, rather than lost by omission.
+      if (!(spec.domainMix && spec.domainMix.length) && (mode === 'mock' || config.weighted)) {
+        spec = Object.assign({}, spec, {
+          domainMix: (State.course.blueprint || []).map(d => ({ id: d.id, pct: d.weight || 0 })),
+          domainMixImplied: true
+        });
+      }
       const r = composeTest(filtered, spec, wanted, rng, State.course.blueprint);
       if (r.shortfalls.length && spec.strict !== false) {
         const err = new Error(describeShortfalls(r.shortfalls, wanted));
         err.shortfalls = r.shortfalls;
+        // By far the commonest hidden cause: a difficulty mix over a bank
+        // nobody has graded. Those questions match no difficulty part at all,
+        // so they are simply unavailable to the mix — which looks inexplicable
+        // unless it is said outright.
+        if (r.unreachable && spec.difficultyMix) {
+          err.ungradedNote = r.unreachable + ' of the ' + filtered.length +
+            ' matching question(s) have never had their difficulty graded, so they cannot fill a difficulty quota. ' +
+            'Grade them as you practise — the prompt appears after each answer — or drop the difficulty mix for now.';
+        }
         throw err;
       }
       chosen = r.questions;
-      notes = r.buckets;
+      notes = r.parts;
       shortfalls = r.shortfalls;
-      composition = { spec: JSON.parse(JSON.stringify(spec)), buckets: r.buckets, substituted: r.substituted };
+      composition = { spec: JSON.parse(JSON.stringify(spec)), parts: r.parts, substituted: r.substituted, unreachable: r.unreachable };
     } else if (mode === 'mock' || (config.weighted && filtered.length)) {
       const r = weightedPick(filtered, State.course.blueprint, wanted, rng);
       chosen = r.questions; notes = r.notes; shortfalls = r.shortfalls;
@@ -3528,7 +3624,7 @@ ROUTES.practice = async (root, preselect) => {
     worse than one that stays out of the way. Feasibility is recomputed on
     every keystroke against the real pool, so an impossible mix is visible
     here rather than being discovered at the moment you press Start. */
-function compositionEditor(cfg, pool, filters, recountOuter) {
+function compositionEditor(cfg, pool, filters) {
   const wrap = h('div', { class: 'field', style: 'margin-top:4px' });
   const spec = cfg.composition = { domainMix: null, difficultyMix: null, seenMix: null, strict: true };
   const bp = State.course.blueprint || [];
@@ -3585,11 +3681,16 @@ function compositionEditor(cfg, pool, filters, recountOuter) {
           h('span', { class: 'tiny dim', text: '%' })
         ]));
       });
-      const ungraded = pool.filter(q => q.difficultyVerified !== 'verified').length;
+      // Counted against the pool the mix will actually draw from, not the
+      // whole bank — a warning about 440 ungraded questions is misleading
+      // when the filters have already narrowed the paper to 30.
+      const inScope = applyFilters(pool, filters);
+      const ungraded = inScope.filter(q => q.difficultyVerified !== 'verified').length;
       if (ungraded) {
         rows.appendChild(h('div', { class: 'notice warn small', style: 'margin-top:4px' },
-          ungraded + ' of ' + pool.length + ' eligible question(s) have never had their difficulty graded, so they still count as “medium”. ' +
-          'Grade them as you practise — the prompt appears after each answer — or this mix will mostly reflect that default rather than real difficulty.'));
+          ungraded + ' of the ' + inScope.length + ' question(s) matching your filters have never had their difficulty graded. ' +
+          'They cannot fill a difficulty quota at all, so this mix can only draw on the ' + (inScope.length - ungraded) + ' that have been. ' +
+          'Grade them as you practise — the prompt appears after each answer.'));
       }
       body.appendChild(rows);
     }
@@ -3623,24 +3724,36 @@ function compositionEditor(cfg, pool, filters, recountOuter) {
   function refreshFeasibility() {
     feasibility.textContent = '';
     const enabled = (spec.domainMix && spec.domainMix.length) || (spec.difficultyMix && spec.difficultyMix.length) || (spec.seenMix && spec.seenMix.seenPct != null);
-    if (!enabled) { if (recountOuter) recountOuter(); return; }
+    if (!enabled) return;
     const filtered = applyFilters(pool, filters);
     // Dry run on a fixed seed: this is a preview of feasibility, not of the
     // actual paper, so it must not consume or depend on the session's seed.
     const r = composeTest(filtered, spec, Math.max(1, cfg.count || 20), mulberry32(1), bp);
     const tbl = h('table', { class: 'recon' });
     const tb = h('tbody');
-    r.buckets.forEach(b => {
+    // Grouped by dimension, because the quotas are per dimension: "hard" is
+    // short is a statement about the difficulty mix, not about some corner of
+    // a cross-product the candidate never asked for.
+    let lastDim = null;
+    r.parts.forEach(b => {
+      if (b.dimension !== lastDim) {
+        lastDim = b.dimension;
+        tb.appendChild(h('tr', {}, [h('td', { colspan: '3', class: 'eyebrow', style: 'padding-top:8px', text: b.dimension })]));
+      }
       const short = b.got < b.want;
       tb.appendChild(h('tr', {}, [
-        h('td', { class: 'small', text: b.label }),
+        h('td', { class: 'small', style: 'padding-left:12px', text: b.label }),
         h('td', { class: 'amt', text: String(b.want) }),
-        h('td', { class: 'amt', style: short ? 'color:var(--rose)' : '', text: String(b.available) + ' available' })
+        h('td', { class: 'amt', style: short ? 'color:var(--rose)' : '', text: short ? 'only ' + b.available + ' available' : b.available + ' available' })
       ]));
     });
     tbl.appendChild(tb);
     feasibility.appendChild(h('div', { class: 'eyebrow', style: 'margin-bottom:4px', text: 'This mix would ask for' }));
     feasibility.appendChild(tbl);
+    if (r.unreachable) {
+      feasibility.appendChild(h('div', { class: 'tiny dim', style: 'margin-top:4px' },
+        r.unreachable + ' matching question(s) cannot serve these quotas at all — most often because their difficulty has never been graded.'));
+    }
     if (r.shortfalls.length) {
       feasibility.appendChild(h('div', { class: 'notice bad small', style: 'margin-top:6px' },
         spec.strict !== false
@@ -3649,7 +3762,6 @@ function compositionEditor(cfg, pool, filters, recountOuter) {
     } else {
       feasibility.appendChild(h('div', { class: 'notice ok small', style: 'margin-top:6px' }, 'Your bank can fill this mix exactly.'));
     }
-    if (recountOuter) recountOuter();
   }
 
   wrap.appendChild(h('label', { text: 'Paper composition' }));
@@ -3658,6 +3770,12 @@ function compositionEditor(cfg, pool, filters, recountOuter) {
   wrap.appendChild(body);
   wrap.appendChild(feasibility);
   draw();
+  // Exposed so the outer recount can drive it: the controls that actually fix
+  // an infeasible mix — the question count, the domain chips, the phrase
+  // filter — all live outside this editor, and a feasibility verdict that
+  // does not move when they do is worse than none, because it reads as
+  // confirmation.
+  wrap.refresh = refreshFeasibility;
   return wrap;
 }
 
@@ -3669,6 +3787,7 @@ async function configureMode(mode) {
   const cfg = { filters: f, count: mode === 'mock' ? Settings.get('mockCount') : 20, weighted: mode === 'mixed' || mode === 'mock', minutes: Settings.get('mockMinutes') };
 
   const countLabel = h('span', { class: 'docnum' });
+  let compositionPanel = null;
   const recount = () => {
     let p = applyFilters(pool, f);
     if (mode === 'spaced') p = p.filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date());
@@ -3676,6 +3795,10 @@ async function configureMode(mode) {
     countLabel.style.color = p.length < cfg.count ? 'var(--pencil)' : 'var(--green)';
     warn.classList.toggle('hidden', p.length >= cfg.count);
     warn.textContent = 'Only ' + p.length + ' question(s) match. The session will run with what is available rather than repeating any question.';
+    // Every filter chip, keyword keystroke and count change routes through
+    // here, so this is the one place that can keep the feasibility verdict
+    // honest as the request changes underneath it.
+    if (compositionPanel && compositionPanel.refresh) compositionPanel.refresh();
   };
   const warn = h('div', { class: 'notice warn hidden' });
 
@@ -3742,7 +3865,8 @@ async function configureMode(mode) {
     body.appendChild(h('label', { class: 'check' }, [h('input', { type: 'checkbox', checked: true, onchange: (e) => cfg.weighted = e.target.checked }), h('span', { text: 'Distribute by official exam weights (' + State.course.blueprint.map(d => d.weight + '%').join(' / ') + ')' })]));
   }
   if (mode === 'mock' || mode === 'mixed' || mode === 'custom') {
-    body.appendChild(compositionEditor(cfg, pool, f, recount));
+    compositionPanel = compositionEditor(cfg, pool, f);
+    body.appendChild(compositionPanel);
   }
   body.appendChild(h('div', { class: 'row' }, [h('span', { class: 'eyebrow', text: 'Matching pool' }), countLabel]));
   body.appendChild(warn);
@@ -3783,7 +3907,33 @@ async function configureMode(mode) {
     const s = await Session.create(mode, cfg);
     runSession(s);
   } catch (e) {
-    modal({ title: 'Cannot start this session', body: h('p', { text: e.message }) });
+    // A shortfall is a request to change one number, so it is shown as a
+    // table of exactly which quota could not be met and by how much. The
+    // plain-text form collapses its newlines to spaces in HTML and arrives as
+    // one unreadable paragraph, which is no use to someone who has to decide
+    // what to edit.
+    const rows = e.shortfalls || null;
+    await modal({
+      title: 'Cannot start this session',
+      body: rows
+        ? h('div', { class: 'stack' }, [
+          h('p', {}, 'Your bank cannot fill the mix you asked for. These quotas came up short:'),
+          h('table', { class: 'recon' }, h('tbody', {}, shortfallRows(rows).map(r =>
+            h('tr', {}, [
+              h('td', { class: 'small', text: r.label }),
+              h('td', { class: 'tiny dim', text: r.dimension }),
+              h('td', { class: 'small', style: 'color:var(--rose)', text: r.detail })
+            ])))),
+          h('p', { class: 'small muted', style: 'margin:0' },
+            'Lower that percentage, widen the filters, ask for fewer questions, or untick “Refuse to start…” to let the rest be drawn from elsewhere.'),
+          e.ungradedNote ? h('div', { class: 'notice warn small' }, e.ungradedNote) : null
+        ])
+        : h('p', { text: e.message })
+    });
+    // The configuration is expensive to rebuild — five domain percentages, a
+    // difficulty split, filters — so reopen it as it was rather than dropping
+    // the candidate back to an empty picker to type it all again.
+    if (rows) return configureMode(mode);
   }
 }
 
@@ -4108,8 +4258,23 @@ async function showResults(s) {
   target.appendChild(domCard);
 
   if (s.shortfalls && s.shortfalls.length) {
-    target.appendChild(h('div', { class: 'notice warn', style: 'margin-bottom:16px' },
-      'Weighted selection could not be met in full: ' + s.shortfalls.map(x => State.domainName(x.id) + ' wanted ' + x.want + ', supplied ' + x.got).join('; ') + '. The balance was drawn from other domains.'));
+    // Two selection methods produce shortfalls with different shapes:
+    // weightedPick's carry a domain id, a composed paper's carry their own
+    // label and can be on any dimension. Reading one with the other's shape
+    // printed "Unmapped" against every row and blamed the wrong thing.
+    const composed = !!s.composition;
+    target.appendChild(h('div', { class: 'notice warn', style: 'margin-bottom:16px' }, [
+      h('div', {}, composed
+        ? 'This paper does not match the mix you asked for:'
+        : 'Weighted selection could not be met in full:'),
+      h('div', { class: 'small', style: 'margin-top:4px' },
+        s.shortfalls.map(x => (x.label || State.domainName(x.id)) + ' — asked ' + x.want + ', supplied ' + x.got).join(' · ')),
+      h('div', { class: 'small', style: 'margin-top:4px' }, composed
+        ? ((s.composition.substituted || 0) > 0
+          ? s.composition.substituted + ' question(s) were drawn from outside the mix, so treat the domain and difficulty breakdown below with that in mind.'
+          : 'The paper is shorter than requested rather than being padded from elsewhere.')
+        : 'The balance was drawn from other domains.')
+    ]));
   }
 
   // review list
@@ -7944,6 +8109,16 @@ async function courseDialog(course) {
   }
   bp = bp.filter(d => d.id && d.name.trim());
   if (!bp.length) { toast('Add at least one domain', 'bad'); return; }
+  // "+ Add domain" numbers the new row from the current length, so deleting a
+  // middle domain and adding another re-issues a code already in use. Two rows
+  // sharing a code both draw from the same questions, which puts the same
+  // question in a weighted paper twice and splits the domain's weight in a way
+  // nobody asked for.
+  const dupeIds = bp.map(d => d.id).filter((id, i, a) => a.indexOf(id) !== i);
+  if (dupeIds.length) {
+    toast('Two domains share the code ' + Array.from(new Set(dupeIds)).join(', ') + '. Codes must be unique — questions are filed under them.', 'bad', 7000);
+    return;
+  }
   if (!isNew) {
     // A domain code that's renamed or removed here looks, to the rest of
     // the app, identical to one that simply no longer exists — any
@@ -10609,17 +10784,21 @@ test('A rubbish difficulty value is refused rather than stored', async () => {
 /* ---- test composition ---- */
 const mkPoolQ = (domainId, difficulty, attempts) => {
   const q = mkQ('stem ' + uuid().slice(0, 6), ['a', 'b', 'c', 'd'], 0, { domainId, difficulty });
+  // Difficulty quotas only count questions a person actually graded, so a
+  // pool built for those tests has to say so — an ungraded question is not
+  // an easy/medium/hard question, it is one nobody has judged.
+  q.difficultyVerified = 'verified';
   q.stats.attempts = attempts || 0;
   return q;
 };
 const BP3 = [{ id: 'D1', name: 'One', weight: 50 }, { id: 'D2', name: 'Two', weight: 50 }];
+const marginalOf = (r, label) => (r.parts.find(p => p.label === label) || {}).got;
 
 test('apportion hands out exactly the total, favouring the largest remainders', () => {
   const a = apportion([{ key: 'x', pct: 33 }, { key: 'y', pct: 33 }, { key: 'z', pct: 34 }], 10);
   eq(a.reduce((s, x) => s + x.n, 0), 10, 'every unit must be handed out');
   const b = apportion([{ key: 'x', pct: 50 }, { key: 'y', pct: 50 }], 7);
   eq(b.reduce((s, x) => s + x.n, 0), 7, 'an odd total must still be fully allocated');
-  // Shares need not total 100 — they are proportions.
   const c = apportion([{ key: 'x', pct: 2 }, { key: 'y', pct: 2 }], 8);
   eq(c[0].n, 4); eq(c[1].n, 4);
   const z = apportion([{ key: 'x', pct: 0 }, { key: 'y', pct: 0 }], 5);
@@ -10643,48 +10822,85 @@ test('A 100%-one-domain mix is allowed — studying only one domain is legitimat
   eq(r.shortfalls.length, 0);
   eq(r.questions.filter(q => q.domainId === 'D1').length, 10, 'the whole paper must come from D1');
 });
-test('Two dimensions intersect: the mix is met on both at once', () => {
+test('Percentages are MARGINAL, so perfectly correlated dimensions still compose', () => {
+  // The case that exposed the original design as wrong. Every D1 question is
+  // easy and every D2 question is hard, so no question exists in two of the
+  // four intersections. Demanding a quarter of the paper in each corner
+  // refuses this outright — yet "half from D1" and "half easy" is satisfied
+  // exactly by 10 easy D1 questions plus 10 hard D2 ones.
   const pool = [];
-  for (let i = 0; i < 10; i++) pool.push(mkPoolQ('D1', 'hard', 0));
-  for (let i = 0; i < 10; i++) pool.push(mkPoolQ('D1', 'easy', 0));
-  for (let i = 0; i < 10; i++) pool.push(mkPoolQ('D2', 'hard', 0));
-  for (let i = 0; i < 10; i++) pool.push(mkPoolQ('D2', 'easy', 0));
+  for (let i = 0; i < 50; i++) pool.push(mkPoolQ('D1', 'easy', 0));
+  for (let i = 0; i < 50; i++) pool.push(mkPoolQ('D2', 'hard', 0));
   const r = composeTest(pool, {
     domainMix: [{ id: 'D1', pct: 50 }, { id: 'D2', pct: 50 }],
-    difficultyMix: [{ key: 'hard', pct: 50 }, { key: 'easy', pct: 50 }]
-  }, 8, mulberry32(11), BP3);
-  eq(r.shortfalls.length, 0);
-  eq(r.questions.filter(q => q.domainId === 'D1' && q.difficulty === 'hard').length, 2);
-  eq(r.questions.filter(q => q.domainId === 'D2' && q.difficulty === 'easy').length, 2);
+    difficultyMix: [{ key: 'easy', pct: 50 }, { key: 'hard', pct: 50 }]
+  }, 20, mulberry32(11), BP3);
+  eq(r.shortfalls.length, 0, 'a satisfiable marginal request must not be refused');
+  eq(r.questions.filter(q => q.domainId === 'D1').length, 10, 'the domain marginal holds');
+  eq(r.questions.filter(q => q.difficulty === 'easy').length, 10, 'and so does the difficulty marginal');
 });
-test('An unsatisfiable intersection is reported per bucket, not silently substituted', () => {
-  // Each dimension alone is satisfiable — 20 hard questions exist, and D2 has
-  // 20 questions — but their INTERSECTION is empty, which is exactly the trap
-  // a single-dimension check would miss.
+test('A genuinely unmeetable marginal is reported against the dimension that failed', () => {
+  // Only 3 hard questions exist anywhere, so no arrangement can put 10 in a
+  // 20-question paper. That is a real shortfall, unlike the case above.
   const pool = [];
-  for (let i = 0; i < 20; i++) pool.push(mkPoolQ('D1', 'hard', 0));
-  for (let i = 0; i < 20; i++) pool.push(mkPoolQ('D2', 'easy', 0));
-  const r = composeTest(pool, {
-    domainMix: [{ id: 'D2', pct: 100 }],
-    difficultyMix: [{ key: 'hard', pct: 100 }]
-  }, 6, mulberry32(5), BP3);
-  eq(r.shortfalls.length, 1, 'the empty intersection must be reported');
-  eq(r.shortfalls[0].available, 0);
-  eq(r.shortfalls[0].want, 6);
-  const msg = describeShortfalls(r.shortfalls, 6);
-  assert(msg.indexOf('D2') >= 0 && msg.indexOf('hard') >= 0, 'the message must name the bucket that failed, got: ' + msg);
-  assert(msg.indexOf('6') >= 0, 'and how many questions have nowhere to come from');
+  for (let i = 0; i < 3; i++) pool.push(mkPoolQ('D1', 'hard', 0));
+  for (let i = 0; i < 50; i++) pool.push(mkPoolQ('D1', 'easy', 0));
+  const r = composeTest(pool, { difficultyMix: [{ key: 'easy', pct: 50 }, { key: 'hard', pct: 50 }] }, 20, mulberry32(5), BP3);
+  eq(r.shortfalls.length, 1, 'exactly the one quota that cannot be met');
+  eq(r.shortfalls[0].label, 'hard');
+  eq(r.shortfalls[0].want, 10);
+  eq(r.shortfalls[0].available, 3);
+  const rows = shortfallRows(r.shortfalls);
+  assert(rows[0].detail.indexOf('3') >= 0, 'the row must state what the bank can actually supply');
+  eq(rows[0].dimension, 'difficulty', 'and which dimension it belongs to');
+});
+test('Ungraded questions cannot fill a difficulty quota and are reported as unreachable', () => {
+  const pool = [];
+  for (let i = 0; i < 40; i++) {
+    const q = mkPoolQ('D1', 'medium', 0);
+    q.difficultyVerified = 'unverified';   // the stored 'medium' is a default, not a judgement
+    pool.push(q);
+  }
+  for (let i = 0; i < 5; i++) pool.push(mkPoolQ('D1', 'medium', 0));
+  const r = composeTest(pool, { difficultyMix: [{ key: 'medium', pct: 100 }] }, 20, mulberry32(2), BP3);
+  eq(r.unreachable, 40, 'ungraded questions must be held back, not counted as genuine mediums');
+  eq(r.shortfalls.length, 1, 'so the quota is honestly short rather than falsely satisfiable');
+  eq(r.shortfalls[0].available, 5);
 });
 test('Seen/unseen composition splits on attempt history', () => {
   const pool = [];
-  for (let i = 0; i < 10; i++) pool.push(mkPoolQ('D1', 'medium', 3));   // seen
-  for (let i = 0; i < 10; i++) pool.push(mkPoolQ('D1', 'medium', 0));   // unseen
+  for (let i = 0; i < 10; i++) pool.push(mkPoolQ('D1', 'medium', 3));
+  for (let i = 0; i < 10; i++) pool.push(mkPoolQ('D1', 'medium', 0));
   const r = composeTest(pool, { seenMix: { seenPct: 25 } }, 8, mulberry32(9), BP3);
   eq(r.shortfalls.length, 0);
   eq(r.questions.filter(q => q.stats.attempts > 0).length, 2, '25% of 8 is 2 seen');
   eq(r.questions.filter(q => q.stats.attempts === 0).length, 6);
 });
-test('Lenient mode fills the gap but says how much it substituted', () => {
+test('Three dimensions at a small count still split every one of them exactly', () => {
+  // 5 domains x 3 difficulties x seen/unseen is 30 cells for an 8-question
+  // paper. Allocating the cross-product directly starves whole dimensions —
+  // notably every "seen" cell, whose share is always the smaller of the pair.
+  const bp5 = ['D1', 'D2', 'D3', 'D4', 'D5'].map(id => ({ id, name: id, weight: 20 }));
+  const pool = [];
+  bp5.forEach(d => ['easy', 'medium', 'hard'].forEach(dif => {
+    for (let i = 0; i < 20; i++) pool.push(mkPoolQ(d.id, dif, i % 2 ? 3 : 0));
+  }));
+  const r = composeTest(pool, {
+    domainMix: bp5.map(d => ({ id: d.id, pct: 20 })),
+    difficultyMix: [{ key: 'easy', pct: 25 }, { key: 'medium', pct: 50 }, { key: 'hard', pct: 25 }],
+    seenMix: { seenPct: 50 }
+  }, 8, mulberry32(13), bp5);
+  eq(r.questions.length, 8);
+  eq(r.questions.filter(q => q.stats.attempts > 0).length, 4, 'the seen half must not be starved by rounding');
+});
+test('An all-zero mix is treated as no constraint rather than silently refusing', () => {
+  const pool = [];
+  for (let i = 0; i < 20; i++) pool.push(mkPoolQ('D1', 'medium', 0));
+  const r = composeTest(pool, { domainMix: [{ id: 'D1', pct: 0 }, { id: 'D2', pct: 0 }] }, 10, mulberry32(1), BP3);
+  eq(r.questions.length, 10, 'a paper is still produced');
+  eq(r.shortfalls.length, 0, 'and nothing is reported as short, because nothing was actually asked for');
+});
+test('Lenient mode fills the gap and says how many did not match', () => {
   const pool = [];
   for (let i = 0; i < 3; i++) pool.push(mkPoolQ('D1', 'hard', 0));
   for (let i = 0; i < 20; i++) pool.push(mkPoolQ('D2', 'easy', 0));
@@ -10698,7 +10914,7 @@ test('No composition spec falls back to a plain shuffle of the pool', () => {
   for (let i = 0; i < 30; i++) pool.push(mkPoolQ('D1', 'medium', 0));
   const r = composeTest(pool, {}, 10, mulberry32(1), BP3);
   eq(r.questions.length, 10);
-  eq(r.buckets.length, 0);
+  eq(r.parts.length, 0);
   eq(r.shortfalls.length, 0);
 });
 test('Composition never returns the same question twice', () => {
@@ -10712,6 +10928,17 @@ test('Composition never returns the same question twice', () => {
   }, 12, mulberry32(4), BP3);
   const ids = r.questions.map(q => q.uuid);
   eq(new Set(ids).size, ids.length, 'a question must not appear twice in one paper');
+});
+test('weightedPick never repeats a question when two domains share a code', () => {
+  // "+ Add domain" numbers from the current length, so removing a middle
+  // domain and adding another re-issues a code already in use. Both rows then
+  // draw the same questions into one paper.
+  const bpDupe = [{ id: 'D1', name: 'One', weight: 50 }, { id: 'D1', name: 'Also One', weight: 50 }];
+  const pool = [];
+  for (let i = 0; i < 20; i++) pool.push(mkPoolQ('D1', 'medium', 0));
+  const r = weightedPick(pool, bpDupe, 10, mulberry32(6));
+  const ids = r.questions.map(q => q.uuid);
+  eq(new Set(ids).size, ids.length, 'a colliding domain code must not duplicate questions in the paper');
 });
 test('The same seed and spec compose the same paper twice', () => {
   const pool = [];
