@@ -1460,6 +1460,58 @@ async function rescanCourseForPairs(courseId, onProgress) {
   return { checked, newConflicts, newDups, cleared };
 }
 
+/** A conflict is a relationship, so a record carrying the flag with nothing
+    on the other end of it is corrupt state rather than a conflict. It reads
+    as "disagrees with 0 other records" and can never be resolved, because
+    there is nothing to resolve it against.
+
+    Three things produce one. A merge deliberately flags the surviving
+    record about the answer of the record it just absorbed — a real
+    disagreement, but with a partner that is no longer live. An import flags
+    from a staging verdict, where the pairing lives on the in-memory
+    candidate rather than in conflictWith. And a partner can simply have
+    been deleted since. Re-derive each against the live bank, so it either
+    finds the partners it actually has or stops claiming to be a conflict. */
+async function repairOrphanedConflicts(courseId) {
+  const all = await Questions.byCourse(courseId);
+  const byUuid = new Map(all.map(q => [q.uuid, q]));
+  const isLive = (q) => q && q.status !== 'merged' && q.status !== 'rejected';
+  const live = all.filter(isLive);
+  const orphans = live.filter(q =>
+    (q.conflict || q.status === 'answer_conflict') &&
+    !(q.conflictWith || []).some(u => isLive(byUuid.get(u))));
+  if (!orphans.length) return { repaired: 0, becameConflict: 0, cleared: 0, doubtful: 0 };
+
+  const index = buildIndex(live);
+  const liveByUuid = new Map(live.map(q => [q.uuid, q]));
+  let becameConflict = 0, cleared = 0, doubtful = 0;
+  for (const q of orphans) {
+    const fromMerge = (q.mergedFrom || []).length > 0;
+    // Cleared first so the recheck re-derives from scratch rather than
+    // diffing against the very list that is already wrong.
+    q.conflictWith = [];
+    await recheckQuestion(q, { bank: live, index, byUuid: liveByUuid });
+    if ((q.conflictWith || []).length) becameConflict++;
+    else if (fromMerge) {
+      // The disagreement was real, so don't silently drop it — but a
+      // conflict with an absorbed record cannot be resolved as a pair.
+      // "Confirm this answer" is the same information in a form that can
+      // actually be acted on.
+      q.conflict = false;
+      q.answerVerified = 'doubtful';
+      q.status = 'needs_answer';
+      q.verifyNote = 'A merged source disagreed on the answer — confirm which is right';
+      doubtful++;
+    } else cleared++;
+    q.updatedAt = nowISO();
+    await DB.put('questions', q);
+  }
+  await audit('integrity', 'question', '', null,
+    { orphaned: orphans.length, becameConflict, cleared, doubtful },
+    'Repaired conflict flags that had no record on the other side');
+  return { repaired: orphans.length, becameConflict, cleared, doubtful };
+}
+
 /** Settle a whole conflict group in one action: apply the answer chosen for
     each record, mark them verified, and clear the conflict between them —
     definitively, whether or not the chosen answers agree.
@@ -1603,7 +1655,9 @@ async function mergeQuestions(canonicalUuid, dupUuid, note) {
   if (!canon.topic && dup.topic) canon.topic = dup.topic;
   if (!canon.domainId && dup.domainId) canon.domainId = dup.domainId;
   const mergeConflict = answersConflict(canon, dup);
-  if (mergeConflict) { canon.conflict = true; canon.status = 'answer_conflict'; }
+  // Recorded, not asserted as a conflict — see the merge-conflict note below,
+  // where this is turned into a "confirm the answer" the reviewer can act on.
+  if (mergeConflict) { canon.answerVerified = 'doubtful'; }
   // dup is leaving the live pool — anything still pointing at it as a
   // conflict or duplicate partner would otherwise be left referencing a
   // merged record. Clear it from those partners' pairing lists.
@@ -1618,11 +1672,17 @@ async function mergeQuestions(canonicalUuid, dupUuid, note) {
   await Questions.save(canon, 'merge:' + (dup.qid || dup.uuid), true);
   // Questions.save's recheck derives status purely from conflictWith/dupWith,
   // which will never include dup — it is already merged away by the time the
-  // recheck runs. A conflict that exists only because the two records being
-  // merged disagreed on the answer needs to be reasserted here, the one
-  // place that still knows why.
-  if (mergeConflict && (!canon.conflict || canon.status !== 'answer_conflict')) {
-    canon.conflict = true; canon.status = 'answer_conflict'; canon.updatedAt = nowISO();
+  // recheck runs. The disagreement was real and must not be dropped, but
+  // flagging it as an answer conflict names a pairing that no longer exists:
+  // it lands in the conflicts queue as a record "disagreeing with 0 other
+  // records", with no second side to resolve it against and no way to clear
+  // it. Ask for the one thing that actually settles it instead.
+  if (mergeConflict) {
+    canon.conflict = false;
+    canon.answerVerified = 'doubtful';
+    canon.status = 'needs_answer';
+    canon.verifyNote = 'A merged source disagreed on the answer — confirm which is right';
+    canon.updatedAt = nowISO();
     await DB.put('questions', canon);
   }
   await audit('merge', 'question', canon.qid || canon.uuid, { mergedQid: dup.qid }, summarise(canon), note || '');
@@ -5759,6 +5819,20 @@ const ConflictQueueState = { sel: new Set(), answers: new Map() };
 const ReviewQueueState = { filter: 'all' };
 
 async function renderReviewQueue(root) {
+  // Before deciding what to show: a conflict flag with no live record on the
+  // other side is unresolvable by construction, so clear those out rather
+  // than listing rows nothing can act on. Cheap — it only inspects records
+  // already carrying the flag, and does nothing at all when none are broken.
+  const repair = await repairOrphanedConflicts(State.course.id);
+  if (repair.repaired) {
+    State.invalidate();
+    setTimeout(() => toast(
+      repair.repaired + ' record(s) were flagged as conflicting with nothing on the other side. ' +
+      (repair.becameConflict ? repair.becameConflict + ' matched to a real partner. ' : '') +
+      (repair.doubtful ? repair.doubtful + ' came from a merge and now ask you to confirm the answer. ' : '') +
+      (repair.cleared ? repair.cleared + ' had no disagreement left and were cleared. ' : ''),
+      'info', 9000), 400);
+  }
   const all = await State.questions();
   const queue = all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0);
   const conflicts = queue.filter(q => q.status === 'answer_conflict' || q.conflict);
@@ -5782,10 +5856,29 @@ async function renderReviewQueue(root) {
     return;
   }
 
+  const byUuid = new Map(all.map(x => [x.uuid, x]));
+  /** A conflict is one disagreement shared by two records, so counting the
+      records says "16" where there are eight things to decide. Pair them up
+      once, here, and let the tab, the card badge and the rows all report the
+      same number — a record whose partner has gone is not a pair at all and
+      is left out of both. */
+  const conflictPairs = (() => {
+    const covered = new Set(), out = [];
+    conflicts.forEach(q => {
+      if (covered.has(q.uuid)) return;
+      const partners = (q.conflictWith || []).map(u => byUuid.get(u)).filter(Boolean);
+      if (!partners.length) return;
+      covered.add(q.uuid);
+      partners.forEach(p => covered.add(p.uuid));
+      out.push({ q, partners });
+    });
+    return out;
+  })();
+
   // A tab a person isn't even looking at any more is not a filter worth
   // keeping — if it emptied out entirely, drop back to All rather than show
   // a picker with nothing selected under it.
-  const counts = { all: queue.length, answer_conflict: conflicts.length, possible_dup: dupes.length, needs_answer: noAnswer.length, needs_class: noClass.length, other: rest.length };
+  const counts = { all: queue.length, answer_conflict: conflictPairs.length, possible_dup: dupes.length, needs_answer: noAnswer.length, needs_class: noClass.length, other: rest.length };
   if (ReviewQueueState.filter !== 'all' && !counts[ReviewQueueState.filter]) ReviewQueueState.filter = 'all';
 
   const tabsBar = h('div', { class: 'seg', style: 'margin-bottom:14px' });
@@ -5805,7 +5898,6 @@ async function renderReviewQueue(root) {
     container.appendChild(card);
   };
 
-  const byUuid = new Map(all.map(x => [x.uuid, x]));
   /** A badge saying "Conflicts with CISA-Q-000042" makes you open that record
       just to find out what it actually disagrees about. State the two
       competing answers right here instead — which option each record thinks
@@ -5854,20 +5946,13 @@ async function renderReviewQueue(root) {
       bulk toolbar above them, and its own local refresh so ticking a box
       doesn't re-fetch the whole queue. */
   function renderConflictsSection(container) {
-    if (!conflicts.length) return;
-    // A conflict is a relationship, so both of its records appear in this
-    // list — rendering a row for each would show the identical pair twice,
-    // side by side both times, and doubles the apparent amount of work.
-    // One row per pairing instead, keyed on whichever record comes first.
-    const covered = new Set();
-    const pairs = [];
-    conflicts.forEach(q => {
-      if (covered.has(q.uuid)) return;
-      const partners = (q.conflictWith || []).map(u => byUuid.get(u)).filter(Boolean);
-      covered.add(q.uuid);
-      partners.forEach(p => covered.add(p.uuid));
-      pairs.push({ q, partners });
-    });
+    // Both records of a conflict appear in `conflicts`, so a row per record
+    // would show the identical pair twice and double the apparent workload.
+    // conflictPairs (built once above, and shared with the tab count so the
+    // two can never disagree) is already one entry per pairing, with
+    // partnerless records left out.
+    const pairs = conflictPairs;
+    if (!pairs.length) return;
     const visible = pairs.slice(0, 40);
     // A row that scrolled out of the visible 40 (resolved, or just paged
     // out) is not a row a bulk action should silently still include.
@@ -5945,7 +6030,7 @@ async function renderReviewQueue(root) {
       card.appendChild(h('div', { class: 'card-h' }, [
         h('h3', { text: 'Answer conflicts' }), h('span', { class: 'badge b-review', text: String(pairs.length) }),
         h('div', { class: 'spacer' }),
-        h('span', { class: 'tiny dim', text: pairs.length === conflicts.length ? 'Two records disagree on the correct answer' : pairs.length + ' pair(s) across ' + conflicts.length + ' records' })
+        h('span', { class: 'tiny dim', text: 'Two records disagree on the correct answer' })
       ]));
 
       const toolbar = h('div', { class: 'row wrap', style: 'gap:10px;align-items:center;padding:0 16px 12px' });
@@ -9973,6 +10058,80 @@ test('"Not the same question" clears a conflict on both sides without touching e
   } finally {
     await DB.del('questions', a.uuid); await DB.del('questions', b.uuid);
   }
+});
+
+/* ---- orphaned conflict flags ---- */
+test('A conflict flag with nothing on the other side is cleared, not listed', async () => {
+  // Exactly what the queue was showing as "disagrees with 0 other records":
+  // flagged as conflicted, but conflictWith empty, so nothing could resolve it.
+  const cid = 'test-orphan-' + Date.now();
+  const q = mkQ('Which of the following is one of the functionalities of a DLP solution?',
+    ['Enhancing user productivity', 'Managing network configurations', 'Improving system performance', 'Preventing data exfiltration'], 3,
+    { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  q.conflictWith = [];
+  await recomputeFingerprint(q);
+  await DB.put('questions', q);
+  try {
+    const r = await repairOrphanedConflicts(cid);
+    eq(r.repaired, 1, 'the orphan must be found');
+    eq(r.cleared, 1, 'with no real partner in the bank, the stale flag is cleared');
+    const fresh = await DB.get('questions', q.uuid);
+    assert(!fresh.conflict, 'the conflict flag must be gone');
+    assert(fresh.status !== 'answer_conflict', 'and it must no longer read as conflicted');
+    eq(fresh.correctOptionId, q.options[3].id, 'the answer itself must be untouched');
+  } finally { await DB.del('questions', q.uuid); }
+});
+test('An orphaned flag that does have a real partner is repaired into a genuine pair', async () => {
+  const cid = 'test-orphan-' + Date.now();
+  const opts = ['Firewall', 'Log review', 'Encryption', 'Training'];
+  // a claims to be conflicted but names nobody; b genuinely disagrees with it.
+  const a = mkQ('Which is a detective control?', opts, 1, { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  const b = mkQ('Which is a detective control?', opts, 0, { courseId: cid, status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  a.conflictWith = []; b.conflictWith = [];
+  await recomputeFingerprint(a); await recomputeFingerprint(b);
+  await DB.put('questions', a); await DB.put('questions', b);
+  try {
+    const r = await repairOrphanedConflicts(cid);
+    eq(r.repaired, 1);
+    eq(r.becameConflict, 1, 'the real partner must be discovered rather than the flag dropped');
+    const freshA = await DB.get('questions', a.uuid);
+    const freshB = await DB.get('questions', b.uuid);
+    assert((freshA.conflictWith || []).indexOf(b.uuid) >= 0, 'a must now name its real partner');
+    assert((freshB.conflictWith || []).indexOf(a.uuid) >= 0, 'and the pairing must be recorded on b too');
+    eq(freshB.status, 'answer_conflict', 'b must now be flagged as well, not silently left Active');
+  } finally { await DB.del('questions', a.uuid); await DB.del('questions', b.uuid); }
+});
+test('A conflict inherited from a merge becomes a "confirm the answer", not a partnerless conflict', async () => {
+  const cid = 'test-orphan-' + Date.now();
+  const q = mkQ('What does RTO measure?', ['Data loss tolerance', 'Time to restore service', 'Backup window', 'Retention period'], 1,
+    { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  q.conflictWith = [];
+  q.mergedFrom = [{ uuid: 'gone-' + Date.now(), qid: 'OLD-Q-000001' }];
+  await recomputeFingerprint(q);
+  await DB.put('questions', q);
+  try {
+    const r = await repairOrphanedConflicts(cid);
+    eq(r.repaired, 1);
+    eq(r.doubtful, 1, 'a merge-origin conflict keeps its signal instead of being silently cleared');
+    const fresh = await DB.get('questions', q.uuid);
+    assert(!fresh.conflict, 'it must stop claiming a pairing that cannot exist');
+    eq(fresh.answerVerified, 'doubtful', 'the real disagreement survives as doubt about the answer');
+    eq(fresh.status, 'needs_answer', 'and lands somewhere the reviewer can actually act on it');
+    assert(!isPracticeEligible(fresh), 'a doubtful answer must stay out of practice');
+  } finally { await DB.del('questions', q.uuid); }
+});
+test('Repairing is a no-op when every conflict already names a live partner', async () => {
+  const cid = 'test-orphan-' + Date.now();
+  const opts = ['Firewall', 'Log review', 'Encryption', 'Training'];
+  const a = mkQ('Which is a detective control?', opts, 1, { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  const b = mkQ('Which is a detective control?', opts, 0, { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  a.conflictWith = [b.uuid]; b.conflictWith = [a.uuid];
+  await recomputeFingerprint(a); await recomputeFingerprint(b);
+  await DB.put('questions', a); await DB.put('questions', b);
+  try {
+    const r = await repairOrphanedConflicts(cid);
+    eq(r.repaired, 0, 'a healthy pair must not be touched');
+  } finally { await DB.del('questions', a.uuid); await DB.del('questions', b.uuid); }
 });
 
 /* ---- per-course option count ---- */
