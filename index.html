@@ -6178,7 +6178,8 @@ async function safetyBackup(reason) {
  * to proceed — either the backup worked, or the person explicitly accepted
  * going ahead without one.
  */
-async function requireSafetyBackup(reason) {
+async function requireSafetyBackup(reason, skip) {
+  if (skip) { toast('Skipped the safety backup, as requested', 'warn'); return true; }
   toast('Taking a safety backup first…');
   const res = await safetyBackup(reason);
   if (res.ok) {
@@ -6301,7 +6302,8 @@ async function backupExternalPayload(payload, filePrefix, reason) {
     never in this browser's IndexedDB to begin with — a Drive copy, or an
     existing local file connected to without being loaded. `label` names
     it in the dialog copy ("the Drive copy", "the existing file"). */
-async function requireExternalBackup(payload, filePrefix, label, reason) {
+async function requireExternalBackup(payload, filePrefix, label, reason, skip) {
+  if (skip) { toast('Skipped backing up ' + label + ', as requested', 'warn'); return true; }
   toast('Backing up ' + label + ' first…');
   const res = await backupExternalPayload(payload, filePrefix, reason);
   if (res.ok) {
@@ -8232,9 +8234,9 @@ const DriveSync = {
             if (!choice) continue; // "Back" really goes back now
           }
           if (choice === 'drive') {
-            if (await requireSafetyBackup('discarding this browser’s unsynced changes for the Drive copy')) await this._applyRemote(remote);
+            if (await requireSafetyBackup('discarding this browser’s unsynced changes for the Drive copy', chooseOneSideDialog._skipBackup)) await this._applyRemote(remote);
           } else if (choice === 'browser') {
-            if (await requireExternalBackup(remote, 'mcq-mastery-drive', 'the Drive copy', 'overwriting the Drive copy with this browser’s bank')) {
+            if (await requireExternalBackup(remote, 'mcq-mastery-drive', 'the Drive copy', 'overwriting the Drive copy with this browser’s bank', chooseOneSideDialog._skipBackup)) {
               this.allowDriveShrink('confirmed by the user, after a backup, in the Drive boot-conflict dialog');
               await this.push();
             }
@@ -8387,12 +8389,12 @@ const DriveSync = {
         if (!choice) continue; // "Back" really goes back now, not all the way out
       }
       if (choice === 'drive') {
-        if (!(await requireSafetyBackup('discarding this browser’s bank for the Drive copy'))) return false;
+        if (!(await requireSafetyBackup('discarding this browser’s bank for the Drive copy', chooseOneSideDialog._skipBackup))) return false;
         await this._applyRemote(remote);
         return true;
       }
       if (choice === 'browser') {
-        if (!(await requireExternalBackup(remote, 'mcq-mastery-drive', 'the Drive copy', 'overwriting the Drive copy with this browser’s bank'))) return false;
+        if (!(await requireExternalBackup(remote, 'mcq-mastery-drive', 'the Drive copy', 'overwriting the Drive copy with this browser’s bank', chooseOneSideDialog._skipBackup))) return false;
         this.allowDriveShrink('confirmed by the user, after a backup, in the Drive reconciliation dialog');
         await this.push();
         return true;
@@ -9257,19 +9259,31 @@ async function showMergeReport(report, title, intro) {
     so the common, always-safe choice (merge) is the only thing competing
     for attention there, and this destructive, rarely-needed pair of
     choices takes one extra, deliberate step to even reach. */
+/** Resolves to the chosen side, same as before — the "skip the backup"
+    checkbox's state is stashed on this function itself (the same pattern
+    askMistake already uses for its own extra pick), since every caller here
+    already awaits the dialog before reading its result, so there is no risk
+    of reading a stale value from a previous call. */
 async function chooseOneSideDialog(otherLabel, otherValue, otherCount, hereCount, dramaticLoss) {
+  const skipBox = h('input', { type: 'checkbox' });
+  chooseOneSideDialog._skipBackup = false;
+  const captureSkip = () => { chooseOneSideDialog._skipBackup = skipBox.checked; return true; };
   return await modal({
     title: 'Keep only one copy?',
     body: h('div', { class: 'stack' }, [
       h('p', { class: 'small' }, otherLabel + ' holds ' + otherCount + ' question(s); this browser holds ' + hereCount + '.'),
       dramaticLoss
         ? h('div', { class: 'notice bad small' }, 'This browser has far fewer questions — almost always because ' + otherLabel + ' is the real bank. When unsure, go back and merge instead.')
-        : h('div', { class: 'notice small' }, 'Whichever you discard is backed up first, automatically, before anything is overwritten.')
+        : h('div', { class: 'notice small' }, 'Whichever you discard is backed up first, automatically, before anything is overwritten — unless you skip that below.'),
+      h('label', { class: 'check', style: 'margin-top:4px' }, [
+        skipBox,
+        h('span', { class: 'small' }, 'Skip that backup this time — only if you’re sure there’s nothing here worth a copy of (e.g. you just reconnected and haven’t changed anything since)')
+      ])
     ]),
     actions: [
-      { label: 'Back', value: '' },
-      { label: 'Keep only ' + otherLabel, value: otherValue, kind: 'danger' },
-      { label: 'Keep only this browser’s', value: 'browser', kind: 'danger' }
+      { label: 'Back', value: '', before: captureSkip },
+      { label: 'Keep only ' + otherLabel, value: otherValue, before: captureSkip, kind: 'danger' },
+      { label: 'Keep only this browser’s', value: 'browser', before: captureSkip, kind: 'danger' }
     ]
   });
 }
@@ -9353,14 +9367,14 @@ async function connectFlow() {
     }
     if (!choice) { await FileStore.forget(); updateStorageBar(); return; }
     if (choice === 'file') {
-      if (!(await requireSafetyBackup('loading the file over this browser’s bank'))) {
+      if (!(await requireSafetyBackup('loading the file over this browser’s bank', chooseOneSideDialog._skipBackup))) {
         await FileStore.forget(); updateStorageBar(); return;
       }
       await FileStore.loadFromDisk();
       toast('Loaded your bank from the file.', 'ok');
       break;
     } else if (choice === 'browser') {
-      if (!(await requireExternalBackup(existing.payload, 'mcq-mastery-file', 'the existing file', 'overwriting the connected file with this browser\u2019s bank'))) {
+      if (!(await requireExternalBackup(existing.payload, 'mcq-mastery-file', 'the existing file', 'overwriting the connected file with this browser\u2019s bank', chooseOneSideDialog._skipBackup))) {
         await FileStore.forget(); updateStorageBar(); return;
       }
       FileStore._diskQuestionCount = existing.count;
