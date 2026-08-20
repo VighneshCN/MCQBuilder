@@ -1467,7 +1467,13 @@ async function mergeQuestions(canonicalUuid, dupUuid, note) {
   const refs = (canon.sourceRefs || []).concat(dup.sourceRefs || []);
   const seen = new Set(); canon.sourceRefs = refs.filter(r => { const k = r.sourceId + '|' + (r.locator || ''); if (seen.has(k)) return false; seen.add(k); return true; });
   if (dup.qid) canon.aliasQids = Array.from(new Set((canon.aliasQids || []).concat([dup.qid])));
-  canon.mergedFrom = (canon.mergedFrom || []).concat([{ uuid: dup.uuid, qid: dup.qid, at: nowISO(), snapshot: JSON.parse(JSON.stringify(dup)) }]);
+  canon.mergedFrom = (canon.mergedFrom || []).concat([{
+    uuid: dup.uuid, qid: dup.qid, at: nowISO(), snapshot: JSON.parse(JSON.stringify(dup)),
+    // Just enough of the pre-merge canonical record for Unmerge to
+    // actually undo what this specific merge changed, without touching
+    // anything a later edit or a different merge has since added.
+    before: { sourceRefs: before.sourceRefs, explanation: before.explanation, topic: before.topic, domainId: before.domainId, conflict: before.conflict, status: before.status }
+  }]);
   if (!canon.explanation && dup.explanation) canon.explanation = dup.explanation;
   if (!canon.topic && dup.topic) canon.topic = dup.topic;
   if (!canon.domainId && dup.domainId) canon.domainId = dup.domainId;
@@ -1495,7 +1501,6 @@ async function mergeQuestions(canonicalUuid, dupUuid, note) {
     await DB.put('questions', canon);
   }
   await audit('merge', 'question', canon.qid || canon.uuid, { mergedQid: dup.qid }, summarise(canon), note || '');
-  void before;
   State.invalidate();
   return canon;
 }
@@ -1504,8 +1509,37 @@ async function unmergeQuestion(dupUuid) {
   if (!dup || dup.status !== 'merged') throw new Error('That record is not a merged duplicate.');
   const canon = dup.canonicalUuid ? await Questions.get(dup.canonicalUuid) : null;
   if (canon) {
+    const entry = (canon.mergedFrom || []).find(m => m.uuid === dup.uuid);
     canon.mergedFrom = (canon.mergedFrom || []).filter(m => m.uuid !== dup.uuid);
     canon.aliasQids = (canon.aliasQids || []).filter(a => a !== dup.qid);
+
+    if (entry && entry.before) {
+      const before = entry.before;
+      // Only revert a field if it's still exactly what this merge set it
+      // to — a later edit, or a different merge, may have legitimately
+      // changed it since, and Unmerge must not silently discard that.
+      if (!before.explanation && canon.explanation === dup.explanation) canon.explanation = before.explanation || '';
+      if (!before.topic && canon.topic === dup.topic) canon.topic = before.topic || '';
+      if (!before.domainId && canon.domainId === dup.domainId) canon.domainId = before.domainId || null;
+      // Source references this specific duplicate contributed, and that no
+      // other source (canon's own, or another merged-in duplicate) also
+      // claims, can be dropped along with it.
+      const dupKeys = new Set((entry.snapshot.sourceRefs || []).map(r => r.sourceId + '|' + (r.locator || '')));
+      const beforeKeys = new Set((before.sourceRefs || []).map(r => r.sourceId + '|' + (r.locator || '')));
+      canon.sourceRefs = (canon.sourceRefs || []).filter(r => {
+        const k = r.sourceId + '|' + (r.locator || '');
+        return beforeKeys.has(k) || !dupKeys.has(k);
+      });
+      // An answer-conflict status that exists only because of this merge —
+      // canon had neither the flag nor the status before it, and has no
+      // other merged-in duplicate or live conflict pairing that would
+      // still cause it — can clear along with the merge that caused it.
+      if (!before.conflict && canon.conflict && !(canon.mergedFrom || []).length && !(canon.conflictWith || []).length) {
+        canon.conflict = false;
+        if (canon.status === 'answer_conflict') canon.status = before.status || (canon.answerVerified === 'verified' ? 'active' : 'needs_answer');
+      }
+    }
+    canon.updatedAt = nowISO();
     await DB.put('questions', canon);
   }
   dup.status = dup.answerVerified === 'verified' ? 'active' : 'needs_answer';
@@ -3630,20 +3664,28 @@ ROUTES.bank = async (root) => {
       const bad = [];
       for (const u of sel) { const q = await Questions.get(u); if (q.answerVerified !== 'verified' || !q.correctOptionId || q.options.length < 2) bad.push(q.qid); }
       if (bad.length) { const ok = await confirmBox('Some questions cannot be activated', bad.length + ' of ' + sel.length + ' have no verified correct answer, so they will stay in the review queue. Activate the rest?'); if (!ok) return; }
+    } else if (status === 'archived') {
+      const ok = await confirmBox('Archive ' + sel.length + ' question(s)?', 'They leave the practice pool but keep their Question ID, sources and attempt history. Archiving is reversible.');
+      if (!ok) return;
     }
+    let applied = 0;
     for (const u of sel) {
       const q = await Questions.get(u);
       if (status === 'active' && (q.answerVerified !== 'verified' || !q.correctOptionId || q.options.length < 2)) continue;
       const prev = q.status; q.status = status; q.updatedAt = nowISO();
       await DB.put('questions', q);
       await audit(status === 'archived' ? 'archive' : 'activate', 'question', q.qid, { status: prev }, { status }, 'bulk');
+      applied++;
     }
-    BankState.sel.clear(); State.invalidate(); toast('Updated ' + sel.length + ' record(s)', 'ok'); go('bank');
+    BankState.sel.clear(); State.invalidate();
+    toast(applied === sel.length ? 'Updated ' + applied + ' record(s)' : 'Updated ' + applied + ' of ' + sel.length + ' record(s)', 'ok');
+    go('bank');
   }
   async function bulkVerify() {
     const sel = Array.from(BankState.sel);
     const ok = await confirmBox('Confirm the source answers?', 'This marks the correct answer as verified for ' + sel.length + ' question(s). Only do this where you have actually checked the answer against the source.');
     if (!ok) return;
+    let applied = 0;
     for (const u of sel) {
       const q = await Questions.get(u);
       if (!q.correctOptionId) continue;
@@ -3651,8 +3693,11 @@ ROUTES.bank = async (root) => {
       if (q.status === 'needs_answer' || q.status === 'draft') q.status = q.domainId ? 'active' : 'needs_class';
       await DB.put('questions', q);
       await audit('verify', 'question', q.qid, null, { answerVerified: 'verified' }, 'bulk');
+      applied++;
     }
-    BankState.sel.clear(); State.invalidate(); toast('Verified', 'ok'); go('bank');
+    BankState.sel.clear(); State.invalidate();
+    toast(applied === sel.length ? 'Verified ' + applied + ' record(s)' : 'Verified ' + applied + ' of ' + sel.length + ' record(s) — the rest have no answer chosen yet', 'ok');
+    go('bank');
   }
   async function bulkClassify() {
     const sel = Array.from(BankState.sel);
@@ -4810,7 +4855,7 @@ function exportSourceRegister(sources) {
 }
 
 /* ---------- side-by-side duplicate comparison ---------- */
-function compareDialog(q, dup, item, redraw) {
+function compareDialog(q, dup, item, redraw, label) {
   const other = dup.other;
   const d = diffWords(q.stem, other.stem);
   const col = (label, qq, parts) => h('div', {}, [
@@ -4827,7 +4872,7 @@ function compareDialog(q, dup, item, redraw) {
     title: 'Duplicate comparison · ' + dup.cls + ' · ' + Math.round(dup.sim.score * 100) + '% similar', wide: true,
     body: h('div', { class: 'stack' }, [
       dup.conflict ? h('div', { class: 'notice bad' }, 'The two records disagree on the correct answer. Neither can enter practice until you decide which is right.') : null,
-      h('div', { class: 'grid g2' }, [col('Incoming', q, d.a), col('Already in bank', other, d.b)]),
+      h('div', { class: 'grid g2' }, [col(label || 'Incoming', q, d.a), col('Already in bank', other, d.b)]),
       h('div', { class: 'card' }, [h('div', { class: 'card-b tight tiny' }, [
         h('div', { class: 'row wrap', style: 'gap:14px' }, [
           h('span', { text: 'stem tokens ' + Math.round(dup.sim.stemTok * 100) + '%' }),
@@ -4839,9 +4884,9 @@ function compareDialog(q, dup, item, redraw) {
     ]),
     actions: [
       { label: 'Cancel', value: null },
-      { label: 'Keep separate', value: 'sep' },
-      { label: 'Reject incoming', value: 'rej' },
-      { label: 'Merge into existing', value: 'merge', kind: 'primary' }
+      { label: 'Keep separate', value: 'sep', kind: 'primary' },
+      { label: 'Reject incoming', value: 'rej', kind: 'danger' },
+      { label: 'Merge into existing', value: 'merge' }
     ]
   }).then(async v => {
     if (!v) return;
@@ -5403,7 +5448,16 @@ async function reviewDuplicate(q) {
   const item = { q: fresh, decision: 'review' };
   compareDialog(fresh, best, item, async () => {
     if (item.decision === 'merge') { await mergeQuestions(best.other.uuid, fresh.uuid, 'Merged from review queue'); toast('Merged into ' + best.other.qid, 'ok'); }
-    else if (item.decision === 'reject') { fresh.status = 'rejected'; fresh.updatedAt = nowISO(); await DB.put('questions', fresh); await audit('reject', 'question', fresh.qid, null, null, 'Rejected as duplicate'); toast('Rejected'); }
+    else if (item.decision === 'reject') {
+      // Unlike a staging candidate, this record already has a permanent
+      // Question ID and is already in the database — rejecting it here is
+      // a real status change to a persisted record, not discarding
+      // something that was never written, so it gets the same kind of
+      // confirmation Archive already has.
+      const ok = await confirmBox('Reject this question?', 'It leaves the bank, but the record and its Question ID are retained — you can bring it back from the Question Bank by changing its status.');
+      if (!ok) { State.importStep = 'check'; go('import'); return; }
+      fresh.status = 'rejected'; fresh.updatedAt = nowISO(); await DB.put('questions', fresh); await audit('reject', 'question', fresh.qid, null, null, 'Rejected as duplicate'); toast('Rejected');
+    }
     else {
       // 'sep' already recorded the dismissal and cleared this one pairing in
       // memory (see compareDialog) — a full recheck confirms nothing else is
@@ -5414,7 +5468,7 @@ async function reviewDuplicate(q) {
       toast('Kept separate');
     }
     State.invalidate(); (function(){ State.importStep='check'; return go('import'); })();
-  });
+  }, 'This record');
 }
 
 
