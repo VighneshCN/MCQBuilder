@@ -873,30 +873,22 @@ const DISA_BLUEPRINT = [
   { id: 'GEN', name: 'General', weight: 100 }
 ];
 
-async function ensureSeedCourse() {
-  const courses = await DB.all('courses');
-  if (courses.length) return courses;
-  const cisa = makeCourse('CISA', 'Certified Information Systems Auditor', CISA_BLUEPRINT, {
-    hints: CISA_HINTS, isSeed: true,
-    // The real CISA exam is 150 questions in 4 hours.
-    defaults: { mockCount: 150, mockMinutes: 240 }
-  });
-  const disa = makeCourse('DISA', 'DISA AT (Diploma in Information System Audit)', DISA_BLUEPRINT, {
-    isSeed: true,
-    // ICAI states the ISA Assessment Test carries 200 marks, and each mock
-    // paper in your source material is 200 questions. The time limit here is
-    // a starting point — check your current ICAI notification and edit it.
-    defaults: { mockCount: 200, mockMinutes: 240 },
-    notes: 'This course starts with a single placeholder domain because the source mock papers aren\u2019t organised by module. Edit the blueprint in Settings once you know the breakdown you want to track against.'
-  });
-  await DB.put('courses', cisa);
-  await DB.put('courses', disa);
-  await DB.put('idRegister', { courseId: cisa.id, lastSeq: 0, allocations: [] });
-  await DB.put('idRegister', { courseId: disa.id, lastSeq: 0, allocations: [] });
-  await audit('create', 'course', cisa.id, null, { code: cisa.code, name: cisa.name }, 'Seeded default course');
-  await audit('create', 'course', disa.id, null, { code: disa.code, name: disa.name }, 'Seeded default course');
-  return [cisa, disa];
-}
+// Optional one-click starting points offered from the "Add a course" dialog.
+// Purely a convenience prefill — nothing here is created automatically, and
+// any other course is built from a blank form with no CISA/DISA assumption.
+const COURSE_TEMPLATES = [
+  {
+    code: 'CISA', name: 'Certified Information Systems Auditor', blueprint: CISA_BLUEPRINT,
+    opts: { hints: CISA_HINTS, defaults: { mockCount: 150, mockMinutes: 240 } } // the real exam is 150 questions in 4 hours
+  },
+  {
+    code: 'DISA', name: 'DISA AT (Diploma in Information System Audit)', blueprint: DISA_BLUEPRINT,
+    opts: {
+      defaults: { mockCount: 200, mockMinutes: 240 },
+      notes: 'This course starts with a single placeholder domain because the source mock papers aren\u2019t organised by module. Edit the blueprint in Settings once you know the breakdown you want to track against.'
+    }
+  }
+];
 
 /* ---------- Question ID allocation register ----------
    Human-readable IDs are allocated only at admission, are never reused and
@@ -2734,51 +2726,53 @@ function renderShell() {
     h('div', { class: 'brand-sub', text: 'Controlled question bank' })
   ]));
 
-  const sel = h('select', {
-    id: 'courseSel', title: State.course ? (State.course.code + ' — ' + State.course.name) : '',
-    onchange: async (e) => {
-      const target = e.target, newId = target.value, prevId = State.course.id;
-      // The course selector reuses the current view as go()'s destination
-      // when mid-session (State.view is 'runner'), which used to make
-      // go()'s own leave-guard a no-op (its condition explicitly excludes
-      // view === 'runner') — silently switching courses out from under an
-      // active exam with the old session's timer left ticking in the
-      // background. Route through the same guard explicitly instead of
-      // relying on go() to catch it.
-      if (State.session && State.session.status === 'active') {
-        if (!State.runnerStop || !(await State.runnerStop())) { target.value = prevId; return; }
-        await State.setCourse(newId);
-        go('practice');
-        return;
+  if (State.course) {
+    const sel = h('select', {
+      id: 'courseSel', title: State.course.code + ' — ' + State.course.name,
+      onchange: async (e) => {
+        const target = e.target, newId = target.value, prevId = State.course.id;
+        // The course selector reuses the current view as go()'s destination
+        // when mid-session (State.view is 'runner'), which used to make
+        // go()'s own leave-guard a no-op (its condition explicitly excludes
+        // view === 'runner') — silently switching courses out from under an
+        // active exam with the old session's timer left ticking in the
+        // background. Route through the same guard explicitly instead of
+        // relying on go() to catch it.
+        if (State.session && State.session.status === 'active') {
+          if (!State.runnerStop || !(await State.runnerStop())) { target.value = prevId; return; }
+          await State.setCourse(newId);
+          go('practice');
+          return;
+        }
+        // A staged import batch is parsed against one specific course
+        // (source-detected domains, defaults, and the Question IDs about to
+        // be issued all assume it). Switching courses mid-review used to be
+        // possible with no warning at all, and the batch would end up
+        // admitted under whichever course happened to be selected at the
+        // moment "Admit" was clicked — not the one it was actually reviewed
+        // against.
+        if (State.staging) {
+          target.value = prevId;
+          toast('Finish or discard the batch you’re reviewing before switching courses.', 'warn', 6000);
+          return;
+        }
+        await State.setCourse(newId); go(State.view);
       }
-      // A staged import batch is parsed against one specific course
-      // (source-detected domains, defaults, and the Question IDs about to
-      // be issued all assume it). Switching courses mid-review used to be
-      // possible with no warning at all, and the batch would end up
-      // admitted under whichever course happened to be selected at the
-      // moment "Admit" was clicked — not the one it was actually reviewed
-      // against.
-      if (State.staging) {
-        target.value = prevId;
-        toast('Finish or discard the batch you’re reviewing before switching courses.', 'warn', 6000);
-        return;
-      }
-      await State.setCourse(newId); go(State.view);
-    }
-  },
-    State.courses.filter(c => !c.archived).map(c => h('option', { value: c.id, selected: State.course && c.id === State.course.id, text: c.code + ' — ' + c.name })));
-  rail.appendChild(h('div', { class: 'course-pick' }, [h('label', { for: 'courseSel', text: 'Course' }), sel]));
+    },
+      State.courses.filter(c => !c.archived).map(c => h('option', { value: c.id, selected: c.id === State.course.id, text: c.code + ' — ' + c.name })));
+    rail.appendChild(h('div', { class: 'course-pick' }, [h('label', { for: 'courseSel', text: 'Course' }), sel]));
 
-  const nav = h('nav', { class: 'nav', id: 'nav' });
-  VIEWS.forEach(v => {
-    nav.appendChild(h('button', {
-      class: 'nav-item', dataset: { view: v.id },
-      'aria-current': State.view === v.id ? 'page' : null,
-      onclick: () => go(v.id)
-    }, [h('span', { class: 'nav-ico', text: v.ico }), h('span', { text: v.label }), h('span', { class: 'nav-badge hidden', dataset: { badge: v.id } })]));
-  });
-  rail.appendChild(nav);
-  rail.appendChild(h('div', { class: 'storagebar', id: 'storagebar' }));
+    const nav = h('nav', { class: 'nav', id: 'nav' });
+    VIEWS.forEach(v => {
+      nav.appendChild(h('button', {
+        class: 'nav-item', dataset: { view: v.id },
+        'aria-current': State.view === v.id ? 'page' : null,
+        onclick: () => go(v.id)
+      }, [h('span', { class: 'nav-ico', text: v.ico }), h('span', { text: v.label }), h('span', { class: 'nav-badge hidden', dataset: { badge: v.id } })]));
+    });
+    rail.appendChild(nav);
+    rail.appendChild(h('div', { class: 'storagebar', id: 'storagebar' }));
+  }
   rail.appendChild(h('div', { class: 'rail-foot' }, [
     h('button', { class: 'rail-btn', onclick: toggleTheme, id: 'themeBtn', text: 'Light' }),
     h('button', { class: 'rail-btn', onclick: showShortcuts, text: 'Keys' })
@@ -2869,6 +2863,11 @@ function kbdRow(keys, what) {
 /* ---------- router ---------- */
 const ROUTES = {};
 async function go(view, arg) {
+  // Every route below assumes a selected course. On a brand-new install (or
+  // right after the only course is removed) there isn't one yet, so every
+  // destination is redirected to the same "add your first course" screen
+  // instead of each route having to guard against a null State.course.
+  if (!State.course) view = 'onboarding';
   if (State.session && State.session.status === 'active' && view !== 'runner') {
     // Route through the exact same confirm-and-clean-up the runner's own
     // Exit/Pause button uses (State.runnerStop is runSession()'s
@@ -2905,6 +2904,18 @@ async function refreshBadges() {
   setBadge('practice', due);
 }
 
+/* ---------- onboarding (no course yet) ---------- */
+ROUTES.onboarding = async (root) => {
+  await band('Welcome to MCQ Mastery', '');
+  root.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, [
+    h('h3', { text: 'Add your first course' }),
+    h('p', { class: 'muted' }, 'This app works for any exam or qualification — question bank, syllabus and weightings all live in the course you set up. Nothing is preloaded.'),
+    h('div', { class: 'row', style: 'justify-content:center;margin-top:10px' }, [
+      h('button', { class: 'btn primary', onclick: () => courseDialog(null), text: 'Add a course' })
+    ])
+  ])));
+};
+
 /* ---------- dashboard ---------- */
 ROUTES.dashboard = async (root) => {
   const all = await State.questions();
@@ -2929,11 +2940,11 @@ ROUTES.dashboard = async (root) => {
     { k: 'Due today', v: String(due.length), color: due.length ? 'var(--pencil)' : null }
   ], [h('button', { class: 'btn primary', onclick: () => go('practice'), text: 'Start practice' })]);
 
-  // A course-level note (currently only ever set by the DISA seed, pointing
-  // at its single placeholder domain) is only still relevant while the
-  // blueprint really is just that placeholder — it goes stale the moment
-  // real domains replace it, so it's shown only up to that point, not
-  // forever.
+  // A course-level note (currently only ever set by the DISA quick-add
+  // template, pointing at its single placeholder domain) is only still
+  // relevant while the blueprint really is just that placeholder — it goes
+  // stale the moment real domains replace it, so it's shown only up to that
+  // point, not forever.
   if (State.course.notes && State.course.blueprint.length === 1) {
     root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:16px' }, State.course.notes));
   }
@@ -6377,10 +6388,9 @@ async function restoreFlow(file) {
   }
 
   State.courses = await DB.all('courses');
-  if (!State.courses.length) State.courses = await ensureSeedCourse();
   await Settings.load();
   const wanted = Settings.get('activeCourseId');
-  State.course = State.courses.find(c => c.id === wanted) || State.courses[0];
+  State.course = State.courses.find(c => c.id === wanted) || State.courses[0] || null;
   State.invalidate();
 
   const issues = await integrityChecks();
@@ -6822,9 +6832,28 @@ async function courseDialog(course) {
   const total = () => { const t = bp.reduce((s, d) => s + (+d.weight || 0), 0); totalEl.textContent = t + '%'; totalEl.style.color = t === 100 ? 'var(--green)' : 'var(--amber)'; };
   drawRows(); total();
 
+  // Optional one-click prefill from a built-in template — purely a shortcut.
+  // Anything not offered a template (or anyone who skips this) fills the
+  // form in blank, with no assumption about which course it is.
+  let templateOpts = null;
+  const quickAdd = isNew ? h('div', { class: 'field' }, [
+    h('label', { text: 'Quick add (optional)' }),
+    h('div', { class: 'row wrap', style: 'gap:6px' }, COURSE_TEMPLATES.map(t => h('button', {
+      class: 'btn sm ghost', onclick: () => {
+        code.value = t.code; name.value = t.name; prefix.value = t.code;
+        bp = t.blueprint.map(d => Object.assign({}, d));
+        templateOpts = t.opts;
+        drawRows(); total();
+        toast(t.code + ' template filled in — edit anything before creating', 'ok');
+      }, text: t.code
+    }))),
+    h('div', { class: 'tiny dim', text: 'Fills in the fields below so you can adjust before creating — building a course for something else? Just fill the form in yourself.' })
+  ]) : null;
+
   const res = await modal({
     title: isNew ? 'Add a course' : 'Edit ' + course.code, wide: true, sticky: true,
     body: h('div', { class: 'stack' }, [
+      quickAdd,
       h('div', { class: 'grid g3' }, [
         h('div', { class: 'field' }, [h('label', { text: 'Short code' }), code]),
         h('div', { class: 'field' }, [h('label', { text: 'Full name' }), name]),
@@ -6835,7 +6864,7 @@ async function courseDialog(course) {
     ]),
     actions: [
       { label: 'Cancel', value: null },
-      !isNew && !course.isSeed ? { label: course.archived ? 'Unarchive' : 'Archive', value: 'arch' } : null,
+      !isNew ? { label: course.archived ? 'Unarchive' : 'Archive', value: 'arch' } : null,
       { label: isNew ? 'Create course' : 'Save', value: 'save', kind: 'primary' }
     ].filter(Boolean)
   });
@@ -6878,7 +6907,7 @@ async function courseDialog(course) {
     }
   }
   if (isNew) {
-    const c = makeCourse(code.value.trim(), name.value.trim(), bp, { qidPrefix: (prefix.value.trim() || code.value.trim()).toUpperCase().replace(/[^A-Z0-9]/g, '') });
+    const c = makeCourse(code.value.trim(), name.value.trim(), bp, Object.assign({}, templateOpts, { qidPrefix: (prefix.value.trim() || code.value.trim()).toUpperCase().replace(/[^A-Z0-9]/g, '') }));
     await DB.put('courses', c);
     await DB.put('idRegister', { courseId: c.id, lastSeq: 0, allocations: [] });
     await audit('create', 'course', c.id, null, { code: c.code, domains: bp.length }, '');
@@ -10014,10 +10043,10 @@ async function boot() {
   }
   await Settings.load();
   applyTheme();
-  State.courses = await ensureSeedCourse();
+  State.courses = await DB.all('courses');
   const wanted = Settings.get('activeCourseId');
-  State.course = State.courses.find(c => c.id === wanted && !c.archived) || State.courses.find(c => !c.archived) || State.courses[0];
-  if (State.course.id !== wanted) await Settings.set('activeCourseId', State.course.id);
+  State.course = State.courses.find(c => c.id === wanted && !c.archived) || State.courses.find(c => !c.archived) || State.courses[0] || null;
+  if (State.course && State.course.id !== wanted) await Settings.set('activeCourseId', State.course.id);
   if (!HAS_CS) setTimeout(() => toast('This browser has no Compression Streams, so .docx, .xlsx and ZIP backups will not work. Use a current Chrome, Edge, Safari or Firefox.', 'warn', 9000), 900);
 
   renderShell();
