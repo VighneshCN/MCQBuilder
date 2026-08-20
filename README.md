@@ -266,3 +266,34 @@ point at a different folder.
 
 **Built-in self-test:** Settings → Diagnostics → Run tests. 50 automated tests,
 listed in `TEST-CHECKLIST.md`.
+
+## 8. Licence
+
+Copyright 2026 Vighnesh CN. Licensed under the
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0),
+full text in [`LICENSE`](LICENSE).
+
+**You may**, for free and for any noncommercial purpose: use it to study, read
+and modify the source, and share copies — including changed ones — so long as
+this licence travels with them. Use inside a school, university, charity,
+public research body or government institution counts as noncommercial,
+whatever its funding.
+
+**You may not** sell it, sell access to it, bundle it into a paid product,
+service or subscription, or use it to deliver paid coaching or training.
+Commercial use is not granted here; contact the copyright holder if you want a
+separate commercial licence.
+
+The same terms are shown inside the app, under Settings → About and licence,
+and from the © Licence link in the sidebar.
+
+### This covers the software, not your questions
+
+The licence covers this application. It does **not** cover question content you
+import. Questions, answers and explanations from past papers, textbooks and
+paid courses belong to whoever wrote them — usually a publisher or a
+certification body. Importing them for your own private study is one thing;
+publishing or redistributing them is another, and nothing in this licence
+grants permission to do so. `.gitignore` deliberately keeps your question bank
+out of this repository for that reason — see `GITHUB-PAGES.md` before you
+publish anything.

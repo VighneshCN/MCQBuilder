@@ -1,4 +1,25 @@
 <!DOCTYPE html>
+<!--
+  MCQ Mastery — a controlled question bank and exam practice tool.
+
+  Copyright 2026 Vighnesh CN.
+  Licensed under the PolyForm Noncommercial License 1.0.0.
+  https://polyformproject.org/licenses/noncommercial/1.0.0
+
+  Free to use, read, modify and share for any NONCOMMERCIAL purpose,
+  including personal study and use by schools, universities, charities,
+  public research bodies and government institutions.
+
+  Commercial use is NOT granted by that licence — that includes selling this,
+  selling access to it, bundling it into a paid product or service, or using
+  it to deliver paid coaching or training. Contact the copyright holder for a
+  separate commercial licence.
+
+  This covers the software only. Question content imported into the app
+  belongs to whoever wrote it; this licence grants no rights over it.
+
+  Required Notice: Copyright 2026 Vighnesh CN
+-->
 <html lang="en" data-theme="light">
 <head>
 <meta charset="utf-8">
@@ -3333,6 +3354,16 @@ function renderShell() {
   rail.appendChild(h('div', { class: 'rail-foot' }, [
     h('button', { class: 'rail-btn', onclick: toggleTheme, id: 'themeBtn', text: 'Light' }),
     h('button', { class: 'rail-btn', onclick: showShortcuts, text: 'Keys' })
+  ]));
+  // Someone opening the published page never sees the repository, so the
+  // licence has to be reachable from the app itself rather than only from a
+  // LICENSE file they will never look at.
+  rail.appendChild(h('div', { class: 'rail-foot', style: 'border-top:0;padding-top:0' }, [
+    h('button', {
+      class: 'rail-btn', style: 'font-size:10.5px;opacity:.75',
+      title: 'Free for your own study. Not for commercial use.',
+      onclick: () => showLicence(), text: '\u00a9 Licence'
+    })
   ]));
 
   const main = h('main', { class: 'main' });
@@ -8348,6 +8379,14 @@ ROUTES.settings = async (root) => {
     ])
   ]));
   grid2.appendChild(h('div', { class: 'card' }, [
+    h('div', { class: 'card-h' }, [h('h3', { text: 'About and licence' }), h('div', { class: 'spacer' }), h('span', { class: 'tiny dim', text: APP.name + ' ' + APP.version })]),
+    h('div', { class: 'card-b' }, [
+      h('div', { class: 'small', style: 'margin-bottom:10px' },
+        'Free to use for your own study. Not free to sell, or to build a paid product or service on.'),
+      h('button', { class: 'btn', onclick: () => showLicence(), text: 'Terms and licence' })
+    ])
+  ]));
+  grid2.appendChild(h('div', { class: 'card' }, [
     h('div', { class: 'card-h' }, h('h3', { text: 'Maintenance' })),
     h('div', { class: 'card-b' }, [
       h('details', {}, [
@@ -8365,6 +8404,64 @@ ROUTES.settings = async (root) => {
   ]));
   root.appendChild(grid2);
 };
+
+/** The licence, in the app as well as the repository. Someone who opens the
+    published page never sees the repo, so a LICENSE file alone leaves most
+    users with no idea what they may do with it. Summarised in plain language
+    first, because the licence text answers a lawyer's question and the
+    summary answers a student's. */
+const LICENCE_HOLDER = 'Vighnesh CN';
+const LICENCE_NAME = 'PolyForm Noncommercial License 1.0.0';
+const LICENCE_URL = 'https://polyformproject.org/licenses/noncommercial/1.0.0';
+
+function showLicence() {
+  const yes = (t) => h('li', { style: 'margin-bottom:4px' }, t);
+  modal({
+    title: 'Terms and licence', wide: true,
+    body: h('div', { class: 'stack scroll-y' }, [
+      h('div', { class: 'notice small' }, [
+        h('b', {}, APP.name + ' ' + APP.version), ' — Copyright 2026 ' + LICENCE_HOLDER + '. ',
+        'Licensed under the ', h('b', {}, LICENCE_NAME), '.'
+      ]),
+
+      h('div', { class: 'eyebrow', text: 'In short' }),
+      h('div', { class: 'small' }, 'You may use this for your own study, for free, for as long as you like. You may read the source, change it, and share it. What you may not do is make money from it.'),
+
+      h('div', { class: 'eyebrow', style: 'margin-top:6px', text: 'You may' }),
+      h('ul', { class: 'small', style: 'margin:0;padding-left:20px' }, [
+        yes('Use it to study, privately, at no cost.'),
+        yes('Read, modify and learn from the source code.'),
+        yes('Share copies, including changed ones, so long as this licence goes with them.'),
+        yes('Use it inside a school, university, charity, public research body or government institution — those all count as non-commercial.')
+      ]),
+
+      h('div', { class: 'eyebrow', style: 'margin-top:6px', text: 'You may not' }),
+      h('ul', { class: 'small', style: 'margin:0;padding-left:20px' }, [
+        yes('Sell it, or sell access to it.'),
+        yes('Bundle it into a paid product, service or subscription.'),
+        yes('Use it to deliver paid coaching, training or exam preparation.'),
+        yes('Remove this notice or the copyright from copies you pass on.')
+      ]),
+      h('div', { class: 'small muted' }, 'Commercial use is not granted here. If you want it, contact the copyright holder about a separate commercial licence.'),
+
+      h('div', { class: 'eyebrow', style: 'margin-top:6px', text: 'Your questions are not covered by this' }),
+      h('div', { class: 'small' }, 'This licence covers the software, not the content you put into it. Questions from past papers, textbooks and paid courses belong to whoever wrote them. Importing them for your own study is one thing; publishing or distributing them is another, and nothing here gives you permission to do that. Your question bank is deliberately stored outside the app\u2019s own repository for the same reason.'),
+
+      h('div', { class: 'eyebrow', style: 'margin-top:6px', text: 'Your data' }),
+      h('div', { class: 'small' }, 'Everything you enter stays in this browser, and in the folder or Google Drive file you connect, if you connect one. There is no account, no server, and no analytics in this app. Nothing is transmitted anywhere unless you switch on Google Drive sync or external OCR, both of which are off until you turn them on and both of which say exactly where they send data.'),
+
+      h('div', { class: 'eyebrow', style: 'margin-top:6px', text: 'No warranty' }),
+      h('div', { class: 'small' }, 'As far as the law allows, the software comes as is, with no warranty or condition of any kind, and the copyright holder is not liable for any loss arising from its use. Keep your own backups — the app gives you the tools to.'),
+
+      h('div', { class: 'small muted', style: 'margin-top:8px' }, [
+        'Full licence text: ',
+        h('a', { href: LICENCE_URL, target: '_blank', rel: 'noreferrer noopener', text: LICENCE_URL }),
+        ' — and in the LICENSE file alongside the source.'
+      ])
+    ]),
+    actions: [{ label: 'Close', value: null, kind: 'primary' }]
+  });
+}
 
 async function courseDialog(course) {
   const isNew = !course;
