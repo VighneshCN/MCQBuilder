@@ -6558,7 +6558,7 @@ ROUTES.settings = async (root) => {
   if (!DriveSync.connected && DriveSync.setupError) {
     driveBlock.appendChild(h('div', { class: 'notice bad small' }, [
       h('b', { text: DriveSync.hasLiveToken() ? 'Signed in to Google — the Drive file itself didn’t set up: ' : 'Could not connect: ' }),
-      DriveSync.setupError.replace(/^(Could not sign in to Google: |Signed in to Google, but could not set up the Drive file: )/, '')
+      DriveSync.setupError.replace(/^Signed in to Google, but could not set up the Drive file: /, '')
     ]));
   }
   if (DriveSync.connected) {
@@ -6584,7 +6584,15 @@ ROUTES.settings = async (root) => {
         h('summary', { class: 'tiny dim', style: 'cursor:pointer' }, 'Using a different Google Cloud project? (advanced)'),
         h('div', { class: 'field', style: 'margin-top:8px' }, [
           h('label', { text: 'Google OAuth client ID' }),
-          h('input', { type: 'text', placeholder: 'xxxxxxxxxx.apps.googleusercontent.com', value: '', onchange: async e => { await Settings.set('driveClientId', e.target.value.trim()); toast('Saved'); go('settings'); } })
+          h('input', {
+            type: 'text', placeholder: 'xxxxxxxxxx.apps.googleusercontent.com', value: '', onchange: async e => {
+              const v = e.target.value.trim();
+              if (v && !(await confirmBox('Replace the default Google connection?', 'This browser will stop using the shared connection this site provides for everyone, and use this one instead — until you reset it back from this same screen.'))) {
+                e.target.value = ''; return;
+              }
+              await Settings.set('driveClientId', v); toast('Saved'); go('settings');
+            }
+          })
         ])
       ]);
       driveBlock.appendChild(advanced);
@@ -6614,6 +6622,21 @@ ROUTES.settings = async (root) => {
   }
 
   db.appendChild(h('div', { class: 'grid g2' }, [localBlock, driveBlock]));
+  // The override field above only ever renders while Google Drive is the
+  // one being set up and nothing else is connected — once a local folder
+  // is active, that whole block disappears, and a student who broke the
+  // connection earlier would otherwise have no way back to fix it. This
+  // stays reachable regardless of which backend is currently active.
+  if (Settings.get('driveClientId')) {
+    db.appendChild(h('div', { class: 'notice small', style: 'margin-top:10px' }, [
+      'This browser is using a custom Google connection instead of the one shared by this site. ',
+      h('button', {
+        class: 'btn sm ghost', style: 'margin-left:6px', onclick: async () => {
+          await Settings.set('driveClientId', ''); toast('Reset to the shared connection'); go('settings');
+        }, text: 'Reset to default'
+      })
+    ]));
+  }
   dataCard.appendChild(db);
   root.appendChild(dataCard);
 
@@ -6716,13 +6739,22 @@ ROUTES.settings = async (root) => {
   ]));
   root.appendChild(grid);
 
+  // Everyday settings (course pick, mock/timer basics, image size) stay
+  // flat and visible; rare, technical, or genuinely destructive controls
+  // move behind an "advanced" disclosure, same pattern the Drive client-id
+  // field already used — a student who came here to change mock length
+  // shouldn't be confronted with a test runner and a permanent delete
+  // button in the same unfiltered list.
   const grid2 = h('div', { class: 'grid g2', style: 'margin-top:16px' });
   grid2.appendChild(h('div', { class: 'card' }, [
     h('div', { class: 'card-h' }, h('h3', { text: 'Images and OCR' })),
     h('div', { class: 'card-b stack' }, [
       checkField('Keep a compressed copy of source images', 'storeSourceImages', 'Useful provenance, but it is what fills up local storage.'),
       numField('Largest stored image (KB)', 'imageMaxKB', 50, 4000),
-      checkField('Use a local OCR engine', 'ocrEnabled', 'Nothing is bundled and nothing is sent anywhere. See the README for how to place tesseract.js in a vendor folder.'),
+      h('details', { style: 'margin-top:6px' }, [
+        h('summary', { class: 'small', style: 'cursor:pointer' }, 'OCR setup (advanced)'),
+        h('div', { class: 'stack', style: 'margin-top:10px' }, [
+      checkField('Use a local OCR engine', 'ocrEnabled', 'Nothing is bundled and nothing is sent anywhere — this needs a one-time technical setup step. Ask whoever set up this app if you’re not sure.'),
       h('div', { class: 'field' }, [
         h('label', { text: 'Local OCR script path' }),
         h('input', { type: 'text', value: Settings.get('ocrScriptPath'), onchange: async e => { await Settings.set('ocrScriptPath', e.target.value.trim()); toast('Saved'); } })
@@ -6736,17 +6768,24 @@ ROUTES.settings = async (root) => {
           h('span', { class: 'tiny dim', text: FileStore.dirHandle ? 'Save it, filled in, in your connected folder.' : 'Needs a connected folder — see “Where your data lives” above.' })
         ])
       ])
+        ])
+      ])
     ])
   ]));
   grid2.appendChild(h('div', { class: 'card' }, [
     h('div', { class: 'card-h' }, h('h3', { text: 'Maintenance' })),
-    h('div', { class: 'card-b stack' }, [
+    h('div', { class: 'card-b' }, [
+      h('details', {}, [
+        h('summary', { class: 'small', style: 'cursor:pointer' }, 'Data tools and diagnostics (advanced)'),
+        h('div', { class: 'stack', style: 'margin-top:10px' }, [
       h('button', { class: 'btn', onclick: () => runIntegrity(), text: 'Run integrity check' }),
       h('button', { class: 'btn', onclick: () => runSelfTests(), text: 'Run built-in tests' }),
       h('button', { class: 'btn', onclick: () => recomputeAll(), text: 'Recompute mastery and fingerprints' }),
       h('button', { class: 'btn', onclick: () => showAudit(), text: 'View audit trail' }),
-      h('button', { class: 'btn danger', onclick: () => wipeCourse(), text: 'Delete this course\u2019s questions' }),
-      h('div', { class: 'small muted', text: 'Everything lives in this browser (and your file, if connected) by default. Nothing is sent anywhere unless you turn on external OCR or Google Drive above, both off by default.' })
+      h('button', { class: 'btn danger', onclick: () => wipeCourse(), text: 'Delete this course\u2019s questions' })
+        ])
+      ]),
+      h('div', { class: 'small muted', style: 'margin-top:10px', text: 'Everything lives in this browser (and your file, if connected) by default. Nothing is sent anywhere unless you turn on external OCR or Google Drive above, both off by default.' })
     ])
   ]));
   root.appendChild(grid2);
@@ -6794,6 +6833,14 @@ async function courseDialog(course) {
   });
   if (!res) return;
   if (res === 'arch') {
+    // Toggling this hides the whole course — questions, notes, everything
+    // in it — from the sidebar course switcher, with a single unconfirmed
+    // click; the equivalent, less consequential action at the question
+    // level (Archive one question) already asks first.
+    if (!course.archived) {
+      const ok = await confirmBox('Archive ' + course.code + '?', 'It disappears from the course picker, along with everything in it — nothing is deleted, and Settings → Edit → Unarchive brings it straight back.');
+      if (!ok) return;
+    }
     course.archived = !course.archived;
     await DB.put('courses', course);
     State.courses = await DB.all('courses');
@@ -6803,6 +6850,25 @@ async function courseDialog(course) {
   if (!code.value.trim() || !name.value.trim()) { toast('A course needs a code and a name', 'bad'); return; }
   bp = bp.filter(d => d.id && d.name.trim());
   if (!bp.length) { toast('Add at least one domain', 'bad'); return; }
+  if (!isNew) {
+    // A domain code that's renamed or removed here looks, to the rest of
+    // the app, identical to one that simply no longer exists — any
+    // question still classified under it silently loses exam-weighted
+    // coverage with nothing on screen to say so. Warn with a real count
+    // before that happens, rather than after.
+    const oldIds = new Set(course.blueprint.map(d => d.id));
+    const newIds = new Set(bp.map(d => d.id));
+    const droppedIds = Array.from(oldIds).filter(id => !newIds.has(id));
+    if (droppedIds.length) {
+      const mine = await Questions.byCourse(course.id);
+      const affected = droppedIds.map(id => ({ id, count: mine.filter(q => q.domainId === id).length })).filter(a => a.count > 0);
+      if (affected.length) {
+        const ok = await confirmBox('Some removed domains still have questions',
+          affected.map(a => a.count + ' question(s) filed under ' + a.id).join(', ') + ' will be left pointing at a domain that no longer exists in this blueprint — exam-weighted selection won’t count them until they’re reclassified from the Question Bank. Save anyway?');
+        if (!ok) return;
+      }
+    }
+  }
   if (isNew) {
     const c = makeCourse(code.value.trim(), name.value.trim(), bp, { qidPrefix: (prefix.value.trim() || code.value.trim()).toUpperCase().replace(/[^A-Z0-9]/g, '') });
     await DB.put('courses', c);
@@ -6864,7 +6930,7 @@ async function showAudit() {
 async function wipeCourse() {
   const all = await State.questions();
   const ok = await confirmBox('Delete every question in ' + State.course.code + '?',
-    all.length + ' question(s), together with their attempts and sessions, will be permanently deleted. A safety backup of everything is taken first, automatically, before anything is removed. Retired Question IDs are recorded as tombstones and will never be reissued.', true);
+    all.length + ' question(s), together with their attempts and sessions, will be permanently deleted. A safety backup of everything is taken first, automatically, before anything is removed. Retired question numbers are kept on a list and never reused for a new question.', true);
   if (!ok) return;
   const again = await modal({
     title: 'Type the course code to confirm',
@@ -7649,6 +7715,23 @@ function effectiveDriveClientId() {
   return Settings.get('driveClientId') || DEFAULT_DRIVE_CLIENT_ID;
 }
 
+/** Google Identity Services surfaces failures as short internal codes
+    (popup_closed, access_denied, …) never meant for anyone but a
+    developer to read. An ordinary action — closing the popup, picking the
+    wrong account and backing out, a blocked popup — must not read as a
+    cryptic error. Map the ones worth naming; fall back to one plain,
+    generic message for anything else rather than showing the raw code. */
+function translateGoogleAuthError(code) {
+  const known = {
+    popup_closed: 'The sign-in window was closed before finishing — try again.',
+    popup_failed_to_open: 'Your browser blocked the sign-in popup — allow popups for this site, then try again.',
+    access_denied: 'Access wasn’t granted — try again if you’d like to allow it.',
+    invalid_client: 'This app’s Google connection isn’t set up correctly — ask whoever set it up.',
+    unauthorized_client: 'This app’s Google connection isn’t set up correctly — ask whoever set it up.'
+  };
+  return known[code] || 'Could not connect to Google — try again in a moment.';
+}
+
 const DriveSync = {
   connected: false, fileId: null, accessToken: null, tokenExpiresAt: 0,
   lastPushedAt: null, lastSyncedModifiedTime: null, problem: null, setupError: null,
@@ -7829,7 +7912,7 @@ const DriveSync = {
       try {
         await this._loadGis();
         await this._requestToken(false);
-      } catch (e) { this.setupError = 'Could not sign in to Google: ' + e.message; updateStorageBar(); toast(this.setupError, 'bad', 8000); return; }
+      } catch (e) { this.setupError = translateGoogleAuthError(e.message); updateStorageBar(); toast(this.setupError, 'bad', 8000); return; }
     }
     try {
       let fileId = await FileStore.meta('driveFileId');
@@ -8168,7 +8251,7 @@ const DriveSync = {
     }
     if (!this.hasLiveToken()) {
       try { await this._loadGis(); await this._requestToken(false); }
-      catch (e) { toast('Could not sign in to Google: ' + e.message, 'bad', 8000); return; }
+      catch (e) { toast(translateGoogleAuthError(e.message), 'bad', 8000); return; }
     }
     // pull()/push() both require this.connected — flip it only for the
     // duration of this call. The local folder, not Drive, is the real
