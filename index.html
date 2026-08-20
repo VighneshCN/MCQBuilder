@@ -7146,23 +7146,36 @@ ROUTES.settings = async (root) => {
     localBlock.appendChild(h('div', { class: 'eyebrow' }, 'Local folder'));
     localBlock.appendChild(h('p', { class: 'small muted' }, 'Not available in this browser — saving straight to a folder needs the File System Access API, which today only Chrome, Edge and other Chromium browsers have. Google Drive works here instead, since it only needs the network.'));
   } else if (FileStore.connected) {
+    // Connected, this card used to render a dozen things at once: an
+    // eyebrow, a location line, the journal explainer, a size warning, a
+    // timestamp line, three buttons and a paragraph disambiguating two of
+    // them. Almost none of it is needed to answer the only question anyone
+    // opens Settings to ask — where is my data, and is it saved. That is the
+    // line and the timestamp; everything else is machinery, one click away.
     localBlock.appendChild(h('div', { class: 'eyebrow' }, 'Local folder — active'));
-    localBlock.appendChild(h('p', { class: 'small' }, ['Saved to ', h('b', { text: DATA_FILE }), ' in ', h('b', { text: FileStore.locationName || 'the folder you chose' }), '. This browser keeps a working copy, rebuilt from the file each time you open the app.']));
-    if (FileStore.canJournal()) {
-      localBlock.appendChild(h('div', { class: 'notice small' }, ['Each answer is appended to a small companion file (', h('b', { text: JOURNAL_FILE }), ') instead of rewriting the whole bank. The full file is rewritten when a session ends, after an import, when you close the tab, and every ten minutes.']));
-    } else {
+    localBlock.appendChild(h('p', { class: 'small' }, ['Saved to ', h('b', { text: DATA_FILE }), ' in ', h('b', { text: FileStore.locationName || 'the folder you chose' }), '.']));
+    localBlock.appendChild(h('p', { class: 'tiny dim', text: FileStore.lastSavedAt ? 'Last saved ' + fmtDate(FileStore.lastSavedAt, true) + (FileStore.lastSnapshotAt ? ' · full file written ' + fmtDate(FileStore.lastSnapshotAt, true) : '') : 'Not saved yet in this session.' }));
+    if (!FileStore.canJournal()) {
       localBlock.appendChild(h('div', { class: 'notice warn small' }, 'A single file was picked rather than a folder, so every change rewrites the whole file.'));
     }
     if (FileStore._lastSize > 12 * 1048576) {
       localBlock.appendChild(h('div', { class: 'notice warn small' }, 'Your data file is ' + bytes(FileStore._lastSize) + '. Full rewrites happen less often past this size, so practice speed is unaffected.'));
     }
-    localBlock.appendChild(h('p', { class: 'tiny dim', text: FileStore.lastSavedAt ? 'Last saved ' + fmtDate(FileStore.lastSavedAt, true) + (FileStore.lastSnapshotAt ? ' · full file written ' + fmtDate(FileStore.lastSnapshotAt, true) : '') : 'Not saved yet in this session.' }));
-    localBlock.appendChild(h('div', { class: 'row wrap', style: 'gap:8px' }, [
-      h('button', { class: 'btn sm', onclick: async () => { const ok = await FileStore.flushNow('snapshot'); toast(ok ? 'Full file written.' : 'Nothing to save.', ok ? 'ok' : 'info'); go('settings'); }, text: 'Write now' }),
-      h('button', { class: 'btn sm', onclick: async () => { await DriveSync.syncBridge(); go('settings'); }, text: 'Sync with Drive' }),
-      h('button', { class: 'btn sm danger', onclick: () => disconnectFlow().then(() => go('settings')), text: 'Disconnect' })
-    ]));
-    localBlock.appendChild(h('p', { class: 'tiny dim' }, '"Sync with Drive" merges a Google Drive copy into this file without switching away from it — different from "Switch to Google Drive" below, which changes the active connection.'));
+    const localMore = h('details', { style: 'margin-top:8px' }, [
+      h('summary', { class: 'small', style: 'cursor:pointer', text: 'More — saving, Drive, disconnect' }),
+      h('div', { class: 'stack', style: 'margin-top:10px' }, [
+        FileStore.canJournal()
+          ? h('div', { class: 'notice small' }, ['Every answer is written straight away, appended to a small companion file (', h('b', { text: JOURNAL_FILE }), ') rather than rewriting the whole bank. The full file is rewritten when a session ends, after an import, when you close the tab, and every ten minutes — so "Write now" is for when you want to copy the folder somewhere, not something to remember.'])
+          : null,
+        h('div', { class: 'row wrap', style: 'gap:8px' }, [
+          h('button', { class: 'btn sm', onclick: async () => { const ok = await FileStore.flushNow('snapshot'); toast(ok ? 'Full file written.' : 'Nothing to save.', ok ? 'ok' : 'info'); go('settings'); }, text: 'Write now' }),
+          h('button', { class: 'btn sm', onclick: async () => { await DriveSync.syncBridge(); go('settings'); }, text: 'Sync with Drive' }),
+          h('button', { class: 'btn sm danger', onclick: () => disconnectFlow().then(() => go('settings')), text: 'Disconnect' })
+        ]),
+        h('p', { class: 'tiny dim', style: 'margin:0' }, '"Sync with Drive" merges a Google Drive copy into this file without switching away from it — different from "Switch to Google Drive", which changes which one is active.')
+      ].filter(Boolean))
+    ]);
+    localBlock.appendChild(localMore);
   } else if (FileStore.needsReconnect) {
     localBlock.appendChild(h('div', { class: 'eyebrow' }, 'Local folder'));
     localBlock.appendChild(h('div', { class: 'notice bad small' }, 'Read-only — cannot reach the file it was saving to. Nothing has been lost; your file still holds everything saved up to the last write.'));
@@ -7184,12 +7197,20 @@ ROUTES.settings = async (root) => {
     ]));
   }
   if (DriveSync.connected) {
-    driveBlock.appendChild(h('p', { class: 'small' }, 'Reachable from any device signed into this Google account. Changes here push within seconds; opening the app elsewhere reads the newer copy in automatically.'));
-    driveBlock.appendChild(h('p', { class: 'tiny dim', text: DriveSync.problem ? DriveSync.problem : (DriveSync.lastPushedAt ? 'Last synced ' + fmtDate(DriveSync.lastPushedAt, true) : 'Connected — first sync happens shortly, or click Sync now.') }));
-    driveBlock.appendChild(h('div', { class: 'row wrap', style: 'gap:8px' }, [
-      h('button', { class: 'btn sm primary', onclick: async () => { const ok = await DriveSync.maybePush(true); toast(ok ? 'Synced to Drive.' : 'Could not sync — see the status above.', ok ? 'ok' : 'bad'); go('settings'); }, text: 'Sync now' }),
-      h('button', { class: 'btn sm', onclick: async () => { await DriveSync.pullNow(); go('settings'); }, text: 'Load from Drive' }),
-      h('button', { class: 'btn sm danger', onclick: async () => { await driveDisconnectFlow(); go('settings'); }, text: 'Disconnect' })
+    // Same shape as the connected folder above: state and freshness in
+    // view, the controls behind one click. A sync problem is the exception —
+    // that is the one thing here that needs answering now, so it stays out.
+    driveBlock.appendChild(h('p', { class: 'small' }, 'Reachable from any device signed into this Google account. Changes push within seconds.'));
+    driveBlock.appendChild(h(DriveSync.problem ? 'div' : 'p',
+      DriveSync.problem ? { class: 'notice warn small' } : { class: 'tiny dim' },
+      DriveSync.problem ? DriveSync.problem : (DriveSync.lastPushedAt ? 'Last synced ' + fmtDate(DriveSync.lastPushedAt, true) : 'Connected — first sync happens shortly.')));
+    driveBlock.appendChild(h('details', { style: 'margin-top:8px' }, [
+      h('summary', { class: 'small', style: 'cursor:pointer', text: 'More — sync, load, disconnect' }),
+      h('div', { class: 'row wrap', style: 'gap:8px;margin-top:10px' }, [
+        h('button', { class: 'btn sm primary', onclick: async () => { const ok = await DriveSync.maybePush(true); toast(ok ? 'Synced to Drive.' : 'Could not sync — see the status above.', ok ? 'ok' : 'bad'); go('settings'); }, text: 'Sync now' }),
+        h('button', { class: 'btn sm', onclick: async () => { await DriveSync.pullNow(); go('settings'); }, text: 'Load from Drive' }),
+        h('button', { class: 'btn sm danger', onclick: async () => { await driveDisconnectFlow(); go('settings'); }, text: 'Disconnect' })
+      ])
     ]));
   } else if (activeMode === 'local') {
     driveBlock.appendChild(h('p', { class: 'small muted' }, 'Currently using a local folder. Connecting Google Drive switches to it — your local file is left exactly as it is.'));
@@ -7351,6 +7372,11 @@ ROUTES.settings = async (root) => {
       h('span', { class: 'badge b-active', text: State.course.code + ' only' })]),
     h('div', { class: 'card-b' }, [
       h('p', { class: 'small muted' }, 'Every answer you give, in every mode, sets the date that question comes back. The interval depends on how you actually answered, not on a hidden score. A later mistake resets to the first interval. Spaced Repetition mode is simply the mode that practises whatever has come due.'),
+      // The defaults are a considered ladder that most people never need to
+      // touch, so seven number fields do not need to be the first thing on
+      // the page. Folded away, still one click from anyone who wants them.
+      h('details', {}, [
+      h('summary', { class: 'small', style: 'cursor:pointer;margin-bottom:10px', text: 'Adjust the intervals' }),
       h('div', { class: 'grid g2' }, [
         srField('Answered incorrectly', 'wrong'),
         srField('Correct but guessed', 'guessed'),
@@ -7373,6 +7399,7 @@ ROUTES.settings = async (root) => {
         }),
         h('div', { class: 'small muted', text: 'Comma-separated days, applied in order as confident correct answers accumulate.' })
       ])
+      ])
     ])
   ]));
   root.appendChild(grid);
@@ -7387,6 +7414,12 @@ ROUTES.settings = async (root) => {
   grid2.appendChild(h('div', { class: 'card' }, [
     h('div', { class: 'card-h' }, h('h3', { text: 'Images and OCR' })),
     h('div', { class: 'card-b stack' }, [
+      // Both defaults are sane and image handling is not something most
+      // people ever configure, so the card opens as one line rather than
+      // two fields plus a nested disclosure.
+      h('details', {}, [
+      h('summary', { class: 'small', style: 'cursor:pointer', text: 'Image storage and OCR options' }),
+      h('div', { class: 'stack', style: 'margin-top:10px' }, [
       checkField('Keep a compressed copy of source images', 'storeSourceImages', 'Useful provenance, but it is what fills up local storage.'),
       numField('Largest stored image (KB)', 'imageMaxKB', 50, 4000),
       h('details', { style: 'margin-top:6px' }, [
@@ -7407,6 +7440,8 @@ ROUTES.settings = async (root) => {
         ])
       ])
         ])
+      ])
+      ])
       ])
     ])
   ]));
