@@ -395,11 +395,15 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 }
 
 /* --- Kab Banega Crorepati ---------------------------------------------- */
-.game-root.kbc{background:radial-gradient(900px 620px at 50% -12%,#5a3a12 0%,transparent 58%),
-  radial-gradient(700px 500px at 50% 118%,#3a1232 0%,transparent 55%),
-  linear-gradient(160deg,#0a0709 0%,#120b12 55%,#070506 100%);
-  --kbc-gold:#f5c542;color:#f6eeda}
-.game-root.kbc.suspense{filter:brightness(.74);transition:filter .4s}
+.game-root.kbc{background:
+    radial-gradient(1000px 560px at 50% 34%, #2b2f8a 0%, transparent 62%),
+    radial-gradient(620px 380px at 8% 22%, #3b1f76 0%, transparent 60%),
+    radial-gradient(620px 380px at 92% 22%, #123784 0%, transparent 60%),
+    linear-gradient(180deg,#0a0d2c 0%,#0d1138 40%,#05071a 100%);
+  --kbc-gold:#f5c542;--kbc-react:#7ec8ff;color:#f2f5ff}
+/* The dim used to sit on the ROOT, which darkened the question text by 26% at
+   the exact moment the player is reading it hardest. It belongs on the set. */
+.game-root.kbc.suspense{filter:none}
 .kbc-logo{margin-bottom:4px}
 .kbc-logo-sub{font-family:var(--display);font-size:15px;letter-spacing:.32em;color:var(--kbc-gold);text-transform:uppercase}
 .kbc-logo-main{font-family:var(--display);font-size:clamp(30px,7vw,46px);font-weight:800;letter-spacing:.06em;
@@ -428,17 +432,228 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .game-root.kbc{display:flex;flex-direction:column}
 .kbc-stage{position:relative;flex:1;display:grid;grid-template-columns:1fr 200px;
   grid-template-rows:auto 1fr;gap:12px;padding:0 12px 14px;min-height:0}
-/* The studio itself: one ornamental SVG pinned behind the stage. It carries
-   no text and takes no clicks, so nothing here can steal a tap from an
-   answer. Rigs, beams, a floor pool and three crowd rows — the whole set in
-   a single paint. */
-.kbc-airwrap{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:0}
-.kbc-air{width:100%;height:100%;display:block}
-.kbc-beam{opacity:.5;animation:kbcBeam 5s ease-in-out infinite alternate;animation-delay:calc(var(--i,0) * -.8s)}
-@keyframes kbcBeam{to{opacity:1}}
-.kbc-crowd{animation:kbcSway 6.5s ease-in-out infinite alternate;animation-delay:calc(var(--r,0) * -1.3s)}
-@keyframes kbcSway{from{transform:translateX(-3px)}to{transform:translateX(3px)}}
+/* THE STUDIO — four edge-anchored strips, not one full-bleed picture.
 
+   A single slice-scaled SVG cannot serve this layout: the stage runs from
+   aspect 2.02 on a desktop to 0.63 on a phone, so one fixed viewBox either
+   crops the truss off the top or throws away 62% of the width. Worse, the
+   legibility rule ("never brighten the area behind the question or the
+   answers") then depends on where shapes happen to be drawn.
+
+   Instead each strip's HEIGHT is set in CSS pixels and anchored to an edge,
+   so a strip physically cannot paint into the content band. The guarantee is
+   an element box, not artistic restraint.
+
+   Every strip is preserveAspectRatio="none", which imposes one absolute rule:
+   AXIS-ALIGNED RECTS AND LINES ONLY, NO CIRCLES OR ELLIPSES. Anisotropy runs
+   to 1.63 on a phone, so a circle added later renders as a visibly squashed
+   ellipse and the cause will not be obvious. */
+.kbc-airwrap{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:0;contain:layout paint}
+.kbc-room{position:absolute;inset:0;background:
+  radial-gradient(120% 62% at 50% -6%, rgba(126,200,255,.10), transparent 62%),
+  radial-gradient(130% 58% at 50% 108%, rgba(96,132,255,.07), transparent 60%),
+  radial-gradient(112% 96% at 50% 46%, transparent 54%, rgba(2,4,14,.58))}
+.kbc-air{display:block;position:absolute}
+.kbc-wall{top:0;left:50%;transform:translateX(-50%);width:max(100%,520px);height:136px}
+.kbc-desk{bottom:0;left:50%;transform:translateX(-50%);width:max(100%,520px);height:52px}
+/* Anchored directly under the wall strip, and short enough that its last pixel
+   still clears the timer bar at stage y 178. */
+.kbc-floor{top:136px;left:50%;transform:translateX(-50%);width:max(100%,520px);height:40px}
+.kbc-rail{top:0;bottom:0;width:11px;height:100%}
+.kbc-rail-l{left:0}.kbc-rail-r{right:0}
+.kbc-glass{position:absolute;inset:0;z-index:6;pointer-events:none;overflow:hidden;background:
+  repeating-linear-gradient(to bottom, rgba(0,0,0,.05) 0 1px, transparent 1px 3px),
+  radial-gradient(130% 116% at 50% 50%, transparent 58%, rgba(0,0,0,.40) 100%)}
+.kbc-roll{position:absolute;left:0;right:0;top:0;height:84px;
+  background:linear-gradient(180deg,transparent,rgba(0,0,0,.10),transparent);
+  animation:kbcRoll 9.5s linear infinite}
+@keyframes kbcRoll{from{transform:translateY(-90px)}to{transform:translateY(780px)}}
+.kbc-scr-far{opacity:.45}
+.kbc-tier,.kbc-hero,.kbc-arm,.kbc-scope,.kbc-meter,.kbc-scope-t{transform-box:fill-box}
+.kbc-tier,.kbc-hero,.kbc-arm{transform-origin:50% 100%}
+.kbc-scope{transform-origin:50% 50%}
+.kbc-meter{transform-origin:0% 50%}
+
+@keyframes kbcDriftA{from{transform:translateX(-4px)}to{transform:translateX(4px)}}
+@keyframes kbcDriftB{from{transform:translateX(-9px)}to{transform:translateX(9px)}}
+@keyframes kbcDriftC{from{transform:translateX(-13px)}to{transform:translateX(13px)}}
+.kbc-drift-a,.kbc-drift-b,.kbc-drift-c{animation-duration:38s;
+  animation-timing-function:cubic-bezier(.45,0,.55,1);
+  animation-iteration-count:infinite;animation-direction:alternate}
+.kbc-drift-a{animation-name:kbcDriftA}
+.kbc-drift-b{animation-name:kbcDriftB}
+.kbc-drift-c{animation-name:kbcDriftC}
+
+@keyframes kbcSway{from{transform:translate(-3px,0)}to{transform:translate(3px,-1.2px)}}
+.kbc-tier{animation:kbcSway var(--d,8s) ease-in-out infinite alternate;animation-delay:calc(var(--k,0) * -2.3s)}
+.kbc-tier-3{--d:11s}.kbc-tier-2{--d:8.6s}.kbc-tier-1{--d:6.8s}
+
+@keyframes kbcBob{0%,100%{transform:translateY(0)}50%{transform:translateY(-3.5px)}}
+.kbc-hero{animation:kbcBob calc(2.1s + var(--i,0) * .17s) ease-in-out infinite;animation-delay:calc(var(--i,0) * -.31s)}
+
+@keyframes kbcFlash{0%,93%,100%{opacity:0}94.5%{opacity:.9}96%{opacity:.2}97.4%{opacity:.65}}
+.kbc-flash{animation:kbcFlash calc(5.3s + var(--f,0) * 1.4s) linear infinite;animation-delay:calc(var(--f,0) * -1.9s)}
+
+@keyframes kbcTally{0%,10%{opacity:1}11%,100%{opacity:.12}}
+.kbc-tally{animation:kbcTally 6.3s linear infinite;animation-delay:calc(var(--t,0) * -.7s)}
+
+@keyframes kbcScr{0%,100%{opacity:.55}42%{opacity:1}}
+.kbc-scr{animation:kbcScr calc(4.1s + var(--s,0) * .5s) ease-in-out infinite;animation-delay:calc(var(--s,0) * -.46s)}
+
+@keyframes kbcBeamP{from{opacity:.5}to{opacity:1}}
+.kbc-beam{animation:kbcBeamP calc(4.6s + var(--i,0) * .6s) ease-in-out infinite alternate;animation-delay:calc(var(--i,0) * -.83s)}
+
+@keyframes kbcFader{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
+.kbc-fader{animation:kbcFader 6.2s ease-in-out infinite;animation-delay:calc(var(--f,0) * -1.03s)}
+
+@keyframes kbcMeter{0%,100%{transform:scaleX(.34)}18%{transform:scaleX(.9)}40%{transform:scaleX(.52)}66%{transform:scaleX(.96)}}
+.kbc-meter{animation:kbcMeter 1.9s ease-in-out infinite}
+.kbc-meter[style*="--m:1"]{animation-duration:2.3s;animation-delay:-.7s}
+
+@keyframes kbcScope{to{transform:translateX(-158px)}}
+.kbc-scope-t{animation:kbcScope 3.9s linear infinite}
+
+@keyframes kbcLip{0%,8%{opacity:.78}26%,100%{opacity:.16}}
+.kbc-lled{animation:kbcLip 5s linear infinite;animation-delay:calc(var(--n,0) * -.55s)}
+
+@keyframes kbcChase{0%,10%{opacity:.92}26%,100%{opacity:.14}}
+.kbc-rled{animation:kbcChase 3.4s linear infinite;animation-delay:calc(var(--l,0) * -.42s)}
+.kbc-rail-r .kbc-rled{animation-direction:reverse}
+@media(min-width:861px){.kbc-rled:nth-of-type(2n){animation:none;opacity:.12}}
+
+/* --- the DOM becomes hardware --- */
+.kbc-q{position:relative;box-shadow:inset 0 0 0 4px #0d0a10, inset 0 0 0 5px rgba(245,197,66,.22),
+  0 0 26px rgba(245,197,66,.14), 0 14px 30px rgba(0,0,0,.55)}
+.kbc-q::before{content:'';position:absolute;inset:5px;border-radius:10px;pointer-events:none;
+  background:repeating-linear-gradient(180deg,rgba(255,255,255,.025) 0 1px,transparent 1px 3px)}
+.kbc-q::after{content:'';position:absolute;inset:5px 5px 58% 5px;border-radius:10px 10px 0 0;
+  pointer-events:none;background:linear-gradient(180deg,rgba(255,255,255,.05),transparent)}
+.kbc-q-tally{position:absolute;right:11px;bottom:8px;width:5px;height:5px;border-radius:50%;
+  background:#ef4444;box-shadow:0 0 7px #ef4444;pointer-events:none;animation:kbcRec 1.6s ease-in-out infinite}
+@keyframes kbcRec{50%{opacity:.2}}
+.kbc-opt{box-shadow:inset 0 1px 0 rgba(255,255,255,.06), inset 0 -2px 0 rgba(0,0,0,.42), 0 5px 12px rgba(0,0,0,.42)}
+.kbc-ladder{box-shadow:inset 0 0 0 3px #0b0e18, inset 0 0 0 4px rgba(245,197,66,.12), 0 12px 28px rgba(0,0,0,.45)}
+.kbc-timer-track{background:#141019;box-shadow:0 0 12px rgba(34,211,238,.18), inset 0 0 0 1px rgba(245,197,66,.12)}
+
+/* --- the react lever --- */
+.game-root.kbc.reveal-right{--kbc-react:#22c55e}
+.game-root.kbc.reveal-wrong{--kbc-react:#ef4444}
+.game-root.kbc.lifeline-fifty,.game-root.kbc.lifeline-audience,.game-root.kbc.lifeline-phone{--kbc-react:#22d3ee}
+.game-root.kbc.milestone{--kbc-react:#ffd25e}
+
+@keyframes kbcSurge{0%{transform:translateY(0)}24%{transform:translateY(-7px)}60%{transform:translateY(1px)}100%{transform:translateY(0)}}
+@keyframes kbcCheer{0%{transform:translateY(0)}20%{transform:translateY(-9px)}45%{transform:translateY(-2px)}70%{transform:translateY(-7px)}100%{transform:translateY(0)}}
+@keyframes kbcArmUp{0%{opacity:0;transform:translateY(9px)}18%{opacity:.9;transform:translateY(-4px)}82%{opacity:.9;transform:translateY(-4px)}100%{opacity:0;transform:translateY(6px)}}
+@keyframes kbcSlump{0%{transform:translateY(0)}55%{transform:translateY(5px)}100%{transform:translateY(3px)}}
+@keyframes kbcTint{0%{opacity:0}14%{opacity:.16}100%{opacity:0}}
+@keyframes kbcSweep{0%{transform:translateX(0);opacity:0}12%{opacity:.7}100%{transform:translateX(1560px);opacity:0}}
+@keyframes kbcHit{0%{opacity:1}100%{opacity:.25}}
+@keyframes kbcDie{to{opacity:.08}}
+@keyframes kbcHold{0%,100%{opacity:.10}50%{opacity:.62}}
+@keyframes kbcCutIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:translateY(0)}}
+
+.kbc.armed .kbc-rled{animation-duration:1.9s}
+.kbc.armed .kbc-lip{opacity:.42;transition:opacity .3s}
+.kbc.armed .kbc-q-tally{background:var(--kbc-gold);box-shadow:0 0 9px var(--kbc-gold)}
+
+.kbc.air-cut .kbc-scr{animation:kbcCutIn .45s ease-out both;animation-delay:calc(var(--s,0) * 42ms)}
+.kbc.air-cut .kbc-tier{animation:kbcCutIn .5s ease-out both;animation-delay:calc(var(--k,0) * 70ms)}
+
+.kbc.suspense .kbc-anim{animation-play-state:paused}
+.kbc.suspense .kbc-airwrap{filter:brightness(.5);transition:filter .45s ease}
+.kbc.suspense .kbc-rled,.kbc.suspense .kbc-scr-hero{animation:kbcHold 1.5s ease-in-out infinite;
+  animation-delay:0s!important;animation-play-state:running}
+.kbc.suspense .kbc-opt:not(.locked-pick){opacity:.6;transition:opacity .4s ease}
+.kbc.suspense .kbc-q-tally{background:var(--kbc-gold);box-shadow:0 0 10px var(--kbc-gold);animation-duration:.55s}
+.game-root.kbc.suspense{filter:none}
+.game-root.kbc.suspense .kbc-q{box-shadow:inset 0 0 0 4px #0d0a10, inset 0 0 0 5px rgba(245,197,66,.55),
+  0 0 44px rgba(245,197,66,.42), 0 14px 30px rgba(0,0,0,.55)}
+
+.kbc.reveal-right .kbc-tier{animation:kbcSurge .95s cubic-bezier(.25,.9,.3,1) both;animation-delay:calc(var(--k,0) * 60ms)}
+.kbc.reveal-right .kbc-hero{animation:kbcCheer .44s ease-out 3 both;animation-delay:calc(var(--i,0) * 42ms)}
+.kbc.reveal-right .kbc-arm{animation:kbcArmUp 1.5s ease-out both;animation-delay:calc(var(--i,0) * 42ms)}
+.kbc.reveal-right .kbc-flash{animation-duration:1.5s}
+.kbc.reveal-right .kbc-tint{animation:kbcTint 1.4s ease-out both}
+.kbc.reveal-right .kbc-scr{animation:kbcHit .42s ease-out 2 both;animation-delay:calc(var(--s,0) * 34ms)}
+.kbc.reveal-right .kbc-lled{animation:kbcHit .38s ease-out 2 both;animation-delay:calc(var(--n,0) * 26ms)}
+.kbc.reveal-right .kbc-meter{animation:none;transform:scaleX(1)}
+.kbc.reveal-right .kbc-q-tally{background:#22c55e;box-shadow:0 0 10px #22c55e;animation:none}
+
+.kbc.reveal-wrong .kbc-tier{animation:kbcSlump .8s ease-out both;animation-delay:calc(var(--k,0) * 44ms)}
+.kbc.reveal-wrong .kbc-hero{animation:none;transform:translateY(3px);transition:transform .6s ease}
+.kbc.reveal-wrong .kbc-arm,.kbc.reveal-wrong .kbc-flash{animation:none;opacity:0}
+.kbc.reveal-wrong .kbc-scr{animation:kbcDie .4s ease-out both;animation-delay:calc(var(--s,0) * 70ms)}
+.kbc.reveal-wrong .kbc-beam{animation:kbcDie .55s ease-out both;animation-delay:calc(var(--i,0) * 40ms)}
+.kbc.reveal-wrong .kbc-scope{transform:scaleY(.04);transition:transform .45s ease}
+.kbc.reveal-wrong .kbc-scope-t{animation:none}
+.kbc.reveal-wrong .kbc-meter{animation:none;transform:scaleX(.05);transition:transform .5s}
+.kbc.reveal-wrong .kbc-tally,.kbc.reveal-wrong .kbc-lled{animation:none;opacity:.06;transition:opacity .5s}
+.kbc.reveal-wrong .kbc-rled{animation:none;opacity:.08;transition:opacity .6s}
+.kbc.reveal-wrong .kbc-lip{opacity:.05;transition:opacity .5s}
+.kbc.reveal-wrong .kbc-tint{animation:kbcTint 1.2s ease-out both}
+.kbc.reveal-wrong .kbc-q-tally{background:#ef4444;animation:none;opacity:1}
+
+.kbc.milestone .kbc-sweep{animation:kbcSweep 1.2s ease-in-out both}
+.kbc.milestone .kbc-hero{animation:kbcCheer .38s ease-out 3 both;animation-delay:calc(var(--i,0) * 34ms)}
+.kbc.milestone .kbc-lip{opacity:.72;transition:opacity .3s}
+.kbc.milestone .kbc-lled{animation:kbcHit .3s ease-out 3 both;animation-delay:calc(var(--n,0) * 22ms)}
+
+.kbc.lifeline-audience .kbc-tier{animation-duration:2.6s}
+.kbc.lifeline-audience .kbc-hero{animation-duration:.55s}
+.kbc.lifeline-audience .kbc-arm{animation:kbcArmUp 2.4s ease-out infinite;animation-delay:calc(var(--i,0) * 70ms)}
+.kbc.lifeline-audience .kbc-beam{animation:none;opacity:.14;transition:opacity .35s}
+.kbc.lifeline-audience .kbc-scr{animation:none;opacity:.9;transition:opacity .3s}
+.kbc.lifeline-phone .kbc-tier,.kbc.lifeline-phone .kbc-hero{animation-play-state:paused}
+.kbc.lifeline-phone .kbc-flash{animation:none;opacity:0}
+.kbc.lifeline-phone .kbc-beam{animation:none;opacity:.2;transition:opacity .4s}
+.kbc.lifeline-phone .kbc-scr:not(.kbc-scr-hero){animation:none;opacity:.12;transition:opacity .4s}
+.kbc.lifeline-fifty .kbc-sweep{animation:kbcSweep .8s ease-in-out both}
+.kbc.lifeline-fifty .kbc-scr{animation:kbcHit .3s ease-out 2 both;animation-delay:calc(var(--s,0) * 30ms)}
+
+.kbc.offair .kbc-anim{animation-play-state:paused}
+.kbc.offair .kbc-scr,.kbc.offair .kbc-beam,.kbc.offair .kbc-tally,
+.kbc.offair .kbc-lled,.kbc.offair .kbc-rled,.kbc.offair .kbc-lip{opacity:.05;transition:opacity .45s ease}
+.kbc.offair .kbc-scope{transform:scaleY(.04);transition:transform .4s}
+.kbc.offair .kbc-q-tally{opacity:0;transition:opacity .3s}
+
+@media(max-width:860px){
+  .kbc-wall{height:96px}
+  .kbc-floor{top:96px;height:30px}
+  .kbc-desk .kbc-wing{display:none}
+  .kbc-strut{display:none}
+  .kbc-lamp-x{display:none}
+  .kbc-hero-x{display:none}
+  .kbc-tally-x{animation:none;opacity:.12}
+  .kbc-flash:nth-of-type(n+5){display:none}
+  .kbc-lled:nth-of-type(2n+1){animation:none}
+  .kbc-drift-c{animation:none}
+  .kbc-ladder{background:rgba(8,11,22,.46)}
+  .kbc-q{box-shadow:inset 0 0 0 3px #0d0a10, inset 0 0 0 4px rgba(245,197,66,.20),
+    0 0 20px rgba(245,197,66,.12), 0 10px 20px rgba(0,0,0,.5)}
+  .kbc-q-tally{right:9px;bottom:7px;width:4px;height:4px}
+}
+
+
+/* The frozen frame has to be a GOOD frame. This block sets no animation (the
+   global rule already stops everything) and — critically — no transform:
+   `transform:none` would override the transform="translate(x,y)" presentation
+   attributes on the seven lamp groups and collapse them onto the origin. */
+@media(prefers-reduced-motion:reduce){
+
+  .kbc-roll{display:none}
+  .kbc-beam{opacity:.62}.kbc-lens{opacity:.9}.kbc-scr{opacity:1}
+  .kbc-tally{opacity:.12}.kbc-tally[style*="--t:4"]{opacity:1}
+  .kbc-lled,.kbc-rled{opacity:.30}
+  .kbc-flash,.kbc-arm,.kbc-sweep,.kbc-tint{opacity:0}
+  .kbc-meter{transform:scaleX(.6)}
+  .kbc-scope-t{transform:translateX(-72px)}
+  .kbc.reveal-right .kbc-tint{opacity:.15}
+  .kbc.reveal-right .kbc-arm{opacity:.9;transform:translateY(-4px)}
+  .kbc.reveal-wrong .kbc-tint{opacity:.12}
+  .kbc.reveal-wrong .kbc-scr{opacity:.08}
+  .kbc.reveal-wrong .kbc-scope,.kbc.offair .kbc-scope{transform:scaleY(.04)}
+  .kbc.suspense .kbc-airwrap{filter:brightness(.5)}
+}
 /* The gallery strip: host, tally light and lower third. Treating the host as
    a camera feed rather than a portrait is what puts "systems in view" — you
    are watching a broadcast, not a cartoon. */
@@ -474,8 +689,9 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 @keyframes kbcBreathe{to{transform:scaleY(1.012)}}
 .kbc-host .kbc-head{transform-origin:60px 70px;animation:kbcIdle 6s ease-in-out infinite}
 @keyframes kbcIdle{0%,100%{transform:rotate(-1.2deg)}50%{transform:rotate(1.4deg)}}
-.kbc-host.talk .kbc-mouth{animation:kbcTalk .5s ease-in-out 3}
-@keyframes kbcTalk{50%{d:path('M53 61 Q60 68 67 61')}}
+.kbc-host.talk .kbc-mouth{transform-box:fill-box;transform-origin:50% 0;
+  animation:kbcTalk .34s ease-in-out 4}
+@keyframes kbcTalk{50%{transform:scaleY(2.1)}}
 .kbc-host.talk .kbc-arm{animation:kbcGesture .8s ease-in-out}
 @keyframes kbcGesture{50%{transform:rotate(-11deg)}}
 .kbc-host .kbc-arm{transform-origin:92px 88px}
@@ -491,21 +707,25 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .kbc-timer-bar{height:100%;width:100%;background:linear-gradient(90deg,#22d3ee,#22c55e);transition:width .25s linear}
 .kbc-timer-bar.warn{background:linear-gradient(90deg,#f59e0b,#ef4444)}
 .kbc-timer-num{font-family:var(--mono);font-size:14px;font-weight:800;min-width:28px;text-align:right}
-.kbc-q{background:linear-gradient(160deg,#251b24,#150f16);border:1.5px solid var(--kbc-gold);border-radius:15px;
+.kbc-q{background:linear-gradient(160deg,#161d47,#0a0e26);border:1.5px solid var(--kbc-gold);border-radius:15px;
   padding:15px 18px;font-size:clamp(14px,3.4vw,17px);font-weight:700;text-align:center;
   box-shadow:0 0 28px rgba(245,197,66,.16)}
-.game-root.kbc.suspense .kbc-q{box-shadow:0 0 44px rgba(245,197,66,.48)}
+.game-root.kbc.suspense .kbc-q{
+  box-shadow: inset 0 0 0 4px #0a0d20, inset 0 0 0 5px rgba(245,197,66,.55),
+              0 0 44px rgba(245,197,66,.42), 0 14px 30px rgba(0,0,0,.55)}
 .kbc-opts{display:grid;grid-template-columns:1fr 1fr;gap:9px}
 .kbc-opt{display:flex;align-items:center;gap:9px;text-align:left;font:inherit;cursor:pointer;
-  background:linear-gradient(160deg,#2a2230,#171015);border:1.5px solid rgba(245,197,66,.16);
+  background:linear-gradient(160deg,#1b2350,#0d1230);border:1.5px solid rgba(245,197,66,.18);
   border-radius:999px;padding:10px 15px;color:inherit;transition:transform .1s,border-color .15s,background .15s}
 .kbc-opt:hover:not(.lock){border-color:var(--kbc-gold);transform:translateY(-1px)}
 .kbc-opt-k{font-family:var(--mono);font-weight:900;color:var(--kbc-gold);flex:none}
 .kbc-opt-t{font-size:13.5px;line-height:1.3;min-width:0}
 .kbc-opt.sel{background:linear-gradient(160deg,#b45309,#f59e0b);border-color:#fff;color:#1a1200}
 .kbc-opt.sel .kbc-opt-k{color:#1a1200}
-.kbc-opt.locked-pick{animation:kbcPulse .8s ease-in-out infinite}
-@keyframes kbcPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,197,66,.55)}50%{box-shadow:0 0 0 13px rgba(245,197,66,0)}}
+.kbc-opt.locked-pick{position:relative;border-color:var(--kbc-gold)}
+.kbc-opt.locked-pick::after{content:'';position:absolute;inset:-3px;border-radius:999px;
+  pointer-events:none;border:2px solid var(--kbc-gold);animation:kbcLockRing .9s ease-out infinite}
+@keyframes kbcLockRing{0%{opacity:.75;transform:scale(1)}100%{opacity:0;transform:scale(1.06)}}
 .kbc-opt.right{background:linear-gradient(160deg,#15803d,#22c55e);border-color:#fff;color:#04210f}
 .kbc-opt.right .kbc-opt-k{color:#04210f}
 .kbc-opt.wrong{background:linear-gradient(160deg,#991b1b,#ef4444);border-color:#fff;color:#2a0606}
@@ -553,9 +773,7 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   .kbc-ladder{padding:5px;background:rgba(8,11,22,.55)}
   .kbc-hostwrap{min-height:0;gap:8px}
 }
-@media(prefers-reduced-motion:reduce){
-  .kbc-beam,.kbc-crowd,.kbc-rec,.kbc-tally,.kbc-host .kbc-body,.kbc-host .kbc-head,.kbc-opt.locked-pick{animation:none}
-}
+
 
 /* --- buttons ---------------------------------------------------------- */
 .btn{
@@ -12222,43 +12440,304 @@ const KBC_FRIEND_OFF = [
 
 /** The host, drawn once as SVG and animated by class. Deliberately a
     stylised figure — a silhouette in a suit, not a likeness of anybody. */
-/** The studio itself: lighting truss, lamps with beams, and an audience in
-    the dark beyond. Built once as a string, animated purely by CSS, and
-    entirely ornamental — every word on screen stays real DOM so it can be
-    selected and read aloud. The crowd is three swaying ROWS rather than
-    sixty-six individually animated shapes, which is what keeps this cheap
-    enough to run behind a game on a phone. Abstract capsules only: no faces,
-    no limbs, nothing that could read as a caricature of anyone. */
-function kbcStudioSVG() {
-  const lamps = [120, 260, 400, 560, 700, 840].map((x, i) =>
-    '<g class="kbc-lamp" style="--i:' + i + '" transform="translate(' + x + ',54)">' +
-      '<path d="M-9,0 L9,0 L13,18 L-13,18 Z" fill="#2b3348"/>' +
-      '<circle cy="20" r="4.5" fill="var(--kbc-gold)" opacity=".9"/>' +
-      '<path class="kbc-beam" d="M-13,20 L-74,330 L74,330 L13,20 Z" fill="url(#kbcBeam)"/>' +
-    '</g>').join('');
-  const struts = Array.from({ length: 14 }, (_, i) => {
-    const x = -20 + i * 72;
-    return '<path d="M' + x + ',26 L' + (x + 36) + ',54 L' + (x + 36) + ',26 L' + x + ',54" stroke="#2b3348" stroke-width="1.6" fill="none" opacity=".55"/>';
-  }).join('');
-  const row = (n, step, y, h, op, r) => '<g class="kbc-crowd" style="--r:' + r + '">' +
-    Array.from({ length: n }, (_, i) =>
-      '<rect x="' + (i * step) + '" y="' + (y + Math.sin(i * 1.7) * 2).toFixed(1) + '" width="9" height="' + h + '" rx="4.5" fill="#8fa3d8" opacity="' + op + '"/>').join('') + '</g>';
-  return '<svg viewBox="0 0 960 540" preserveAspectRatio="xMidYMid slice" class="kbc-air" aria-hidden="true">' +
+/* The studio, built as four edge-anchored strips rather than one full-bleed
+   picture. Each strip's height is set in CSS pixels, so a strip physically
+   cannot paint into the band where the question and the answers live — the
+   legibility guarantee is an element box, not artistic restraint.
+
+   Every strip uses preserveAspectRatio="none", which means one absolute rule:
+   AXIS-ALIGNED RECTS AND LINES ONLY. NO CIRCLES, NO ELLIPSES. A circle added
+   later renders as a visibly squashed ellipse (anisotropy is 1.18 on desktop
+   and 1.63 on a phone) and the cause will not be obvious. Soft gradient fills
+   and the truss zigzag are the two exceptions, because distortion is invisible
+   in both. */
+
+/* A periodic waveform for the scope. f(0) === f(n) === 0 exactly, or the two
+   tiled copies show a step at every loop. */
+const WAVE = (w, amp = 8, n = 40) => {
+  const f = i => amp * (0.62 * Math.sin(2 * Math.PI * 3 * i / n) + 0.38 * Math.sin(2 * Math.PI * 7 * i / n));
+  let d = 'M0,' + f(0).toFixed(2);
+  for (let i = 1; i <= n; i++) d += ' L' + (i * w / n).toFixed(1) + ',' + f(i).toFixed(2);
+  return d;
+};
+
+/* One <path> per tier of the crowd. Drawing 124 separate heads is what made
+   the old version read as scattered dots and blew the node budget at the same
+   time; a single comb of overlapping quadratic bumps reads as a mass and
+   animates as one node. */
+/* THE CROWD.
+
+   Three attempts failed before this one and each failure is worth recording,
+   because the obvious approaches are the wrong ones. A comb of bare bumps
+   reads as decorative scallops. Head-and-shoulder bumps that fall back to the
+   baseline between neighbours read as a sawtooth. A single-colour mass, even
+   a well-shaped one with a rim light, reads as texture — it never becomes
+   people, because real crowds are not one colour.
+
+   What works is drawing INDIVIDUALS and paying for it with grouping rather
+   than with nodes: every person is a torso and a head, but all the torsos
+   sharing a clothing colour are emitted into ONE path. Six colours plus two
+   skin tones plus a rim per tier is nine nodes for forty people. The crowd is
+   colourful, individual and countable, and it costs the same as the wave did.
+
+   Abstract by construction: a torso is a trapezoid, a head is a rounded rect.
+   No faces, no features, no likeness of anyone. */
+const KBC_WEAR = ['#b8474b', '#c98a35', '#3f9a8a', '#5560b4', '#a04d88', '#5f9448'];
+const KBC_SKIN = ['#6b4b39', '#8a6248'];
+
+/* Aerial perspective, which is what turns three identical rows into a room
+   with depth: the far tier is washed toward the haze colour so it recedes,
+   the near tier is crushed toward black so it silhouettes, and only the
+   middle tier is lit close to its true colour. Without this the rows overlap
+   into one flat candy-coloured band. */
+const kbcMix = (hex, to, t) => {
+  const p = (h) => [1, 3, 5].map(i => parseInt(h.substr(i, 2), 16));
+  const a = p(hex), b = p(to);
+  return '#' + a.map((v, i) => Math.round(v + (b[i] - v) * t).toString(16).padStart(2, '0')).join('');
+};
+
+function kbcTier(base, rise, step, phase, dim, cls, k, toward, amt) {
+  const WEAR = KBC_WEAR.map(c => kbcMix(c, toward, amt));
+  const SKIN = KBC_SKIN.map(c => kbcMix(c, toward, amt));
+  const wear = WEAR.map(() => ''), skin = SKIN.map(() => '');
+  let rim = '', n = 0;
+  const f = (q) => q.toFixed(1);
+  for (let x = -34 + phase; x < 1244; x += step, n++) {
+    // Deterministic, but irregular enough that no two neighbours match and the
+    // row never resolves into a repeating pattern.
+    const j1 = Math.sin(n * 2.399 + phase) * 0.5 + 0.5;
+    const j2 = Math.sin(n * 1.117 + phase * 0.7) * 0.5 + 0.5;
+    const j3 = Math.sin(n * 0.773 + phase * 1.9) * 0.5 + 0.5;
+    const sc = 0.86 + 0.28 * j1;                  // this person's size
+    const y = base - rise * 0.30 * j2;            // seated height varies down the row
+    const tw = step * 0.44 * sc;                  // half shoulder width
+    const hw = step * 0.19 * sc;                  // half head width
+    const hh = rise * 0.34 * sc;                  // head height
+    const nk = y - hh - rise * 0.06;              // head top
+    // torso: shoulders sloping out to a wide seated base
+    wear[Math.floor(j3 * 5.999)] +=
+      'M' + f(x - tw) + ' 136 L' + f(x - tw * 0.82) + ' ' + f(y + 2) +
+      ' Q' + f(x - tw * 0.42) + ' ' + f(y - 1) + ' ' + f(x) + ' ' + f(y - 1) +
+      ' Q' + f(x + tw * 0.42) + ' ' + f(y - 1) + ' ' + f(x + tw * 0.82) + ' ' + f(y + 2) +
+      ' L' + f(x + tw) + ' 136 Z ';
+    skin[n % 2] +=
+      'M' + f(x - hw) + ' ' + f(y - 1) + ' L' + f(x - hw) + ' ' + f(nk + hh * 0.4) +
+      ' Q' + f(x - hw) + ' ' + f(nk) + ' ' + f(x) + ' ' + f(nk) +
+      ' Q' + f(x + hw) + ' ' + f(nk) + ' ' + f(x + hw) + ' ' + f(nk + hh * 0.4) +
+      ' L' + f(x + hw) + ' ' + f(y - 1) + ' Z ';
+    // the backlight edge, drawn only over the head and shoulders
+    rim += 'M' + f(x - tw * 0.82) + ' ' + f(y + 2) +
+      ' Q' + f(x - tw * 0.42) + ' ' + f(y - 1) + ' ' + f(x - hw) + ' ' + f(y - 1) +
+      ' L' + f(x - hw) + ' ' + f(nk + hh * 0.4) +
+      ' Q' + f(x - hw) + ' ' + f(nk) + ' ' + f(x) + ' ' + f(nk) +
+      ' Q' + f(x + hw) + ' ' + f(nk) + ' ' + f(x + hw) + ' ' + f(nk + hh * 0.4) +
+      ' L' + f(x + hw) + ' ' + f(y - 1) +
+      ' Q' + f(x + tw * 0.42) + ' ' + f(y - 1) + ' ' + f(x + tw * 0.82) + ' ' + f(y + 2) + ' ';
+  }
+  let out = '<g class="kbc-tier ' + cls + ' kbc-anim" style="--k:' + k + '" opacity="' + dim + '">';
+  wear.forEach((d, i) => { if (d) out += '<path d="' + d + '" fill="' + WEAR[i] + '"/>'; });
+  skin.forEach((d, i) => { if (d) out += '<path d="' + d + '" fill="' + SKIN[i] + '"/>'; });
+  out += '<path d="' + rim + '" fill="none" stroke="#bcd8ff" stroke-width="1" stroke-linejoin="round" opacity="' + (0.42 + 0.34 * (2 - k) / 2).toFixed(2) + '"/>';
+  return out + '</g>';
+}
+
+function kbcWall() {
+  const PANEL = [46, 152, 258, 364, 748, 854, 960, 1066];
+  const PANEL_S = [0, 1, 2, 3, 5, 6, 7, 8];
+  const FAR = [46, 152, 960, 1066];          // behind the camera PIP or the ladder
+  let panels = '';
+  PANEL.forEach((x, n) => {
+    const s = PANEL_S[n], far = FAR.indexOf(x) >= 0;
+    panels +=
+      '<rect x="' + x + '" y="15" width="96" height="24" rx="3" fill="#0b1130" stroke="#2c3f74" stroke-width="1"/>' +
+      '<rect class="kbc-scr' + (far ? ' kbc-scr-far' : ' kbc-anim') + '" style="--s:' + s + '" x="' + (x + 3) + '" y="17.5" width="90" height="19" rx="2" fill="url(#kbcWScr)"/>' +
+      '<rect x="' + (x + 9) + '" y="20" width="44" height="3" rx="1.5" fill="#22d3ee" opacity=".26"/>' +
+      '<rect x="' + (x + 9) + '" y="25" width="60" height="2" rx="1" fill="#8fa3d8" opacity=".18"/>' +
+      '<rect x="' + (x + 9) + '" y="29" width="28" height="6" rx="2" fill="var(--kbc-react,#f5c542)" opacity=".22"/>' +
+      '<rect class="kbc-tally' + (far ? ' kbc-tally-x' : ' kbc-anim') + '" style="--t:' + s + '" x="' + (x + 5) + '" y="11.5" width="11" height="2.5" rx="1.2" fill="#ef4444" opacity=".12"/>';
+  });
+
+  // The hero screen: the show's own prize ladder, on the wall, dead centre so
+  // it survives the phone crop.
+  let hero = '<rect class="kbc-scr kbc-scr-hero kbc-anim" style="--s:4" x="470" y="8" width="260" height="34" rx="3" fill="url(#kbcWScr)" stroke="var(--kbc-react,#f5c542)" stroke-opacity=".45" stroke-width="1.5"/>';
+  for (let r = 0; r < 7; r++) {
+    hero += '<rect x="486" y="' + (12 + r * 4.2).toFixed(1) + '" width="' + (60 + r * 22) + '" height="3.4" rx="1.7" fill="#8fa3d8" opacity=".18"/>';
+  }
+  hero += '<rect x="486" y="24.6" width="126" height="3.4" rx="1.7" fill="var(--kbc-react,#f5c542)" opacity=".6"/>' +
+          '<rect class="kbc-tally kbc-anim" style="--t:4" x="476" y="4.5" width="11" height="3" rx="1.5" fill="#ef4444" opacity=".12"/>';
+
+  const HERO_X = [262, 320, 378, 436, 494, 552, 610, 668, 726, 784];
+  const HERO_Y = [44, 50, 46, 53, 45, 51, 47, 54, 46, 49];
+  let heroes = '', arms = '';
+  HERO_X.forEach((x, i) => {
+    heroes += '<rect class="kbc-hero' + (i % 3 === 2 ? ' kbc-hero-x' : '') + ' kbc-anim" style="--i:' + i + '" x="' + (x - 9) + '" y="' + HERO_Y[i] + '" width="17" height="24" rx="8.5" fill="' + (i % 2 ? '#2b3352' : '#343e61') + '" opacity=".9"/>';
+    if (i % 2 === 0) arms += '<rect class="kbc-arm" style="--i:' + i + '" x="' + (x + 7) + '" y="26" width="5" height="20" rx="2.5" fill="#46527d" opacity="0"/>';
+  });
+
+  const FLASH = [[300, 58], [420, 70], [540, 52], [660, 76], [760, 60], [880, 70]];
+  let flashes = '';
+  FLASH.forEach((p, i) => {
+    flashes += '<rect class="kbc-flash kbc-anim" style="--f:' + i + '" x="' + (p[0] - 7) + '" y="' + p[1] + '" width="14" height="9" rx="4.5" fill="#fff" opacity="0"/>';
+  });
+
+  let struts = '';
+  for (let i = 0; i < 18; i++) { const x = -40 + i * 72; struts += 'M' + x + ' 2 L' + (x + 72) + ' 9 M' + (x + 72) + ' 2 L' + x + ' 9 '; }
+
+  const LAMP = [118, 296, 474, 600, 726, 904, 1082];
+  const LAMP_X = [118, 296, 1082];
+  let lamps = '';
+  LAMP.forEach((x, i) => {
+    lamps += '<g class="kbc-lamp' + (LAMP_X.indexOf(x) >= 0 ? ' kbc-lamp-x' : '') + '" style="--i:' + i + '" transform="translate(' + x + ',9)">' +
+      '<rect x="-4" y="-3" width="8" height="6" fill="#2f3a60"/>' +
+      '<rect x="-11" y="3" width="20" height="12" rx="2" fill="#232c4e" stroke="#42578a" stroke-width="1"/>' +
+      '<rect class="kbc-lens" x="-9" y="13" width="18" height="4.5" rx="2.2" fill="var(--kbc-react,#f5c542)" opacity=".9"/>' +
+      '<rect class="kbc-bloom" x="-34" y="2" width="68" height="34" rx="17" fill="url(#kbcWPool)" opacity=".6"/>' +
+      '<path class="kbc-beam kbc-anim" d="M-11,17 L-58,120 L58,120 L11,17 Z" fill="url(#kbcWBeam)"/>' +
+    '</g>';
+  });
+
+  return '<svg class="kbc-air kbc-wall" viewBox="0 0 1200 136" preserveAspectRatio="none" aria-hidden="true">' +
     '<defs>' +
-      '<linearGradient id="kbcBeam" x1="0" y1="0" x2="0" y2="1">' +
-        '<stop offset="0" stop-color="#f5c542" stop-opacity=".30"/><stop offset="1" stop-color="#f5c542" stop-opacity="0"/></linearGradient>' +
-      '<radialGradient id="kbcPool" cx="50%" cy="78%" r="62%">' +
-        '<stop offset="0" stop-color="#f5c542" stop-opacity=".16"/><stop offset="1" stop-color="#f5c542" stop-opacity="0"/></radialGradient>' +
-      '<radialGradient id="kbcVig" cx="50%" cy="44%" r="76%">' +
-        '<stop offset=".55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".66"/></radialGradient>' +
+      '<linearGradient id="kbcWScr" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1b2a5c"/><stop offset="1" stop-color="#0a1132"/></linearGradient>' +
+      '<linearGradient id="kbcWBeam" x1="0" y1="0" x2="0" y2="1">' +
+        '<stop offset="0" stop-color="var(--kbc-react,#7ec8ff)" stop-opacity=".50"/>' +
+        '<stop offset=".18" stop-color="var(--kbc-react,#7ec8ff)" stop-opacity=".18"/>' +
+        '<stop offset=".42" stop-color="var(--kbc-react,#7ec8ff)" stop-opacity=".04"/>' +
+        '<stop offset="1" stop-color="var(--kbc-react,#f5c542)" stop-opacity="0"/></linearGradient>' +
+      '<linearGradient id="kbcWHaze" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4a63b8" stop-opacity=".34"/><stop offset="1" stop-color="#4a63b8" stop-opacity="0"/></linearGradient>' +
+      '<linearGradient id="kbcWFade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#05070d" stop-opacity="0"/><stop offset="1" stop-color="#05070d" stop-opacity=".95"/></linearGradient>' +
+      '<linearGradient id="kbcWSweep" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity=".5"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>' +
+      '<linearGradient id="kbcWPil" x1="0" y1="0" x2="1" y2="0">' +
+        '<stop offset="0" stop-color="#2a3d8c" stop-opacity=".15"/>' +
+        '<stop offset=".42" stop-color="#7ec8ff" stop-opacity=".42"/>' +
+        '<stop offset=".58" stop-color="#bfe4ff" stop-opacity=".30"/>' +
+        '<stop offset="1" stop-color="#2a3d8c" stop-opacity=".12"/></linearGradient>' +
+      '<radialGradient id="kbcWPool" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="var(--kbc-react,#f5c542)" stop-opacity=".22"/><stop offset="1" stop-color="var(--kbc-react,#f5c542)" stop-opacity="0"/></radialGradient>' +
     '</defs>' +
-    '<line x1="0" y1="26" x2="960" y2="26" stroke="#2b3348" stroke-width="2" opacity=".5"/>' +
-    '<line x1="0" y1="54" x2="960" y2="54" stroke="#2b3348" stroke-width="2" opacity=".5"/>' +
-    struts + lamps +
-    '<ellipse cx="480" cy="470" rx="430" ry="112" fill="url(#kbcPool)"/>' +
-    row(26, 34, 402, 13, '.20', 0) + row(22, 40, 386, 13, '.15', 1) + row(18, 48, 372, 13, '.10', 2) +
-    '<rect width="960" height="540" fill="url(#kbcVig)"/>' +
+    '<rect x="0" y="0" width="1200" height="136" fill="#04061a" opacity=".82"/>' +
+    '<g class="kbc-far kbc-drift-a">' +
+      '<rect class="kbc-pillar" x="352" y="0" width="30" height="136" fill="url(#kbcWPil)" opacity=".85"/>' +
+      '<rect class="kbc-pillar" x="818" y="0" width="30" height="136" fill="url(#kbcWPil)" opacity=".85"/>' +
+      '<rect x="363" y="0" width="7" height="136" fill="#bfe4ff" opacity=".14"/>' +
+      '<rect x="829" y="0" width="7" height="136" fill="#bfe4ff" opacity=".14"/>' +
+      '<rect x="-40" y="12" width="1280" height="30" fill="#101a3e"/>' +
+      '<rect x="-40" y="12" width="1280" height="1.5" fill="#3d5da8" opacity=".7"/>' +
+      '<rect x="-40" y="40" width="1280" height="3" fill="#070b1e"/>' +
+      panels + hero +
+    '</g>' +
+    '<g class="kbc-crowd kbc-drift-b">' +
+      '<rect class="kbc-haze" x="-40" y="36" width="1280" height="60" fill="url(#kbcWHaze)"/>' +
+      kbcTier(68, 22, 22, 5, '.72', 'kbc-tier-3', 2, '#33468e', 0.58) +
+      '<rect x="-40" y="34" width="1280" height="102" fill="url(#kbcWHaze)" opacity=".5"/>' +
+      kbcTier(81, 27, 29, 13, '.92', 'kbc-tier-2', 1, '#1b2350', 0.30) +
+      '<rect x="-40" y="48" width="1280" height="88" fill="url(#kbcWHaze)" opacity=".34"/>' +
+      kbcTier(97, 32, 37, 0, '1', 'kbc-tier-1', 0, '#04050e', 0.66) +
+      heroes + arms + flashes +
+    '</g>' +
+    '<g class="kbc-rig kbc-drift-c">' +
+      '<rect x="-40" y="0" width="1280" height="2" fill="#2f3a60" opacity=".6"/>' +
+      '<rect x="-40" y="7" width="1280" height="2" fill="#2f3a60" opacity=".55"/>' +
+      '<path class="kbc-strut" d="' + struts + '" stroke="#2a3358" stroke-width="1.4" fill="none" opacity=".65"/>' +
+      lamps +
+    '</g>' +
+    '<rect class="kbc-sweep" x="-300" y="0" width="260" height="136" fill="url(#kbcWSweep)" opacity="0"/>' +
+    '<rect class="kbc-tint" x="0" y="0" width="1200" height="136" fill="var(--kbc-react,#f5c542)" opacity="0"/>' +
+    '<rect x="0" y="118" width="1200" height="18" fill="url(#kbcWFade)"/>' +
   '</svg>';
+}
+
+/* The studio floor, in the band between the audience and the timer. Without
+   it that strip is bare gradient and the room stops existing halfway down.
+   Perspective lines converging on a vanishing point do the work: they read as
+   a glossy floor receding toward the crowd, and they cost fourteen nodes. */
+function kbcFloor() {
+  let lines = '';
+  for (let i = 0; i < 15; i++) {
+    const far = 600 + (i - 7) * 26, near = 600 + (i - 7) * 178;
+    lines += '<path d="M' + far.toFixed(0) + ' 0 L' + near.toFixed(0) + ' 40" stroke="#5f7bd8" stroke-width="1" opacity="' + (0.20 - Math.abs(i - 7) * 0.017).toFixed(3) + '" fill="none"/>';
+  }
+  let ribs = '';
+  for (let r = 1; r < 4; r++) {
+    const y = r * r * 2.6;
+    ribs += '<rect x="0" y="' + y.toFixed(1) + '" width="1200" height="0.8" fill="#5f7bd8" opacity="' + (0.16 - r * 0.035).toFixed(3) + '"/>';
+  }
+  return '<svg class="kbc-air kbc-floor" viewBox="0 0 1200 40" preserveAspectRatio="none" aria-hidden="true">' +
+    '<defs>' +
+      '<linearGradient id="kbcFPlane" x1="0" y1="0" x2="0" y2="1">' +
+        '<stop offset="0" stop-color="#131c4c"/><stop offset="1" stop-color="#05071a"/></linearGradient>' +
+      '<linearGradient id="kbcFRef" x1="0" y1="0" x2="0" y2="1">' +
+        '<stop offset="0" stop-color="#8fd0ff" stop-opacity=".26"/>' +
+        '<stop offset="1" stop-color="#8fd0ff" stop-opacity="0"/></linearGradient>' +
+    '</defs>' +
+    '<rect x="0" y="0" width="1200" height="40" fill="url(#kbcFPlane)"/>' +
+    '<rect x="0" y="0" width="1200" height="1.4" fill="var(--kbc-react,#7ec8ff)" opacity=".30"/>' +
+    lines + ribs +
+    // the pillars catch the polish and run down the floor
+    '<rect class="kbc-refl" x="352" y="0" width="30" height="30" fill="url(#kbcFRef)"/>' +
+    '<rect class="kbc-refl" x="818" y="0" width="30" height="30" fill="url(#kbcFRef)"/>' +
+    '<rect x="0" y="34" width="1200" height="6" fill="#04061a" opacity=".8"/>' +
+  '</svg>';
+}
+
+function kbcDesk() {
+  const CAPY = [14, 20, 12, 24, 17, 13, 22, 16, 25, 15, 19, 23];
+  let faders = '';
+  for (let i = 0; i < 12; i++) {
+    faders += '<rect x="' + (30 + i * 20) + '" y="9" width="3" height="22" rx="1.5" fill="#1b2233"/>' +
+      '<rect class="kbc-fader' + (i % 3 === 1 ? ' kbc-anim' : '') + '" style="--f:' + i + '" x="' + (26 + i * 20) + '" y="' + CAPY[i] + '" width="11" height="5" rx="2" fill="#4d5872"/>';
+  }
+  let meters = '';
+  for (let j = 0; j < 2; j++) {
+    meters += '<rect x="858" y="' + (10 + j * 11) + '" width="80" height="7" rx="2" fill="#0d1320"/>' +
+      '<rect class="kbc-meter kbc-anim" style="--m:' + j + '" x="858" y="' + (10 + j * 11) + '" width="80" height="7" rx="2" fill="#22c55e" opacity=".5"/>';
+  }
+  let bus = '';
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 9; c++) {
+    bus += '<rect x="' + (1090 + c * 10) + '" y="' + (9 + r * 9) + '" width="8" height="7" rx="1.5" fill="#1a2233"/>';
+  }
+  let lled = '';
+  for (let n = 0; n < 9; n++) {
+    lled += '<rect class="kbc-lled' + (n % 2 === 0 ? ' kbc-anim' : '') + '" style="--n:' + n + '" x="' + (110 + n * 122) + '" y="41" width="16" height="3" rx="1.5" fill="var(--kbc-react,#f5c542)" opacity=".34"/>';
+  }
+  return '<svg class="kbc-air kbc-desk" viewBox="0 0 1200 52" preserveAspectRatio="none" aria-hidden="true">' +
+    '<defs>' +
+      '<linearGradient id="kbcDDesk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#121828"/><stop offset="1" stop-color="#05070d"/></linearGradient>' +
+      '<clipPath id="kbcDScope"><rect x="682" y="10" width="158" height="22"/></clipPath>' +
+    '</defs>' +
+    '<g class="kbc-wing">' +
+      '<rect x="20" y="5" width="266" height="31" rx="3" fill="#0b1120" stroke="#1e2740" stroke-width="1"/>' + faders +
+      '<rect x="676" y="5" width="170" height="31" rx="3" fill="#080c16" stroke="#22304a" stroke-width="1"/>' +
+      '<g clip-path="url(#kbcDScope)"><g class="kbc-scope" transform="translate(682,21)"><g class="kbc-scope-t kbc-anim">' +
+        '<path d="' + WAVE(158) + '" stroke="var(--kbc-react,#f5c542)" stroke-opacity=".55" stroke-width="1.2" fill="none"/>' +
+        '<path d="' + WAVE(158) + '" transform="translate(158,0)" stroke="var(--kbc-react,#f5c542)" stroke-opacity=".55" stroke-width="1.2" fill="none"/>' +
+      '</g></g></g>' + meters + bus +
+    '</g>' +
+    '<rect class="kbc-lip" x="0" y="38" width="1200" height="1.6" fill="var(--kbc-react,#f5c542)" opacity=".26"/>' +
+    '<rect x="0" y="39.6" width="1200" height="12.4" fill="url(#kbcDDesk)"/>' +
+    '<rect x="0" y="42.6" width="1200" height="1" fill="#000" opacity=".45"/>' + lled +
+  '</svg>';
+}
+
+function kbcRail(side) {
+  let ticks = '', leds = '';
+  for (let i = 0; i < 24; i++) ticks += '<rect x="3" y="' + (6 + i * 16.4).toFixed(1) + '" width="6" height="1" fill="#2a3550" opacity=".65"/>';
+  for (let n = 0; n < 8; n++) {
+    leds += '<rect class="kbc-rled kbc-anim" style="--l:' + n + '" x="4" y="' + (6 + n * 48.6).toFixed(1) + '" width="4" height="8" rx="1.5" fill="' + (side === 'l' ? '#22d3ee' : 'var(--kbc-react,#f5c542)') + '" opacity=".16"/>';
+  }
+  return '<svg class="kbc-air kbc-rail kbc-rail-' + side + '" viewBox="0 0 12 400" preserveAspectRatio="none" aria-hidden="true">' +
+    '<rect x="2" y="0" width="8" height="400" fill="#0b1020"/>' +
+    '<rect x="2" y="0" width="1" height="400" fill="var(--kbc-react,#f5c542)" opacity=".10"/>' +
+    ticks + leds + '</svg>';
+}
+
+let _kbcAir = null;
+function kbcAirwrap() {
+  if (!_kbcAir) _kbcAir = h('div', { class: 'kbc-airwrap', html: kbcStudioSVG() });
+  return _kbcAir;
+}
+
+function kbcStudioSVG() {
+  return '<div class="kbc-room"></div>' + kbcWall() + kbcFloor() + kbcDesk() + kbcRail('l') + kbcRail('r');
 }
 
 function kbcHostSVG() {
@@ -12353,6 +12832,8 @@ async function runKBC(questions) {
 
   function draw() {
     picked = -1; locked = false; hidden = [];
+    host.classList.remove('suspense', 'armed', 'air-cut', 'reveal-right', 'reveal-wrong',
+      'milestone', 'offair', 'lifeline-fifty', 'lifeline-audience', 'lifeline-phone');
     const q = ladder[rung];
     host.textContent = '';
 
@@ -12379,7 +12860,7 @@ async function runKBC(questions) {
     ]));
 
     const stage = h('div', { class: 'kbc-stage' }, [
-      h('div', { class: 'kbc-airwrap', html: kbcStudioSVG() }),
+      kbcAirwrap(),
       h('div', { class: 'kbc-hostwrap' }, [
         // The host is a camera feed rather than a portrait in a bubble: it
         // shows a gallery cutting between sources, which is what "systems in
@@ -12402,16 +12883,25 @@ async function runKBC(questions) {
           h('div', { class: 'kbc-timer-track' }, h('div', { class: 'kbc-timer-bar', id: 'kbc-bar' })),
           h('span', { class: 'kbc-timer-num', id: 'kbc-num', text: '—' })
         ]),
-        h('div', { class: 'kbc-q', id: 'kbc-q', text: q.stem }),
+        h('div', { class: 'kbc-q', id: 'kbc-q' }, [
+          h('span', { id: 'kbc-q-t', text: q.stem }),
+          h('i', { class: 'kbc-q-tally' })
+        ]),
         h('div', { class: 'kbc-opts', id: 'kbc-opts' }, q.options.map((o, i) =>
           h('button', { class: 'kbc-opt', dataset: { i: String(i) }, onclick: () => pick(i) }, [
             h('span', { class: 'kbc-opt-k', text: o.letter }), h('span', { class: 'kbc-opt-t', text: o.text })
           ]))),
         h('div', { class: 'kbc-actions', id: 'kbc-actions' })
       ]),
-      ladderEl
+      ladderEl,
+      h('div', { class: 'kbc-glass', html: '<i class="kbc-roll"></i>' })
     ]);
     host.appendChild(stage);
+
+    // Each question arrives as a camera cut rather than a page swap: the wall
+    // re-cuts its screens and the crowd tiers back into frame.
+    host.classList.add('air-cut');
+    setTimeout(() => host.classList.remove('air-cut'), 620);
 
     // On a phone the ladder is a horizontal strip roughly three times wider
     // than the screen. Without this you climb to rung 8 with the marker
@@ -12478,6 +12968,7 @@ async function runKBC(questions) {
   function pick(i) {
     if (locked || hidden.indexOf(i) >= 0) return;
     picked = i;
+    host.classList.add('armed');
     const q = ladder[rung];
     Array.prototype.forEach.call($('#kbc-opts').children, (el) => {
       el.classList.toggle('sel', Number(el.dataset.i) === i);
@@ -12532,21 +13023,40 @@ async function runKBC(questions) {
     });
     const good = sel === correctIx;
     bug(good ? 'ON AIR' : 'OFF AIR', good ? '' : 'hold');
+    host.classList.remove('armed', 'reveal-right', 'reveal-wrong');
+    void host.offsetWidth;                       // restart the keyframes on a repeat verdict
+    host.classList.add(good ? 'reveal-right' : 'reveal-wrong');
+    // Nothing removes reveal-wrong: transitioning the studio back up to full
+    // brightness while the player is still looking at the red answer is worse
+    // than leaving the room dark. draw() clears it, and draw() never runs
+    // after a loss.
+    if (good) setTimeout(() => host.classList.remove('reveal-right'), 1750);
     if (good) {
       audio.sfx('right');
       say(KBC_RIGHT[Math.floor(Math.random() * KBC_RIGHT.length)]);
-      if (KBC_SAFE.indexOf(rung) >= 0) setTimeout(() => audio.sfx('lifeline'), 400);
+      if (KBC_SAFE.indexOf(rung) >= 0) {
+        setTimeout(() => audio.sfx('lifeline'), 400);
+        host.classList.add('milestone');
+        setTimeout(() => host.classList.remove('milestone'), 1700);
+      }
       rung++;
       setTimeout(() => { if (rung >= ladder.length) return end('won'); draw(); }, 1900);
     } else {
       audio.sfx('wrong');
       audio.stopBed();
       say(KBC_WRONG[Math.floor(Math.random() * KBC_WRONG.length)].replace('{A}', q.correctText));
+      setTimeout(() => host.classList.add('offair'), 1400);
       setTimeout(() => end('lost'), 3000);
     }
   }
 
-  function walkAway() { if (locked) return; if (timer) clearInterval(timer); bug('HOLD', 'hold'); end('walk'); }
+  function walkAway() {
+    if (locked) return;
+    if (timer) clearInterval(timer);
+    bug('HOLD', 'hold');
+    host.classList.add('offair');
+    setTimeout(() => end('walk'), 700);
+  }
 
   function useLifeline(key) {
     if (used[key] || locked) return;
@@ -12556,6 +13066,8 @@ async function runKBC(questions) {
       if (['fifty', 'audience', 'phone'][i] === key) { el.classList.add('used'); el.disabled = true; }
     });
     audio.sfx('lifeline');
+    host.classList.add('lifeline-' + key);
+    setTimeout(() => host.classList.remove('lifeline-' + key), key === 'fifty' ? 1000 : 2600);
     const q = ladder[rung];
     const correctIx = q.options.findIndex(o => o.id === q.correctId);
 
