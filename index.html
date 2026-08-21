@@ -192,6 +192,14 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   color:var(--accent-1);background:var(--grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
 }
 .view{padding:22px 26px 80px;max-width:1220px;width:100%}
+/* A running game is the only thing on the screen that matters, and on a phone
+   this band's stat cards wrap to a second row and cost it ~140px — the exact
+   height the play field is short of. They describe the games LIST, not the
+   game being played, so they are the first thing to go. Scoped with :has()
+   rather than a toggled class so there is no lifecycle to leak: where :has()
+   is unsupported the band simply stays as it was. */
+body:has(.game-root) .band-stats{display:none}
+body:has(.game-root) .view{padding-bottom:16px}
 @media(max-width:880px){
   .app{grid-template-columns:1fr}
   .rail{position:fixed;inset:0 auto 0 0;width:250px;z-index:60;transform:translateX(-100%);transition:transform .18s ease}
@@ -271,8 +279,15 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 /* --- games ------------------------------------------------------------- */
 .game-root{position:relative;min-height:min(64vh,560px);border:1px solid var(--rule);border-radius:var(--r-lg);
   overflow:hidden;background:linear-gradient(180deg,#1a1140 0%,#2d1a52 38%,#5c2760 70%,#8f3f63 100%)}
+/* inset:0 centres the menu against the stage's min-height, but it also means
+   the menu cannot make the stage taller — and .game-root clips. On a 360x640
+   phone the tier menu is 473px of content in a 470px stage, which cut "Back
+   to games" in half. auto is the guarantee that nothing is ever unreachable;
+   the tighter padding below is what stops it needing to scroll at all. */
 .game-screen{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
-  gap:10px;text-align:center;padding:24px;z-index:20}
+  gap:10px;text-align:center;padding:24px;z-index:20;overflow-y:auto}
+.game-emoji{font-size:52px;line-height:1}
+@media(max-height:700px){.game-screen{padding:14px;gap:7px}.game-emoji{font-size:34px}}
 .game-title{font-family:var(--display);font-size:clamp(26px,6vw,38px);font-weight:700;color:#fff;margin:0}
 .game-sub{font-size:14px;color:rgba(255,255,255,.78);max-width:420px;margin:0}
 .tier-pick{display:flex;flex-direction:column;gap:9px;width:min(320px,100%);margin-top:6px}
@@ -322,8 +337,21 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   100%{opacity:1;transform:none}
 }
 @media(prefers-reduced-motion:reduce){.bp-aside.fly{animation:none}}
-.bp-balloon{position:absolute;bottom:-120px;display:flex;flex-direction:column;align-items:center;
-  cursor:pointer;pointer-events:auto;animation:bpFloat linear forwards;will-change:transform}
+/* The balloon starts ON the field, not 120px below it. bottom:-120px existed
+   only to hide the spawn pop-in, and it cost every float its first 1.1-2.5
+   seconds behind the overflow:hidden edge — dead time the player could neither
+   read in nor aim in. There is no pop-in any more: the balloons are placed
+   during the reading beat, still and fully visible, and the float only starts
+   once the player has had their look. */
+.bp-balloon{position:absolute;bottom:8px;display:flex;flex-direction:column;align-items:center;
+  cursor:pointer;pointer-events:auto;animation:bpFloat linear forwards;
+  animation-play-state:paused;will-change:transform}
+/* Parked: readable, but not shootable. A tap during the beat means "I'm
+   ready", never "fire" — so the stage catches it and launches instead. */
+.bp-balloon.is-ready{pointer-events:none}
+.bp-balloon.is-ready .bp-body{animation:bpBob 2.4s ease-in-out infinite alternate}
+@keyframes bpBob{to{transform:translateY(-5px)}}
+.bp-balloon.is-dim{opacity:.28}
 /* The rise is measured from the field, not the viewport: the game sits in a
    card inside the page, so a vh-based travel spends most of the float off
    screen and the balloon is only briefly hittable. */
@@ -335,8 +363,36 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .bp-letter{font-family:var(--mono);font-size:20px;font-weight:800;color:rgba(0,0,0,.7)}
 .bp-knot{width:9px;height:9px;border-radius:50%;margin-top:-3px}
 .bp-string{width:1px;height:26px;background:rgba(255,255,255,.4)}
-.bp-tag{margin-top:3px;max-width:clamp(96px,26vw,150px);font-size:11px;line-height:1.25;text-align:center;
-  color:#fff;background:rgba(12,8,32,.78);border:1px solid rgba(255,255,255,.2);border-radius:8px;padding:3px 6px}
+/* Width comes from the lane the balloon actually got, not a fixed guess: the
+   old clamp(96px,26vw,150px) left the rightmost lane squeezed to 65px against
+   101px for the others, so the fourth option always read worse. */
+.bp-tag{margin-top:3px;width:var(--tagw,140px);font-size:11px;line-height:1.28;text-align:center;
+  color:#fff;background:rgba(12,8,32,.78);border:1px solid rgba(255,255,255,.2);border-radius:8px;
+  padding:3px 6px;overflow-wrap:anywhere}
+/* Clipping is permitted only where bpTagPlan has already proved the four
+   options are distinguishable well before the cut. line-clamp supplies its own
+   ellipsis, so a shortened tag always LOOKS shortened. */
+.bp-tag.clip{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
+/* and at the reveal the answer is never clipped, whatever it costs in height */
+.bp-balloon.is-caught{z-index:24}
+.bp-balloon.is-caught .bp-tag{display:block;overflow:visible;-webkit-line-clamp:none}
+
+.bp-clock{display:flex;align-items:center;gap:8px;margin-top:7px}
+.bp-clock-track{flex:1;min-width:0;height:5px;border-radius:999px;background:rgba(255,255,255,.14);overflow:hidden}
+.bp-clock-bar{display:block;height:100%;border-radius:999px;transform-origin:left center;transform:scaleX(1);
+  background:linear-gradient(90deg,#69db7c,#ffe066)}
+.bp-clock.read .bp-clock-bar{background:linear-gradient(90deg,#74c0fc,#da77f2)}
+.bp-clock.warn .bp-clock-bar{background:linear-gradient(90deg,#ffa94d,#ff4d6d)}
+.bp-clock-k{font-size:10.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:rgba(255,255,255,.6)}
+.bp-clock-n{font-family:var(--mono);font-size:12px;font-weight:800;color:#ffe066;min-width:26px;text-align:right}
+.bp-skip{font-size:10.5px;color:rgba(255,255,255,.5);white-space:nowrap}
+/* Set by fitStage when a phone is too short to show the question, the options
+   and a balloon at once: the block scrolls, and the fade is what says so. */
+.bp-stem.is-capped,.bp-legend.is-capped{
+  -webkit-mask-image:linear-gradient(180deg,#000 calc(100% - 20px),transparent);
+          mask-image:linear-gradient(180deg,#000 calc(100% - 20px),transparent)}
+/* while it is being read, say where the full text lives */
+.game-root.is-reading .bp-aside{outline:2px solid rgba(255,224,102,.5);outline-offset:1px}
 .bp-balloon.pop-right .bp-body{animation:bpPopGood .4s forwards}
 .bp-balloon.pop-wrong .bp-body{animation:bpPopBad .4s forwards}
 @keyframes bpPopGood{0%{transform:scale(1)}50%{transform:scale(1.55);background:#00ff88!important}100%{transform:scale(0);opacity:0}}
@@ -378,8 +434,10 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 @media(max-width:560px){
   /* A long stem plus a four-option legend can take 40% of a phone screen, and
      what is left is the only place a balloon can actually be hit. Give the
-     game the viewport rather than a fraction of it, and cap the legend so one
-     enormous question cannot squeeze the play field to nothing. */
+     game the viewport rather than a fraction of it. This is a FLOOR only —
+     the 170px is the chrome above the stage, which varies with how the band
+     above wraps, so fitStage() measures the real offset and trims the stage
+     to end above the fold. */
   .game-root{min-height:calc(100vh - 170px)}
   .bp-hud{padding:7px}
   .bp-legend{grid-template-columns:1fr;gap:3px;max-height:33vh;overflow-y:auto}
@@ -387,10 +445,22 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   .bp-stem{font-size:13.5px}
   .bp-launcher{width:62px;height:54px}
   .bp-base{width:50px}.bp-barrel{height:32px}
-  .bp-tag{font-size:10px}
+  .bp-tag{font-size:10px;line-height:1.24}
+  .bp-tag.clip{-webkit-line-clamp:4}
+  .bp-string{height:16px}
+  .bp-skip{display:none}          /* the Read label alone is enough at 330px */
 }
 @media(prefers-reduced-motion:reduce){
-  .bp-balloon{animation-duration:26s!important}
+  /* `.bp-balloon{animation-duration:26s!important}` used to live here, and it
+     had never once worked. Among same-origin !important declarations the
+     cascade goes by specificity, so `.bp-balloon` won the animation-DURATION
+     longhand — but animation-NAME is only ever declared by the global
+     `*{animation:none!important}` shorthand at the end of this sheet, so it
+     resolved to none. Name none plus duration 26s is no animation at all: the
+     balloons never moved, never escaped, and the round never ended. The game
+     hung on round one for every reduced-motion player.
+     It runs its own clock in JS now, so parked balloons are a supported mode
+     rather than a dead one, and there is nothing to rescue here. */
   .bp-flash.show{animation-duration:1s}
 }
 
@@ -11854,7 +11924,7 @@ async function gameQuestions(opts) {
   // come first, the rest still follow, each group independently shuffled.
   if (opts.preferShortOptions) {
     const longest = (q) => q.options.reduce((m, o) => Math.max(m, o.text.length), 0);
-    const cut = opts.preferShortOptions === true ? 60 : opts.preferShortOptions;
+    const cut = opts.preferShortOptions === true ? SHORT_OPTION_CUT : opts.preferShortOptions;
     out = out.filter(q => longest(q) <= cut).concat(out.filter(q => longest(q) > cut));
   }
   return out;
@@ -11900,7 +11970,7 @@ const GAMES = [
     optionCount: null,
     minQuestions: 8,
     blurb: 'Each question sends its options up as balloons. Aim, fire, and pop the correct one — the clock is the balloon leaving the screen.',
-    fits: 'Any subject, though it favours short answers — a balloon can only carry so much text. Banks written in long sentences still play, they just read more slowly.'
+    fits: 'Any subject. Each round is held still for as long as its text needs before the balloons lift off, so questions written in long sentences play as fairly as short ones — they simply get a longer look first.'
   }
 ];
 
@@ -12085,12 +12155,17 @@ async function launchGame(id) {
   const game = gameById(id);
   if (!game) return;
   if (!courseHasGame(State.course, id)) { toast(game.name + ' is not on this course', 'warn'); return; }
-  const qs = await gameQuestions({ optionCount: game.optionCount });
+  // ONE draw. This used to call gameQuestions twice for Balloon Pop — an
+  // unranked pool to test the minimum, then a ranked one to play — which was
+  // two independent shuffles and two full passes over the bank to answer a
+  // single question. preferShortOptions only reorders, so it cannot change the
+  // count and the gate is just as valid against the ranked list.
+  const qs = await gameQuestions({
+    optionCount: game.optionCount,
+    preferShortOptions: id === 'balloon' ? SHORT_OPTION_CUT : false
+  });
   if (qs.length < game.minQuestions) { toast('Not enough questions for that game yet', 'warn'); return; }
-  if (id === 'balloon') {
-    const ranked = await gameQuestions({ optionCount: game.optionCount, preferShortOptions: true });
-    return runBalloonPop(ranked);
-  }
+  if (id === 'balloon') return runBalloonPop(qs);
   if (id === 'kbc') return runKBC(qs);
 }
 
@@ -12837,10 +12912,116 @@ const BALLOON_COLORS = [
 ];
 
 const BALLOON_TIERS = {
-  gentle: { label: 'Gentle', rounds: 8,  lives: 4, floatMin: 15, floatMax: 21, desc: 'Slow floats, four lives' },
-  brisk:  { label: 'Brisk',  rounds: 10, lives: 3, floatMin: 11, floatMax: 15, desc: 'Faster, three lives' },
-  frantic:{ label: 'Frantic',rounds: 12, lives: 3, floatMin: 7.5, floatMax: 10.5, desc: 'They escape quickly' }
+  gentle: { label: 'Gentle', rounds: 8,  lives: 4, floatMin: 15, floatMax: 21,   read: 1.15, desc: 'A long read, slow floats, four lives' },
+  brisk:  { label: 'Brisk',  rounds: 10, lives: 3, floatMin: 11, floatMax: 15,   read: 1.00, desc: 'A short read, then they go' },
+  frantic:{ label: 'Frantic',rounds: 12, lives: 3, floatMin: 7.5, floatMax: 10.5, read: 0.80, desc: 'Barely a glance before liftoff' }
 };
+
+/* ---------- reading the round before it moves ----------
+
+   A player told us the only thing wrong with this game was "the long options",
+   and they were right for a reason worth writing down: a balloon carries a
+   letter, the text lives in a legend beside it, and the balloon is already
+   moving while you read. That is a lookup — spot the letter, look away, read a
+   sentence, look back, hit something that has shifted — and no amount of extra
+   float time removes a lookup.
+
+   So the round is now held still while it is read, and only then does it move.
+   The functions below decide how long "still" is, how long the float is, which
+   questions lead the game, and whether the balloons can carry their own text.
+   They are pure so the numbers can be tested without a browser. */
+
+/** One definition of "short". gameQuestions() ranks on it and the round picker
+    partitions on it; two numbers drifting apart is exactly how the 30-character
+    tag cutoff ended up unrelated to the 60-character ranking cut. */
+const SHORT_OPTION_CUT = 60;
+
+/* Adult silent reading of non-fiction runs about 238 wpm, and an English word
+   averages ~5 characters plus a space, so one pass is roughly 42 ms/char.
+   perChar is 23 — about 55% of a pass — because the beat is a HEAD START, not
+   the whole read: the float and the legend carry the rest, and the stem never
+   leaves the card. stemWeight is 0.4 for the same reason. */
+const BP_READ = { base: 500, perChar: 23, stemWeight: 0.4, min: 1400, max: 5600, first: 800 };
+const BP_MS_PER_CHAR = 42;
+
+function bpOptionChars(options) {
+  return (options || []).reduce((n, o) => n + String((o && o.text) || '').length, 0);
+}
+
+/** How long the round is held still before liftoff. */
+function bpReadMs(stem, options, tierRead, first) {
+  const chars = bpOptionChars(options) + String(stem || '').length * BP_READ.stemWeight;
+  const raw = (BP_READ.base + chars * BP_READ.perChar) * (tierRead || 1) + (first ? BP_READ.first : 0);
+  return Math.round(clamp(raw, BP_READ.min, BP_READ.max));
+}
+
+/** Float seconds — ONE value for the whole round, placed across the tier's own
+    band by how much text the round carries. Four balloons at four different
+    random speeds is why the deadline was previously unreadable. */
+const BP_FLOAT = { lo: 56, hi: 300 };
+function bpFloatSec(tier, stem, options, readMs) {
+  const c = bpOptionChars(options);
+  const t = clamp((c - BP_FLOAT.lo) / (BP_FLOAT.hi - BP_FLOAT.lo), 0, 1);
+  let dur = tier.floatMin + t * (tier.floatMax - tier.floatMin);
+  // A floor, so no round can offer less than one full read plus two seconds to
+  // aim. On an ordinary bank this never binds; it exists so that one
+  // pathologically long question cannot produce a round nobody could answer.
+  const need = (c + String(stem || '').length * BP_READ.stemWeight) * BP_MS_PER_CHAR / 1000;
+  dur = Math.max(dur, need - (readMs || 0) / 1000 + 2);
+  return Math.min(dur, tier.floatMax * 1.6);
+}
+
+/** Pick the round list from a SHORT-FIRST ranked pool.
+    Taking a stable slice would keep only the short group — the hard filter we
+    deliberately rejected, since it would repeat a small subset every game and
+    permanently exclude the more nuanced questions. Re-shuffling throws the
+    ranking away, which is the bug this replaces. Instead: draw a quota from
+    each group, shuffle within each group so no two games open on the same
+    questions, then walk the positions drawing a long question with a
+    probability that climbs from 0 to 0.6 across the game. The opening is
+    almost always short; the closing rounds are near a coin flip. */
+function bpPickRounds(ranked, n, cut, rng) {
+  const r = rng || Math.random;
+  const longest = (q) => q.options.reduce((m, o) => Math.max(m, o.text.length), 0);
+  const want = Math.min(n, ranked.length);
+  if (!want) return [];
+  const short = shuffle(ranked.filter(q => longest(q) <= cut), r);
+  const long = shuffle(ranked.filter(q => longest(q) > cut), r);
+  let nLong = Math.min(long.length, want - Math.min(short.length, Math.round(want * 0.7)));
+  let nShort = Math.min(short.length, want - nLong);
+  nLong = Math.min(long.length, want - nShort);
+  const s = short.slice(0, nShort), l = long.slice(0, nLong), out = [];
+  while (out.length < want && (s.length || l.length)) {
+    const p = want > 1 ? (out.length / (want - 1)) * 0.6 : 0;
+    const takeLong = l.length && (!s.length || r() < p);
+    out.push(takeLong ? l.shift() : s.shift());
+  }
+  return out;
+}
+
+/** What the balloons may carry this round.
+      'full'  — every option fits the box, so nothing is cut and nothing has to
+                be taken on trust.
+      'clamp' — cut by -webkit-line-clamp, which supplies its own ellipsis, and
+                permitted ONLY where the options are already distinguishable
+                well before the cut.
+      'none'  — the options diverge only in their tails ("Debit cash 10,000" vs
+                "Debit cash 1,00,000"). A clipped tag there reads as a different
+                answer, which is worse than no tag at all. Letters only; the
+                reading beat and the legend carry the round.
+    Distinctness is tested at a deliberately short prefix because the property
+    is monotone — distinct at k implies distinct at every longer k, and the cut
+    CSS actually makes is never shorter than k. */
+function bpTagPlan(options, budget) {
+  const txt = (options || []).map(o => String((o && o.text) || ''));
+  if (!txt.length) return 'none';
+  if (txt.every(t => t.length <= budget)) return 'full';
+  const k = Math.max(10, Math.round(budget * 0.6));
+  const key = (t) => t.slice(0, k).toLowerCase().replace(/\s+/g, ' ').trim();
+  const seen = new Set();
+  for (const t of txt) { const x = key(t); if (seen.has(x)) return 'none'; seen.add(x); }
+  return 'clamp';
+}
 
 async function runBalloonPop(questions) {
   const host = h('div', { class: 'game-root', id: 'bpop' });
@@ -12851,27 +13032,48 @@ async function runBalloonPop(questions) {
 
   let tier = BALLOON_TIERS.brisk, tierKey = 'brisk';
   let lives = 3, score = 0, round = 0, order = [], current = null;
-  let balloons = [], evaluating = false, idc = 0, spawnTimer = null, floatWatch = null;
+  let balloons = [], idc = 0;
+  // One explicit phase rather than a boolean. A round is idle -> reading ->
+  // live -> reveal, and two separate flags would eventually disagree about
+  // which of those it was in.
+  let phase = 'idle';
+  let readTimer = null, clockTimer = null, clockEnd = 0, clockTotal = 0;
+  let readMs = 0, roundDur = 0, tagPlan = 'none', still = false, skipOn = false;
 
   const audio = GameAudio();
 
   function stopEverything() {
-    if (spawnTimer) { clearTimeout(spawnTimer); spawnTimer = null; }
-    if (floatWatch) { clearInterval(floatWatch); floatWatch = null; }
+    if (readTimer) { clearTimeout(readTimer); readTimer = null; }
+    if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
+    disarmSkip();
     balloons.forEach(b => { if (b.el) b.el.remove(); });
     balloons = [];
     audio.stopAll();
   }
-  // Leaving the screen mid-round must not leave timers and oscillators running
-  // behind it — go() replaces #view without telling anything it is being torn
-  // down, so the game has to notice for itself.
-  const guard = setInterval(() => { if (!document.body.contains(host)) { stopEverything(); clearInterval(guard); } }, 500);
+  // Leaving the screen mid-round must not leave timers, listeners and
+  // oscillators running behind it — go() replaces #view without telling
+  // anything it is being torn down, so the game has to notice for itself.
+  const guard = setInterval(() => { if (!document.body.contains(host)) { teardown(); } }, 500);
+  // stopEverything() also runs between rounds, so anything that must outlive a
+  // round but not the game — the resize listener, the guard itself — is
+  // released here instead.
+  function teardown() {
+    stopEverything();
+    window.removeEventListener('resize', onResize);
+    clearInterval(guard);
+  }
+
+  /** The fitted height belongs to a round, not to the game: the menu and the
+      end screen are .game-screen boxes on inset:0, so a height left over from
+      a short phone round would clip them under .game-root{overflow:hidden}. */
+  function releaseFit() { host.style.height = ''; host.style.minHeight = ''; }
 
   function menu() {
     stopEverything();
+    releaseFit();
     host.textContent = '';
     host.appendChild(h('div', { class: 'game-screen' }, [
-      h('div', { style: 'font-size:52px;line-height:1' }, '🎈'),
+      h('div', { class: 'game-emoji' }, '🎈'),
       h('h1', { class: 'game-title', text: 'Balloon Pop' }),
       h('p', { class: 'game-sub', text: 'A question goes up, and its options float away with it. Pop the right one before it escapes.' }),
       h('div', { class: 'tier-pick' }, Object.keys(BALLOON_TIERS).map(k => {
@@ -12886,8 +13088,11 @@ async function runBalloonPop(questions) {
   }
 
   function start() {
-    lives = tier.lives; score = 0; round = 0; evaluating = false;
-    order = shuffle(questions).slice(0, Math.min(tier.rounds, questions.length));
+    lives = tier.lives; score = 0; round = 0; phase = 'idle';
+    // This used to be shuffle(questions).slice(...), which re-randomised the
+    // array gameQuestions had just ranked short-first — so preferShortOptions
+    // had literally no effect on what got played.
+    order = bpPickRounds(questions, tier.rounds, SHORT_OPTION_CUT);
     audio.resume();
     nextRound();
   }
@@ -12896,24 +13101,122 @@ async function runBalloonPop(questions) {
     stopEverything();
     if (round >= order.length) return finish();
     current = order[round];
-    evaluating = false;
+    phase = 'reading';
     drawStage();
+    // Before anything measures the field: fitStage decides how tall it is, and
+    // both the lane geometry and each balloon's travel are read off it.
+    const clear = fitStage();
+
     // The options are the balloons. Nothing invented, nothing borrowed from
     // another question — the distractors are the examiner's own.
     const opts = shuffle(current.options.slice());
-    // Each option gets its own lane. Random horizontal placement clustered two
-    // balloons on top of each other often enough to make one unclickable and
-    // its tag unreadable, which turns a knowledge question into a dexterity one.
-    //
-    // The stagger is only for the look of them rising in sequence, so it stays
-    // short: at 420ms the fourth option did not arrive until 1.26s into the
-    // round, and if that was the correct one a player could shoot early, lose
-    // a life, and be told the answer was an option that had not yet appeared.
-    // At 150ms every option is in the air within half a second, so no round is
-    // ever unwinnable at the moment it becomes playable.
-    opts.forEach((o, i) => setTimeout(() => { if (!evaluating) spawn(o, i, opts.length); }, i * 150));
-    floatWatch = setInterval(reap, 400);
+    readMs = bpReadMs(current.stem, current.options, tier.read, round === 0);
+    roundDur = bpFloatSec(tier, current.stem, current.options, readMs);
+    still = matchMedia('(prefers-reduced-motion:reduce)').matches;
+    // A tag is worth ~50px of balloon, and on a small phone with a long
+    // question that is exactly the height the balloon does not have — it ends
+    // up standing behind the legend, which is worse than carrying no text at
+    // all. So the tag is offered only where there is room to stand.
+    tagPlan = clear < FIT.tagged ? 'none' : bpTagPlan(current.options, bpTagBudget(opts.length));
+
+    // Every balloon is placed NOW — parked on the pad, paused, readable, and
+    // not yet clickable. The reading beat is not a screen in front of the
+    // game; it is the game, held still. There is no spawn stagger any more
+    // because there is nothing left to sequence: all four are already there.
+    host.classList.add('is-reading');
+    opts.forEach((o, i) => spawn(o, i, opts.length));
+
+    armSkip();
+    startClock(readMs, 'read');
+    readTimer = setTimeout(liftoff, readMs);
   }
+
+  /** The balloons let go. Reached by the read timer or by the player saying
+      they are ready — both land here, and it is idempotent. */
+  function liftoff() {
+    if (phase !== 'reading') return;
+    phase = 'live';
+    if (readTimer) { clearTimeout(readTimer); readTimer = null; }
+    disarmSkip();
+    host.classList.remove('is-reading');
+    audio.sfx('pop');
+    balloons.forEach((b, i) => {
+      b.el.classList.remove('is-ready');
+      // Reduced motion: they simply stay where they are, fully visible and
+      // now clickable. The round clock is the only pressure.
+      if (still) return;
+      // A small launch stagger, purely for the look of it. Safe now in a way
+      // it never was before: all four have been on screen and readable for the
+      // whole beat, so nothing arrives late and no round is unwinnable at the
+      // moment it becomes playable.
+      b.el.style.animationDelay = (i * 90) + 'ms';
+      b.el.style.animationPlayState = 'running';
+    });
+    startClock(Math.round(roundDur * 1000), 'live');
+  }
+
+  function timeUp() {
+    if (phase !== 'live') return;
+    phase = 'reveal';
+    lives--; refreshHud(); audio.sfx('wrong');
+    reveal(false, 'They all got away.');
+  }
+
+  /* The beat must cost a returning player nothing, so any tap or key launches
+     early. But that input must NOT also fire the cannon: losing a life to a
+     tap that meant "I'm ready" would be the worst possible outcome of adding
+     a reading phase. Parked balloons carry pointer-events:none, so the stage
+     swallows the first input and turns it into liftoff. */
+  function onSkipPointer(e) { if (e.target.closest('button')) return; liftoff(); }
+  function onSkipKey(e) {
+    if (e.key === 'Escape' || e.key === 'Tab' || e.key === 'Shift' ||
+        e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') return;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName || '') || e.target.isContentEditable) return;
+    if ($('.modal-bg')) return;
+    e.preventDefault();
+    liftoff();
+  }
+  function armSkip() {
+    if (skipOn) return;
+    skipOn = true;
+    host.addEventListener('pointerdown', onSkipPointer);
+    document.addEventListener('keydown', onSkipKey);
+  }
+  function disarmSkip() {
+    if (!skipOn) return;
+    skipOn = false;
+    host.removeEventListener('pointerdown', onSkipPointer);
+    document.removeEventListener('keydown', onSkipKey);
+  }
+
+  /* The clock is INFORMATION, not decoration, so it cannot be a CSS animation:
+     the global reduced-motion rule sets animation:none on everything, which
+     would leave a reduced-motion player with no clock at all — and it is the
+     only clock they get, since their balloons do not move. A direct transform
+     write is untouched by both animation:none and transition:none. */
+  function startClock(ms, mode) {
+    if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
+    clockTotal = ms; clockEnd = performance.now() + ms;
+    const c = $('#bp-clock'), k = $('#bp-clock-k'), s = $('#bp-skip');
+    if (c) c.className = 'bp-clock ' + (mode === 'read' ? 'read' : 'live');
+    if (k) k.textContent = mode === 'read' ? 'Read' : 'Time';
+    if (s) s.style.display = mode === 'read' ? '' : 'none';
+    tickClock();
+    clockTimer = setInterval(tickClock, 100);
+  }
+  function tickClock() {
+    const left = clockEnd - performance.now();
+    const p = clamp(left / clockTotal, 0, 1);
+    const bar = $('#bp-clock-bar'), n = $('#bp-clock-n'), c = $('#bp-clock');
+    if (bar) bar.style.transform = 'scaleX(' + p.toFixed(4) + ')';
+    if (n) n.textContent = Math.max(0, Math.ceil(left / 1000)) + 's';
+    if (c && p <= 0.28) c.classList.add('warn');
+    if (left <= 0) {
+      clearInterval(clockTimer); clockTimer = null;
+      if (phase === 'reading') liftoff(); else timeUp();
+    }
+  }
+  function pauseClock() { if (clockTimer) { clearInterval(clockTimer); clockTimer = null; } }
 
   function drawStage() {
     host.textContent = '';
@@ -12925,12 +13228,23 @@ async function runBalloonPop(questions) {
           h('span', { class: 'tiny dim', text: current.qid || '' })
         ]),
         h('div', { class: 'bp-stem', text: current.stem }),
+        // The clock lives in the card, not over the field: .bp-hud already
+        // carries padding-right:274px above 900px, so this is the one spot
+        // that is correct at both breakpoints without any extra rules — and
+        // it is where the verdict already appears, which is the information
+        // zone rather than the play area.
+        h('div', { class: 'bp-clock', id: 'bp-clock' }, [
+          h('span', { class: 'bp-clock-k', id: 'bp-clock-k', text: 'Read' }),
+          h('div', { class: 'bp-clock-track' }, h('i', { class: 'bp-clock-bar', id: 'bp-clock-bar' })),
+          h('span', { class: 'bp-clock-n', id: 'bp-clock-n', text: '' }),
+          h('span', { class: 'bp-skip', id: 'bp-skip', text: 'tap to launch' })
+        ]),
         h('div', { id: 'bp-verdict' })
       ]),
       h('div', { class: 'bp-side' }, [
         h('div', { id: 'bp-lives', style: 'font-size:15px;letter-spacing:1px' }, '❤️'.repeat(Math.max(0, lives)) + '🖤'.repeat(Math.max(0, tier.lives - lives))),
         h('div', { class: 'bp-score', id: 'bp-score', text: 'Score ' + score }),
-        h('button', { class: 'btn sm ghost', onclick: () => { stopEverything(); go('games'); }, text: 'Quit' })
+        h('button', { class: 'btn sm ghost', onclick: () => { teardown(); go('games'); }, text: 'Quit' })
       ])
     ]);
     host.appendChild(hud);
@@ -12965,63 +13279,154 @@ async function runBalloonPop(questions) {
     if (s) s.textContent = 'Score ' + score;
   }
 
+  /* The balloons park at the BOTTOM of the field, so the bottom of the field
+     has to be on screen — otherwise the reading beat, whose whole point is to
+     show the player what they are about to aim at, shows an empty slab and the
+     balloons only appear once they have already risen past the fold.
+
+     CSS cannot do this, because it cannot know how tall the chrome above the
+     stage is. The phone rule guessed 170px; measured, the band above is 192px
+     at 390 and 243px at 360 once it wraps, so the stage overhung the viewport
+     by 21-88px on every phone size tested and none of the four parked balloons
+     was visible without scrolling.
+
+     Measured instead, and shrink-only: a stage that already fits is left
+     exactly as its CSS designed it, so nothing about the desktop layout the
+     player already knows changes. */
+  /* bare/tagged are what a balloon actually occupies: body + knot + string,
+     and the same again with a tag under it. Reserving a single guessed number
+     was wrong in both directions — a tagged balloon measures 145px, so a
+     128px reserve left its body sitting behind the legend on every phone
+     under 700px tall. */
+  const FIT = { gap: 8, bare: 106, tagged: 168, legend: 66, stem: 72, floor: 240, jitter: 24 };
+  /** Fits the stage into the viewport and returns the clear height left below
+      the panels — the balloons' standing room, which then decides whether they
+      can carry a tag at all. */
+  function fitStage() {
+    const field = $('#bp-field'), legend = $('.bp-legend'), stem = $('.bp-stem');
+    if (!field) return 0;
+    [legend, stem].forEach(el => {
+      if (!el) return;
+      el.style.maxHeight = ''; el.style.overflowY = ''; el.classList.remove('is-capped');
+    });
+    host.style.height = '';
+    host.style.minHeight = '0px';
+    // With the field and the launcher absolutely positioned, the host's own
+    // height IS the height of the flow content: the question card, plus the
+    // legend below it on a phone. Above 900px the legend is a side panel and
+    // out of flow, so this is just the card — which is why the same
+    // subtraction gives the right answer at both breakpoints.
+    const contentH = host.offsetHeight;
+    host.style.minHeight = '';
+    const natural = host.offsetHeight;
+    const avail = Math.round(window.innerHeight - host.getBoundingClientRect().top - FIT.gap);
+    // Too little room to be worth fitting into: leave the page to scroll
+    // rather than crush the stage into a letterbox.
+    const fit = avail >= FIT.floor && natural > avail;
+    if (fit) { host.style.minHeight = '0px'; host.style.height = avail + 'px'; }
+    let clear = (fit ? avail : natural) - contentH;
+    if (window.innerWidth >= 900) return clear;
+    // A phone has to be told what to give up. The legend goes first: it
+    // scrolls, and every word of it is still reachable. Then the stem, which
+    // scrolls for the same reason. Both keep a floor, because a two-line
+    // window onto a question is not a question.
+    const give = (el, floor) => {
+      if (!el || clear >= FIT.bare) return;
+      const h0 = el.getBoundingClientRect().height;
+      const cut = Math.min(h0 - floor, FIT.bare - clear);
+      if (cut <= 0) return;
+      el.style.maxHeight = Math.round(h0 - cut) + 'px';
+      el.style.overflowY = 'auto';
+      // A question that is quietly cut off is worse than a short one: the
+      // player reads to the bottom line and has no idea there is more. The
+      // fade says "this continues" without costing a row of text.
+      el.classList.add('is-capped');
+      clear += cut;
+    };
+    give(legend, FIT.legend);
+    give(stem, FIT.stem);
+    return clear;
+  }
+  /* A phone hiding its URL bar mid-round changes innerHeight by ~60px, so the
+     fit has to survive it. Re-measuring the parked balloons' travel is safe
+     while they are still held; once they are moving, their rise is left alone
+     rather than jumped mid-flight. */
+  let fitAt = 0;
+  function onResize() {
+    if (!document.body.contains(host)) return;
+    if (Math.abs(window.innerHeight - fitAt) < FIT.jitter) return;
+    fitAt = window.innerHeight;
+    if (phase === 'idle' || !$('#bp-field')) return;
+    fitStage();
+    if (phase !== 'reading') return;
+    const field = $('#bp-field');
+    balloons.forEach(b => b.el.style.setProperty('--rise', '-' + (field.clientHeight + b.el.offsetHeight + 8) + 'px'));
+  }
+  window.addEventListener('resize', onResize);
+
+  /** Tag geometry, derived from the lane the balloon actually gets rather than
+      from a fixed pixel guess. The old max-width:clamp(96px,26vw,150px) left
+      the rightmost lane squeezed to 65px against 101px for the other three, so
+      the fourth option always read worse than the rest. */
+  function bpLaneGeom(lanes) {
+    const field = $('#bp-field');
+    const fw = field ? field.clientWidth : 320;
+    const n = Math.max(1, lanes || 1);
+    const laneW = fw / n;
+    const tagW = Math.round(Math.max(60, Math.min(laneW - 18, 176)));
+    return { fw: fw, laneW: laneW, tagW: tagW, fs: fw < 560 ? 10 : 11, lines: fw < 560 ? 4 : 3 };
+  }
+  /** Characters the tag box can actually hold: content width over the average
+      advance (~0.5em for sentence case in this face), times the line budget,
+      times 0.9 for word-wrap raggedness. Computed rather than restated as a
+      magic number, so it tracks the real breakpoint. */
+  function bpTagBudget(lanes) {
+    const g = bpLaneGeom(lanes);
+    return Math.floor(((g.tagW - 14) / (g.fs * 0.5)) * g.lines * 0.9);
+  }
+
   function spawn(opt, lane, lanes) {
     const field = $('#bp-field');
     if (!field) return;
     const id = 'bp' + (idc++);
     const col = BALLOON_COLORS[idc % BALLOON_COLORS.length];
-    const dur = tier.floatMin + Math.random() * (tier.floatMax - tier.floatMin);
-    // Option text can be a full sentence, which no balloon can carry. The
-    // balloon shows a letter; the text sits beside it on a tag, which is what
-    // the player actually reads.
-    const rise = field.clientHeight + 190;
-    const n = Math.max(1, lanes || 1);
-    const span = 84 / n;
-    const left = 8 + span * (lane || 0) + span * (0.15 + Math.random() * 0.4);
+    const g = bpLaneGeom(lanes);
+    const jit = (g.laneW - g.tagW) / 2;
+    const left = Math.round((lane || 0) * g.laneW + jit + (Math.random() * 2 - 1) * jit);
     const el = h('div', {
-      class: 'bp-balloon', id: id,
-      style: 'left:' + left.toFixed(1) + '%;animation-duration:' + dur + 's;--rise:-' + rise + 'px'
+      class: 'bp-balloon is-ready', id: id,
+      // One duration for the whole round. Four balloons at four random speeds
+      // is why the deadline used to be unreadable.
+      style: 'left:' + left + 'px;animation-duration:' + roundDur + 's;--tagw:' + g.tagW + 'px'
     }, [
       h('div', { class: 'bp-body', style: 'background:' + col.body }, h('span', { class: 'bp-letter', text: opt.letter })),
       h('div', { class: 'bp-knot', style: 'background:' + col.knot }),
       h('div', { class: 'bp-string' }),
-      // Truncating here would be worse than omitting it: a clipped tag looks
-      // like the whole answer. Long options are read from the legend instead.
-      opt.text.length <= 30 ? h('div', { class: 'bp-tag', text: opt.text }) : null
+      // Whether the balloon carries its own text is decided once per round by
+      // bpTagPlan, so all four agree — one clipped tag among three full ones
+      // would read as a meaningful difference between the options.
+      tagPlan === 'none' ? null
+        : h('div', { class: 'bp-tag' + (tagPlan === 'clamp' ? ' clip' : ''), text: opt.text })
     ]);
     const b = { id: id, opt: opt, el: el, alive: true, firing: false };
     el.onclick = () => shootAt(b);
     field.appendChild(el);
+    // Measured, not the old magic 190: the tag makes every balloon a different
+    // height, and each one must leave the field exactly as the clock reaches
+    // zero for the bar and the picture to agree.
+    el.style.setProperty('--rise', '-' + (field.clientHeight + el.offsetHeight + 8) + 'px');
     balloons.push(b);
   }
 
-  /** A balloon that floats off the top is a miss, not a free pass — otherwise
-      the winning strategy is to shoot nothing and wait. */
-  function reap() {
-    if (evaluating) return;
-    const field = $('#bp-field');
-    if (!field) return;
-    const top = field.getBoundingClientRect().top;
-    balloons.slice().forEach(b => {
-      if (!b.alive) return;
-      const r = b.el.getBoundingClientRect();
-      if (r.bottom < top - 10) {
-        b.alive = false; b.el.remove();
-        balloons = balloons.filter(x => x !== b);
-        if (b.opt.id === current.correctId) missed();
-      }
-    });
-  }
-
   function missed() {
-    if (evaluating) return;
-    evaluating = true;
+    if (phase !== 'live') return;
+    phase = 'reveal';
     lives--; refreshHud(); audio.sfx('wrong');
     reveal(false, 'It got away.');
   }
 
   function shootAt(b) {
-    if (evaluating || !b.alive || b.firing) return;
+    if (phase !== 'live' || !b.alive || b.firing) return;
     b.firing = true;
     const el = b.el, launcher = $('#bp-launcher'), barrel = $('#bp-barrel');
     el.style.animationPlayState = 'paused';
@@ -13044,20 +13449,21 @@ async function runBalloonPop(questions) {
   }
 
   function impact(b) {
-    if (!b.alive || evaluating) return;
+    if (!b.alive || phase !== 'live') return;
     const correct = b.opt.id === current.correctId;
     b.alive = false;
     b.el.classList.add(correct ? 'pop-right' : 'pop-wrong');
     setTimeout(() => b.el.remove(), 420);
     balloons = balloons.filter(x => x !== b);
-    evaluating = true;
+    phase = 'reveal';
     if (correct) { score++; refreshHud(); audio.sfx('right'); reveal(true, ''); }
     else { lives--; refreshHud(); audio.sfx('wrong'); reveal(false, 'You shot ' + b.opt.letter + '.'); }
   }
 
   function reveal(good, msg) {
-    if (spawnTimer) { clearTimeout(spawnTimer); spawnTimer = null; }
-    if (floatWatch) { clearInterval(floatWatch); floatWatch = null; }
+    if (readTimer) { clearTimeout(readTimer); readTimer = null; }
+    disarmSkip();
+    pauseClock();
     const field = $('#bp-field');
     if (!field) return;
 
@@ -13069,8 +13475,26 @@ async function runBalloonPop(questions) {
     // and NOWHERE over the play area. A panel in the middle of the field
     // covered the very balloons the player is trying to learn from — it hid
     // the answer in the act of announcing it.
-    //   1. the balloon itself, which is what they just aimed at
-    balloons.forEach(b => { if (b.alive && b.opt.id === current.correctId) b.el.classList.add('is-answer'); });
+    //   1. the balloon itself, brought back into view if it escaped.
+    //      This used to be gated on b.alive — and on a miss the balloon had
+    //      already been removed from the DOM, so the one channel the player
+    //      most needed was silently absent exactly when they had got it wrong.
+    //      Nothing is removed on escape any more, so it is always still here.
+    const winner = balloons.find(b => b.opt.id === current.correctId);
+    if (winner && winner.el.isConnected) {
+      const el = winner.el;
+      // Freeze at the CURRENT transform first. Dropping the animation without
+      // doing so snaps the balloon back to translateY(0), which reads as the
+      // answer having fallen to the floor.
+      const m = new DOMMatrixReadOnly(getComputedStyle(el).transform);
+      el.style.animation = 'none';
+      el.style.transform = 'translateY(' + m.m42 + 'px)';
+      void el.offsetWidth;
+      el.style.transition = 'transform .45s cubic-bezier(.3,.9,.35,1)';
+      el.style.transform = 'translateY(' + (-Math.round(field.clientHeight * 0.34)) + 'px)';
+      el.classList.add('is-answer', 'is-caught');
+    }
+    balloons.forEach(b => { if (b !== winner && b.el) b.el.classList.add('is-dim'); });
     //   2. the options panel, where option text already lives
     const legRow = host.querySelector('.bp-leg[data-opt="' + current.correctId + '"]');
     if (legRow) legRow.classList.add('is-answer');
@@ -13089,7 +13513,9 @@ async function runBalloonPop(questions) {
       }
     }
 
-    const hold = current.explanation ? 3000 : (good ? 1500 : 2200);
+    // A little longer than before, because the correct balloon now glides back
+    // into frame over 450ms and the hold has to outlast that.
+    const hold = current.explanation ? 3200 : (good ? 1600 : 2600);
     setTimeout(() => {
       if (lives <= 0) return finish();
       round++; nextRound();
@@ -13098,6 +13524,7 @@ async function runBalloonPop(questions) {
 
   function finish() {
     stopEverything();
+    releaseFit();
     const pct = order.length ? score / order.length : 0;
     const grade = pct === 1 ? 'Every one.' : pct >= 0.8 ? 'Strong round.' : pct >= 0.5 ? 'Middling — worth another go.' : 'The bank won this time.';
     if (pct >= 0.8) audio.sfx('fanfare');
@@ -13118,10 +13545,16 @@ async function runBalloonPop(questions) {
   // stop moving — so without a way in, the game cannot be driven by a test at
   // all. Mirrors the debug handle the standalone version shipped with.
   window.__bpop = {
-    state: () => ({ round: round, score: score, lives: lives, rounds: order.length,
-      stem: current && current.stem, live: balloons.filter(b => b.alive).map(b => b.opt.letter) }),
+    state: () => ({ phase: phase, round: round, score: score, lives: lives, rounds: order.length,
+      stem: current && current.stem, readMs: readMs, floatSec: roundDur, tagPlan: tagPlan, still: still,
+      live: balloons.filter(b => b.alive).map(b => b.opt.letter) }),
     shootLetter: (L) => { const b = balloons.find(x => x.alive && x.opt.letter === L); if (b) shootAt(b); return !!b; },
-    correctLetter: () => { const o = current && current.options.find(x => x.id === current.correctId); return o && o.letter; }
+    correctLetter: () => { const o = current && current.options.find(x => x.id === current.correctId); return o && o.letter; },
+    // Without these, any driver that clicks the instant a round starts now
+    // clicks during the reading beat and gets nothing.
+    skipRead: () => { if (phase === 'reading') { liftoff(); return true; } return false; },
+    expire: () => { if (clockTimer) { clockEnd = performance.now() - 1; tickClock(); return true; } return false; },
+    refit: () => { fitAt = 0; onResize(); }
   };
 }
 
@@ -15561,6 +15994,119 @@ test('The app never advertises question files it has not confirmed', async () =>
 });
 
 /* ---- eligibility gate ---- */
+/* ---- reading a round before it moves ----
+   A player's only complaint about Balloon Pop was the long options. These are
+   the numbers that answer it, so they are checked here rather than by eye. */
+
+const bpQ = (stem, lens) => ({ stem: stem, options: lens.map(n => ({ text: 'x'.repeat(n) })) });
+
+test('The reading beat grows with the text, and stops growing', () => {
+  const t = 1;
+  const a = bpReadMs('Short stem?', [10, 10, 10, 10].map(n => ({ text: 'x'.repeat(n) })), t, false);
+  const b = bpReadMs('Short stem?', [40, 40, 40, 40].map(n => ({ text: 'x'.repeat(n) })), t, false);
+  const c = bpReadMs('Short stem?', [80, 80, 80, 80].map(n => ({ text: 'x'.repeat(n) })), t, false);
+  assert(a < b && b < c, 'more text must buy more reading time (' + a + ', ' + b + ', ' + c + ')');
+  eq(bpReadMs('s', [500, 500, 500, 500].map(n => ({ text: 'x'.repeat(n) })), t, false), BP_READ.max,
+    'a runaway question is capped, not unbounded');
+  eq(bpReadMs('Hi?', [{ text: 'a' }], t, false), BP_READ.min, 'and a trivial one still gets a floor');
+  assert(Number.isInteger(a), 'the beat is a whole number of milliseconds');
+});
+
+test('A frantic round is read faster than a gentle one', () => {
+  const q = bpQ('Which control detects unauthorised change?', [30, 30, 30, 30]);
+  const f = bpReadMs(q.stem, q.options, BALLOON_TIERS.frantic.read, false);
+  const b = bpReadMs(q.stem, q.options, BALLOON_TIERS.brisk.read, false);
+  const g = bpReadMs(q.stem, q.options, BALLOON_TIERS.gentle.read, false);
+  assert(f < b && b < g, 'the tier must change the read, not just the float (' + f + ', ' + b + ', ' + g + ')');
+  assert(bpReadMs(q.stem, q.options, 1, true) > bpReadMs(q.stem, q.options, 1, false),
+    'the first round of a game gets longer, since the stage is new too');
+});
+
+test('Every balloon in a round floats for exactly the same time', () => {
+  // The direct regression for the old per-balloon Math.random(): four balloons
+  // at four speeds is why the deadline could not be read off the screen.
+  const q = bpQ('A question?', [24, 31, 18, 44]);
+  const a = bpFloatSec(BALLOON_TIERS.brisk, q.stem, q.options, 2000);
+  const b = bpFloatSec(BALLOON_TIERS.brisk, q.stem, q.options, 2000);
+  eq(a, b, 'the same round must produce the same float every time it is asked');
+});
+
+test('A float stays inside its tier, and the tiers stay in order', () => {
+  Object.keys(BALLOON_TIERS).forEach(k => {
+    const t = BALLOON_TIERS[k];
+    [0, 40, 120, 240, 400].forEach(n => {
+      const q = bpQ('Stem?', [n / 4, n / 4, n / 4, n / 4]);
+      const d = bpFloatSec(t, q.stem, q.options, bpReadMs(q.stem, q.options, t.read, false));
+      assert(d >= t.floatMin - 0.001, k + ' at ' + n + ' chars fell below its own floor (' + d + ')');
+      assert(d <= t.floatMax * 1.6 + 0.001, k + ' at ' + n + ' chars ran past its ceiling (' + d + ')');
+    });
+  });
+  const q = bpQ('Stem?', [26, 26, 26, 26]);
+  const f = bpFloatSec(BALLOON_TIERS.frantic, q.stem, q.options, 0);
+  const g = bpFloatSec(BALLOON_TIERS.gentle, q.stem, q.options, 0);
+  assert(f < g, 'frantic must still be faster than gentle for the same question');
+});
+
+test('No round is shorter than one read of it', () => {
+  const q = bpQ('A demanding stem that itself runs on for a while?', [150, 150, 150, 150]);
+  const read = bpReadMs(q.stem, q.options, 1, false);
+  const total = read / 1000 + bpFloatSec(BALLOON_TIERS.brisk, q.stem, q.options, read);
+  const need = (bpOptionChars(q.options) + q.stem.length * BP_READ.stemWeight) * BP_MS_PER_CHAR / 1000;
+  assert(total >= need, 'an extreme question must still be answerable (' + total.toFixed(1) + 's for ' + need.toFixed(1) + 's of reading)');
+  // and the floor must not be firing on ordinary questions
+  const easy = bpQ('Short?', [12, 12, 12, 12]);
+  eq(bpFloatSec(BALLOON_TIERS.brisk, easy.stem, easy.options, 1500), BALLOON_TIERS.brisk.floatMin,
+    'a short question should sit exactly at the tier floor, untouched by the safety net');
+});
+
+test('Short-option questions genuinely lead the game', () => {
+  const mk = (i, n) => ({ uuid: 'q' + i, options: [{ text: 'x'.repeat(n) }, { text: 'y' }] });
+  const pool = [];
+  for (let i = 0; i < 20; i++) pool.push(mk('s' + i, 20));
+  for (let i = 0; i < 20; i++) pool.push(mk('l' + i, 120));
+  const isShort = (q) => q.options.reduce((m, o) => Math.max(m, o.text.length), 0) <= SHORT_OPTION_CUT;
+  const out = bpPickRounds(pool, 10, SHORT_OPTION_CUT, mulberry32(1));
+  eq(out.length, 10, 'a full round list');
+  eq(new Set(out.map(q => q.uuid)).size, 10, 'with no question played twice');
+  const shorts = out.filter(isShort), longs = out.filter(q => !isShort(q));
+  assert(shorts.length >= 7, 'most of a game should be comfortable (' + shorts.length + ' short)');
+  assert(longs.length >= 1, 'but long questions must NOT be filtered out of the game');
+  const mean = (a) => a.reduce((s, q) => s + out.indexOf(q), 0) / a.length;
+  assert(mean(longs) > mean(shorts), 'and the long ones should arrive later, not first');
+});
+
+test('Two games do not open on the same question', () => {
+  const mk = (i) => ({ uuid: 'q' + i, options: [{ text: 'x'.repeat(20) }] });
+  const pool = []; for (let i = 0; i < 30; i++) pool.push(mk(i));
+  const a = bpPickRounds(pool, 8, SHORT_OPTION_CUT, mulberry32(1));
+  const b = bpPickRounds(pool, 8, SHORT_OPTION_CUT, mulberry32(2));
+  const c = bpPickRounds(pool, 8, SHORT_OPTION_CUT, mulberry32(1));
+  assert(a[0].uuid !== b[0].uuid, 'a different seed must open differently');
+  eq(a.map(q => q.uuid).join(','), c.map(q => q.uuid).join(','), 'the same seed must be reproducible');
+});
+
+test('A bank of nothing but long options still fills a game', () => {
+  const pool = []; for (let i = 0; i < 12; i++) pool.push({ uuid: 'L' + i, options: [{ text: 'x'.repeat(200) }] });
+  eq(bpPickRounds(pool, 10, SHORT_OPTION_CUT, mulberry32(3)).length, 10,
+    'ranking is not filtering — a long-only bank must still be playable');
+  eq(bpPickRounds(pool, 40, SHORT_OPTION_CUT, mulberry32(3)).length, 12, 'and it cannot invent questions it does not have');
+});
+
+test('A balloon tag is only clipped when a clipped tag is still unambiguous', () => {
+  const opts = (a) => a.map(t => ({ text: t }));
+  eq(bpTagPlan(opts(['Firewall', 'Log review', 'Encryption', 'Training']), 75), 'full',
+    'short options are carried whole');
+  eq(bpTagPlan(opts(['Alpha ' + 'a'.repeat(120), 'Bravo ' + 'b'.repeat(120),
+                     'Charlie ' + 'c'.repeat(120), 'Delta ' + 'd'.repeat(120)]), 40), 'clamp',
+    'long options that differ from the first word may be clipped');
+  // The hazard the old code warned about: options that diverge only at the end.
+  eq(bpTagPlan(opts(['Debit cash 10,000 to the suspense account',
+                     'Debit cash 1,00,000 to the suspense account',
+                     'Debit cash 10,00,000 to the suspense account',
+                     'Debit cash 100 to the suspense account']), 20), 'none',
+    'options that only diverge in their tails must NOT be clipped — a clipped tag would read as a different answer');
+});
+
 /* ---- the score ----
    I cannot hear this music, so everything that CAN be checked by arithmetic
    is checked by arithmetic. These are the properties whose failure produced
