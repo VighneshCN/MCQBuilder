@@ -204,6 +204,28 @@ and all spaced-repetition intervals are set separately for CISA and DISA, since
 they are different exams. Settings shows a badge telling you which you are
 editing. Appearance and shuffle behaviour are shared across courses.
 
+### Games
+
+**Games** is a shelf, not a mode. Two are built in — *Kab Banega Crorepati*, a
+fifteen-rung quiz-show ladder with lifelines, and *Balloon Pop*, where the
+options float away and you shoot the right one.
+
+Games live in a shared library and you add them to a course. That tagging is
+the whole mechanism: it tells the game which question bank to draw from. The
+same game can sit on as many courses as you like, and a course starts with an
+empty shelf.
+
+Nothing stops you adding a game to a course it was not written for. A game that
+needs specific subject matter — spotting network hardware, say — will still run
+on a tax bank; it just will not be worth playing there. Each game's info button
+says what it needs and what it suits, and the difference matters: the app can
+check structure (enough questions, the right number of options) and enforces
+that, but it cannot judge whether a game fits your subject. Only you can.
+
+Games draw from the same pool practice does — Active questions with a verified
+answer — but they **never write back**. No attempt is recorded, no review date
+moves. Playing cannot disturb your spaced-repetition schedule.
+
 ## 5. Checking what the app could not confirm
 
 Adding questions is two steps, both on the **Add Questions** screen.

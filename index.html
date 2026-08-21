@@ -230,6 +230,10 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .card.clickable:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg);border-color:var(--accent-1)}
 .card.clickable:active{transform:translateY(0)}
 .card-h{padding:13px 16px;border-bottom:1px solid var(--rule-soft);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+/* A heading over a group of cards rather than inside one, so it lines up with
+   the card edges instead of with their padding. */
+.sec-h{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:0 0 10px}
+.sec-h h3{font-size:15px;margin:0}
 .card-b{padding:16px}
 .card-b.tight{padding:10px 16px}
 .grid{display:grid;gap:14px;align-items:start}
@@ -1274,7 +1278,7 @@ function makeCourse(code, name, domains, opts) {
   return Object.assign({
     id: uuid(), code, name, qidPrefix: code.toUpperCase().replace(/[^A-Z0-9]/g, ''),
     blueprint: domains.map((d, i) => ({ id: d.id || ('D' + (i + 1)), name: d.name, weight: d.weight })),
-    createdAt: nowISO(), archived: false, notes: ''
+    createdAt: nowISO(), archived: false, notes: '', games: []
   }, opts || {});
 }
 const CISA_BLUEPRINT = [
@@ -7267,7 +7271,7 @@ async function renderReviewQueue(root) {
   // A tab a person isn't even looking at any more is not a filter worth
   // keeping — if it emptied out entirely, drop back to All rather than show
   // a picker with nothing selected under it.
-  const counts = { all: queue.length, answer_conflict: conflictPairs.length, possible_dup: dupes.length, needs_answer: noAnswer.length, needs_class: noClass.length, other: rest.length };
+  const counts = { all: queue.length, answer_conflict: conflicts.length, possible_dup: dupes.length, needs_answer: noAnswer.length, needs_class: noClass.length, other: rest.length };
   if (ReviewQueueState.filter !== 'all' && !counts[ReviewQueueState.filter]) ReviewQueueState.filter = 'all';
 
   const tabsBar = h('div', { class: 'seg', style: 'margin-bottom:14px' });
@@ -7337,9 +7341,10 @@ async function renderReviewQueue(root) {
   function renderConflictsSection(container) {
     // Both records of a conflict appear in `conflicts`, so a row per record
     // would show the identical pair twice and double the apparent workload.
-    // conflictPairs (built once above, and shared with the tab count so the
-    // two can never disagree) is already one entry per pairing, with
-    // partnerless records left out.
+    // conflictPairs is already one entry per pairing, with partnerless
+    // records left out. The tab counts records — so that it adds up with its
+    // siblings and with All — and this header says how many rows that comes
+    // to, which is the honest way to show two different true numbers.
     const pairs = conflictPairs;
     if (!pairs.length) return;
     const visible = pairs.slice(0, 40);
@@ -7415,14 +7420,15 @@ async function renderReviewQueue(root) {
     function refresh() {
       card.textContent = '';
       card.appendChild(h('div', { class: 'card-h' }, [
-        h('h3', { text: 'Answer conflicts' }), h('span', { class: 'badge b-review', text: String(pairs.length) }),
+        h('h3', { text: 'Answer conflicts' }),
+        h('span', { class: 'badge b-review', text: pairs.length + (pairs.length === 1 ? ' disagreement' : ' disagreements') }),
         infoTip('Answer conflicts', h('div', { class: 'stack' }, [
           h('div', { class: 'small' }, 'Each pair reads as the same question but disagrees on the right answer — usually the same question imported twice from different papers.'),
           h('div', { class: 'small' }, 'Both records are shown side by side. Pick the correct answer for each, then press Resolve. That settles the pair for good, whether you brought them into agreement or accepted that they differ.'),
           h('div', { class: 'small' }, '“Not the same question” clears the flag without changing either answer — for records that only look alike.')
         ])),
         h('div', { class: 'spacer' }),
-        h('span', { class: 'tiny dim', text: 'Two records disagree on the correct answer' })
+        h('span', { class: 'tiny dim', text: conflicts.length + ' record(s), shown as one row per disagreement' })
       ]));
 
       const toolbar = h('div', { class: 'row wrap', style: 'gap:10px;align-items:center;padding:0 16px 12px' });
@@ -11409,49 +11415,120 @@ async function gameQuestions(opts) {
   return out;
 }
 
-/** A game declares what it needs; the tab works out whether this course can
-    feed it. `courses: null` means any course whose bank fits — which is the
-    honest default for anything driven by plain multiple-choice questions.
-    A game that genuinely belongs to one subject (spotting network hardware,
-    say) names its course codes and simply will not appear elsewhere. */
+/* Games are a shared library, not a property of a course. A course keeps a
+   list of the games added to it, and that list is the whole reason tagging
+   exists: it tells the game which bank to draw from. The same game can sit
+   on any number of courses.
+
+   Matching games to courses by course code was tried and abandoned. A course
+   code is an identity, not a capability — courses here are user-created, so
+   "CISA" in one bank and "cisa-2026" in another are the same subject with
+   different names, and no built-in list can keep up.
+
+   Two different questions are therefore kept apart:
+
+   `needs`   — structure the app can actually check: how many options a
+               question must have, how many questions the game needs. Fail
+               this and the game genuinely cannot run, so it is enforced.
+   `fits`    — subject relevance, which no program can check. A hardware
+               spotting game will run perfectly on a tax bank and be useless
+               there. So it is said in the game's info and left to the user,
+               who is the only one who knows what their course is about. */
 const GAMES = [
   {
     id: 'kbc',
     name: 'Kab Banega Crorepati',
     tagline: 'Climb fifteen questions. The host is not on your side.',
     ico: '◈',
-    courses: null,
+    general: true,
     optionCount: 4,
     minQuestions: 15,
-    blurb: 'A quiz-show ladder built from your own bank. Three lifelines, a suspense beat before every reveal, and a host who will happily point you at the wrong answer.'
+    blurb: 'A quiz-show ladder built from your own bank. Three lifelines, a suspense beat before every reveal, and a host who will happily point you at the wrong answer.',
+    fits: 'Any subject. It only needs four-option questions, so it reads the same whether your bank is auditing, tax or pharmacology.'
   },
   {
     id: 'balloon',
     name: 'Balloon Pop',
     tagline: 'The options float. Shoot the right one before it escapes.',
     ico: '●',
-    courses: null,
+    general: true,
     optionCount: null,
     minQuestions: 8,
-    blurb: 'Each question sends its options up as balloons. Aim, fire, and pop the correct one — the clock is the balloon leaving the screen.'
+    blurb: 'Each question sends its options up as balloons. Aim, fire, and pop the correct one — the clock is the balloon leaving the screen.',
+    fits: 'Any subject, though it favours short answers — a balloon can only carry so much text. Banks written in long sentences still play, they just read more slowly.'
   }
 ];
 
-/** Why a game can or cannot run for the course on screen right now. Returns
-    a reason rather than a boolean, because "not enough questions" and "wrong
-    subject" need different things said about them. */
+const gameById = (id) => GAMES.find(g => g.id === id) || null;
+
+/** The games on this course's shelf.
+
+    A course saved before games became a library has no list at all. Treating
+    that as an empty shelf would silently take games away from someone on
+    upgrade, so an absent list means "the general-purpose games", which is
+    exactly what was available under the old rule. A course created from now
+    on starts with an explicit list — empty — and the user fills it. */
+function courseGameIds(course) {
+  if (course && Array.isArray(course.games)) return course.games.filter(gameById);
+  return GAMES.filter(g => g.general).map(g => g.id);
+}
+
+const courseHasGame = (course, id) => courseGameIds(course).indexOf(id) >= 0;
+
+/** Add or remove a game from the course on screen, persisting to the course
+    record. Writes the full list rather than a diff, so a course still on the
+    implicit default gets an explicit one the first time it is touched. */
+async function setCourseGame(id, add) {
+  const course = State.course;
+  if (!course || !gameById(id)) return;
+  const current = courseGameIds(course);
+  const next = add ? (current.indexOf(id) >= 0 ? current : current.concat([id]))
+                   : current.filter(g => g !== id);
+  course.games = next;
+  await DB.put('courses', course);
+  State.courses = await DB.all('courses');
+  State.course = State.courses.find(c => c.id === course.id) || course;
+  await audit('edit', 'course', course.id, { games: current }, { games: next }, '');
+}
+
+/** Whether this course's bank can actually feed the game. Structure only —
+    relevance is the user's call. Returns a reason rather than a boolean,
+    because "not enough questions" needs a different thing said about it than
+    "not enough four-option questions". */
 function gameAvailability(game, course, counts) {
-  if (game.courses && game.courses.indexOf(course.code) < 0) {
-    return { ok: false, why: 'Built for ' + game.courses.join(', ') + ' — not for ' + course.code + '.' };
-  }
   const have = game.optionCount ? (counts.byOptionCount[game.optionCount] || 0) : counts.eligible;
   if (have < game.minQuestions) {
     const need = game.optionCount
       ? game.minQuestions + ' questions with exactly ' + game.optionCount + ' options'
       : game.minQuestions + ' practice-ready questions';
-    return { ok: false, why: 'Needs ' + need + '. This course has ' + have + '.', short: true };
+    return { ok: false, why: 'Needs ' + need + '. This course has ' + have + '.', short: true, have: have };
   }
   return { ok: true, have: have };
+}
+
+/** What a game needs, what it suits, and where else it already sits. This is
+    the one place the relevance caveat lives, which is why it is parked behind
+    an info icon rather than printed on every card. */
+function gameInfoBody(game) {
+  const elsewhere = (State.courses || []).filter(c =>
+    c.id !== (State.course || {}).id && courseHasGame(c, game.id));
+  const line = (k, v) => h('div', { style: 'margin-top:12px' }, [
+    h('div', { class: 'eyebrow', text: k }),
+    h('div', { class: 'small', style: 'margin-top:3px', text: v })
+  ]);
+  return h('div', { class: 'stack' }, [
+    h('div', { class: 'small', text: game.blurb }),
+    line('What it needs', game.optionCount
+      ? 'At least ' + game.minQuestions + ' practice-ready questions with exactly ' + game.optionCount + ' options.'
+      : 'At least ' + game.minQuestions + ' practice-ready questions, any number of options.'),
+    line('What it suits', game.fits),
+    h('div', { class: 'notice small', style: 'margin-top:12px', text:
+      'Adding a game to a course only tells it which bank to draw from. Nothing stops you adding it to a course it was not written for — it will run, it just may not be worth playing there.' }),
+    elsewhere.length ? h('div', { class: 'tiny dim', style: 'margin-top:10px',
+      text: 'Also on ' + elsewhere.map(c => c.code).join(', ') + '.' }) : null,
+    h('div', { class: 'tiny dim', style: 'margin-top:8px', text:
+      'Games never touch your practice history — no attempts recorded, no review dates moved.' })
+  ]);
 }
 
 ROUTES.games = async (root) => {
@@ -11461,38 +11538,93 @@ ROUTES.games = async (root) => {
   pool.forEach(q => { const n = (q.options || []).length; byOptionCount[n] = (byOptionCount[n] || 0) + 1; });
   const counts = { eligible: pool.length, byOptionCount: byOptionCount };
 
+  const onShelf = GAMES.filter(g => courseHasGame(State.course, g.id));
+  const library = GAMES.filter(g => !courseHasGame(State.course, g.id));
+
   await band('Games', 'Practise without it feeling like practice', [
-    { k: 'Playable', v: String(GAMES.filter(g => gameAvailability(g, State.course, counts).ok).length) },
+    { k: 'On this course', v: String(onShelf.length) },
+    { k: 'Playable now', v: String(onShelf.filter(g => gameAvailability(g, State.course, counts).ok).length) },
     { k: 'Question pool', v: String(pool.length) }
   ]);
 
-  const grid = h('div', { class: 'grid g2 stretch' });
-  GAMES.forEach(game => {
+  /* One card shape for both sections. The difference is the action: a game
+     on the shelf is played, one in the library is added. */
+  const gameCard = (game, added) => {
     const avail = gameAvailability(game, State.course, counts);
-    const card = h('div', {
-      class: 'card' + (avail.ok ? ' clickable' : ''),
-      style: 'padding:0' + (avail.ok ? '' : ';opacity:.6'),
-      onclick: avail.ok ? () => launchGame(game.id) : null
-    }, [
-      h('div', { class: 'card-b' }, [
-        h('div', { class: 'row', style: 'gap:10px;align-items:center' }, [
-          h('span', { style: 'font-size:22px;color:var(--accent-1)', text: game.ico }),
-          h('h3', { style: 'font-size:16px;margin:0', text: game.name }),
-          h('div', { class: 'spacer' }),
-          avail.ok ? h('span', { class: 'badge b-active', text: avail.have + ' ready' })
-                   : h('span', { class: 'badge b-draft', text: 'Not yet' })
-        ]),
-        h('div', { class: 'small', style: 'margin:7px 0 0;color:var(--txt-2)', text: game.tagline }),
-        h('div', { class: 'tiny dim', style: 'margin-top:6px', text: game.blurb }),
-        avail.ok ? null : h('div', { class: 'notice warn small', style: 'margin-top:10px' }, [
-          h('span', { text: avail.why + ' ' }),
-          avail.short ? h('a', { href: '#', onclick: (e) => { e.preventDefault(); go('import'); }, text: 'Add more questions' }) : null
-        ])
+    const playable = added && avail.ok;
+    return h('div', { class: 'card', style: 'padding:0' }, h('div', { class: 'card-b' }, [
+      h('div', { class: 'row', style: 'gap:10px;align-items:center' }, [
+        h('span', { style: 'font-size:22px;color:var(--accent-1)', text: game.ico }),
+        h('h3', { style: 'font-size:16px;margin:0', text: game.name }),
+        h('div', { class: 'spacer' }),
+        added
+          ? (avail.ok ? h('span', { class: 'badge b-active', text: avail.have + ' ready' })
+                      : h('span', { class: 'badge b-draft', text: 'Not enough yet' }))
+          : null,
+        infoTip(game.name, gameInfoBody(game))
+      ]),
+      h('div', { class: 'small', style: 'margin:7px 0 0;color:var(--txt-2)', text: game.tagline }),
+      added && !avail.ok ? h('div', { class: 'notice warn small', style: 'margin-top:10px' }, [
+        h('span', { text: avail.why + ' ' }),
+        h('a', { href: '#', onclick: (e) => { e.preventDefault(); go('import'); }, text: 'Add more questions' })
+      ]) : null,
+      h('div', { class: 'row', style: 'gap:8px;margin-top:12px;flex-wrap:wrap' }, [
+        added
+          ? h('button', {
+              class: 'btn primary', disabled: !playable,
+              onclick: playable ? () => launchGame(game.id) : null, text: 'Play'
+            })
+          : h('button', {
+              class: 'btn primary',
+              onclick: async () => { await setCourseGame(game.id, true); toast(game.name + ' added to ' + State.course.code, 'ok'); go('games'); },
+              text: 'Add to ' + ((State.course || {}).code || 'course')
+            }),
+        added
+          ? h('button', {
+              class: 'btn ghost sm',
+              onclick: async () => { await setCourseGame(game.id, false); toast(game.name + ' removed from ' + State.course.code, 'ok'); go('games'); },
+              text: 'Remove'
+            })
+          : null
       ])
-    ]);
-    grid.appendChild(card);
-  });
-  root.appendChild(grid);
+    ]));
+  };
+
+  if (!State.course) {
+    root.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, [
+      h('h3', { text: 'Pick a course first' }),
+      h('p', { class: 'muted', text: 'A game plays on one course’s question bank, so there has to be a course to play on.' })
+    ])));
+    return;
+  }
+
+  root.appendChild(h('div', { class: 'sec-h' }, [
+    h('h3', { text: 'On ' + State.course.code }),
+    h('div', { class: 'spacer' }),
+    h('span', { class: 'tiny dim', text: 'Plays on this course’s bank' })
+  ]));
+
+  if (onShelf.length) {
+    const grid = h('div', { class: 'grid g2 stretch' });
+    onShelf.forEach(g => grid.appendChild(gameCard(g, true)));
+    root.appendChild(grid);
+  } else {
+    root.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, [
+      h('h3', { text: 'No games on this course yet' }),
+      h('p', { class: 'muted', text: 'Add one from the library below. A game plays on whichever course you add it to, and the same game can sit on as many courses as you like.' })
+    ])));
+  }
+
+  if (library.length) {
+    root.appendChild(h('div', { class: 'sec-h', style: 'margin-top:22px' }, [
+      h('h3', { text: 'Game library' }),
+      h('div', { class: 'spacer' }),
+      h('span', { class: 'tiny dim', text: 'Available to every course' })
+    ]));
+    const lib = h('div', { class: 'grid g2 stretch' });
+    library.forEach(g => lib.appendChild(gameCard(g, false)));
+    root.appendChild(lib);
+  }
 
   if (!pool.length) {
     root.appendChild(h('div', { class: 'card', style: 'margin-top:16px' }, h('div', { class: 'empty' }, [
@@ -11505,8 +11637,9 @@ ROUTES.games = async (root) => {
 };
 
 async function launchGame(id) {
-  const game = GAMES.find(g => g.id === id);
+  const game = gameById(id);
   if (!game) return;
+  if (!courseHasGame(State.course, id)) { toast(game.name + ' is not on this course', 'warn'); return; }
   const qs = await gameQuestions({ optionCount: game.optionCount });
   if (qs.length < game.minQuestions) { toast('Not enough questions for that game yet', 'warn'); return; }
   if (id === 'balloon') {
@@ -13855,6 +13988,99 @@ test('The app never advertises question files it has not confirmed', async () =>
 });
 
 /* ---- eligibility gate ---- */
+/* ---- games as a shared library ---- */
+test('A course saved before games were a library keeps the games it had', () => {
+  // No `games` key at all: that course predates the library, and emptying its
+  // shelf on upgrade would silently take games away from someone.
+  const legacy = { id: 'legacy', code: 'OLD' };
+  const ids = courseGameIds(legacy);
+  GAMES.filter(g => g.general).forEach(g =>
+    assert(ids.indexOf(g.id) >= 0, 'general game ' + g.id + ' should still be on a legacy course'));
+});
+
+test('A course with an explicit empty shelf has no games, and that is not the same as having none set', () => {
+  eq(courseGameIds({ id: 'fresh', code: 'NEW', games: [] }).length, 0, 'an explicit empty list means empty');
+  assert(courseGameIds({ id: 'legacy', code: 'OLD' }).length > 0, 'an absent list does not');
+});
+
+test('A shelf only reports games that still exist', () => {
+  const ids = courseGameIds({ id: 'c', code: 'C', games: ['kbc', 'a-game-that-was-removed'] });
+  eq(ids.length, 1, 'the stale id is dropped');
+  eq(ids[0], 'kbc', 'the real one survives');
+});
+
+test('The same game can sit on more than one course', () => {
+  const a = { id: 'a', code: 'A', games: ['kbc'] };
+  const b = { id: 'b', code: 'B', games: ['kbc', 'balloon'] };
+  assert(courseHasGame(a, 'kbc') && courseHasGame(b, 'kbc'), 'both courses have it');
+  assert(!courseHasGame(a, 'balloon'), 'and a shelf is per course, not global');
+});
+
+test('Adding and removing a game persists to the course record', async () => {
+  const prevCourses = State.courses, prevCourse = State.course;
+  const cid = 'games-shelf-' + uuid();
+  const c = makeCourse('GSH', 'Shelf test', [{ id: 'D1', name: 'One', weight: 100 }], { id: cid, qidPrefix: 'GSH' });
+  await DB.put('courses', c);
+  State.courses = await DB.all('courses');
+  State.course = State.courses.find(x => x.id === cid);
+  try {
+    eq(courseGameIds(State.course).length, 0, 'a newly created course starts with an empty shelf');
+    await setCourseGame('kbc', true);
+    eq((await DB.get('courses', cid)).games.join(','), 'kbc', 'the add reached the database');
+    await setCourseGame('kbc', true);
+    eq((await DB.get('courses', cid)).games.length, 1, 'adding twice does not duplicate');
+    await setCourseGame('balloon', true);
+    eq((await DB.get('courses', cid)).games.length, 2, 'a second game joins the first');
+    await setCourseGame('kbc', false);
+    eq((await DB.get('courses', cid)).games.join(','), 'balloon', 'the remove reached the database too');
+  } finally {
+    await DB.del('courses', cid);
+    State.courses = prevCourses; State.course = prevCourse;
+  }
+});
+
+test('Touching the shelf of a legacy course writes out the list it was relying on', async () => {
+  // The implicit default must become explicit the first time it is edited,
+  // or removing one game would silently restore the rest on next load.
+  const prevCourses = State.courses, prevCourse = State.course;
+  const cid = 'games-legacy-' + uuid();
+  const c = makeCourse('GLG', 'Legacy shelf', [{ id: 'D1', name: 'One', weight: 100 }], { id: cid, qidPrefix: 'GLG' });
+  delete c.games;
+  await DB.put('courses', c);
+  State.courses = await DB.all('courses');
+  State.course = State.courses.find(x => x.id === cid);
+  try {
+    await setCourseGame('kbc', false);
+    const saved = await DB.get('courses', cid);
+    assert(Array.isArray(saved.games), 'the shelf is now explicit');
+    assert(saved.games.indexOf('kbc') < 0, 'the removed game is gone');
+    assert(saved.games.indexOf('balloon') >= 0, 'the other one it had is kept');
+  } finally {
+    await DB.del('courses', cid);
+    State.courses = prevCourses; State.course = prevCourse;
+  }
+});
+
+test('Whether a game can run depends on the bank, never on the course code', () => {
+  const kbc = gameById('kbc');
+  const counts = { eligible: 200, byOptionCount: { 4: 200 } };
+  ['CISA', 'DISA', 'PHARM-101', 'something the author never heard of'].forEach(code => {
+    assert(gameAvailability(kbc, { code: code }, counts).ok,
+      'a full four-option bank plays regardless of the course being called ' + code);
+  });
+  assert(!gameAvailability(kbc, { code: 'CISA' }, { eligible: 3, byOptionCount: { 4: 3 } }).ok,
+    'and a bank that is too small does not, whatever it is called');
+});
+
+test('A game that is not on the course cannot be launched by a stale link', async () => {
+  const prevCourse = State.course;
+  State.course = { id: 'x', code: 'X', games: [] };
+  try {
+    await launchGame('kbc');
+    assert(!document.querySelector('.game-root.kbc'), 'no game was mounted');
+  } finally { State.course = prevCourse; }
+});
+
 test('Only active, verified questions can enter a session', () => {
   const base = () => { const q = mkQ('q', ['a', 'b'], 0); q.status = 'active'; q.answerVerified = 'verified'; return q; };
   assert(isPracticeEligible(base()));
