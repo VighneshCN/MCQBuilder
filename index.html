@@ -283,6 +283,10 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   border-radius:var(--r-lg);padding:9px 13px;backdrop-filter:blur(3px)}
 .bp-card .eyebrow{color:rgba(255,255,255,.6)}
 .bp-stem{font-size:clamp(13px,3.4vw,16px);font-weight:600;color:#fff;line-height:1.35}
+.bp-legend{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;margin-top:7px}
+.bp-leg{display:flex;gap:6px;align-items:baseline;min-width:0}
+.bp-leg-k{font-family:var(--mono);font-size:11px;font-weight:800;color:#ffe066;flex:none}
+.bp-leg-t{font-size:12px;line-height:1.3;color:rgba(255,255,255,.9)}
 .bp-side{display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex:none}
 .bp-score{background:rgba(12,8,32,.72);border:1px solid rgba(255,255,255,.22);border-radius:var(--r);
   padding:2px 8px;font-size:12px;font-weight:700;color:#ffe066;white-space:nowrap}
@@ -327,8 +331,15 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .bp-explain{position:absolute;left:50%;bottom:74px;transform:translateX(-50%);z-index:25;width:min(460px,90%);
   background:rgba(12,8,32,.9);border:1px solid rgba(255,255,255,.25);border-radius:var(--r-lg);padding:10px 14px;color:#fff}
 @media(max-width:560px){
-  .game-root{min-height:78vh}
+  /* A long stem plus a four-option legend can take 40% of a phone screen, and
+     what is left is the only place a balloon can actually be hit. Give the
+     game the viewport rather than a fraction of it, and cap the legend so one
+     enormous question cannot squeeze the play field to nothing. */
+  .game-root{min-height:calc(100vh - 170px)}
   .bp-hud{padding:7px}
+  .bp-legend{grid-template-columns:1fr;gap:3px;max-height:33vh;overflow-y:auto}
+  .bp-leg-t{font-size:11.5px}
+  .bp-stem{font-size:13.5px}
   .bp-launcher{width:62px;height:54px}
   .bp-base{width:50px}.bp-barrel{height:32px}
   .bp-tag{font-size:10px}
@@ -11523,7 +11534,16 @@ async function runBalloonPop(questions) {
           h('div', { class: 'spacer' }),
           h('span', { class: 'tiny dim', text: current.qid || '' })
         ]),
-        h('div', { class: 'bp-stem', text: current.stem })
+        h('div', { class: 'bp-stem', text: current.stem }),
+        // A balloon can carry a letter and, if the option is short, a tag.
+        // It can never carry a full sentence, so the letters need somewhere
+        // authoritative to resolve to — otherwise a long option is a balloon
+        // labelled "B" and nothing else, and the player is guessing blind.
+        h('div', { class: 'bp-legend' }, current.options.map(o =>
+          h('div', { class: 'bp-leg' }, [
+            h('span', { class: 'bp-leg-k', text: o.letter }),
+            h('span', { class: 'bp-leg-t', text: o.text })
+          ])))
       ]),
       h('div', { class: 'bp-side' }, [
         h('div', { style: 'font-size:15px;letter-spacing:1px' }, '❤️'.repeat(Math.max(0, lives)) + '🖤'.repeat(Math.max(0, tier.lives - lives))),
@@ -11559,7 +11579,9 @@ async function runBalloonPop(questions) {
       h('div', { class: 'bp-body', style: 'background:' + col.body }, h('span', { class: 'bp-letter', text: opt.letter })),
       h('div', { class: 'bp-knot', style: 'background:' + col.knot }),
       h('div', { class: 'bp-string' }),
-      h('div', { class: 'bp-tag', text: opt.text.length > 64 ? opt.text.slice(0, 62) + '…' : opt.text })
+      // Truncating here would be worse than omitting it: a clipped tag looks
+      // like the whole answer. Long options are read from the legend instead.
+      opt.text.length <= 30 ? h('div', { class: 'bp-tag', text: opt.text }) : null
     ]);
     const b = { id: id, opt: opt, el: el, alive: true, firing: false };
     el.onclick = () => shootAt(b);
