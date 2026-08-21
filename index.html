@@ -1081,6 +1081,15 @@ input:disabled,select:disabled,textarea:disabled{background:var(--surface-3);col
 
 /* --- tables ----------------------------------------------------------- */
 .tbl-wrap{overflow:auto;border-radius:0 0 var(--r-lg) var(--r-lg)}
+.tbl-wrap table td:first-child,.tbl-wrap table th:first-child{
+  position:sticky;left:0;background:var(--surface);
+  box-shadow:1px 0 0 var(--rule-soft)}
+.tbl-wrap table th:first-child{background:var(--surface-2);z-index:3}
+.tbl-wrap table td:first-child{z-index:1}
+@media(max-width:880px){
+  .tbl-wrap table td:first-child,.tbl-wrap table th:first-child{
+    max-width:46vw;min-width:8.5rem}
+}
 table{width:100%;border-collapse:collapse;font-size:13.5px}
 th{
   text-align:left;font-family:var(--mono);font-size:10px;letter-spacing:.11em;text-transform:uppercase;
