@@ -516,6 +516,8 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 @keyframes kbcLip{0%,8%{opacity:.78}26%,100%{opacity:.16}}
 .kbc-lled{animation:kbcLip 5s linear infinite;animation-delay:calc(var(--n,0) * -.55s)}
 
+@keyframes kbcBulb{0%,9%{opacity:1}28%,100%{opacity:.22}}
+.kbc-bulbs{animation:kbcBulb 1.45s linear infinite;animation-delay:calc(var(--b,0) * -.3625s)}
 @keyframes kbcChase{0%,10%{opacity:.92}26%,100%{opacity:.14}}
 .kbc-rled{animation:kbcChase 3.4s linear infinite;animation-delay:calc(var(--l,0) * -.42s)}
 .kbc-rail-r .kbc-rled{animation-direction:reverse}
@@ -588,6 +590,7 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .kbc.reveal-wrong .kbc-scope-t{animation:none}
 .kbc.reveal-wrong .kbc-meter{animation:none;transform:scaleX(.05);transition:transform .5s}
 .kbc.reveal-wrong .kbc-tally,.kbc.reveal-wrong .kbc-lled{animation:none;opacity:.06;transition:opacity .5s}
+.kbc.reveal-wrong .kbc-bulbs{animation:none;opacity:.07;transition:opacity .6s}
 .kbc.reveal-wrong .kbc-rled{animation:none;opacity:.08;transition:opacity .6s}
 .kbc.reveal-wrong .kbc-lip{opacity:.05;transition:opacity .5s}
 .kbc.reveal-wrong .kbc-tint{animation:kbcTint 1.2s ease-out both}
@@ -597,6 +600,7 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .kbc.milestone .kbc-hero{animation:kbcCheer .38s ease-out 3 both;animation-delay:calc(var(--i,0) * 34ms)}
 .kbc.milestone .kbc-lip{opacity:.72;transition:opacity .3s}
 .kbc.milestone .kbc-lled{animation:kbcHit .3s ease-out 3 both;animation-delay:calc(var(--n,0) * 22ms)}
+.kbc.milestone .kbc-bulbs,.kbc.reveal-right .kbc-bulbs{animation-duration:.62s}
 
 .kbc.lifeline-audience .kbc-tier{animation-duration:2.6s}
 .kbc.lifeline-audience .kbc-hero{animation-duration:.55s}
@@ -626,6 +630,7 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   .kbc-tally-x{animation:none;opacity:.12}
   .kbc-flash:nth-of-type(n+5){display:none}
   .kbc-lled:nth-of-type(2n+1){animation:none}
+  .kbc-bulbs{animation-duration:1.9s}
   .kbc-drift-c{animation:none}
   .kbc-ladder{background:rgba(8,11,22,.46)}
   .kbc-q{box-shadow:inset 0 0 0 3px #0d0a10, inset 0 0 0 4px rgba(245,197,66,.20),
@@ -644,6 +649,7 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   .kbc-beam{opacity:.62}.kbc-lens{opacity:.9}.kbc-scr{opacity:1}
   .kbc-tally{opacity:.12}.kbc-tally[style*="--t:4"]{opacity:1}
   .kbc-lled,.kbc-rled{opacity:.30}
+  .kbc-bulbs{opacity:.8}
   .kbc-flash,.kbc-arm,.kbc-sweep,.kbc-tint{opacity:0}
   .kbc-meter{transform:scaleX(.6)}
   .kbc-scope-t{transform:translateX(-72px)}
@@ -12541,6 +12547,28 @@ function kbcTier(base, rise, step, phase, dim, cls, k, toward, amt) {
   return out + '</g>';
 }
 
+/* Marquee bulbs — the one motif that separates a television studio from a
+   showbiz STAGE, and the cheapest grandeur available: a run of small gold
+   lamps chasing along an edge.
+
+   The chase is done with four phase GROUPS rather than four hundred delayed
+   bulbs. Every bulb goes into group (index % 4), so each run still chases
+   along its own length, and the entire marquee — however many runs, however
+   many bulbs — costs exactly four animated nodes. */
+function kbcBulbRun(into, x0, y0, dx, dy, n, r) {
+  for (let i = 0; i < n; i++) {
+    const x = x0 + dx * i, y = y0 + dy * i, h = r * 2.6;
+    // halo then core: a bare dot reads as a pixel, a dot with a bloom around
+    // it reads as a lamp. Both live in the same phase group, so the pair still
+    // costs nothing to animate.
+    into[i % 4] +=
+      '<rect x="' + (x - h).toFixed(1) + '" y="' + (y - h).toFixed(1) + '" width="' + (h * 2).toFixed(1) +
+        '" height="' + (h * 2).toFixed(1) + '" rx="' + h.toFixed(1) + '" fill="#ffc93f" opacity=".20"/>' +
+      '<rect x="' + (x - r).toFixed(1) + '" y="' + (y - r).toFixed(1) + '" width="' + (r * 2).toFixed(1) +
+        '" height="' + (r * 2).toFixed(1) + '" rx="' + r.toFixed(1) + '" fill="#ffeab4"/>';
+  }
+}
+
 function kbcWall() {
   const PANEL = [46, 152, 258, 364, 748, 854, 960, 1066];
   const PANEL_S = [0, 1, 2, 3, 5, 6, 7, 8];
@@ -12559,11 +12587,11 @@ function kbcWall() {
 
   // The hero screen: the show's own prize ladder, on the wall, dead centre so
   // it survives the phone crop.
-  let hero = '<rect class="kbc-scr kbc-scr-hero kbc-anim" style="--s:4" x="470" y="8" width="260" height="34" rx="3" fill="url(#kbcWScr)" stroke="var(--kbc-react,#f5c542)" stroke-opacity=".45" stroke-width="1.5"/>';
+  let hero = '<rect class="kbc-scr kbc-scr-hero kbc-anim" style="--s:4" x="472" y="10" width="256" height="31" rx="3" fill="url(#kbcWScr)" stroke="var(--kbc-react,#f5c542)" stroke-opacity=".45" stroke-width="1.5"/>';
   for (let r = 0; r < 7; r++) {
-    hero += '<rect x="486" y="' + (12 + r * 4.2).toFixed(1) + '" width="' + (60 + r * 22) + '" height="3.4" rx="1.7" fill="#8fa3d8" opacity=".18"/>';
+    hero += '<rect x="486" y="' + (13.5 + r * 3.9).toFixed(1) + '" width="' + (60 + r * 22) + '" height="3.4" rx="1.7" fill="#8fa3d8" opacity=".18"/>';
   }
-  hero += '<rect x="486" y="24.6" width="126" height="3.4" rx="1.7" fill="var(--kbc-react,#f5c542)" opacity=".6"/>' +
+  hero += '<rect x="486" y="25.2" width="126" height="3.4" rx="1.7" fill="var(--kbc-react,#f5c542)" opacity=".6"/>' +
           '<rect class="kbc-tally kbc-anim" style="--t:4" x="476" y="4.5" width="11" height="3" rx="1.5" fill="#ef4444" opacity=".12"/>';
 
   const HERO_X = [262, 320, 378, 436, 494, 552, 610, 668, 726, 784];
@@ -12596,6 +12624,19 @@ function kbcWall() {
     '</g>';
   });
 
+  // A marquee frame around the hero screen, an apron run along the front of
+  // the video wall, and a column of lamps up each pillar.
+  const bulbs = ['', '', '', ''];
+  kbcBulbRun(bulbs, 468, 3.6, 13.8, 0, 20, 3.1);          // marquee top
+  kbcBulbRun(bulbs, 468, 45.4, 13.8, 0, 20, 3.1);         // marquee bottom
+  kbcBulbRun(bulbs, 464.5, 12, 0, 7.8, 4, 3.1);             // marquee left
+  kbcBulbRun(bulbs, 735.5, 12, 0, 7.8, 4, 3.1);             // marquee right
+  kbcBulbRun(bulbs, 24, 43.4, 27.3, 0, 44, 2.7);          // the apron
+  kbcBulbRun(bulbs, 367, 12, 0, 11.4, 11, 2.6);           // left pillar
+  kbcBulbRun(bulbs, 833, 12, 0, 11.4, 11, 2.6);           // right pillar
+  const marquee = bulbs.map((g, i) =>
+    '<g class="kbc-bulbs kbc-anim" style="--b:' + i + '">' + g + '</g>').join('');
+
   return '<svg class="kbc-air kbc-wall" viewBox="0 0 1200 136" preserveAspectRatio="none" aria-hidden="true">' +
     '<defs>' +
       '<linearGradient id="kbcWScr" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1b2a5c"/><stop offset="1" stop-color="#0a1132"/></linearGradient>' +
@@ -12623,7 +12664,7 @@ function kbcWall() {
       '<rect x="-40" y="12" width="1280" height="30" fill="#101a3e"/>' +
       '<rect x="-40" y="12" width="1280" height="1.5" fill="#3d5da8" opacity=".7"/>' +
       '<rect x="-40" y="40" width="1280" height="3" fill="#070b1e"/>' +
-      panels + hero +
+      panels + hero + marquee +
     '</g>' +
     '<g class="kbc-crowd kbc-drift-b">' +
       '<rect class="kbc-haze" x="-40" y="36" width="1280" height="60" fill="url(#kbcWHaze)"/>' +
