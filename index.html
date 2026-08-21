@@ -283,7 +283,10 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   border-radius:var(--r-lg);padding:9px 13px;backdrop-filter:blur(3px)}
 .bp-card .eyebrow{color:rgba(255,255,255,.6)}
 .bp-stem{font-size:clamp(13px,3.4vw,16px);font-weight:600;color:#fff;line-height:1.35}
-.bp-legend{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;margin-top:7px}
+.bp-aside{position:relative;z-index:15;margin:0 10px 8px;padding:9px 12px;
+  background:rgba(12,8,32,.72);border:1.5px solid rgba(255,255,255,.22);border-radius:var(--r-lg);backdrop-filter:blur(3px)}
+.bp-aside .eyebrow{color:rgba(255,255,255,.55)}
+.bp-legend{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px}
 .bp-leg{display:flex;gap:6px;align-items:baseline;min-width:0}
 .bp-leg-k{font-family:var(--mono);font-size:11px;font-weight:800;color:#ffe066;flex:none}
 .bp-leg-t{font-size:12px;line-height:1.3;color:rgba(255,255,255,.9)}
@@ -291,6 +294,26 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .bp-score{background:rgba(12,8,32,.72);border:1px solid rgba(255,255,255,.22);border-radius:var(--r);
   padding:2px 8px;font-size:12px;font-weight:700;color:#ffe066;white-space:nowrap}
 .bp-field{position:absolute;inset:0;z-index:5;overflow:hidden;pointer-events:none}
+/* Wide enough for a column beside the play area: the legend moves there and
+   the field gives up the width, so balloons never drift under it. */
+@media(min-width:900px){
+  .bp-aside{position:absolute;top:12px;right:12px;width:250px;max-height:calc(100% - 92px);overflow-y:auto;margin:0}
+  .bp-legend{grid-template-columns:1fr;gap:7px}
+  /* Reserve the panel's column once, on the row and the field. Positioning the
+     score block absolutely instead put it on top of the question text. */
+  .bp-hud{padding-right:274px}
+  .bp-field{right:274px}
+}
+/* Shown once a game, on the first round only: the panel arrives from where the
+   question is, so it is obvious the letters resolve over there. By round two
+   the player knows, and an animation every round would just be in the way. */
+.bp-aside.fly{animation:bpFly .62s cubic-bezier(.34,.8,.3,1)}
+@keyframes bpFly{
+  0%{opacity:0;transform:translate(-18%,-46px) scale(1.05)}
+  55%{opacity:1}
+  100%{opacity:1;transform:none}
+}
+@media(prefers-reduced-motion:reduce){.bp-aside.fly{animation:none}}
 .bp-balloon{position:absolute;bottom:-120px;display:flex;flex-direction:column;align-items:center;
   cursor:pointer;pointer-events:auto;animation:bpFloat linear forwards;will-change:transform}
 /* The rise is measured from the field, not the viewport: the game sits in a
@@ -11190,8 +11213,18 @@ async function gameQuestions(opts) {
   let pool = eligiblePool(all);
   if (opts.optionCount) pool = pool.filter(q => (q.options || []).length === opts.optionCount);
   if (opts.domains && opts.domains.length) pool = pool.filter(q => opts.domains.indexOf(q.domainId) >= 0);
-  const out = pool.map(toGameQuestion).filter(Boolean);
-  if (opts.shuffle !== false) return shuffle(out, opts.rng || Math.random);
+  let out = pool.map(toGameQuestion).filter(Boolean);
+  if (opts.shuffle !== false) out = shuffle(out, opts.rng || Math.random);
+  // A game with small labels plays better on short answers, so it can ask for
+  // those FIRST — but never for those ONLY. Excluding long-answer questions
+  // outright would quietly drop them from practice altogether, and they tend
+  // to be the more nuanced ones. Ranked, not filtered: the comfortable ones
+  // come first, the rest still follow, each group independently shuffled.
+  if (opts.preferShortOptions) {
+    const longest = (q) => q.options.reduce((m, o) => Math.max(m, o.text.length), 0);
+    const cut = opts.preferShortOptions === true ? 60 : opts.preferShortOptions;
+    out = out.filter(q => longest(q) <= cut).concat(out.filter(q => longest(q) > cut));
+  }
   return out;
 }
 
@@ -11295,8 +11328,11 @@ async function launchGame(id) {
   if (!game) return;
   const qs = await gameQuestions({ optionCount: game.optionCount });
   if (qs.length < game.minQuestions) { toast('Not enough questions for that game yet', 'warn'); return; }
+  if (id === 'balloon') {
+    const ranked = await gameQuestions({ optionCount: game.optionCount, preferShortOptions: true });
+    return runBalloonPop(ranked);
+  }
   if (id === 'kbc') return runKBC(qs);
-  if (id === 'balloon') return runBalloonPop(qs);
 }
 
 /* ---------- game audio ----------
@@ -11534,16 +11570,7 @@ async function runBalloonPop(questions) {
           h('div', { class: 'spacer' }),
           h('span', { class: 'tiny dim', text: current.qid || '' })
         ]),
-        h('div', { class: 'bp-stem', text: current.stem }),
-        // A balloon can carry a letter and, if the option is short, a tag.
-        // It can never carry a full sentence, so the letters need somewhere
-        // authoritative to resolve to — otherwise a long option is a balloon
-        // labelled "B" and nothing else, and the player is guessing blind.
-        h('div', { class: 'bp-legend' }, current.options.map(o =>
-          h('div', { class: 'bp-leg' }, [
-            h('span', { class: 'bp-leg-k', text: o.letter }),
-            h('span', { class: 'bp-leg-t', text: o.text })
-          ])))
+        h('div', { class: 'bp-stem', text: current.stem })
       ]),
       h('div', { class: 'bp-side' }, [
         h('div', { style: 'font-size:15px;letter-spacing:1px' }, '❤️'.repeat(Math.max(0, lives)) + '🖤'.repeat(Math.max(0, tier.lives - lives))),
@@ -11552,6 +11579,20 @@ async function runBalloonPop(questions) {
       ])
     ]);
     host.appendChild(hud);
+    // A balloon can carry a letter and, if short, a tag — never a sentence. So
+    // the letters need somewhere authoritative to resolve to. On a wide screen
+    // that lives beside the play area, using horizontal room that was empty
+    // anyway rather than the vertical room the balloons need; on a phone there
+    // is no such room, so it sits under the question instead.
+    const aside = h('div', { class: 'bp-aside' + (round === 0 ? ' fly' : '') }, [
+      h('div', { class: 'eyebrow', style: 'margin-bottom:5px', text: 'The options' }),
+      h('div', { class: 'bp-legend' }, current.options.map(o =>
+        h('div', { class: 'bp-leg' }, [
+          h('span', { class: 'bp-leg-k', text: o.letter }),
+          h('span', { class: 'bp-leg-t', text: o.text })
+        ])))
+    ]);
+    host.appendChild(aside);
     host.appendChild(h('div', { class: 'bp-field', id: 'bp-field' }));
     host.appendChild(h('div', { class: 'bp-launcher', id: 'bp-launcher' }, [
       h('div', { class: 'bp-barrel', id: 'bp-barrel' }), h('div', { class: 'bp-hub' }), h('div', { class: 'bp-base' })
