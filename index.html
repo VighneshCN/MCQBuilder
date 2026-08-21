@@ -1342,6 +1342,7 @@ const Settings = {
     // is the point of sitting a mock rather than a practice set; always
     // skippable from its first frame, and switchable off here entirely.
     mockSimulation: true,
+    audioMuted: false,
     candidateName: '',
     srIntervals: { wrong: 1, guessed: 1, lowConf: 3, medConf: 7, highConf: 14, unknown: 3, ladder: [14, 30, 60, 90] },
     weakMinSample: 5,
@@ -11895,9 +11896,158 @@ const NEAR_SILENT = 0.0001;
    graph. */
 let SHARED_AC = null;
 
+/* ============================================================================
+   SAWAAL (सवाल) — the score
+   ==========================================================================
+
+   What was here before was not music. Two sawtooth drones a fraction of a
+   percent apart, fed through a lowpass with Q=12, pulsed by a setInterval.
+   Three separate faults, and the user's description of the result — "like
+   some radio malfunctioning" — was exact:
+
+   1. Web Audio's `Q` on a lowpass is a resonance value in DECIBELS, not a
+      linear Q. Q=12 is therefore a +12.07 dB peak (measured against the W3C
+      coefficient formulas, not assumed), and sweeping a +12 dB resonance
+      across a sawtooth's harmonics is precisely the sound of a detuned radio.
+      Every filter here is Q = -3.0103, which measures +0.00 dB: monotonic,
+      so it cannot ring by construction rather than by luck.
+   2. Two oscillators 0.4-1.4% apart at 55 Hz beat continuously and never
+      resolve. There is not one detuned unison anywhere in this bed. Width
+      comes from octave doubling, which cannot beat, and from StereoPanner.
+      The drone is in JUST intonation — exact 3:2 and 2:1 — so its pairwise
+      beat rate is 0.000 Hz by arithmetic.
+   3. Rhythm on setInterval inherits the JS timer's jitter plus whatever the
+      main thread is doing. Here a 25 ms timer only decides WHEN TO DECIDE;
+      every note is committed to an absolute AudioContext time 120 ms ahead.
+
+   And there was no music: no key, no metre, no progression, no melody. This
+   is a Rupak-taal bed in Bhairavi (Sa = D). Rupak is a seven-beat cycle whose
+   sam is khali — the downbeat carries no bass stroke — so it never quite
+   settles, which is the state a contestant is in. At rung 11 one element of
+   the scale array changes, komal ni C to shuddh Ni C#, and Bhairavi becomes
+   Dhenuka: an augmented second appears, the floating Adim hardens into a real
+   A7, and the bass's approach note flips from a descending sigh to a rising
+   leading tone. Rung 15 is not rung 1 played louder; it is a different raga.
+
+   I cannot hear any of this. Everything asserted above was measured offline
+   instead — filter peak gain, beat rates, envelope event ordering, node
+   counts, and how much of each layer survives a phone speaker. */
+
+const NEAR_SILENT_A = 0.0001;
+
+/* The drone in just intonation. Exact ratios cannot beat. */
+const KBC_SA = 73.416;
+const KBC_DRONE = [
+  { f: KBC_SA,         g: 1.00 },   //  73.416  Sa kharaj
+  { f: KBC_SA * 3 / 2, g: 0.62 },   // 110.124  Pa        exact 3:2
+  { f: KBC_SA * 2,     g: 0.55 },   // 146.832  Sa madhya exact 2:1
+  { f: KBC_SA * 4,     g: 0.30 }    // 293.664  Sa tar    — carries the drone onto a phone
+];
+/* Jawari: the buzzing bridge of a tanpura. Partials 4-20 of a 73 Hz string
+   land at 294-1468 Hz, so the ear reconstructs a fundamental the speaker
+   never reproduces. This is why rung 1 is audible on a phone at all. */
+const KBC_JAWARI = [0,
+  1.00, 0.68, 0.50, 0.44, 0.40, 0.36, 0.31, 0.27, 0.23, 0.20, 0.17, 0.145,
+  0.12, 0.10, 0.085, 0.070, 0.058, 0.047, 0.038, 0.030, 0.024, 0.018, 0.013, 0.009];
+
+/* Rupak theka, 7 matras at 2 slots each. Matra 1 is khali: no bayan on sam. */
+const KBC_THEKA = {
+  0:  [440.00, false], 2:  [440.00, false], 4:  [587.33, false],
+  6:  [440.00, true ], 8:  [587.33, false], 10: [440.00, true ], 12: [587.33, false]
+};
+const KBC_THEKA_SPARSE = [0, 6, 10];
+const KBC_TI_FILL = [3, 7, 11, 13];
+const KBC_MANJIRA = [0, 6, 10];
+
+const KBC_CHORDS = ['Dm', 'Cm', 'Bbmaj', 'Gm', 'Dm', 'Bbmaj', 'Adim', 'Ebmaj'];
+const KBC_BASS = {
+  Dm:    { root: 73.42, fifth: 110.00, oct: 146.83 },
+  Cm:    { root: 65.41, fifth:  98.00, oct: 130.81 },
+  Bbmaj: { root: 58.27, fifth:  87.31, oct: 116.54 },
+  Gm:    { root: 98.00, fifth: 146.83, oct: 196.00 },
+  Adim:  { root: 55.00, fifth:  77.78, oct: 110.00 },
+  A7:    { root: 55.00, fifth:  98.00, oct: 110.00 }   // b7, not the 5th: E is outside the raga
+};
+KBC_BASS.Ebmaj = { root: 77.78, fifth: 116.54, oct: 155.56 };
+const KBC_BASS_D1 = [[0,'root',1.0],[6,'root',1.0],[10,'fifth',1.0],[12,'appr',1.0]];
+const KBC_BASS_D2 = [[0,'root',1.0],[3,'root',0.5],[4,'fifth',1.0],[6,'root',1.0],[10,'fifth',1.0],[12,'appr',1.0]];
+const KBC_BASS_D3 = [[0,'root',0.75],[3,'root',0.5],[4,'fifth',1.0],[6,'root',1.0],[8,'oct',0.5],[10,'fifth',1.0],[12,'appr',1.0]];
+/* The approach note at matra 7 leads into the NEXT avartan's root, indexed by
+   avartan so it can never land an octave out. At high stakes Eb2 (a falling
+   semitone, the Phrygian sigh) becomes C#2 (a rising leading tone) — the same
+   slot, the opposite gravity. */
+const KBC_APPROACH      = [73.42, 65.41, 110.00, 77.78, 65.41, 58.27, 87.31, 77.78];
+const KBC_APPROACH_HIGH = [73.42, 65.41, 110.00, 69.30, 65.41, 58.27, 87.31, 69.30];
+
+/* Three voices, all between 261 and 466 Hz, so the harmony lives in the
+   phone's band by construction. No voice moves more than three semitones. */
+const KBC_PAD = [
+  [293.66, 349.23, 440.00], [261.63, 311.13, 392.00], [293.66, 349.23, 466.16],
+  [293.66, 392.00, 466.16], [293.66, 349.23, 440.00], [293.66, 349.23, 466.16],
+  [261.63, 311.13, 440.00], [311.13, 392.00, 466.16]
+];
+const KBC_PAD_AV7_HIGH = [277.18, 392.00, 440.00];   // A7 = A C# G. No fifth: E is not in the scale.
+
+/* Sawaal — the question. Sa, (re), Sa, ni, dha, Pa: it descends to the fifth
+   and stops, which in Bhairavi is an open question. */
+const KBC_SAWAAL = [
+  [4, 587.33, 0.5, { grace: 622.25 }],
+  [6, 587.33, 1.0, { gamak: true }],
+  [8, 523.25, 0.5, { hiSwap: 554.37 }],
+  [9, 466.16, 0.5, null],
+  [10, 440.00, 1.5, { meendFrom: 466.16 }]
+];
+/* Jawaab — the answer, over A7. A Phrygian-dominant descent that happens to
+   be the raga's own scale. */
+const KBC_JAWAAB = [
+  [0, 587.33, 1.0], [2, 554.37, 1.0], [4, 466.16, 1.0], [6, 440.00, 1.0],
+  [8, 392.00, 1.0], [10, 349.23, 1.0], [12, 311.13, 1.0], [14, 293.66, 1.5]
+];
+/* Tihai: a three-note cell stated three times, the third landing exactly on
+   sam. Offsets are from the start of avartan 8, so the final note falls on
+   slot 14 — the next loop's downbeat — and the seam becomes an arrival
+   rather than a repeat. */
+const KBC_TIHAI_OFF = [4, 5, 6, 8, 9, 10, 12, 13, 14];
+const KBC_TIHAI_CELL = [440.00, 466.16, 587.33];
+
+/** The one envelope function. Its SHAPE is the guarantee, not its numbers:
+    the release lives outside `dur` and A and D are clamped to fit, so the
+    emitted automation events are strictly increasing for any inputs at all.
+    Scheduling a release inside `dur` is what puts a step on every short note
+    — the gain falls to silence, ramps back up to sustain, and is then cut. */
+function kbcEnv(g, t0, dur, A, D, S, R, peak) {
+  A = Math.min(A, dur * 0.5);
+  D = Math.min(D, Math.max(0.002, dur - A));
+  const pk = Math.max(peak, NEAR_SILENT_A);
+  const sus = S > 0 ? Math.max(peak * S, NEAR_SILENT_A) : NEAR_SILENT_A;
+  g.gain.setValueAtTime(NEAR_SILENT_A, t0);
+  g.gain.exponentialRampToValueAtTime(pk, t0 + A);
+  g.gain.exponentialRampToValueAtTime(sus, t0 + A + D);
+  if (S > 0) {
+    g.gain.setValueAtTime(sus, t0 + dur);
+    g.gain.exponentialRampToValueAtTime(NEAR_SILENT_A, t0 + dur + R);
+    return t0 + dur + R;
+  }
+  return t0 + A + D;
+}
+
+/** cancelAndHoldAtTime, never cancelScheduledValues + setValueAtTime(.value).
+    In a lookahead scheduler `t` is in the future but `.value` is the value
+    now, so writing it at a future time creates exactly the step the idiom is
+    supposed to prevent. */
+function kbcHold(p, t, target, dur) {
+  if (p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(t);
+  else { p.cancelScheduledValues(t); p.setValueAtTime(Math.max(p.value, NEAR_SILENT_A), t); }
+  p.exponentialRampToValueAtTime(Math.max(target, NEAR_SILENT_A), t + dur);
+}
+
+const kbcBpm = (rung) => 112 + 2 * rung;
+const kbcTilt = (rung) => 1200 + (rung / 14) * 1400;
+
+
 function GameAudio() {
-  let ctx = null, master = null, muted = false;
-  let bed = null;          // the sustained tension layer, if any
+  let ctx = null, master = null;
+  let muted = !!Settings.get('audioMuted');
   const timers = [];
 
   function ensure() {
@@ -11933,54 +12083,463 @@ function GameAudio() {
     freqs.forEach((f, i) => note(f, dur, type, vol, i * (stagger || 0)));
   }
 
-  /** The tension bed. `level` 0..1 walks it from a calm low drone up to a
-      close, detuned, faster pulse — so rung 14 sounds materially different
-      from rung 1 without swapping to a different piece of music. */
-  function startBed(level) {
+  /* ── the score's engine ───────────────────────────────────────────────
+     Built once per game and then only ramped. draw() calls bed() once per
+     question AND again 1.9s after every correct reveal, so bed() runs 15-30
+     times a game: it must be idempotent, or the drone re-does its 2.4s
+     fade-in every question and the schedulers stack up. */
+  let engine = null, running = false, schedId = null, suspended = false;
+  let cycleOrigin = 0, slotInCycle = 0, cycleIx = 0;
+  let stepDur = 60 / 112 / 2, rung = 0, pendingRung = 0;
+  let padVoices = [], ratchet = null, lookahead = 0.120;
+  const SLOTS_CYCLE = 14, CYCLES = 8;
+
+  const slotTime = () => cycleOrigin + slotInCycle * stepDur;
+  const chordAt = (cy) => (cy === 6 && rung >= 10) ? 'A7' : KBC_CHORDS[cy];
+
+  /** Stop and disconnect on the audio thread's own onended, never on a
+      setTimeout — a throttled tab must not be able to leak a voice. */
+  function reap(osc, nodes, tEnd) {
+    osc.stop(tEnd + 0.04);
+    osc.onended = () => { nodes.forEach(n => { try { n.disconnect(); } catch (e) {} }); };
+  }
+  function mkGain(v) { const g = ctx.createGain(); g.gain.value = v; return g; }
+  function mkFilt(type, freq, q) {
+    const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq;
+    f.Q.value = (q === undefined ? -3.0103 : q); return f;
+  }
+  /* A drum on a small speaker is made of noise, not of low partials. A pure
+     sine at 62-92 Hz measures -29 dB through a phone model; the same stroke
+     with this burst measures -13.8 dB. */
+  function malletNoise(t, vol, dest) {
+    const n = Math.floor(ctx.sampleRate * 0.022);
+    const buf = ctx.createBuffer(1, n, ctx.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+    const src = ctx.createBufferSource(); src.buffer = buf;
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2000; bp.Q.value = 0.9;
+    const g = mkGain(NEAR_SILENT_A);
+    src.connect(bp); bp.connect(g); g.connect(dest);
+    kbcEnv(g, t, 0.022, 0.001, 0.022, 0, 0, vol);
+    src.start(t); src.stop(t + 0.06);
+    src.onended = () => { try { src.disconnect(); bp.disconnect(); g.disconnect(); } catch (e) {} };
+  }
+
+  function buildEngine() {
+    const c = ensure(); if (!c || engine) return;
+    const bedGain = mkGain(NEAR_SILENT_A);
+    const droneGain = mkGain(NEAR_SILENT_A);
+    const droneHP = mkFilt('highpass', 60);
+    const droneLP = mkFilt('lowpass', 1200);
+    const tablaBus = mkGain(NEAR_SILENT_A);
+    const bassBus = mkGain(NEAR_SILENT_A), bassLP = mkFilt('lowpass', 900), bassHP = mkFilt('highpass', 45);
+    const padBus = mkGain(NEAR_SILENT_A), padLP = mkFilt('lowpass', 1200);
+    const leadBus = mkGain(NEAR_SILENT_A), leadLP = mkFilt('lowpass', 1200);
+    droneGain.connect(droneHP); droneHP.connect(droneLP); droneLP.connect(bedGain);
+    tablaBus.connect(bedGain);
+    bassBus.connect(bassHP); bassHP.connect(bassLP); bassLP.connect(bedGain);
+    padBus.connect(padLP); padLP.connect(bedGain);
+    leadBus.connect(leadLP); leadLP.connect(bedGain);
+    bedGain.connect(master);
+
+    const wave = ctx.createPeriodicWave(new Float32Array(KBC_JAWARI.length), new Float32Array(KBC_JAWARI));
+    const drone = KBC_DRONE.map(d => {
+      const o = ctx.createOscillator(); o.setPeriodicWave(wave); o.frequency.value = d.f;
+      const g = mkGain(d.g * 0.30);
+      o.connect(g); g.connect(droneGain); o.start();
+      return { osc: o, gain: g, base: d.f };
+    });
+    // An 11-second breath rather than a beat: the one legitimate way to give
+    // a drone life without detuning it.
+    const lfo = ctx.createOscillator(); lfo.frequency.value = 0.09;
+    const lfoG = mkGain(0.016); lfo.connect(lfoG); lfoG.connect(droneGain.gain); lfo.start();
+    // The sarangi's gamak is an ornament with a stated rate, not a mistuning.
+    const gamak = ctx.createOscillator(); gamak.frequency.value = 4.8;
+    const gamakG = mkGain(18); gamak.connect(gamakG); gamak.start();
+
+    engine = { bedGain, droneGain, droneHP, droneLP, tablaBus, bassBus, bassLP, padBus, padLP,
+               leadBus, leadLP, drone, lfo, lfoG, gamak, gamakG };
+    const t = ctx.currentTime;
+    kbcHold(bedGain.gain, t, 0.62, 2.0);
+    kbcHold(droneGain.gain, t, 0.30, 2.4);
+    [tablaBus, bassBus, padBus, leadBus].forEach(b => kbcHold(b.gain, t, 1, 1.2));
+  }
+
+  // ---- emitters. Every one takes an ABSOLUTE time. --------------------
+  function bayan(t, vol) {
+    if (!engine) return;
+    const lp = mkFilt('lowpass', 400), g = mkGain(NEAR_SILENT_A);
+    lp.connect(g); g.connect(engine.tablaBus);
+    const o1 = ctx.createOscillator(); o1.type = 'sine';
+    o1.frequency.setValueAtTime(92, t);                       // anchor first, or a fresh
+    o1.frequency.exponentialRampToValueAtTime(62, t + 0.18);  // oscillator whoops from 440
+    const o2 = ctx.createOscillator(); o2.type = 'triangle'; o2.frequency.value = 320;
+    const g2 = mkGain(0.35);
+    const o3 = ctx.createOscillator(); o3.type = 'sine'; o3.frequency.value = 900;
+    const g3 = mkGain(0.22);
+    o1.connect(lp); o2.connect(g2); g2.connect(lp); o3.connect(g3); g3.connect(lp);
+    const tEnd = kbcEnv(g, t, 0.28, 0.006, 0.28, 0, 0, vol || 0.115);
+    [o1, o2, o3].forEach(o => o.start(t));
+    o2.stop(t + 0.05); o3.stop(t + 0.012);
+    reap(o1, [o1, o2, o3, g2, g3, lp, g], tEnd);
+    malletNoise(t, 0.050, engine.tablaBus);
+  }
+  function dayan(freq, t, vol) {
+    if (!engine) return;
+    const g = mkGain(NEAR_SILENT_A); g.connect(engine.tablaBus);
+    const o1 = ctx.createOscillator(); o1.type = 'sine'; o1.frequency.value = freq;
+    const o2 = ctx.createOscillator(); o2.type = 'sine'; o2.frequency.value = freq * 2.74;
+    const g2 = mkGain(0.12);
+    o1.connect(g); o2.connect(g2); g2.connect(g);
+    const tEnd = kbcEnv(g, t, 0.15, 0.004, 0.15, 0, 0, vol || 0.090);
+    o1.start(t); o2.start(t); o2.stop(tEnd + 0.04);
+    reap(o1, [o1, o2, g2, g], tEnd);
+    malletNoise(t, 0.040, engine.tablaBus);   // straight to the bus: a 2 kHz
+  }                                            // transient through a 587 Hz filter has no attack
+  function ping(freq, t, dur, peak, type, dest, decay) {
+    if (!engine) return;
+    const g = mkGain(NEAR_SILENT_A); g.connect(dest || engine.tablaBus);
+    const o = ctx.createOscillator(); o.type = type || 'triangle'; o.frequency.value = freq;
+    o.connect(g);
+    const tEnd = kbcEnv(g, t, dur, 0.003, decay || dur, 0, 0, peak);
+    o.start(t); reap(o, [o, g], tEnd);
+  }
+  const ti = (t) => ping(1400, t, 0.04, 0.028, 'triangle');
+  function manjira(t) {
+    if (!engine) return;
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 3600; bp.Q.value = 0.9;
+    const g = mkGain(NEAR_SILENT_A); bp.connect(g); g.connect(engine.tablaBus);
+    const o1 = ctx.createOscillator(); o1.type = 'triangle'; o1.frequency.value = 3140;
+    const o2 = ctx.createOscillator(); o2.type = 'triangle'; o2.frequency.value = 4710;  // exact 3:2
+    o1.connect(bp); o2.connect(bp);
+    const tEnd = kbcEnv(g, t, 0.11, 0.002, 0.11, 0, 0, 0.018);
+    o1.start(t); o2.start(t); o2.stop(tEnd + 0.04);
+    reap(o1, [o1, o2, bp, g], tEnd);
+  }
+  function bassNote(cy, degree, durM, t, hi) {
+    if (!engine) return;
+    const f = degree === 'appr'
+      ? (hi ? KBC_APPROACH_HIGH : KBC_APPROACH)[cy]
+      : KBC_BASS[chordAt(cy)][degree];
+    const g = mkGain(NEAR_SILENT_A); g.connect(engine.bassBus);
+    // Sawtooth for the octave doubler, not triangle: a triangle's partials
+    // fall as 1/n^2, so its first partial above 400 Hz is already ~19 dB down
+    // and the doubling contributes nothing on a phone.
+    const o1 = ctx.createOscillator(); o1.type = 'sawtooth'; o1.frequency.value = f;
+    const o2 = ctx.createOscillator(); o2.type = 'sawtooth'; o2.frequency.value = f * 2;
+    const g2 = mkGain(0.45);
+    o1.connect(g); o2.connect(g2); g2.connect(g);
+    const tEnd = kbcEnv(g, t, durM * stepDur * 2, 0.014, 0.100, 0.45, 0.130, 0.150);
+    o1.start(t); o2.start(t); o2.stop(tEnd + 0.04);
+    reap(o1, [o1, o2, g2, g], tEnd);
+  }
+  function lead(spec, t, hi) {
+    if (!engine) return;
+    const orn = spec[3] || {};
+    let f = spec[1];
+    if (hi && orn.hiSwap) f = orn.hiSwap;
+    const g = mkGain(NEAR_SILENT_A); g.connect(engine.leadBus);
+    const o = ctx.createOscillator(); o.type = 'sawtooth';
+    if (orn.meendFrom) { o.frequency.setValueAtTime(orn.meendFrom, t); o.frequency.exponentialRampToValueAtTime(f, t + 0.09); }
+    else if (orn.grace) { o.frequency.setValueAtTime(orn.grace, t); o.frequency.setValueAtTime(f, t + 0.04); }
+    else o.frequency.setValueAtTime(f, t);
+    o.connect(g);
+    if (orn.gamak) engine.gamakG.connect(o.detune);
+    const dur = spec[2] * stepDur * 2;
+    const tEnd = kbcEnv(g, t, dur, 0.055, 0.150, 0.70, 0.220, 0.080);
+    o.start(t);
+    o.stop(tEnd + 0.04);
+    o.onended = () => {
+      // The LFO fans out into transient oscillators' detune params; leaving it
+      // connected retains every stopped node for the life of the context.
+      if (orn.gamak) { try { engine.gamakG.disconnect(o.detune); } catch (e) {} }
+      try { o.disconnect(); g.disconnect(); } catch (e) {}
+    };
+  }
+  function scheduleTihai(t) {
+    KBC_TIHAI_OFF.forEach((off, i) => {
+      const f = KBC_TIHAI_CELL[i % 3];
+      const g = mkGain(NEAR_SILENT_A); g.connect(engine.leadBus);
+      const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
+      o.connect(g);
+      const tt = t + off * stepDur;
+      const tEnd = kbcEnv(g, tt, stepDur * 0.9, 0.010, 0.090, 0.35, 0.120, 0.095);
+      o.start(tt); reap(o, [o, g], tEnd);
+    });
+  }
+  /* The pad crossfades, it never glides. Gliding between voicings produces
+     pitch swoops of up to eight semitones, including one across the very seam
+     the arrangement exists to hide. */
+  function padChord(cy, t) {
+    if (!engine) return;
+    const v = (cy === 6 && rung >= 10) ? KBC_PAD_AV7_HIGH : KBC_PAD[cy];
+    const old = padVoices;
+    padVoices = v.map((f, i) => {
+      const g = mkGain(NEAR_SILENT_A);
+      const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+      if (pan) { pan.pan.value = [-0.45, 0, 0.45][i]; g.connect(pan); pan.connect(engine.padBus); }
+      else g.connect(engine.padBus);
+      const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
+      o.connect(g); o.start(t);
+      kbcHold(g.gain, t, 0.042, 0.85);
+      return { osc: o, gain: g, pan: pan };
+    });
+    old.forEach(pv => {
+      kbcHold(pv.gain.gain, t + 0.06, NEAR_SILENT_A, 1.10);
+      pv.osc.stop(t + 1.25);
+      pv.osc.onended = () => { try { pv.osc.disconnect(); pv.gain.disconnect(); if (pv.pan) pv.pan.disconnect(); } catch (e) {} };
+    });
+  }
+
+  function scheduleSlot(cy, s, t) {
+    if (muted) return;
+    const hi = rung >= 10;
+    const th = KBC_THEKA[s];
+    if (th && (rung >= 2 || KBC_THEKA_SPARSE.indexOf(s) >= 0)) {
+      if (th[1]) bayan(t);
+      dayan(th[0], t);
+    }
+    if (rung >= 10 && KBC_TI_FILL.indexOf(s) >= 0) ti(t);
+    if (rung >= 14 && KBC_MANJIRA.indexOf(s) >= 0) manjira(t);
+    if (rung >= 4) {
+      const tbl = rung >= 14 ? KBC_BASS_D3 : rung >= 11 ? KBC_BASS_D2 : KBC_BASS_D1;
+      tbl.forEach(n => { if (n[0] === s) bassNote(cy, n[1], n[2], t, hi); });
+    }
+    if (rung >= 8 && (cy === 0 || cy === 4)) KBC_SAWAAL.forEach(n => { if (n[0] === s) lead(n, t, hi); });
+    if (rung >= 12 && cy === 6) KBC_JAWAAB.forEach(n => { if (n[0] === s) lead(n, t, hi); });
+    if (rung >= 14 && cy === 7 && s === 0) scheduleTihai(t);
+  }
+
+  function applyPendingStakes(t) {
+    if (pendingRung === rung) return;
+    rung = pendingRung;
+    stepDur = 60 / kbcBpm(rung) / 2;
+    kbcHold(engine.padLP.frequency, t, kbcTilt(rung), 1.2);
+    kbcHold(engine.leadLP.frequency, t, kbcTilt(rung), 1.2);
+    kbcHold(engine.droneLP.frequency, t, kbcTilt(rung), 1.2);
+  }
+
+  function tick() {
+    if (!running || !ctx || !engine) return;
+    // ensure() resumes asynchronously; seeding while the context is still
+    // suspended anchors the clock at 0 and trips the resync guard the instant
+    // it starts running.
+    if (ctx.state !== 'running') return;
+    if (!cycleOrigin) { cycleOrigin = ctx.currentTime + 0.12; padChord(0, cycleOrigin); }
+    const now = ctx.currentTime;
+    // A hidden tab throttles setInterval to >= 1s, which starves a 120ms
+    // window. Widen it rather than resyncing every wake, and snap to a CYCLE
+    // boundary so the harmony stays coherent.
+    if (slotTime() < now - 0.05) {
+      const missed = Math.ceil((now + 0.06 - slotTime()) / stepDur);
+      const raw = slotInCycle + missed;
+      cycleIx = (cycleIx + Math.floor(raw / SLOTS_CYCLE)) % CYCLES;
+      slotInCycle = raw % SLOTS_CYCLE;
+      cycleOrigin = now + 0.06 - slotInCycle * stepDur;
+      padChord(cycleIx, now + 0.06);
+    }
+    while (slotTime() < now + lookahead) {
+      const t = Math.max(slotTime(), now + 0.005);
+      if (!suspended) scheduleSlot(cycleIx, slotInCycle, t);
+      if (++slotInCycle >= SLOTS_CYCLE) {
+        cycleOrigin += SLOTS_CYCLE * stepDur;
+        slotInCycle = 0;
+        cycleIx = (cycleIx + 1) % CYCLES;
+        // Stakes BEFORE chord. The other order voices the pad in the old key
+        // and then changes the key, leaving the harmony a step wrong for a
+        // whole avartan at the most exposed moment in the piece.
+        applyPendingStakes(slotTime());
+        if (!suspended) padChord(cycleIx, slotTime());
+      }
+    }
+  }
+
+  function startSequencer() {
+    if (running) return;
+    running = true;
+    schedId = setInterval(tick, 25);
+    timers.push(schedId);
+  }
+  function stopSequencer() {
+    running = false;
+    if (schedId) { clearInterval(schedId); const i = timers.indexOf(schedId); if (i >= 0) timers.splice(i, 1); schedId = null; }
+  }
+
+  function startBed(r) {
     const c = ensure(); if (!c) return;
-    stopBed();
-    const lv = clamp(level == null ? 0.3 : level, 0, 1);
-    const g = c.createGain();
-    g.gain.setValueAtTime(NEAR_SILENT, c.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.05 + lv * 0.06, c.currentTime + 1.2);
-    g.connect(master);
+    pendingRung = clamp(Math.round(r || 0), 0, 14);
+    if (!engine) {
+      buildEngine();
+      rung = pendingRung;
+      stepDur = 60 / kbcBpm(rung) / 2;
+      if (engine) {
+        const t = c.currentTime;
+        [engine.padLP, engine.leadLP, engine.droneLP].forEach(f => kbcHold(f.frequency, t, kbcTilt(rung), 1.5));
+      }
+      startSequencer();
+    }
+  }
 
-    const lowF = 55 + lv * 18;
-    const low = c.createOscillator(); low.type = 'sawtooth'; low.frequency.value = lowF;
-    const lp = c.createBiquadFilter(); lp.type = 'lowpass';
-    lp.frequency.value = 180 + lv * 520; lp.Q.value = 6 + lv * 6;
-    low.connect(lp); lp.connect(g); low.start();
+  /** The instant an answer is locked. Built by SUBTRACTION: six sounding
+      voices, fewer than normal play. Tension rises as density falls. */
+  function suspenseCue(wait) {
+    if (!engine || muted) return;
+    suspended = true;
+    const t = ctx.currentTime;
+    [engine.bassBus, engine.leadBus, engine.tablaBus].forEach(b => kbcHold(b.gain, t, NEAR_SILENT_A, 0.30));
+    kbcHold(engine.padBus.gain, t, 0.45, 0.30);
+    kbcHold(engine.droneLP.frequency, t, 3200, 1.2);   // closer and brighter, not louder
+    // Every stroke of the accelerando pre-scheduled in one pass at absolute
+    // times, so no timer is involved and jitter is structurally impossible.
+    let tt = t, gap = 0.62, v = 0.055, i = 0;
+    while (tt - t < wait - 0.16 && i < 16) {
+      if (i & 1) dayan(440.00, tt, v); else bayan(tt, v);
+      tt += gap; gap = Math.max(0.11, gap * 0.86); v = Math.min(0.145, v + 0.011); i++;
+    }
+    // The ratchet: Pa gliding up a semitone to komal dha across the whole
+    // window. Both endpoints above 400 Hz, so a phone hears all of it.
+    const rg = mkGain(NEAR_SILENT_A); rg.connect(engine.leadBus);
+    const ro = ctx.createOscillator(); ro.type = 'sawtooth';
+    ro.frequency.setValueAtTime(440.00, t);
+    ro.frequency.exponentialRampToValueAtTime(466.16, t + wait);
+    ro.connect(rg); ro.start(t);
+    kbcHold(engine.leadBus.gain, t + 0.30, 1, 0.2);
+    kbcHold(rg.gain, t, 0.045, 0.70);
+    ratchet = { osc: ro, gain: rg };
+    // The cluster: Sa against komal re. d/ERB = 0.39 — squarely in the
+    // sensory-roughness zone, and entirely above 400 Hz.
+    const cl = [587.33, 622.25].concat(rung >= 10 ? [554.37] : []);
+    cl.forEach(f => {
+      const g = mkGain(NEAR_SILENT_A); g.connect(engine.padBus);
+      const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
+      o.connect(g); o.start(t);
+      kbcHold(g.gain, t, 0.038, 1.30);
+      kbcHold(g.gain, t + wait, NEAR_SILENT_A, 0.60);
+      o.stop(t + wait + 0.8);
+      o.onended = () => { try { o.disconnect(); g.disconnect(); } catch (e) {} };
+    });
+  }
 
-    // A second oscillator a few cents off produces the slow beating that
-    // reads as unease; the detune widens with the stakes.
-    const beat = c.createOscillator(); beat.type = 'sawtooth';
-    beat.frequency.value = lowF * (1 + 0.004 + lv * 0.010);
-    const bg = c.createGain(); bg.gain.value = 0.5;
-    beat.connect(bg); bg.connect(lp); beat.start();
+  function killRatchet(t, slideTo) {
+    if (!ratchet) return;
+    const r = ratchet; ratchet = null;
+    if (slideTo) { r.osc.frequency.cancelScheduledValues(t); r.osc.frequency.setValueAtTime(r.osc.frequency.value, t); r.osc.frequency.exponentialRampToValueAtTime(slideTo, t + 0.18); }
+    kbcHold(r.gain.gain, t + (slideTo ? 0.18 : 0), NEAR_SILENT_A, 0.35);
+    r.osc.stop(t + 0.8);
+    r.osc.onended = () => { try { r.osc.disconnect(); r.gain.disconnect(); } catch (e) {} };
+  }
 
-    // A pulse whose rate climbs with the level — the heartbeat of the format.
-    const period = 1.5 - lv * 0.85;
-    const pulse = setInterval(() => {
-      if (muted) return;
-      note(lowF * 2, 0.16, 'sine', 0.05 + lv * 0.05);
-    }, period * 1000);
-    timers.push(pulse);
+  function restore(t) {
+    suspended = false;
+    if (!engine) return;
+    [engine.bassBus, engine.leadBus, engine.tablaBus].forEach(b => kbcHold(b.gain, t, 1, 0.40));
+    kbcHold(engine.padBus.gain, t, 1, 0.40);
+    kbcHold(engine.droneLP.frequency, t, kbcTilt(rung), 0.8);
+    cycleOrigin = 0; slotInCycle = 0; cycleIx = 0;   // resume on a fresh sam
+  }
 
-    bed = { g: g, nodes: [low, beat], pulse: pulse };
+  function resolveCue(kind, r) {
+    if (!engine || muted) return;
+    const t = ctx.currentTime;
+    if (kind === 'right') {
+      killRatchet(t, 440.00);              // the sigh completes: Bb falls back to A
+      restore(t + 0.30);
+      // A bare, just-intoned D: exact 3:2 and 2:1, and no third. An open fifth
+      // is the sound of something locking into place; F# is outside the raga.
+      [293.664, 440.496, 587.328].forEach(f => {
+        const g = mkGain(NEAR_SILENT_A); g.connect(engine.padBus);
+        const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
+        o.connect(g); o.start(t);
+        kbcHold(g.gain, t, 0.040, 0.20);
+        kbcHold(g.gain, t + 1.1, NEAR_SILENT_A, 0.7);
+        o.stop(t + 2.1);
+        o.onended = () => { try { o.disconnect(); g.disconnect(); } catch (e) {} };
+      });
+      // the reward is the score's own material, not an imported beep
+      let tt = t + 0.05, gaps = [0.09, 0.045, 0];
+      for (let s = 0; s < 3; s++) {
+        for (let i = 0; i < 3; i++) { ping(KBC_TIHAI_CELL[i], tt, 0.16, 0.085, 'sawtooth', engine.leadBus, 0.14); tt += 0.16; }
+        tt += gaps[s];
+      }
+      bayan(t, 0.13); dayan(587.33, t, 0.10);
+      bayan(t + 0.10, 0.11); dayan(440.00, t + 0.10, 0.09);
+      if (KBC_SAFE.indexOf(r) >= 0) {
+        [587.33, 880.99].forEach(f => ping(f, t + 0.25, 1.6, 0.045, 'sawtooth', engine.padBus, 1.5));
+      }
+      return;
+    }
+    // WRONG. The flat second finally wins: all game the Eb has leaned on the
+    // tonic from a semitone above, and now it lands on it.
+    killRatchet(t, null);
+    suspended = true;
+    [engine.bassBus, engine.leadBus, engine.padBus].forEach(b => kbcHold(b.gain, t, NEAR_SILENT_A, 0.12));
+    kbcHold(engine.tablaBus.gain, t, 1, 0.05);
+    // THE DRONE LOSES ITS Sa: the ground the whole piece stood on gives way.
+    // Costs zero new nodes, and the 520 Hz floor keeps it audible on a phone.
+    engine.drone.forEach(d => {
+      d.osc.frequency.cancelScheduledValues(t);
+      d.osc.frequency.setValueAtTime(d.base, t);
+      d.osc.frequency.exponentialRampToValueAtTime(d.base * 0.9439, t + 1.10);
+    });
+    kbcHold(engine.droneLP.frequency, t, 520, 1.40);
+    // the clash, voiced in the phone band: D5 against Eb5, d/ERB = 0.39
+    [311.13, 392.00, 466.16, 622.25, 587.33].forEach(f => {
+      const g = mkGain(NEAR_SILENT_A); g.connect(engine.padBus);
+      const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
+      o.connect(g); o.start(t);
+      kbcHold(engine.padBus.gain, t + 0.12, 1, 0.05);
+      kbcHold(g.gain, t, 0.055, 0.02);
+      kbcHold(g.gain, t + 0.92, NEAR_SILENT_A, 1.60);
+      o.stop(t + 2.7);
+      o.onended = () => { try { o.disconnect(); g.disconnect(); } catch (e) {} };
+    });
+    [[96, 72, 0.16], [80, 58, 0.13], [64, 44, 0.10]].forEach((s, i) => {
+      const tt = t + i * 0.34;
+      const lp = mkFilt('lowpass', 400), g = mkGain(NEAR_SILENT_A);
+      lp.connect(g); g.connect(engine.tablaBus);
+      const o = ctx.createOscillator(); o.type = 'sine';
+      o.frequency.setValueAtTime(s[0], tt);
+      o.frequency.exponentialRampToValueAtTime(s[1], tt + 0.26);
+      o.connect(lp);
+      const tEnd = kbcEnv(g, tt, 0.34, 0.006, 0.34, 0, 0, s[2]);
+      o.start(tt); reap(o, [o, lp, g], tEnd);
+      malletNoise(tt, 0.045, engine.tablaBus);
+    });
+    // a descending tail that ends on the flat second and does not resolve
+    [440.00, 392.00, 311.13].forEach((f, i) =>
+      ping(f, t + 0.9 + i * 0.16, 0.55, 0.11, 'sawtooth', engine.leadBus, 0.5));
+    const kill = setTimeout(() => stopBed(), 2600);
+    timers.push(kill);
+  }
+
+  function walkAwayCue() {
+    if (!engine) return;
+    const t = ctx.currentTime;
+    suspended = true;
+    killRatchet(t, null);
+    // The cadence never happens. The player left before the question was
+    // answered, and so does the music.
+    [engine.bassBus, engine.leadBus, engine.padBus, engine.tablaBus]
+      .forEach(b => kbcHold(b.gain, t, NEAR_SILENT_A, 0.90));
+    const kill = setTimeout(() => stopBed(), 1300);
+    timers.push(kill);
   }
 
   function stopBed() {
-    if (!bed || !ctx) return;
-    const b = bed; bed = null;
-    clearInterval(b.pulse);
+    stopSequencer();
+    if (!engine || !ctx) { engine = null; return; }
+    const e = engine; engine = null;
+    padVoices = []; ratchet = null; suspended = false;
+    cycleOrigin = 0; slotInCycle = 0; cycleIx = 0;
     const t = ctx.currentTime;
-    try {
-      b.g.gain.cancelScheduledValues(t);
-      b.g.gain.setValueAtTime(Math.max(b.g.gain.value, NEAR_SILENT), t);
-      b.g.gain.exponentialRampToValueAtTime(NEAR_SILENT, t + 0.35);
-    } catch (e) {}
-    b.nodes.forEach(n => { try { n.stop(t + 0.4); } catch (e) {} });
-    setTimeout(() => { try { b.g.disconnect(); } catch (e) {} }, 600);
+    try { kbcHold(e.bedGain.gain, t, NEAR_SILENT_A, 0.35); } catch (err) {}
+    e.drone.forEach(d => { try { d.osc.stop(t + 0.45); } catch (err) {} });
+    try { e.lfo.stop(t + 0.45); e.gamak.stop(t + 0.45); } catch (err) {}
+    const done = setTimeout(() => {
+      [e.droneGain, e.droneHP, e.droneLP, e.tablaBus, e.bassBus, e.bassLP,
+       e.padBus, e.padLP, e.leadBus, e.leadLP, e.lfoG, e.gamakG, e.bedGain]
+        .forEach(n => { try { n.disconnect(); } catch (err) {} });
+    }, 700);
+    timers.push(done);
   }
 
   const CUES = {
@@ -11998,22 +12557,29 @@ function GameAudio() {
     pop() { note(700, 0.07, 'triangle', 0.13); note(1100, 0.09, 'sine', 0.1, 0.03); },
     tick() { note(1000, 0.03, 'sine', 0.05); },
     lifeline() { note(740, 0.1, 'triangle', 0.09); note(988, 0.12, 'triangle', 0.08, 0.06); },
-    lock() { note(120, 0.9, 'sawtooth', 0.11); note(90, 1.1, 'sine', 0.09, 0.05); }
+    // the dominant root in three octaves: the cue IS the chord it lands on,
+    // and the A4 is what makes it audible on a phone
+    lock() { note(110, 0.9, 'sawtooth', 0.10); note(220, 1.0, 'sine', 0.08, 0.03); note(440, 0.7, 'triangle', 0.05, 0.06); }
   };
 
   return {
     resume() { const c = ensure(); if (c && c.state === 'suspended') c.resume(); },
     sfx(name) { const f = CUES[name]; if (f) { ensure(); f(); } },
     bed: startBed,
+    suspense: suspenseCue,
+    resolve: resolveCue,
+    walkAway: walkAwayCue,
     stopBed: stopBed,
     setMuted(v) {
       muted = !!v;
-      if (master && ctx) {
-        const t = ctx.currentTime;
-        master.gain.cancelScheduledValues(t);
-        master.gain.setValueAtTime(Math.max(master.gain.value, NEAR_SILENT), t);
-        master.gain.exponentialRampToValueAtTime(muted ? NEAR_SILENT : 0.9, t + 0.2);
-      }
+      Settings.set('audioMuted', muted);
+      // Unmuting is a user gesture, which is the only place the autoplay
+      // policy will let a suspended context resume.
+      if (!muted) { const c = ensure(); if (c && c.state === 'suspended') c.resume(); }
+      // The sequencer keeps running while muted — scheduleSlot returns early,
+      // so a muted game creates zero transient voices but keeps its place in
+      // the cycle, and unmuting lands on the beat instead of restarting.
+      if (master && ctx) kbcHold(master.gain, ctx.currentTime, muted ? NEAR_SILENT : 0.9, 0.20);
     },
     isMuted() { return muted; },
     stopAll() {
@@ -12818,8 +13384,17 @@ async function runKBC(questions) {
     if (tickHandle) { clearInterval(tickHandle); tickHandle = null; }
     audio.stopAll();
   }
+  const onKey = (e) => {
+    if (e.key !== 'm' && e.key !== 'M') return;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName || '')) || e.target.isContentEditable) return;
+    audio.setMuted(!audio.isMuted());
+    const b = $('#kbc-mute');
+    if (b) { b.textContent = audio.isMuted() ? '🔇' : '🔊'; b.setAttribute('aria-pressed', String(audio.isMuted())); }
+    toast(audio.isMuted() ? 'Music off' : 'Music on', 'info', 1400);
+  };
+  document.addEventListener('keydown', onKey);
   const guard = setInterval(() => {
-    if (!document.body.contains(host)) { teardown(); clearInterval(guard); }
+    if (!document.body.contains(host)) { teardown(); document.removeEventListener('keydown', onKey); clearInterval(guard); }
   }, 500);
 
   const say = (text, whisper) => {
@@ -12897,6 +13472,16 @@ async function runKBC(questions) {
       h('div', { class: 'kbc-lifelines' }, [
         lifelineBtn('fifty', '50:50'), lifelineBtn('audience', '👥'), lifelineBtn('phone', '📞')
       ]),
+      h('button', {
+        class: 'btn sm ghost', id: 'kbc-mute', title: 'Mute the music (M)',
+        'aria-label': 'Mute the music', 'aria-pressed': String(audio.isMuted()),
+        onclick: (e) => {
+          audio.setMuted(!audio.isMuted());
+          e.currentTarget.textContent = audio.isMuted() ? '🔇' : '🔊';
+          e.currentTarget.setAttribute('aria-pressed', String(audio.isMuted()));
+        },
+        text: audio.isMuted() ? '🔇' : '🔊'
+      }),
       h('button', { class: 'btn sm ghost', onclick: () => { teardown(); go('games'); }, text: 'Quit' })
     ]));
 
@@ -12965,7 +13550,7 @@ async function runKBC(questions) {
     walkAwayBtn();
     // The bed tightens as the ladder does: rung 1 and rung 15 are the same
     // music played at different levels of nerve.
-    audio.bed(0.15 + (rung / (KBC_PRIZES.length - 1)) * 0.85);
+    audio.bed(rung);
     startClock(rung < 5 ? 60 : rung < 10 ? 50 : 45);
   }
 
@@ -13046,8 +13631,8 @@ async function runKBC(questions) {
     bug('LOCKED', 'locked');
     host.classList.add('suspense');
     audio.sfx('lock');
-    audio.bed(1);
     const wait = rung < 5 ? 1600 : rung < 10 ? 2600 : 3600;
+    audio.suspense(wait / 1000);
     if (rung >= 8) setTimeout(() => { if (locked) say('…I could tell you now. Or I could let you sit with it.'); }, wait * 0.45);
     setTimeout(() => reveal(picked), wait);
   }
@@ -13073,7 +13658,7 @@ async function runKBC(questions) {
     // after a loss.
     if (good) setTimeout(() => host.classList.remove('reveal-right'), 1750);
     if (good) {
-      audio.sfx('right');
+      audio.resolve('right', rung);
       say(KBC_RIGHT[Math.floor(Math.random() * KBC_RIGHT.length)]);
       if (KBC_SAFE.indexOf(rung) >= 0) {
         setTimeout(() => audio.sfx('lifeline'), 400);
@@ -13083,9 +13668,10 @@ async function runKBC(questions) {
       rung++;
       setTimeout(() => { if (rung >= ladder.length) return end('won'); draw(); }, 1900);
     } else {
-      audio.sfx('wrong');
-      audio.stopBed();
-      say(KBC_WRONG[Math.floor(Math.random() * KBC_WRONG.length)].replace('{A}', q.correctText));
+      audio.resolve('wrong');
+      // The collapse runs 2.6s and ends in a second of true silence; the host
+      // speaking over it was the loudest thing wrong with the old cue.
+      setTimeout(() => say(KBC_WRONG[Math.floor(Math.random() * KBC_WRONG.length)].replace('{A}', q.correctText)), 2100);
       setTimeout(() => host.classList.add('offair'), 1400);
       setTimeout(() => end('lost'), 3000);
     }
@@ -13096,7 +13682,8 @@ async function runKBC(questions) {
     if (timer) clearInterval(timer);
     bug('HOLD', 'hold');
     host.classList.add('offair');
-    setTimeout(() => end('walk'), 700);
+    audio.walkAway();
+    setTimeout(() => end('walk'), 1400);
   }
 
   function useLifeline(key) {
@@ -14541,6 +15128,110 @@ test('The app never advertises question files it has not confirmed', async () =>
 });
 
 /* ---- eligibility gate ---- */
+/* ---- the score ----
+   I cannot hear this music, so everything that CAN be checked by arithmetic
+   is checked by arithmetic. These are the properties whose failure produced
+   the sound the user rejected. */
+
+test('Every envelope emits strictly increasing automation times', () => {
+  // The defect this exists to catch: scheduling the release INSIDE `dur` when
+  // A+D+R exceeds it. Web Audio sorts automation by time, so the gain falls to
+  // silence, ramps back UP to sustain and is then hard-cut by stop() — a step
+  // on every short note. Clicking, reintroduced through the opposite door from
+  // the one being guarded.
+  const VOICES = [
+    [0.006, 0.280, 0, 0, 0.115], [0.004, 0.150, 0, 0, 0.090],
+    [0.014, 0.100, 0.45, 0.130, 0.150], [0.850, 0.500, 0.72, 1.100, 0.042],
+    [0.055, 0.150, 0.70, 0.220, 0.080], [0.010, 0.090, 0.35, 0.120, 0.095]
+  ];
+  // both tempo extremes: a matra at 112 BPM and at 140 BPM
+  const DURS = [0.0357, 0.107, 0.214, 0.268, 0.428, 0.535, 0.803, 1.607];
+  let combos = 0;
+  VOICES.forEach(v => DURS.forEach(dur => {
+    const events = [];
+    const fake = { gain: {
+      setValueAtTime: (val, t) => events.push([t, val]),
+      exponentialRampToValueAtTime: (val, t) => events.push([t, val])
+    } };
+    kbcEnv(fake, 10, dur, v[0], v[1], v[2], v[3], v[4]);
+    combos++;
+    for (let i = 1; i < events.length; i++) {
+      assert(events[i][0] >= events[i - 1][0],
+        'event ' + i + ' goes backwards at dur=' + dur + ' (' + events[i - 1][0] + ' -> ' + events[i][0] + ')');
+    }
+    events.forEach(e => assert(e[1] >= 0.0001,
+      'a ramp targets ' + e[1] + ' — exponentialRampToValueAtTime cannot reach zero'));
+  }));
+  assert(combos === 48, 'expected 48 voice/duration combinations, ran ' + combos);
+});
+
+test('The drone is in just intonation, so it cannot beat', () => {
+  // Two oscillators a fraction of a percent apart at 55 Hz beat forever and
+  // never resolve. That was the old bed. Exact ratios cannot.
+  eq(KBC_DRONE[1].f / KBC_DRONE[0].f, 1.5, 'Pa must be an exact 3:2');
+  eq(KBC_DRONE[2].f / KBC_DRONE[0].f, 2, 'Sa madhya must be an exact 2:1');
+  eq(KBC_DRONE[3].f / KBC_DRONE[0].f, 4, 'Sa tar must be an exact 4:1');
+  // and the drone must reach a phone: its top partial has to clear 400 Hz
+  assert(KBC_DRONE[3].f * 2 > 400, 'the drone needs energy above 400Hz to exist on a phone speaker');
+});
+
+test('Every pitch in the score is in tune to within a cent', () => {
+  const cents = (f) => 1200 * Math.log2(f / 440);
+  const off = (f) => { const c = cents(f); return Math.abs(c - Math.round(c / 100) * 100); };
+  const all = []
+    .concat(Object.keys(KBC_BASS).map(k => [KBC_BASS[k].root, KBC_BASS[k].fifth, KBC_BASS[k].oct]).flat())
+    .concat(KBC_PAD.flat(), KBC_PAD_AV7_HIGH, KBC_APPROACH, KBC_APPROACH_HIGH,
+            KBC_SAWAAL.map(n => n[1]), KBC_JAWAAB.map(n => n[1]), KBC_TIHAI_CELL);
+  let worst = 0;
+  all.forEach(f => { worst = Math.max(worst, off(f)); });
+  assert(worst < 1.0, 'worst tuning error is ' + worst.toFixed(3) + ' cents');
+});
+
+test('The raga mutation changes the scale, not the volume', () => {
+  // One element: komal ni C -> shuddh Ni C#. It has to flip the bass approach
+  // from a falling sigh to a rising leading tone, and turn the diminished
+  // chord into a real dominant.
+  assert(KBC_APPROACH[3] > 73.42, 'at low stakes the approach falls to D2');
+  assert(KBC_APPROACH_HIGH[3] < 73.42, 'at high stakes it rises to D2 instead');
+  eq(KBC_APPROACH[7], 77.78, 'low stakes approaches the tonic from Eb2 above');
+  eq(KBC_APPROACH_HIGH[7], 69.30, 'high stakes approaches it from C#2 below');
+  // A7 is A-C#-G with no fifth: E is outside the scale and never belongs here
+  assert(KBC_PAD_AV7_HIGH.indexOf(329.63) < 0, 'A7 must not contain E — it is not in the raga');
+  eq(KBC_PAD_AV7_HIGH.length, 3, 'A7 is voiced in three parts');
+});
+
+test('The tihai lands exactly on sam', () => {
+  // The last note of the third statement has to fall on the next cycle's
+  // downbeat. An off-by-one here resolves it a sixteenth early and destroys
+  // the whole point of the device.
+  eq(KBC_TIHAI_OFF.length, 9, 'three statements of a three-note cell');
+  eq(KBC_TIHAI_OFF[8], 14, 'the final note falls on slot 14 — the next loop\'s sam');
+  const gaps = [KBC_TIHAI_OFF[3] - KBC_TIHAI_OFF[2], KBC_TIHAI_OFF[6] - KBC_TIHAI_OFF[5]];
+  eq(gaps[0], gaps[1], 'the two gaps between statements must be equal');
+});
+
+test('No two melodic layers can be scheduled onto the same slot', () => {
+  const saw = KBC_SAWAAL.map(n => n[0]), jaw = KBC_JAWAAB.map(n => n[0]);
+  // Sawaal runs on avartans 1 and 5, Jawaab on 7, the tihai on 8 — so a slot
+  // clash is only possible within a layer.
+  eq(new Set(saw).size, saw.length, 'Sawaal has no repeated slot');
+  eq(new Set(jaw).size, jaw.length, 'Jawaab has no repeated slot');
+});
+
+test('Tempo rises with the stakes, and the cycle length follows', () => {
+  eq(kbcBpm(0), 112, 'rung 1 sits at 112 BPM');
+  eq(kbcBpm(14), 140, 'rung 15 sits at 140 BPM');
+  // 7 matras at 112 BPM is exactly 3.75s; at 140 BPM exactly 3.0s
+  eq(7 * 60 / kbcBpm(0), 3.75, 'a cycle at the bottom of the ladder');
+  eq(7 * 60 / kbcBpm(14), 3, 'a cycle at the top');
+  for (let r = 1; r <= 14; r++) assert(kbcBpm(r) > kbcBpm(r - 1), 'tempo must never fall');
+});
+
+test('Filter cutoffs open as the stakes rise, and stay inside the audible band', () => {
+  assert(kbcTilt(0) < kbcTilt(14), 'the bed gets brighter as the ladder climbs');
+  assert(kbcTilt(0) >= 1000 && kbcTilt(14) <= 4000, 'cutoffs stay musical');
+});
+
 /* ---- games as a shared library ---- */
 test('A course saved before games were a library keeps the games it had', () => {
   // No `games` key at all: that course predates the library, and emptying its
