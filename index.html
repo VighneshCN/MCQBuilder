@@ -264,6 +264,80 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .q-prev-lg{font-size:15px;line-height:1.5}
 .evidence{font-size:13.5px;line-height:1.45;color:var(--txt-2)}
 
+/* --- games ------------------------------------------------------------- */
+.game-root{position:relative;min-height:min(72vh,620px);border:1px solid var(--rule);border-radius:var(--r-lg);
+  overflow:hidden;background:linear-gradient(180deg,#1a1140 0%,#2d1a52 38%,#5c2760 70%,#8f3f63 100%)}
+.game-screen{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:10px;text-align:center;padding:24px;z-index:20}
+.game-title{font-family:var(--display);font-size:clamp(26px,6vw,38px);font-weight:700;color:#fff;margin:0}
+.game-sub{font-size:14px;color:rgba(255,255,255,.78);max-width:420px;margin:0}
+.tier-pick{display:flex;flex-direction:column;gap:9px;width:min(320px,100%);margin-top:6px}
+.tier-btn{text-align:left;cursor:pointer;background:rgba(255,255,255,.08);border:1.5px solid rgba(255,255,255,.22);
+  border-radius:var(--r-lg);padding:10px 14px;color:#fff;font:inherit;transition:transform .1s,border-color .12s}
+.tier-btn:hover{transform:translateY(-1px);border-color:rgba(255,255,255,.55)}
+.tier-btn .tiny{color:rgba(255,255,255,.66)}
+
+/* balloon pop */
+.bp-hud{position:relative;z-index:15;display:flex;gap:10px;padding:10px;align-items:flex-start}
+.bp-card{flex:1;min-width:0;background:rgba(12,8,32,.72);border:1.5px solid rgba(255,255,255,.22);
+  border-radius:var(--r-lg);padding:9px 13px;backdrop-filter:blur(3px)}
+.bp-card .eyebrow{color:rgba(255,255,255,.6)}
+.bp-stem{font-size:clamp(13px,3.4vw,16px);font-weight:600;color:#fff;line-height:1.35}
+.bp-side{display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex:none}
+.bp-score{background:rgba(12,8,32,.72);border:1px solid rgba(255,255,255,.22);border-radius:var(--r);
+  padding:2px 8px;font-size:12px;font-weight:700;color:#ffe066;white-space:nowrap}
+.bp-field{position:absolute;inset:0;z-index:5;overflow:hidden;pointer-events:none}
+.bp-balloon{position:absolute;bottom:-120px;display:flex;flex-direction:column;align-items:center;
+  cursor:pointer;pointer-events:auto;animation:bpFloat linear forwards;will-change:transform}
+/* The rise is measured from the field, not the viewport: the game sits in a
+   card inside the page, so a vh-based travel spends most of the float off
+   screen and the balloon is only briefly hittable. */
+@keyframes bpFloat{to{transform:translateY(var(--rise,-800px))}}
+.bp-body{width:clamp(52px,13vw,66px);height:clamp(62px,15vw,78px);border-radius:50% 50% 50% 50%/55% 55% 45% 45%;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:inset -7px -7px 14px rgba(0,0,0,.3),inset 4px 4px 9px rgba(255,255,255,.28);transition:filter .12s}
+.bp-balloon:hover .bp-body{filter:brightness(1.22)}
+.bp-letter{font-family:var(--mono);font-size:20px;font-weight:800;color:rgba(0,0,0,.7)}
+.bp-knot{width:9px;height:9px;border-radius:50%;margin-top:-3px}
+.bp-string{width:1px;height:26px;background:rgba(255,255,255,.4)}
+.bp-tag{margin-top:3px;max-width:clamp(96px,26vw,150px);font-size:11px;line-height:1.25;text-align:center;
+  color:#fff;background:rgba(12,8,32,.78);border:1px solid rgba(255,255,255,.2);border-radius:8px;padding:3px 6px}
+.bp-balloon.pop-right .bp-body{animation:bpPopGood .4s forwards}
+.bp-balloon.pop-wrong .bp-body{animation:bpPopBad .4s forwards}
+@keyframes bpPopGood{0%{transform:scale(1)}50%{transform:scale(1.55);background:#00ff88!important}100%{transform:scale(0);opacity:0}}
+@keyframes bpPopBad{0%{transform:scale(1)}30%{transform:scale(1.35);background:#ff2244!important}100%{transform:scale(0);opacity:0}}
+.bp-launcher{position:absolute;left:50%;bottom:4px;transform:translateX(-50%);z-index:16;width:80px;height:64px;pointer-events:none}
+.bp-launcher.fire{animation:bpRecoil .18s ease}
+@keyframes bpRecoil{40%{transform:translateX(-50%) translateY(5px)}}
+.bp-base{position:absolute;left:50%;bottom:0;transform:translateX(-50%);width:64px;height:22px;border-radius:13px 13px 9px 9px;
+  background:linear-gradient(180deg,#5a5a8f,#31314f 60%,#1c1c30);border:2px solid #7c7cc8}
+.bp-hub{position:absolute;left:50%;bottom:15px;transform:translateX(-50%);width:13px;height:13px;border-radius:50%;
+  background:radial-gradient(circle at 35% 30%,#c9c9ff,#4a4a7a);border:1.5px solid #23233c;z-index:3}
+.bp-barrel{position:absolute;left:50%;bottom:15px;width:18px;height:42px;transform-origin:50% 88%;
+  transform:translateX(-50%) rotate(0deg);border-radius:8px 8px 4px 4px;border:1.5px solid #34345a;z-index:2;
+  background:linear-gradient(90deg,#4c4c7c,#c7c7f5 32%,#eaeaff 47%,#9a9ad6 66%,#3f3f68);transition:transform .07s ease-out}
+.bp-shot{position:fixed;z-index:70;width:24px;height:7px;border-radius:6px;pointer-events:none;
+  background:linear-gradient(90deg,rgba(255,255,255,0),#ffe066 40%,#fff);box-shadow:0 0 11px #ffe066}
+.bp-flash{position:absolute;top:44%;left:50%;transform:translate(-50%,-50%);z-index:30;pointer-events:none;
+  font-size:clamp(20px,5.5vw,32px);font-weight:800;opacity:0;text-align:center;max-width:86%;text-shadow:0 0 22px currentColor}
+.bp-flash.show{animation:bpFlash 1.5s forwards}
+.bp-flash.good{color:#00ff88}.bp-flash.bad{color:#ff4d6d}
+@keyframes bpFlash{0%{opacity:0;transform:translate(-50%,-50%) scale(.6)}18%{opacity:1;transform:translate(-50%,-50%) scale(1.08)}
+  72%{opacity:1;transform:translate(-50%,-50%) scale(1)}100%{opacity:0;transform:translate(-50%,-50%) scale(.9)}}
+.bp-explain{position:absolute;left:50%;bottom:74px;transform:translateX(-50%);z-index:25;width:min(460px,90%);
+  background:rgba(12,8,32,.9);border:1px solid rgba(255,255,255,.25);border-radius:var(--r-lg);padding:10px 14px;color:#fff}
+@media(max-width:560px){
+  .game-root{min-height:78vh}
+  .bp-hud{padding:7px}
+  .bp-launcher{width:62px;height:54px}
+  .bp-base{width:50px}.bp-barrel{height:32px}
+  .bp-tag{font-size:10px}
+}
+@media(prefers-reduced-motion:reduce){
+  .bp-balloon{animation-duration:26s!important}
+  .bp-flash.show{animation-duration:1s}
+}
+
 /* --- buttons ---------------------------------------------------------- */
 .btn{
   display:inline-flex;align-items:center;justify-content:center;gap:7px;
@@ -3303,6 +3377,7 @@ const VIEWS = [
   { id: 'bank',      label: 'Question Bank',    ico: '≡' },
   { id: 'notes',     label: 'Notes',            ico: '▧' },
   { id: 'practice',  label: 'Practice',         ico: '▶' },
+  { id: 'games',     label: 'Games',            ico: '◈' },
   { id: 'analytics', label: 'Analytics',        ico: '◱' },
   { id: 'backup',    label: 'Backup & Restore', ico: '⧉' },
   { id: 'settings',  label: 'Settings',         ico: '⚙' }
@@ -11062,6 +11137,545 @@ async function driveConnectFlow() {
   await go(State.view || 'dashboard');
 }
 
+
+/* ============================================================================
+   15B · Games — a shell the app's own question bank feeds
+   A game is a registry entry plus one render function. Nothing here reaches
+   into IndexedDB or the question schema: gameQuestions() is the single seam,
+   so a game keeps working when the schema moves under it.
+   ========================================================================== */
+
+/** Everything a game is allowed to know about a question. Deliberately not the
+    stored record: no uuid-keyed stats, no spaced-repetition fields, no
+    conflict flags. A game gets what it needs to ask and mark a question, and
+    nothing it could corrupt. */
+function toGameQuestion(q) {
+  const correct = (q.options || []).find(o => o.id === q.correctOptionId);
+  if (!correct) return null;
+  return {
+    uuid: q.uuid,
+    qid: q.qid,
+    stem: q.stem,
+    // The letter is fixed to the stored order here, once, so it stays stable
+    // however a game shuffles the options for display — a balloon labelled C
+    // is the same option whichever corner of the screen it drifts into.
+    options: q.options.map((o, i) => ({ id: o.id, text: o.text, letter: letterOf(i) })),
+    correctId: q.correctOptionId,
+    correctText: correct.text,
+    explanation: q.explanation || '',
+    domainId: q.domainId || null,
+    // An ungraded question still carries the stored default, so games must not
+    // read difficulty as a judgement unless it was actually made.
+    difficulty: q.difficultyVerified === 'verified' ? (q.difficulty || 'medium') : null
+  };
+}
+
+/** The one call every game makes. Draws from exactly the same pool practice
+    does — Active and answer-verified — so a game can never quiz someone on a
+    question the app itself does not yet trust. */
+async function gameQuestions(opts) {
+  opts = opts || {};
+  const all = await State.questions();
+  let pool = eligiblePool(all);
+  if (opts.optionCount) pool = pool.filter(q => (q.options || []).length === opts.optionCount);
+  if (opts.domains && opts.domains.length) pool = pool.filter(q => opts.domains.indexOf(q.domainId) >= 0);
+  const out = pool.map(toGameQuestion).filter(Boolean);
+  if (opts.shuffle !== false) return shuffle(out, opts.rng || Math.random);
+  return out;
+}
+
+/** A game declares what it needs; the tab works out whether this course can
+    feed it. `courses: null` means any course whose bank fits — which is the
+    honest default for anything driven by plain multiple-choice questions.
+    A game that genuinely belongs to one subject (spotting network hardware,
+    say) names its course codes and simply will not appear elsewhere. */
+const GAMES = [
+  {
+    id: 'kbc',
+    name: 'Kab Banega Crorepati',
+    tagline: 'Climb fifteen questions. The host is not on your side.',
+    ico: '◈',
+    courses: null,
+    optionCount: 4,
+    minQuestions: 15,
+    blurb: 'A quiz-show ladder built from your own bank. Three lifelines, a suspense beat before every reveal, and a host who will happily point you at the wrong answer.'
+  },
+  {
+    id: 'balloon',
+    name: 'Balloon Pop',
+    tagline: 'The options float. Shoot the right one before it escapes.',
+    ico: '●',
+    courses: null,
+    optionCount: null,
+    minQuestions: 8,
+    blurb: 'Each question sends its options up as balloons. Aim, fire, and pop the correct one — the clock is the balloon leaving the screen.'
+  }
+];
+
+/** Why a game can or cannot run for the course on screen right now. Returns
+    a reason rather than a boolean, because "not enough questions" and "wrong
+    subject" need different things said about them. */
+function gameAvailability(game, course, counts) {
+  if (game.courses && game.courses.indexOf(course.code) < 0) {
+    return { ok: false, why: 'Built for ' + game.courses.join(', ') + ' — not for ' + course.code + '.' };
+  }
+  const have = game.optionCount ? (counts.byOptionCount[game.optionCount] || 0) : counts.eligible;
+  if (have < game.minQuestions) {
+    const need = game.optionCount
+      ? game.minQuestions + ' questions with exactly ' + game.optionCount + ' options'
+      : game.minQuestions + ' practice-ready questions';
+    return { ok: false, why: 'Needs ' + need + '. This course has ' + have + '.', short: true };
+  }
+  return { ok: true, have: have };
+}
+
+ROUTES.games = async (root) => {
+  const all = await State.questions();
+  const pool = eligiblePool(all);
+  const byOptionCount = {};
+  pool.forEach(q => { const n = (q.options || []).length; byOptionCount[n] = (byOptionCount[n] || 0) + 1; });
+  const counts = { eligible: pool.length, byOptionCount: byOptionCount };
+
+  await band('Games', 'Practise without it feeling like practice', [
+    { k: 'Playable', v: String(GAMES.filter(g => gameAvailability(g, State.course, counts).ok).length) },
+    { k: 'Question pool', v: String(pool.length) }
+  ]);
+
+  const grid = h('div', { class: 'grid g2 stretch' });
+  GAMES.forEach(game => {
+    const avail = gameAvailability(game, State.course, counts);
+    const card = h('div', {
+      class: 'card' + (avail.ok ? ' clickable' : ''),
+      style: 'padding:0' + (avail.ok ? '' : ';opacity:.6'),
+      onclick: avail.ok ? () => launchGame(game.id) : null
+    }, [
+      h('div', { class: 'card-b' }, [
+        h('div', { class: 'row', style: 'gap:10px;align-items:center' }, [
+          h('span', { style: 'font-size:22px;color:var(--accent-1)', text: game.ico }),
+          h('h3', { style: 'font-size:16px;margin:0', text: game.name }),
+          h('div', { class: 'spacer' }),
+          avail.ok ? h('span', { class: 'badge b-active', text: avail.have + ' ready' })
+                   : h('span', { class: 'badge b-draft', text: 'Not yet' })
+        ]),
+        h('div', { class: 'small', style: 'margin:7px 0 0;color:var(--txt-2)', text: game.tagline }),
+        h('div', { class: 'tiny dim', style: 'margin-top:6px', text: game.blurb }),
+        avail.ok ? null : h('div', { class: 'notice warn small', style: 'margin-top:10px' }, [
+          h('span', { text: avail.why + ' ' }),
+          avail.short ? h('a', { href: '#', onclick: (e) => { e.preventDefault(); go('import'); }, text: 'Add more questions' }) : null
+        ])
+      ])
+    ]);
+    grid.appendChild(card);
+  });
+  root.appendChild(grid);
+
+  if (!pool.length) {
+    root.appendChild(h('div', { class: 'card', style: 'margin-top:16px' }, h('div', { class: 'empty' }, [
+      h('h3', { text: 'Nothing to play with yet' }),
+      h('p', { class: 'muted', text: 'Games draw from the same pool practice does — questions that are Active with a verified answer.' }),
+      h('div', { class: 'row', style: 'justify-content:center;margin-top:10px' },
+        h('button', { class: 'btn primary', onclick: () => go(all.length ? 'review' : 'import'), text: all.length ? 'Open the review queue' : 'Add questions' }))
+    ])));
+  }
+};
+
+async function launchGame(id) {
+  const game = GAMES.find(g => g.id === id);
+  if (!game) return;
+  const qs = await gameQuestions({ optionCount: game.optionCount });
+  if (qs.length < game.minQuestions) { toast('Not enough questions for that game yet', 'warn'); return; }
+  if (id === 'kbc') return runKBC(qs);
+  if (id === 'balloon') return runBalloonPop(qs);
+}
+
+/* ---------- game audio ----------
+   Synthesised in the browser, so there is no audio file to ship, nothing to
+   fetch, and it works with the network off — the same constraint the rest of
+   the app lives under.
+
+   Two rules the Web Audio API enforces that shape everything here.
+   First, a context created before a user gesture starts suspended, so it is
+   built lazily on the first click rather than at load. Second,
+   exponentialRampToValueAtTime cannot reach zero — a ramp to 0 either throws
+   or silently does nothing, which is why every fade-out targets NEAR_SILENT
+   and only then stops. Gain changes are always ramped rather than assigned,
+   because an instant jump in amplitude is heard as a click. */
+const NEAR_SILENT = 0.0001;
+
+function GameAudio() {
+  let ctx = null, master = null, muted = false;
+  let bed = null;          // the sustained tension layer, if any
+  const timers = [];
+
+  function ensure() {
+    if (ctx) return ctx;
+    try { ctx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (e) { return null; }
+    master = ctx.createGain();
+    master.gain.value = muted ? NEAR_SILENT : 0.9;
+    master.connect(ctx.destination);
+    return ctx;
+  }
+
+  function note(freq, dur, type, vol, delay, slideTo) {
+    const c = ensure(); if (!c || muted) return;
+    const t0 = c.currentTime + (delay || 0);
+    const osc = c.createOscillator(), g = c.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.setValueAtTime(freq, t0);
+    if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+    g.gain.setValueAtTime(NEAR_SILENT, t0);
+    g.gain.exponentialRampToValueAtTime(vol || 0.18, t0 + 0.015);
+    g.gain.exponentialRampToValueAtTime(NEAR_SILENT, t0 + dur);
+    osc.connect(g); g.connect(master);
+    osc.start(t0); osc.stop(t0 + dur + 0.04);
+    osc.onended = () => { try { g.disconnect(); } catch (e) {} };
+  }
+
+  function chord(freqs, dur, type, vol, stagger) {
+    freqs.forEach((f, i) => note(f, dur, type, vol, i * (stagger || 0)));
+  }
+
+  /** The tension bed. `level` 0..1 walks it from a calm low drone up to a
+      close, detuned, faster pulse — so rung 14 sounds materially different
+      from rung 1 without swapping to a different piece of music. */
+  function startBed(level) {
+    const c = ensure(); if (!c) return;
+    stopBed();
+    const lv = clamp(level == null ? 0.3 : level, 0, 1);
+    const g = c.createGain();
+    g.gain.setValueAtTime(NEAR_SILENT, c.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.05 + lv * 0.06, c.currentTime + 1.2);
+    g.connect(master);
+
+    const lowF = 55 + lv * 18;
+    const low = c.createOscillator(); low.type = 'sawtooth'; low.frequency.value = lowF;
+    const lp = c.createBiquadFilter(); lp.type = 'lowpass';
+    lp.frequency.value = 180 + lv * 520; lp.Q.value = 6 + lv * 6;
+    low.connect(lp); lp.connect(g); low.start();
+
+    // A second oscillator a few cents off produces the slow beating that
+    // reads as unease; the detune widens with the stakes.
+    const beat = c.createOscillator(); beat.type = 'sawtooth';
+    beat.frequency.value = lowF * (1 + 0.004 + lv * 0.010);
+    const bg = c.createGain(); bg.gain.value = 0.5;
+    beat.connect(bg); bg.connect(lp); beat.start();
+
+    // A pulse whose rate climbs with the level — the heartbeat of the format.
+    const period = 1.5 - lv * 0.85;
+    const pulse = setInterval(() => {
+      if (muted) return;
+      note(lowF * 2, 0.16, 'sine', 0.05 + lv * 0.05);
+    }, period * 1000);
+    timers.push(pulse);
+
+    bed = { g: g, nodes: [low, beat], pulse: pulse };
+  }
+
+  function stopBed() {
+    if (!bed || !ctx) return;
+    const b = bed; bed = null;
+    clearInterval(b.pulse);
+    const t = ctx.currentTime;
+    try {
+      b.g.gain.cancelScheduledValues(t);
+      b.g.gain.setValueAtTime(Math.max(b.g.gain.value, NEAR_SILENT), t);
+      b.g.gain.exponentialRampToValueAtTime(NEAR_SILENT, t + 0.35);
+    } catch (e) {}
+    b.nodes.forEach(n => { try { n.stop(t + 0.4); } catch (e) {} });
+    setTimeout(() => { try { b.g.disconnect(); } catch (e) {} }, 600);
+  }
+
+  const CUES = {
+    // rising minor arpeggio, unresolved — the "answer locked" hold
+    suspense() { chord([196, 233, 294], 1.6, 'sawtooth', 0.07, 0.18); },
+    // a bright major triad that RESOLVES, which is what makes it read as relief
+    right() { [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => note(f, 0.28, 'triangle', 0.2, i * 0.075)); },
+    // the same shape falling and flattened
+    wrong() { note(311, 0.32, 'sawtooth', 0.17); note(233, 0.42, 'sawtooth', 0.15, 0.06); note(155, 0.6, 'sine', 0.13, 0.14); },
+    fanfare() {
+      [523.25, 659.25, 783.99, 1046.5, 1318.5].forEach((f, i) => note(f, 0.34, 'triangle', 0.2, i * 0.1));
+      chord([523.25, 659.25, 783.99, 1046.5], 1.5, 'triangle', 0.12, 0);
+    },
+    shoot() { note(880, 0.08, 'square', 0.09, 0, 300); },
+    pop() { note(700, 0.07, 'triangle', 0.13); note(1100, 0.09, 'sine', 0.1, 0.03); },
+    tick() { note(1000, 0.03, 'sine', 0.05); },
+    lifeline() { note(740, 0.1, 'triangle', 0.09); note(988, 0.12, 'triangle', 0.08, 0.06); },
+    lock() { note(120, 0.9, 'sawtooth', 0.11); note(90, 1.1, 'sine', 0.09, 0.05); }
+  };
+
+  return {
+    resume() { const c = ensure(); if (c && c.state === 'suspended') c.resume(); },
+    sfx(name) { const f = CUES[name]; if (f) { ensure(); f(); } },
+    bed: startBed,
+    stopBed: stopBed,
+    setMuted(v) {
+      muted = !!v;
+      if (master && ctx) {
+        const t = ctx.currentTime;
+        master.gain.cancelScheduledValues(t);
+        master.gain.setValueAtTime(Math.max(master.gain.value, NEAR_SILENT), t);
+        master.gain.exponentialRampToValueAtTime(muted ? NEAR_SILENT : 0.9, t + 0.2);
+      }
+    },
+    isMuted() { return muted; },
+    stopAll() {
+      stopBed();
+      timers.forEach(clearInterval); timers.length = 0;
+      if (ctx) { try { ctx.close(); } catch (e) {} ctx = null; master = null; }
+    }
+  };
+}
+
+/* ---------- Balloon Pop ----------
+   The original was written for accounting: a journal entry appeared and you
+   shot a DEBIT balloon then a CREDIT one, with balloon labels drawn from a
+   hand-written distractor list. Driven by the question bank instead, the
+   mapping is simpler and truer: a question's OWN options are the balloons, so
+   the distractors are the ones the examiner actually wrote, and popping the
+   right one is the whole round. */
+
+const BALLOON_COLORS = [
+  { body: '#ff6b6b', knot: '#cc3333' }, { body: '#ffa94d', knot: '#cc7700' },
+  { body: '#ffe066', knot: '#cc9900' }, { body: '#69db7c', knot: '#2d8a3e' },
+  { body: '#74c0fc', knot: '#2070b0' }, { body: '#da77f2', knot: '#9b3dc8' },
+  { body: '#f783ac', knot: '#c2255c' }, { body: '#63e6be', knot: '#1a9a6e' }
+];
+
+const BALLOON_TIERS = {
+  gentle: { label: 'Gentle', rounds: 8,  lives: 4, floatMin: 15, floatMax: 21, desc: 'Slow floats, four lives' },
+  brisk:  { label: 'Brisk',  rounds: 10, lives: 3, floatMin: 11, floatMax: 15, desc: 'Faster, three lives' },
+  frantic:{ label: 'Frantic',rounds: 12, lives: 3, floatMin: 7.5, floatMax: 10.5, desc: 'They escape quickly' }
+};
+
+async function runBalloonPop(questions) {
+  const host = h('div', { class: 'game-root', id: 'bpop' });
+  const target = $('#view');
+  State.view = 'games';
+  target.textContent = '';
+  target.appendChild(host);
+
+  let tier = BALLOON_TIERS.brisk, tierKey = 'brisk';
+  let lives = 3, score = 0, round = 0, order = [], current = null;
+  let balloons = [], evaluating = false, idc = 0, spawnTimer = null, floatWatch = null;
+
+  const audio = GameAudio();
+
+  function stopEverything() {
+    if (spawnTimer) { clearTimeout(spawnTimer); spawnTimer = null; }
+    if (floatWatch) { clearInterval(floatWatch); floatWatch = null; }
+    balloons.forEach(b => { if (b.el) b.el.remove(); });
+    balloons = [];
+    audio.stopAll();
+  }
+  // Leaving the screen mid-round must not leave timers and oscillators running
+  // behind it — go() replaces #view without telling anything it is being torn
+  // down, so the game has to notice for itself.
+  const guard = setInterval(() => { if (!document.body.contains(host)) { stopEverything(); clearInterval(guard); } }, 500);
+
+  function menu() {
+    stopEverything();
+    host.textContent = '';
+    host.appendChild(h('div', { class: 'game-screen' }, [
+      h('div', { style: 'font-size:52px;line-height:1' }, '🎈'),
+      h('h1', { class: 'game-title', text: 'Balloon Pop' }),
+      h('p', { class: 'game-sub', text: 'A question goes up, and its options float away with it. Pop the right one before it escapes.' }),
+      h('div', { class: 'tier-pick' }, Object.keys(BALLOON_TIERS).map(k => {
+        const t = BALLOON_TIERS[k];
+        return h('button', { class: 'tier-btn', onclick: () => { tierKey = k; tier = t; start(); } }, [
+          h('div', {}, [h('b', { text: t.label }), h('div', { class: 'tiny dim', text: t.rounds + ' rounds · ' + t.desc })])
+        ]);
+      })),
+      h('div', { class: 'row', style: 'justify-content:center;margin-top:14px' },
+        h('button', { class: 'btn ghost', onclick: () => go('games'), text: 'Back to games' }))
+    ]));
+  }
+
+  function start() {
+    lives = tier.lives; score = 0; round = 0; evaluating = false;
+    order = shuffle(questions).slice(0, Math.min(tier.rounds, questions.length));
+    audio.resume();
+    nextRound();
+  }
+
+  function nextRound() {
+    stopEverything();
+    if (round >= order.length) return finish();
+    current = order[round];
+    evaluating = false;
+    drawStage();
+    // The options are the balloons. Nothing invented, nothing borrowed from
+    // another question — the distractors are the examiner's own.
+    const opts = shuffle(current.options.slice());
+    // Each option gets its own lane. Random horizontal placement clustered two
+    // balloons on top of each other often enough to make one unclickable and
+    // its tag unreadable, which turns a knowledge question into a dexterity one.
+    opts.forEach((o, i) => setTimeout(() => { if (!evaluating) spawn(o, i, opts.length); }, i * 420));
+    floatWatch = setInterval(reap, 400);
+  }
+
+  function drawStage() {
+    host.textContent = '';
+    const hud = h('div', { class: 'bp-hud' }, [
+      h('div', { class: 'bp-card' }, [
+        h('div', { class: 'row', style: 'gap:8px;align-items:center;margin-bottom:5px' }, [
+          h('span', { class: 'eyebrow', text: 'Question ' + (round + 1) + ' of ' + order.length }),
+          h('div', { class: 'spacer' }),
+          h('span', { class: 'tiny dim', text: current.qid || '' })
+        ]),
+        h('div', { class: 'bp-stem', text: current.stem })
+      ]),
+      h('div', { class: 'bp-side' }, [
+        h('div', { style: 'font-size:15px;letter-spacing:1px' }, '❤️'.repeat(Math.max(0, lives)) + '🖤'.repeat(Math.max(0, tier.lives - lives))),
+        h('div', { class: 'bp-score', text: 'Score ' + score }),
+        h('button', { class: 'btn sm ghost', onclick: () => { stopEverything(); go('games'); }, text: 'Quit' })
+      ])
+    ]);
+    host.appendChild(hud);
+    host.appendChild(h('div', { class: 'bp-field', id: 'bp-field' }));
+    host.appendChild(h('div', { class: 'bp-launcher', id: 'bp-launcher' }, [
+      h('div', { class: 'bp-barrel', id: 'bp-barrel' }), h('div', { class: 'bp-hub' }), h('div', { class: 'bp-base' })
+    ]));
+    host.appendChild(h('div', { class: 'bp-flash', id: 'bp-flash' }));
+  }
+
+  function spawn(opt, lane, lanes) {
+    const field = $('#bp-field');
+    if (!field) return;
+    const id = 'bp' + (idc++);
+    const col = BALLOON_COLORS[idc % BALLOON_COLORS.length];
+    const dur = tier.floatMin + Math.random() * (tier.floatMax - tier.floatMin);
+    // Option text can be a full sentence, which no balloon can carry. The
+    // balloon shows a letter; the text sits beside it on a tag, which is what
+    // the player actually reads.
+    const rise = field.clientHeight + 190;
+    const n = Math.max(1, lanes || 1);
+    const span = 84 / n;
+    const left = 8 + span * (lane || 0) + span * (0.15 + Math.random() * 0.4);
+    const el = h('div', {
+      class: 'bp-balloon', id: id,
+      style: 'left:' + left.toFixed(1) + '%;animation-duration:' + dur + 's;--rise:-' + rise + 'px'
+    }, [
+      h('div', { class: 'bp-body', style: 'background:' + col.body }, h('span', { class: 'bp-letter', text: opt.letter })),
+      h('div', { class: 'bp-knot', style: 'background:' + col.knot }),
+      h('div', { class: 'bp-string' }),
+      h('div', { class: 'bp-tag', text: opt.text.length > 64 ? opt.text.slice(0, 62) + '…' : opt.text })
+    ]);
+    const b = { id: id, opt: opt, el: el, alive: true, firing: false };
+    el.onclick = () => shootAt(b);
+    field.appendChild(el);
+    balloons.push(b);
+  }
+
+  /** A balloon that floats off the top is a miss, not a free pass — otherwise
+      the winning strategy is to shoot nothing and wait. */
+  function reap() {
+    if (evaluating) return;
+    const field = $('#bp-field');
+    if (!field) return;
+    const top = field.getBoundingClientRect().top;
+    balloons.slice().forEach(b => {
+      if (!b.alive) return;
+      const r = b.el.getBoundingClientRect();
+      if (r.bottom < top - 10) {
+        b.alive = false; b.el.remove();
+        balloons = balloons.filter(x => x !== b);
+        if (b.opt.id === current.correctId) missed();
+      }
+    });
+  }
+
+  function missed() {
+    if (evaluating) return;
+    evaluating = true;
+    lives--; audio.sfx('wrong');
+    reveal(false, 'It got away — that was ' + current.correctText + '.');
+  }
+
+  function shootAt(b) {
+    if (evaluating || !b.alive || b.firing) return;
+    b.firing = true;
+    const el = b.el, launcher = $('#bp-launcher'), barrel = $('#bp-barrel');
+    el.style.animationPlayState = 'paused';
+    const r = el.getBoundingClientRect(), lr = launcher.getBoundingClientRect();
+    const bx = r.left + r.width / 2, by = r.top + r.height / 2;
+    const px = lr.left + lr.width / 2, py = lr.top + 6;
+    const deg = clamp(Math.atan2(bx - px, py - by) * 180 / Math.PI, -80, 80);
+    barrel.style.transform = 'translateX(-50%) rotate(' + deg + 'deg)';
+    launcher.classList.remove('fire'); void launcher.offsetWidth; launcher.classList.add('fire');
+    audio.sfx('shoot');
+
+    const shot = h('div', { class: 'bp-shot', style: 'left:' + px + 'px;top:' + py + 'px' });
+    document.body.appendChild(shot);
+    const dur = Math.min(320, Math.max(130, Math.hypot(bx - px, by - py) / 2.6));
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      shot.style.transition = 'left ' + dur + 'ms linear, top ' + dur + 'ms linear';
+      shot.style.left = bx + 'px'; shot.style.top = by + 'px';
+    }));
+    setTimeout(() => { shot.remove(); impact(b); }, dur + 20);
+  }
+
+  function impact(b) {
+    if (!b.alive || evaluating) return;
+    const correct = b.opt.id === current.correctId;
+    b.alive = false;
+    b.el.classList.add(correct ? 'pop-right' : 'pop-wrong');
+    setTimeout(() => b.el.remove(), 420);
+    balloons = balloons.filter(x => x !== b);
+    evaluating = true;
+    if (correct) { score++; audio.sfx('right'); reveal(true, ''); }
+    else { lives--; audio.sfx('wrong'); reveal(false, 'That was ' + b.opt.letter + '. The answer is ' + current.correctText + '.'); }
+  }
+
+  function reveal(good, msg) {
+    if (spawnTimer) { clearTimeout(spawnTimer); spawnTimer = null; }
+    if (floatWatch) { clearInterval(floatWatch); floatWatch = null; }
+    const flash = $('#bp-flash');
+    if (flash) {
+      flash.textContent = good ? '✔ ' + current.correctText : '✘';
+      flash.className = 'bp-flash show ' + (good ? 'good' : 'bad');
+    }
+    const field = $('#bp-field');
+    if (field && (msg || current.explanation)) {
+      field.appendChild(h('div', { class: 'bp-explain' }, [
+        msg ? h('div', { style: 'font-weight:600;margin-bottom:4px', text: msg }) : null,
+        current.explanation ? h('div', { class: 'small', text: current.explanation.slice(0, 260) }) : null
+      ]));
+    }
+    setTimeout(() => {
+      if (lives <= 0) return finish();
+      round++; nextRound();
+    }, current.explanation || msg ? 2600 : 1300);
+  }
+
+  function finish() {
+    stopEverything();
+    const pct = order.length ? score / order.length : 0;
+    const grade = pct === 1 ? 'Every one.' : pct >= 0.8 ? 'Strong round.' : pct >= 0.5 ? 'Middling — worth another go.' : 'The bank won this time.';
+    if (pct >= 0.8) audio.sfx('fanfare');
+    host.textContent = '';
+    host.appendChild(h('div', { class: 'game-screen' }, [
+      h('h1', { class: 'game-title', text: score + ' / ' + order.length }),
+      h('p', { class: 'game-sub', text: grade + (lives <= 0 ? ' You ran out of lives.' : '') }),
+      h('div', { class: 'row', style: 'gap:10px;justify-content:center;flex-wrap:wrap' }, [
+        h('button', { class: 'btn primary', onclick: start, text: 'Play again' }),
+        h('button', { class: 'btn', onclick: menu, text: 'Change difficulty' }),
+        h('button', { class: 'btn ghost', onclick: () => go('games'), text: 'Back to games' })
+      ])
+    ]));
+  }
+
+  menu();
+  // A balloon is never still, and an automated click waits for an element to
+  // stop moving — so without a way in, the game cannot be driven by a test at
+  // all. Mirrors the debug handle the standalone version shipped with.
+  window.__bpop = {
+    state: () => ({ round: round, score: score, lives: lives, rounds: order.length,
+      stem: current && current.stem, live: balloons.filter(b => b.alive).map(b => b.opt.letter) }),
+    shootLetter: (L) => { const b = balloons.find(x => x.alive && x.opt.letter === L); if (b) shootAt(b); return !!b; },
+    correctLetter: () => { const o = current && current.options.find(x => x.id === current.correctId); return o && o.letter; }
+  };
+}
 
 /* ============================================================================
    16 · Built-in tests and boot
