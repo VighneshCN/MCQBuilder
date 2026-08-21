@@ -562,7 +562,9 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .kbc.air-cut .kbc-tier{animation:kbcCutIn .5s ease-out both;animation-delay:calc(var(--k,0) * 70ms)}
 
 .kbc.suspense .kbc-anim{animation-play-state:paused}
-.kbc.suspense .kbc-airwrap{filter:brightness(.5);transition:filter .45s ease}
+.kbc-dim{position:absolute;inset:0;background:#04061a;opacity:0;pointer-events:none;
+  transition:opacity .45s ease}
+.kbc.suspense .kbc-dim{opacity:.52}
 .kbc.suspense .kbc-rled,.kbc.suspense .kbc-scr-hero{animation:kbcHold 1.5s ease-in-out infinite;
   animation-delay:0s!important;animation-play-state:running}
 .kbc.suspense .kbc-opt:not(.locked-pick){opacity:.6;transition:opacity .4s ease}
@@ -645,6 +647,7 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
    attributes on the seven lamp groups and collapse them onto the origin. */
 @media(prefers-reduced-motion:reduce){
 
+  .kbi-act{display:none}
   .kbc-roll{display:none}
   .kbc-beam{opacity:.62}.kbc-lens{opacity:.9}.kbc-scr{opacity:1}
   .kbc-tally{opacity:.12}.kbc-tally[style*="--t:4"]{opacity:1}
@@ -658,8 +661,216 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   .kbc.reveal-wrong .kbc-tint{opacity:.12}
   .kbc.reveal-wrong .kbc-scr{opacity:.08}
   .kbc.reveal-wrong .kbc-scope,.kbc.offair .kbc-scope{transform:scaleY(.04)}
-  .kbc.suspense .kbc-airwrap{filter:brightness(.5)}
+  .kbc.suspense .kbc-dim{opacity:.52}
 }
+
+/* ── THE ARRIVAL: the cold open ────────────────────────────────────────
+   One attribute drives the whole timeline — data-beat on .kbi-act, single
+   valued — so only one beat's rules can ever match and there is no
+   equal-specificity source-order fragility.
+
+   SIGN CONVENTIONS, because they are the likeliest thing to get wrong:
+   rotate() positive is clockwise; every limb is authored pointing DOWN from
+   its pivot; the figures face +x so forward is NEGATIVE. Knee flexion is
+   POSITIVE relative rotation and elbow flexion is NEGATIVE, because knees and
+   elbows bend in opposite directions. A negative knee is a leg bending
+   backwards.
+
+   EVERY BASE POSE BELOW IS THE FINAL, SEATED TABLEAU. So a dropped animation,
+   a mid-flight skip, a stalled tab or the global reduced-motion rule all land
+   on the correct end frame rather than on a broken pose or a black rectangle. */
+.kbi-act{position:absolute;left:0;right:0;top:136px;bottom:52px;z-index:4;
+  pointer-events:auto;cursor:pointer;display:block;width:100%;
+  --camA:none;--camB:scale(1.62)}
+.kbi-fig,.kbi-lit,.kbi-hips,.kbi-leg,.kbi-shin,.kbi-foot,.kbi-torso,
+.kbi-head,.kbi-arm,.kbi-fore,.kbi-spot,.kbi-spoti,.kbi-cam,.kbi-clasp{
+  transform-box:view-box;transform-origin:0 0}
+.kbi-sh{transform-box:fill-box;transform-origin:50% 50%}
+.kbi-cam{transform-origin:606px 70px;transform:var(--camB);
+  transition:transform 220ms cubic-bezier(.4,0,.2,1)}
+.kbi-act[data-beat="walk"] .kbi-cam{transform:var(--camA)}
+
+.kbi-cont{transform:translateX(556px);--t0:-4deg}
+.kbi-anchor{transform:translateX(656px);--t0:-3deg}
+.kbi-spot{transform:translateX(556px)}
+.kbi-cont .kbi-hips{transform:translateY(18px)}
+.kbi-anchor .kbi-hips{transform:translateY(14px)}
+.kbi-cont .kbi-lb{transform:rotate(-64deg)}
+.kbi-cont .kbi-lf{transform:rotate(-70deg)}
+.kbi-cont .kbi-lb .kbi-shin{transform:rotate(64deg)}
+.kbi-cont .kbi-lf .kbi-shin{transform:rotate(70deg)}
+.kbi-fig .kbi-torso{transform:rotate(1deg)}
+.kbi-fig .kbi-an{transform:rotate(-14deg)}
+.kbi-fig .kbi-an .kbi-fore{transform:rotate(-24deg)}
+.kbi-fig .kbi-af{transform:rotate(6deg)}
+.kbi-fig .kbi-af .kbi-fore{transform:rotate(-16deg)}
+.kbi-spoti{transform:scaleX(.68)}
+
+/* ---- BEAT 1: the walk. 880ms cycle, two steps, 136 steps a minute. ----
+   Travel is linear and is 58.27 units per step, matched to the rig's own
+   foot displacement — change one without the other and the feet skate. */
+@keyframes kbiWalkX{from{transform:translateX(323px)}to{transform:translateX(556px)}}
+@keyframes kbiThighF{0%{transform:rotate(-22deg)}12%{transform:rotate(-14deg)}
+  25%{transform:rotate(0deg)}40%{transform:rotate(14deg)}50%{transform:rotate(22.5deg)}
+  62%{transform:rotate(6deg)}75%{transform:rotate(-10deg)}88%{transform:rotate(-20deg)}
+  100%{transform:rotate(-22deg)}}
+@keyframes kbiThighB{0%{transform:rotate(22.5deg)}12%{transform:rotate(6deg)}
+  25%{transform:rotate(-10deg)}38%{transform:rotate(-20deg)}50%{transform:rotate(-22deg)}
+  62%{transform:rotate(-14deg)}75%{transform:rotate(0deg)}90%{transform:rotate(14deg)}
+  100%{transform:rotate(22.5deg)}}
+@keyframes kbiShinF{0%{transform:rotate(0deg)}12%{transform:rotate(6deg)}
+  25%{transform:rotate(0deg)}40%{transform:rotate(2deg)}50%{transform:rotate(10deg)}
+  62%{transform:rotate(58deg)}75%{transform:rotate(34deg)}88%{transform:rotate(10deg)}
+  100%{transform:rotate(0deg)}}
+@keyframes kbiShinB{0%{transform:rotate(10deg)}12%{transform:rotate(58deg)}
+  25%{transform:rotate(34deg)}38%{transform:rotate(10deg)}50%{transform:rotate(0deg)}
+  62%{transform:rotate(6deg)}75%{transform:rotate(0deg)}90%{transform:rotate(2deg)}
+  100%{transform:rotate(10deg)}}
+@keyframes kbiFootF{0%{transform:rotate(-8deg)}12%{transform:rotate(2deg)}
+  25%{transform:rotate(0deg)}40%{transform:rotate(-4deg)}50%{transform:rotate(18deg)}
+  62%{transform:rotate(-4deg)}75%{transform:rotate(-6deg)}88%{transform:rotate(-3deg)}
+  100%{transform:rotate(-8deg)}}
+@keyframes kbiFootB{0%{transform:rotate(18deg)}12%{transform:rotate(-4deg)}
+  25%{transform:rotate(-6deg)}38%{transform:rotate(-3deg)}50%{transform:rotate(-8deg)}
+  62%{transform:rotate(2deg)}75%{transform:rotate(0deg)}90%{transform:rotate(-4deg)}
+  100%{transform:rotate(18deg)}}
+/* lowest when the legs are apart — the opposite of the instinct to bounce up */
+@keyframes kbiBob{0%{transform:translateY(4.4px)}12%{transform:translateY(1.4px)}
+  25%{transform:translateY(0)}40%{transform:translateY(2.6px)}50%{transform:translateY(4.4px)}
+  62%{transform:translateY(1.4px)}75%{transform:translateY(0)}88%{transform:translateY(2.6px)}
+  100%{transform:translateY(4.4px)}}
+@keyframes kbiSway{0%,100%{transform:rotate(-2.6deg)}50%{transform:rotate(2.6deg)}}
+@keyframes kbiArmF{0%,100%{transform:rotate(24deg)}50%{transform:rotate(-26deg)}}
+@keyframes kbiArmB{0%,100%{transform:rotate(-26deg)}50%{transform:rotate(24deg)}}
+@keyframes kbiForeSwing{0%,100%{transform:rotate(-10deg)}40%{transform:rotate(-30deg)}}
+@keyframes kbiHeadLevel{0%,100%{transform:rotate(1.5deg)}50%{transform:rotate(-1.5deg)}}
+@keyframes kbiShadow{0%,100%{opacity:.42;transform:scaleX(1.10)}50%{opacity:.58;transform:scaleX(.88)}}
+@keyframes kbiLitIn{from{opacity:0}to{opacity:1}}
+@keyframes kbiSpotIn{from{opacity:0;transform:scaleX(.4)}to{opacity:1;transform:scaleX(1)}}
+@keyframes kbiBeckon{0%,100%{transform:rotate(-8deg)}45%{transform:rotate(-48deg)}}
+@keyframes kbiHostWait{0%,100%{transform:rotate(0deg)}45%{transform:rotate(6deg)}}
+
+.kbi-act[data-beat="walk"] .kbi-cont,
+.kbi-act[data-beat="walk"] .kbi-spot{animation:kbiWalkX 1760ms linear 1 forwards}
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-lb{animation:kbiThighB 880ms linear 2 forwards}
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-lf{animation:kbiThighF 880ms linear 2 forwards}
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-lb .kbi-shin{animation:kbiShinB 880ms linear 2 forwards}
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-lf .kbi-shin{animation:kbiShinF 880ms linear 2 forwards}
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-lb .kbi-foot{animation:kbiFootB 880ms linear 2 forwards}
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-lf .kbi-foot{animation:kbiFootF 880ms linear 2 forwards}
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-hips{animation:kbiBob 880ms linear 2 forwards}
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-torso{animation:kbiSway 880ms ease-in-out 2 forwards}
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-an{animation:kbiArmF 880ms ease-in-out 2 forwards}
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-af{animation:kbiArmB 880ms ease-in-out 2 forwards}
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-an .kbi-fore,
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-af .kbi-fore{animation:kbiForeSwing 880ms ease-in-out 2 forwards}
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-head{animation:kbiHeadLevel 440ms ease-in-out 4 forwards}
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-sh{animation:kbiShadow 440ms linear 4 forwards}
+.kbi-act[data-beat="walk"] .kbi-cont .kbi-lit{animation:kbiLitIn 240ms ease-out 1 forwards}
+.kbi-act[data-beat="walk"] .kbi-spoti{animation:kbiSpotIn 300ms ease-out 1 forwards}
+.kbi-act[data-beat="walk"] .kbi-anchor .kbi-hips{transform:translateY(0)}
+.kbi-act[data-beat="walk"] .kbi-anchor .kbi-an{animation:kbiBeckon 1400ms ease-in-out 300ms 1 forwards}
+.kbi-act[data-beat="walk"] .kbi-anchor .kbi-torso{animation:kbiHostWait 1400ms ease-in-out 300ms 1 forwards}
+
+/* ---- BEATS 2+3: the meet and the handshake ----
+   Grouped in one selector so the plant HOLDS across the shake instead of
+   snapping back to the seated base. Every `from` is the pose the walk ended
+   on, and the walk ran an exact whole number of cycles so that pose is known. */
+@keyframes kbiPlantB{from{transform:rotate(22.5deg)}to{transform:rotate(7deg)}}
+@keyframes kbiPlantF{from{transform:rotate(-22deg)}to{transform:rotate(-6deg)}}
+@keyframes kbiPlantShinB{from{transform:rotate(10deg)}to{transform:rotate(3deg)}}
+@keyframes kbiPlantShinF{from{transform:rotate(0deg)}to{transform:rotate(3deg)}}
+@keyframes kbiPlantFoot{to{transform:rotate(0deg)}}
+@keyframes kbiHipSettle{from{transform:translateY(4.4px)}to{transform:translateY(0)}}
+/* the solve: shoulder -37.5, elbow -41.5 puts the hand at exactly (50,-82)
+   in figure-local space, which is world (606,118) for both figures */
+@keyframes kbiReach{from{transform:rotate(24deg)}to{transform:rotate(-37.5deg)}}
+@keyframes kbiReachFore{from{transform:rotate(-10deg)}to{transform:rotate(-41.5deg)}}
+@keyframes kbiFarSettle{to{transform:rotate(6deg)}}
+@keyframes kbiFarFore{to{transform:rotate(-16deg)}}
+@keyframes kbiBow{to{transform:rotate(-4deg)}}
+@keyframes kbiLook{to{transform:rotate(-5deg)}}
+@keyframes kbiClaspIn{from{opacity:0;transform:scale(.4)}to{opacity:.95;transform:scale(1)}}
+@keyframes kbiPump{0%,100%{transform:rotate(-37.5deg)}50%{transform:rotate(-31.5deg)}}
+@keyframes kbiPumpTorso{0%,100%{transform:rotate(var(--t0))}50%{transform:rotate(calc(var(--t0) - 1.5deg))}}
+@keyframes kbiPumpClasp{0%,100%{transform:translateY(0)}50%{transform:translateY(-4.3px)}}
+@keyframes kbiFlash{0%{opacity:0}18%{opacity:.85}100%{opacity:0}}
+
+.kbi-act[data-beat="meet"] .kbi-cont .kbi-lb,.kbi-act[data-beat="shake"] .kbi-cont .kbi-lb{animation:kbiPlantB 260ms cubic-bezier(.3,0,.2,1) forwards}
+.kbi-act[data-beat="meet"] .kbi-cont .kbi-lf,.kbi-act[data-beat="shake"] .kbi-cont .kbi-lf{animation:kbiPlantF 260ms cubic-bezier(.3,0,.2,1) forwards}
+.kbi-act[data-beat="meet"] .kbi-cont .kbi-lb .kbi-shin,.kbi-act[data-beat="shake"] .kbi-cont .kbi-lb .kbi-shin{animation:kbiPlantShinB 260ms cubic-bezier(.3,0,.2,1) forwards}
+.kbi-act[data-beat="meet"] .kbi-cont .kbi-lf .kbi-shin,.kbi-act[data-beat="shake"] .kbi-cont .kbi-lf .kbi-shin{animation:kbiPlantShinF 260ms cubic-bezier(.3,0,.2,1) forwards}
+.kbi-act[data-beat="meet"] .kbi-cont .kbi-foot,.kbi-act[data-beat="shake"] .kbi-cont .kbi-foot{animation:kbiPlantFoot 260ms cubic-bezier(.3,0,.2,1) forwards}
+.kbi-act[data-beat="meet"] .kbi-cont .kbi-hips,.kbi-act[data-beat="shake"] .kbi-cont .kbi-hips{animation:kbiHipSettle 260ms cubic-bezier(.3,0,.2,1) forwards}
+.kbi-act[data-beat="meet"] .kbi-anchor .kbi-hips,.kbi-act[data-beat="shake"] .kbi-anchor .kbi-hips{transform:translateY(0)}
+.kbi-act[data-beat="meet"] .kbi-fig .kbi-an,.kbi-act[data-beat="shake"] .kbi-fig .kbi-an{animation:kbiReach 260ms cubic-bezier(.3,0,.2,1) forwards}
+.kbi-act[data-beat="meet"] .kbi-fig .kbi-an .kbi-fore,.kbi-act[data-beat="shake"] .kbi-fig .kbi-an .kbi-fore{animation:kbiReachFore 260ms cubic-bezier(.3,0,.2,1) forwards}
+.kbi-act[data-beat="meet"] .kbi-fig .kbi-af,.kbi-act[data-beat="shake"] .kbi-fig .kbi-af{animation:kbiFarSettle 260ms cubic-bezier(.3,0,.2,1) forwards}
+.kbi-act[data-beat="meet"] .kbi-fig .kbi-af .kbi-fore,.kbi-act[data-beat="shake"] .kbi-fig .kbi-af .kbi-fore{animation:kbiFarFore 260ms cubic-bezier(.3,0,.2,1) forwards}
+.kbi-act[data-beat="meet"] .kbi-cont .kbi-torso,.kbi-act[data-beat="shake"] .kbi-cont .kbi-torso{animation:kbiBow 260ms cubic-bezier(.3,0,.2,1) forwards}
+.kbi-act[data-beat="meet"] .kbi-cont .kbi-head,.kbi-act[data-beat="shake"] .kbi-cont .kbi-head{animation:kbiLook 260ms cubic-bezier(.3,0,.2,1) forwards}
+/* The pump is written against .kbi-fig, so BOTH figures get the same keyframes
+   at the same moment and the host's static scale(-1,1) mirrors them. That is
+   the only reason the hands stay locked together for 640ms. */
+.kbi-act[data-beat="shake"] .kbi-clasp{animation:kbiClaspIn 120ms ease-out forwards,kbiPumpClasp 200ms ease-in-out 40ms 3 forwards}
+.kbi-act[data-beat="shake"] .kbi-fig .kbi-an{animation:kbiReach 260ms cubic-bezier(.3,0,.2,1) forwards,kbiPump 200ms ease-in-out 40ms 3 forwards}
+.kbi-act[data-beat="shake"] .kbi-fig .kbi-torso{animation:kbiPumpTorso 200ms ease-in-out 40ms 3 forwards}
+.kbi-act[data-beat="shake"] .kbi-flash{animation:kbiFlash 90ms ease-out 80ms 1 forwards}
+
+/* ---- BEATS 4+5: the sit and the settle. Every `to` equals the base pose,
+   so when the layer is torn down nothing moves. ---- */
+@keyframes kbiSitHips{from{transform:translateY(0)}to{transform:translateY(18px)}}
+@keyframes kbiSitHost{from{transform:translateY(0)}to{transform:translateY(14px)}}
+@keyframes kbiSitThighB{from{transform:rotate(7deg)}to{transform:rotate(-64deg)}}
+@keyframes kbiSitThighF{from{transform:rotate(-6deg)}to{transform:rotate(-70deg)}}
+@keyframes kbiSitShinB{from{transform:rotate(3deg)}to{transform:rotate(64deg)}}
+@keyframes kbiSitShinF{from{transform:rotate(3deg)}to{transform:rotate(70deg)}}
+@keyframes kbiArmRest{from{transform:rotate(-37.5deg)}to{transform:rotate(-14deg)}}
+@keyframes kbiForeRest{from{transform:rotate(-41.5deg)}to{transform:rotate(-24deg)}}
+@keyframes kbiSitTorso{from{transform:rotate(var(--t0))}to{transform:rotate(1deg)}}
+@keyframes kbiHeadRest{from{transform:rotate(-5deg)}to{transform:rotate(0deg)}}
+@keyframes kbiShadowSit{to{opacity:.2;transform:scaleX(.72)}}
+@keyframes kbiSpotNarrow{from{transform:scaleX(1)}to{transform:scaleX(.68)}}
+@keyframes kbiClaspOut{to{opacity:0}}
+
+.kbi-act[data-beat="sit"] .kbi-cont .kbi-hips,.kbi-act[data-beat="settle"] .kbi-cont .kbi-hips{animation:kbiSitHips 400ms cubic-bezier(.34,0,.2,1) forwards}
+.kbi-act[data-beat="sit"] .kbi-anchor .kbi-hips,.kbi-act[data-beat="settle"] .kbi-anchor .kbi-hips{animation:kbiSitHost 400ms cubic-bezier(.34,0,.2,1) forwards}
+.kbi-act[data-beat="sit"] .kbi-cont .kbi-lb,.kbi-act[data-beat="settle"] .kbi-cont .kbi-lb{animation:kbiSitThighB 400ms cubic-bezier(.34,0,.2,1) forwards}
+.kbi-act[data-beat="sit"] .kbi-cont .kbi-lf,.kbi-act[data-beat="settle"] .kbi-cont .kbi-lf{animation:kbiSitThighF 400ms cubic-bezier(.34,0,.2,1) forwards}
+.kbi-act[data-beat="sit"] .kbi-cont .kbi-lb .kbi-shin,.kbi-act[data-beat="settle"] .kbi-cont .kbi-lb .kbi-shin{animation:kbiSitShinB 400ms cubic-bezier(.34,0,.2,1) forwards}
+.kbi-act[data-beat="sit"] .kbi-cont .kbi-lf .kbi-shin,.kbi-act[data-beat="settle"] .kbi-cont .kbi-lf .kbi-shin{animation:kbiSitShinF 400ms cubic-bezier(.34,0,.2,1) forwards}
+.kbi-act[data-beat="sit"] .kbi-fig .kbi-an,.kbi-act[data-beat="settle"] .kbi-fig .kbi-an{animation:kbiArmRest 400ms cubic-bezier(.34,0,.2,1) forwards}
+.kbi-act[data-beat="sit"] .kbi-fig .kbi-an .kbi-fore,.kbi-act[data-beat="settle"] .kbi-fig .kbi-an .kbi-fore{animation:kbiForeRest 400ms cubic-bezier(.34,0,.2,1) forwards}
+.kbi-act[data-beat="sit"] .kbi-fig .kbi-torso,.kbi-act[data-beat="settle"] .kbi-fig .kbi-torso{animation:kbiSitTorso 400ms cubic-bezier(.34,0,.2,1) forwards}
+.kbi-act[data-beat="sit"] .kbi-cont .kbi-head,.kbi-act[data-beat="settle"] .kbi-cont .kbi-head{animation:kbiHeadRest 400ms cubic-bezier(.34,0,.2,1) forwards}
+.kbi-act[data-beat="sit"] .kbi-cont .kbi-sh,.kbi-act[data-beat="settle"] .kbi-cont .kbi-sh{animation:kbiShadowSit 400ms cubic-bezier(.34,0,.2,1) forwards}
+.kbi-act[data-beat="sit"] .kbi-spoti,.kbi-act[data-beat="settle"] .kbi-spoti{animation:kbiSpotNarrow 400ms cubic-bezier(.34,0,.2,1) forwards}
+.kbi-act[data-beat="sit"] .kbi-clasp,.kbi-act[data-beat="settle"] .kbi-clasp{animation:kbiClaspOut 150ms ease-out forwards}
+
+/* The crowd reaction is BORROWED: existing nodes, existing keyframes, existing
+   --i stagger. Fifteen real audience figures react and the intro adds none. */
+.kbc.kbi-cheer .kbc-arm{animation:kbcArmUp 1.5s ease-out both;animation-delay:calc(var(--i,0) * 42ms)}
+.kbc.kbi-cheer .kbc-hero{animation:kbcCheer .44s ease-out 3 both;animation-delay:calc(var(--i,0) * 42ms)}
+
+/* visibility:hidden preserves layout — so the handoff costs no reflow — AND
+   takes the four answer buttons out of the tab order, so no keystroke can lock
+   in an answer during the walk-on. Switching this to opacity:0 later would
+   silently re-arm them. */
+.kbc.kbi-on .kbc-top,.kbc.kbi-on .kbc-qwrap,
+.kbc.kbi-on .kbc-ladder,.kbc.kbi-on .kbc-hostwrap{visibility:hidden}
+.kbi-skip{position:absolute;right:12px;bottom:12px;z-index:8}
+.kbi-act.out{animation:kbiOut 220ms cubic-bezier(.4,0,.2,1) forwards;transform-origin:606px 118px}
+@keyframes kbiOut{to{opacity:0;transform:scale(1.06)}}
+.kbc.kbi-open .kbc-top{animation:kbiUiIn 300ms cubic-bezier(.2,.7,.3,1) both}
+.kbc.kbi-open .kbc-hostwrap{animation:kbiUiIn 300ms cubic-bezier(.2,.7,.3,1) 60ms both}
+.kbc.kbi-open .kbc-qwrap{animation:kbiUiIn 300ms cubic-bezier(.2,.7,.3,1) 110ms both}
+.kbc.kbi-open .kbc-ladder{animation:kbiUiIn 300ms cubic-bezier(.2,.7,.3,1) 170ms both}
+@keyframes kbiUiIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
+@media(max-width:860px){
+  .kbi-act{top:96px;--camA:translateX(90px);--camB:none}
+}
+
 /* The gallery strip: host, tally light and lower third. Treating the host as
    a camera feed rather than a portrait is what puts "systems in view" — you
    are watching a broadcast, not a cartoon. */
@@ -13272,6 +13483,9 @@ function kbcFloor() {
     '<defs>' +
       '<linearGradient id="kbcFPlane" x1="0" y1="0" x2="0" y2="1">' +
         '<stop offset="0" stop-color="#131c4c"/><stop offset="1" stop-color="#05071a"/></linearGradient>' +
+      '<linearGradient id="kbcFEdge" x1="0" y1="0" x2="0" y2="1">' +
+        '<stop offset="0" stop-color="#04061a" stop-opacity="0"/>' +
+        '<stop offset="1" stop-color="#04061a" stop-opacity=".85"/></linearGradient>' +
       '<linearGradient id="kbcFRef" x1="0" y1="0" x2="0" y2="1">' +
         '<stop offset="0" stop-color="#8fd0ff" stop-opacity=".26"/>' +
         '<stop offset="1" stop-color="#8fd0ff" stop-opacity="0"/></linearGradient>' +
@@ -13282,7 +13496,7 @@ function kbcFloor() {
     // the pillars catch the polish and run down the floor
     '<rect class="kbc-refl" x="352" y="0" width="30" height="30" fill="url(#kbcFRef)"/>' +
     '<rect class="kbc-refl" x="818" y="0" width="30" height="30" fill="url(#kbcFRef)"/>' +
-    '<rect x="0" y="34" width="1200" height="6" fill="#04061a" opacity=".8"/>' +
+    '<rect x="0" y="30" width="1200" height="10" fill="url(#kbcFEdge)"/>' +
   '</svg>';
 }
 
@@ -13337,6 +13551,126 @@ function kbcRail(side) {
     ticks + leds + '</svg>';
 }
 
+/* THE ARRIVAL — the cold open.
+
+   The contestant walks on, shakes the anchor's hand and takes the seat, and
+   then the first question arrives. It runs once per sitting, about 3.3
+   seconds, and any tap or key kills it instantly and for good.
+
+   WHERE IT LIVES, which is the whole trick: the studio is a top band and a
+   bottom band with nothing in between, and during the intro there is no
+   question — so that middle band is empty. The act layer mounts into it with
+   the same edge anchors the set strips use (top:136px, bottom:52px), and the
+   real studio keeps running behind and around it, unscaled, at its correct
+   aspect, with its ambient animations mid-flight. Nothing is duplicated,
+   nothing is squashed, and the handoff is free because the background is the
+   same DOM node before, during and after.
+
+   THIS IS THE ONE LAYER ALLOWED ROUND SHAPES. The set strips are
+   preserveAspectRatio="none" and would render an ellipse squashed; this layer
+   is "xMidYMax slice", uniform, so heads and shadows can be ellipses. Put a
+   figure node into kbcWall() later and it will distort with no obvious cause.
+
+   NO LIKENESS. A head is a bare ellipse — no eyes, mouth, brow, hair or ears.
+   The two figures are told apart by suit value, stance and posture only. */
+
+function kbiLimb(cls, len, w, col) {
+  return '<path class="' + cls + '" d="M0,0 L0,' + len + '" stroke="' + col +
+    '" stroke-width="' + w + '" stroke-linecap="round" fill="none"/>';
+}
+
+/** One figure. `legs` is false for the anchor: the desk front runs to y=186
+    and his hips sit at x=656 inside its span, so his legs are never visible
+    and rigging them would be the highest-risk animation in the piece for no
+    picture at all. He sits by dropping his hips 14 units. */
+function kbiFigure(cls, wear, skin, rim, legs) {
+  const arm = (side) =>
+    '<g transform="translate(' + (side === 'an' ? 10 : -10) + ',-36)">' +
+      '<g class="kbi-arm kbi-' + side + '">' +
+        kbiLimb('kbi-up', 27, 7.5, wear) +
+        '<g transform="translate(0,27)"><g class="kbi-fore">' +
+          kbiLimb('kbi-lo', 24, 6.5, wear) +
+          (side === 'an' ? '<g transform="translate(0,24)"><ellipse class="kbi-hand" rx="5" ry="4.5" fill="' + skin + '"/></g>' : '') +
+        '</g></g>' +
+      '</g></g>';
+  const leg = (side) =>
+    '<g class="kbi-leg kbi-' + side + '">' +
+      kbiLimb('kbi-thigh', 36, 10, wear) +
+      '<g transform="translate(0,36)"><g class="kbi-shin">' +
+        kbiLimb('kbi-calf', 34, 8.5, wear) +
+        '<g transform="translate(0,34)"><g class="kbi-foot">' +
+          '<path d="M-5,-2 L12,-0.4 L13,2 L-5,2 Z" fill="#05070f"/>' +
+        '</g></g>' +
+      '</g></g></g>';
+  return '<g class="kbi-fig ' + cls + '">' +
+    '<g transform="translate(0,200)' + (legs ? '' : ' scale(-1,1)') + '">' +
+      (legs ? '<ellipse class="kbi-sh" cy="1" rx="26" ry="5" fill="#000" opacity=".45"/>' : '') +
+      '<g class="kbi-lit">' +
+        '<g transform="translate(0,-72)"><g class="kbi-hips">' +
+          (legs ? leg('lb') + leg('lf')
+                : '<path d="M-12,-2 L12,-2 L16,72 L-16,72 Z" fill="' + wear + '"/>') +
+          '<g class="kbi-torso">' +
+            arm('af') +
+            '<path class="kbi-body" d="M-11,2 C-13,-14 -13,-28 -13,-36 Q0,-42 13,-36 C13,-28 13,-14 11,2 Z" fill="' + wear + '"/>' +
+            '<path d="M-13,-36 Q0,-42 13,-36" stroke="' + rim + '" stroke-width="1.4" fill="none"/>' +
+            '<g transform="translate(0,-36)"><g class="kbi-head">' +
+              kbiLimb('kbi-neck', -5, 6, skin) +
+              '<ellipse cx="0" cy="-15" rx="10.5" ry="12" fill="' + skin + '"/>' +
+              '<path d="M-10.5,-15 A10.5,12 0 0 1 0,-27" stroke="' + rim + '" stroke-width="1.2" fill="none" opacity=".7"/>' +
+            '</g></g>' +
+            arm('an') +
+          '</g>' +
+        '</g></g>' +
+      '</g>' +
+    '</g></g>';
+}
+
+function kbiActSVG(tall) {
+  const vb = tall ? '502 17 208 215' : '191 38 830 214';
+  return '<svg class="kbi-act" viewBox="' + vb + '" preserveAspectRatio="xMidYMax slice" aria-hidden="true">' +
+    '<defs>' +
+      '<linearGradient id="kbiCone" x1="0" y1="0" x2="0" y2="1">' +
+        '<stop offset="0" stop-color="#dff4ff" stop-opacity=".26"/>' +
+        '<stop offset="1" stop-color="#dff4ff" stop-opacity="0"/></linearGradient>' +
+      '<radialGradient id="kbiPool"><stop offset="0" stop-color="#dff4ff" stop-opacity=".50"/>' +
+        '<stop offset="1" stop-color="#dff4ff" stop-opacity="0"/></radialGradient>' +
+      '<linearGradient id="kbiDesk" x1="0" y1="0" x2="0" y2="1">' +
+        '<stop offset="0" stop-color="#1b2450"/><stop offset="1" stop-color="#05070d"/></linearGradient>' +
+      '<linearGradient id="kbiGloss" x1="0" y1="0" x2="0" y2="1">' +
+        '<stop offset="0" stop-color="#8fd0ff" stop-opacity=".22"/>' +
+        '<stop offset="1" stop-color="#8fd0ff" stop-opacity="0"/></linearGradient>' +
+    '</defs>' +
+    '<g class="kbi-cam">' +
+      '<rect x="500" y="196" width="120" height="10" fill="url(#kbiGloss)"/>' +
+      '<rect x="612" y="196" width="96" height="10" fill="url(#kbiGloss)"/>' +
+      // the hot seat, its pan top at world y=146 — exactly the seated hip height
+      '<g transform="translate(556,200)">' +
+        '<path d="M-15,-54 L15,-54 L12,-96 Q0,-102 -12,-96 Z" fill="#1a2050"/>' +
+        '<path d="M-12,-96 Q0,-102 12,-96" stroke="#7ec8ff" stroke-width="1.5" fill="none" opacity=".5"/>' +
+        '<path d="M-18,-54 L18,-54 L16,-44 L-16,-44 Z" fill="#232a63"/>' +
+        '<path d="M-5,-44 L5,-44 L8,-8 L-8,-8 Z" fill="#141b3e"/>' +
+        '<path d="M-14,-8 L14,-8 L14,-2 L-14,-2 Z" fill="#101736"/>' +
+      '</g>' +
+      kbiFigure('kbi-anchor', '#141a30', '#8a6248', 'rgba(191,228,255,.55)', false) +
+      kbiFigure('kbi-cont', '#5560b4', '#8a6248', 'rgba(191,228,255,.38)', true) +
+      // drawn AFTER both figures: its front face crosses the host at shin
+      // height, which is what lets him have no legs at all
+      '<g>' +
+        '<path d="M580,158 C610,148 670,148 700,158 L700,172 C670,182 610,182 580,172 Z" fill="url(#kbiDesk)"/>' +
+        '<path d="M580,172 C610,182 670,182 700,172 L700,190 C670,200 610,200 580,190 Z" fill="#05070d"/>' +
+        '<path d="M580,172 C610,182 670,182 700,172" stroke="var(--kbc-react,#7ec8ff)" stroke-width="1.6" fill="none" opacity=".45"/>' +
+        '<ellipse cx="640" cy="160" rx="26" ry="4" fill="#bfe4ff" opacity=".16"/>' +
+      '</g>' +
+      '<ellipse class="kbi-clasp" cx="606" cy="118" rx="10" ry="7.5" fill="#f0f7ff" opacity="0"/>' +
+      '<g class="kbi-spot"><g class="kbi-spoti">' +
+        '<path class="kbi-cone" d="M-16,20 L-54,200 L54,200 L16,20 Z" fill="url(#kbiCone)"/>' +
+        '<ellipse class="kbi-pool" cy="200" rx="52" ry="13" fill="url(#kbiPool)"/>' +
+      '</g></g>' +
+      '<rect class="kbi-flash" x="191" y="38" width="830" height="214" fill="#eaf6ff" opacity="0"/>' +
+    '</g>' +
+  '</svg>';
+}
+
 let _kbcAir = null;
 function kbcAirwrap() {
   if (!_kbcAir) _kbcAir = h('div', { class: 'kbc-airwrap', html: kbcStudioSVG() });
@@ -13344,7 +13678,8 @@ function kbcAirwrap() {
 }
 
 function kbcStudioSVG() {
-  return '<div class="kbc-room"></div>' + kbcWall() + kbcFloor() + kbcDesk() + kbcRail('l') + kbcRail('r');
+  return '<div class="kbc-room"></div>' + kbcWall() + kbcFloor() + kbcDesk() + kbcRail('l') + kbcRail('r') +
+    '<div class="kbc-dim"></div>';
 }
 
 function kbcHostSVG() {
@@ -13378,8 +13713,16 @@ async function runKBC(questions) {
   const audio = GameAudio();
   let ladder = [], rung = 0, picked = -1, locked = false, hidden = [];
   let used = {}, timer = null, tleft = 0, tickHandle = null;
+  let introLive = false, introTimers = [], introMQ = null, openQ = null;
+  /* Once per sitting, and never again once you have skipped it. Someone on
+     their fourth game does not want to watch this. */
+  const introOff = () => matchMedia('(prefers-reduced-motion:reduce)').matches || (() => {
+    try { return sessionStorage.getItem('kbi.seen') === '1' || localStorage.getItem('kbi.off') === '1'; }
+    catch (e) { return false; }
+  })();
 
   function teardown() {
+    introKill();
     if (timer) { clearInterval(timer); timer = null; }
     if (tickHandle) { clearInterval(tickHandle); tickHandle = null; }
     audio.stopAll();
@@ -13443,7 +13786,9 @@ async function runKBC(questions) {
     if (ladder.length < KBC_PRIZES.length) { toast('Not enough questions for a full ladder', 'warn'); return; }
     rung = 0; used = {}; locked = false; hidden = [];
     audio.resume();
+    introLive = !introOff();          // set BEFORE draw(), which reads it
     draw();
+    if (introLive) playIntro();
   }
 
   function draw() {
@@ -13546,12 +13891,91 @@ async function runKBC(questions) {
     // time in five and said `undefined`.
     const stakePool = rung >= 10 ? KBC_ASK_HIGH : rung >= 5 ? KBC_ASK_MID : KBC_ASK_LOW;
     const pool = Math.random() < 0.2 ? KBC_ASK_SLY : stakePool;
-    say(pool[Math.floor(Math.random() * pool.length)].replace('{P}', money(rung)));
     walkAwayBtn();
-    // The bed tightens as the ladder does: rung 1 and rung 15 are the same
-    // music played at different levels of nerve.
-    audio.bed(rung);
-    startClock(rung < 5 ? 60 : rung < 10 ? 50 : 45);
+    // Everything that starts the CLOCK is deferred behind the intro. Without
+    // this guard the answer timer runs during the walk-on and the player loses
+    // three seconds of their first question — a bug that surfaces as "the
+    // timer is wrong", nowhere near its cause.
+    openQ = () => {
+      say(pool[Math.floor(Math.random() * pool.length)].replace('{P}', money(rung)));
+      // The bed tightens as the ladder does: rung 1 and rung 15 are the same
+      // music played at different levels of nerve.
+      audio.bed(rung);
+      startClock(rung < 5 ? 60 : rung < 10 ? 50 : 45);
+    };
+    if (!introLive) { openQ(); openQ = null; }
+  }
+
+  /* The cold open. draw() has already run, so the entire playing view is built
+     and laid out underneath — which is what makes the handoff free: no reflow,
+     nothing measured, nothing rebuilt. */
+  const KBI_SEQ = [[1760, 'meet'], [2020, 'shake'], [2660, 'sit'], [3060, 'settle']];
+
+  function playIntro() {
+    const stage = host.querySelector('.kbc-stage');
+    if (!stage) return bailIntro();
+    // The act layer is edge-anchored between the wall and the desk strips, so
+    // its height is whatever the stage leaves. Under 150px there is no room to
+    // act in and `slice` would crop to a shot of two pairs of shoes.
+    const tall = matchMedia('(max-width:860px)').matches;
+    const band = stage.getBoundingClientRect().height - (tall ? 96 : 136) - 52;
+    if (band < 150) return bailIntro();
+    try { sessionStorage.setItem('kbi.seen', '1'); } catch (e) {}
+
+    const act = h('div', { html: kbiActSVG(tall) }).firstChild;
+    act.setAttribute('data-beat', 'walk');     // set BEFORE insertion, so t=0
+    stage.appendChild(act);                     // is the frame it lands in
+    stage.appendChild(h('button', {
+      class: 'btn sm ghost kbi-skip', text: 'Skip intro ›',
+      onclick: (e) => { e.stopPropagation(); endIntro(true); }
+    }));
+    host.classList.add('kbi-on');
+    act.addEventListener('click', () => endIntro(true));
+    document.addEventListener('keydown', onIntroKey, true);
+    introMQ = matchMedia('(prefers-reduced-motion:reduce)');
+    if (introMQ.addEventListener) introMQ.addEventListener('change', onIntroRM);
+
+    KBI_SEQ.forEach(pair => introTimers.push(setTimeout(() => {
+      act.setAttribute('data-beat', pair[1]);
+      if (pair[1] === 'shake') host.classList.add('kbi-cheer');
+    }, pair[0])));
+    introTimers.push(setTimeout(() => endIntro(false), 3280));
+  }
+
+  function bailIntro() { introLive = false; if (openQ) { openQ(); openQ = null; } }
+  function onIntroKey(e) {
+    if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault(); e.stopPropagation(); endIntro(true);
+    }
+  }
+  function onIntroRM() { if (introMQ && introMQ.matches) endIntro(false); }
+
+  /* Every route out — the chip, a tap, a key, a reduced-motion flip mid-play,
+     the natural end, teardown — funnels through here, and introLive is the
+     idempotence guard: skipping at 40ms and at 3279ms both yield exactly one
+     openQ(). */
+  function introKill() {
+    introTimers.forEach(clearTimeout); introTimers = [];
+    document.removeEventListener('keydown', onIntroKey, true);
+    if (introMQ && introMQ.removeEventListener) introMQ.removeEventListener('change', onIntroRM);
+    introMQ = null;
+    if (!introLive) return;
+    introLive = false;
+    host.classList.remove('kbi-on', 'kbi-cheer');
+    const a = host.querySelector('.kbi-act'), sk = host.querySelector('.kbi-skip');
+    if (a) a.remove();
+    if (sk) sk.remove();
+  }
+
+  function endIntro(byUser) {
+    if (!introLive) return;
+    // Skipping is a preference, not a one-off: it never plays for them again.
+    if (byUser) { try { localStorage.setItem('kbi.off', '1'); } catch (e) {} }
+    const q = openQ; openQ = null;
+    introKill();
+    host.classList.add('kbi-open');
+    setTimeout(() => host.classList.remove('kbi-open'), 520);
+    if (q) q();
   }
 
   function lifelineBtn(key, label) {
