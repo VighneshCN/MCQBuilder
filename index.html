@@ -276,6 +276,10 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   border-radius:var(--r-lg);padding:10px 14px;color:#fff;font:inherit;transition:transform .1s,border-color .12s}
 .tier-btn:hover{transform:translateY(-1px);border-color:rgba(255,255,255,.55)}
 .tier-btn .tiny{color:rgba(255,255,255,.66)}
+/* The games run on a dark stage whatever the app theme is, so a ghost button
+   inheriting the page's own muted text colour comes out near-invisible on it. */
+.game-root .btn.ghost{color:rgba(255,255,255,.8);border-color:rgba(255,255,255,.3)}
+.game-root .btn.ghost:hover{background:rgba(255,255,255,.14);color:#fff;border-color:rgba(255,255,255,.55)}
 
 /* balloon pop */
 .bp-hud{position:relative;z-index:15;display:flex;gap:10px;padding:10px;align-items:flex-start}
@@ -351,8 +355,22 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .bp-flash.good{color:#00ff88}.bp-flash.bad{color:#ff4d6d}
 @keyframes bpFlash{0%{opacity:0;transform:translate(-50%,-50%) scale(.6)}18%{opacity:1;transform:translate(-50%,-50%) scale(1.08)}
   72%{opacity:1;transform:translate(-50%,-50%) scale(1)}100%{opacity:0;transform:translate(-50%,-50%) scale(.9)}}
-.bp-explain{position:absolute;left:50%;bottom:74px;transform:translateX(-50%);z-index:25;width:min(460px,90%);
-  background:rgba(12,8,32,.9);border:1px solid rgba(255,255,255,.25);border-radius:var(--r-lg);padding:10px 14px;color:#fff}
+.bp-balloon.is-answer .bp-body{outline:3px solid #00ff88;box-shadow:0 0 22px #00ff88;animation:bpAnswer 1s ease-in-out infinite alternate}
+@keyframes bpAnswer{to{box-shadow:0 0 34px #00ff88}}
+.bp-balloon.is-answer{z-index:22}
+/* The verdict lives in the question card, so it never covers the field. */
+.bp-verdict{margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,.18);
+  font-size:13.5px;color:#fff;animation:bpVerdict .26s ease}
+@keyframes bpVerdict{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+.bp-verdict-mark{font-size:17px;line-height:1}
+.bp-verdict.good .bp-verdict-mark{color:#00ff88}
+.bp-verdict.bad .bp-verdict-mark{color:#ff4d6d}
+.bp-verdict-why{font-size:12px;line-height:1.4;color:rgba(255,255,255,.72);margin-top:5px}
+/* and the matching row in the options panel lights up */
+.bp-leg.is-answer{background:rgba(0,255,136,.14);border-radius:6px;
+  box-shadow:inset 0 0 0 1px rgba(0,255,136,.45);margin:-2px -5px;padding:2px 5px}
+.bp-leg.is-answer .bp-leg-k{color:#00ff88}
+.bp-leg.is-answer .bp-leg-t{color:#eafff4;font-weight:600}
 @media(max-width:560px){
   /* A long stem plus a four-option legend can take 40% of a phone screen, and
      what is left is the only place a balloon can actually be hit. Give the
@@ -11557,7 +11575,14 @@ async function runBalloonPop(questions) {
     // Each option gets its own lane. Random horizontal placement clustered two
     // balloons on top of each other often enough to make one unclickable and
     // its tag unreadable, which turns a knowledge question into a dexterity one.
-    opts.forEach((o, i) => setTimeout(() => { if (!evaluating) spawn(o, i, opts.length); }, i * 420));
+    //
+    // The stagger is only for the look of them rising in sequence, so it stays
+    // short: at 420ms the fourth option did not arrive until 1.26s into the
+    // round, and if that was the correct one a player could shoot early, lose
+    // a life, and be told the answer was an option that had not yet appeared.
+    // At 150ms every option is in the air within half a second, so no round is
+    // ever unwinnable at the moment it becomes playable.
+    opts.forEach((o, i) => setTimeout(() => { if (!evaluating) spawn(o, i, opts.length); }, i * 150));
     floatWatch = setInterval(reap, 400);
   }
 
@@ -11570,11 +11595,12 @@ async function runBalloonPop(questions) {
           h('div', { class: 'spacer' }),
           h('span', { class: 'tiny dim', text: current.qid || '' })
         ]),
-        h('div', { class: 'bp-stem', text: current.stem })
+        h('div', { class: 'bp-stem', text: current.stem }),
+        h('div', { id: 'bp-verdict' })
       ]),
       h('div', { class: 'bp-side' }, [
-        h('div', { style: 'font-size:15px;letter-spacing:1px' }, '❤️'.repeat(Math.max(0, lives)) + '🖤'.repeat(Math.max(0, tier.lives - lives))),
-        h('div', { class: 'bp-score', text: 'Score ' + score }),
+        h('div', { id: 'bp-lives', style: 'font-size:15px;letter-spacing:1px' }, '❤️'.repeat(Math.max(0, lives)) + '🖤'.repeat(Math.max(0, tier.lives - lives))),
+        h('div', { class: 'bp-score', id: 'bp-score', text: 'Score ' + score }),
         h('button', { class: 'btn sm ghost', onclick: () => { stopEverything(); go('games'); }, text: 'Quit' })
       ])
     ]);
@@ -11587,7 +11613,7 @@ async function runBalloonPop(questions) {
     const aside = h('div', { class: 'bp-aside' + (round === 0 ? ' fly' : '') }, [
       h('div', { class: 'eyebrow', style: 'margin-bottom:5px', text: 'The options' }),
       h('div', { class: 'bp-legend' }, current.options.map(o =>
-        h('div', { class: 'bp-leg' }, [
+        h('div', { class: 'bp-leg', dataset: { opt: o.id } }, [
           h('span', { class: 'bp-leg-k', text: o.letter }),
           h('span', { class: 'bp-leg-t', text: o.text })
         ])))
@@ -11598,6 +11624,16 @@ async function runBalloonPop(questions) {
       h('div', { class: 'bp-barrel', id: 'bp-barrel' }), h('div', { class: 'bp-hub' }), h('div', { class: 'bp-base' })
     ]));
     host.appendChild(h('div', { class: 'bp-flash', id: 'bp-flash' }));
+  }
+
+  /** Score and lives are the feedback for what just happened, so they have to
+      change at the moment it happens. Rebuilt only on the next round's draw,
+      they told the player about their PREVIOUS answer while they were looking
+      at the result of this one. */
+  function refreshHud() {
+    const l = $('#bp-lives'), s = $('#bp-score');
+    if (l) l.textContent = '❤️'.repeat(Math.max(0, lives)) + '🖤'.repeat(Math.max(0, tier.lives - lives));
+    if (s) s.textContent = 'Score ' + score;
   }
 
   function spawn(opt, lane, lanes) {
@@ -11651,8 +11687,8 @@ async function runBalloonPop(questions) {
   function missed() {
     if (evaluating) return;
     evaluating = true;
-    lives--; audio.sfx('wrong');
-    reveal(false, 'It got away — that was ' + current.correctText + '.');
+    lives--; refreshHud(); audio.sfx('wrong');
+    reveal(false, 'It got away.');
   }
 
   function shootAt(b) {
@@ -11686,29 +11722,49 @@ async function runBalloonPop(questions) {
     setTimeout(() => b.el.remove(), 420);
     balloons = balloons.filter(x => x !== b);
     evaluating = true;
-    if (correct) { score++; audio.sfx('right'); reveal(true, ''); }
-    else { lives--; audio.sfx('wrong'); reveal(false, 'That was ' + b.opt.letter + '. The answer is ' + current.correctText + '.'); }
+    if (correct) { score++; refreshHud(); audio.sfx('right'); reveal(true, ''); }
+    else { lives--; refreshHud(); audio.sfx('wrong'); reveal(false, 'You shot ' + b.opt.letter + '.'); }
   }
 
   function reveal(good, msg) {
     if (spawnTimer) { clearTimeout(spawnTimer); spawnTimer = null; }
     if (floatWatch) { clearInterval(floatWatch); floatWatch = null; }
-    const flash = $('#bp-flash');
-    if (flash) {
-      flash.textContent = good ? '✔ ' + current.correctText : '✘';
-      flash.className = 'bp-flash show ' + (good ? 'good' : 'bad');
-    }
     const field = $('#bp-field');
-    if (field && (msg || current.explanation)) {
-      field.appendChild(h('div', { class: 'bp-explain' }, [
-        msg ? h('div', { style: 'font-weight:600;margin-bottom:4px', text: msg }) : null,
-        current.explanation ? h('div', { class: 'small', text: current.explanation.slice(0, 260) }) : null
+    if (!field) return;
+
+    // Everything still in the air stops, so the screen is calm at the moment
+    // there is something to read and nothing can drift off mid-explanation.
+    balloons.forEach(b => { if (b.el) b.el.style.animationPlayState = 'paused'; });
+
+    // The answer is shown in the three places the player is already looking,
+    // and NOWHERE over the play area. A panel in the middle of the field
+    // covered the very balloons the player is trying to learn from — it hid
+    // the answer in the act of announcing it.
+    //   1. the balloon itself, which is what they just aimed at
+    balloons.forEach(b => { if (b.alive && b.opt.id === current.correctId) b.el.classList.add('is-answer'); });
+    //   2. the options panel, where option text already lives
+    const legRow = host.querySelector('.bp-leg[data-opt="' + current.correctId + '"]');
+    if (legRow) legRow.classList.add('is-answer');
+    //   3. the question card, which is already the information zone
+    const verdict = $('#bp-verdict');
+    if (verdict) {
+      verdict.textContent = '';
+      verdict.className = 'bp-verdict ' + (good ? 'good' : 'bad');
+      verdict.appendChild(h('div', { class: 'row', style: 'gap:8px;align-items:baseline' }, [
+        h('span', { class: 'bp-verdict-mark', text: good ? '✔' : '✘' }),
+        h('span', { style: 'font-weight:700', text: good ? 'Correct' : (msg || 'Not that one') }),
+        h('span', { class: 'tiny dim', style: 'min-width:0', text: good ? '' : '— it was ' + current.correctText })
       ]));
+      if (current.explanation) {
+        verdict.appendChild(h('div', { class: 'bp-verdict-why', text: current.explanation.slice(0, 220) }));
+      }
     }
+
+    const hold = current.explanation ? 3000 : (good ? 1500 : 2200);
     setTimeout(() => {
       if (lives <= 0) return finish();
       round++; nextRound();
-    }, current.explanation || msg ? 2600 : 1300);
+    }, hold);
   }
 
   function finish() {
