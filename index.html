@@ -265,7 +265,7 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .evidence{font-size:13.5px;line-height:1.45;color:var(--txt-2)}
 
 /* --- games ------------------------------------------------------------- */
-.game-root{position:relative;min-height:min(72vh,620px);border:1px solid var(--rule);border-radius:var(--r-lg);
+.game-root{position:relative;min-height:min(64vh,560px);border:1px solid var(--rule);border-radius:var(--r-lg);
   overflow:hidden;background:linear-gradient(180deg,#1a1140 0%,#2d1a52 38%,#5c2760 70%,#8f3f63 100%)}
 .game-screen{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
   gap:10px;text-align:center;padding:24px;z-index:20}
@@ -388,6 +388,169 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 @media(prefers-reduced-motion:reduce){
   .bp-balloon{animation-duration:26s!important}
   .bp-flash.show{animation-duration:1s}
+}
+
+/* --- Kab Banega Crorepati ---------------------------------------------- */
+.game-root.kbc{background:radial-gradient(900px 620px at 50% -12%,#5a3a12 0%,transparent 58%),
+  radial-gradient(700px 500px at 50% 118%,#3a1232 0%,transparent 55%),
+  linear-gradient(160deg,#0a0709 0%,#120b12 55%,#070506 100%);
+  --kbc-gold:#f5c542;color:#f6eeda}
+.game-root.kbc.suspense{filter:brightness(.74);transition:filter .4s}
+.kbc-logo{margin-bottom:4px}
+.kbc-logo-sub{font-family:var(--display);font-size:15px;letter-spacing:.32em;color:var(--kbc-gold);text-transform:uppercase}
+.kbc-logo-main{font-family:var(--display);font-size:clamp(30px,7vw,46px);font-weight:800;letter-spacing:.06em;
+  background:linear-gradient(135deg,#fde68a,var(--kbc-gold) 55%,#e879c9);-webkit-background-clip:text;background-clip:text;color:transparent}
+.kbc-lifeline-legend{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:12px}
+.kbc-lifeline-legend span{font-size:11px;font-weight:700;color:var(--kbc-gold);
+  border:1px solid rgba(245,197,66,.35);border-radius:999px;padding:4px 11px}
+
+.kbc-top{position:relative;z-index:12;display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:10px 12px 6px}
+.kbc-stat{background:rgba(255,255,255,.05);border:1px solid rgba(245,197,66,.18);border-radius:10px;padding:4px 11px;line-height:1.15}
+.kbc-stat .eyebrow{display:block;color:rgba(246,238,218,.55)}
+.kbc-stat b{font-family:var(--mono);font-size:15px;color:var(--kbc-gold)}
+.kbc-lifelines{display:flex;gap:7px}
+.kbc-ll{width:46px;height:38px;border-radius:9px;border:1.5px solid var(--kbc-gold);background:rgba(245,197,66,.08);
+  color:var(--kbc-gold);font-weight:800;font-size:12px;cursor:pointer;transition:transform .12s}
+.kbc-ll:hover:not(:disabled){transform:translateY(-2px)}
+.kbc-ll.used,.kbc-ll:disabled{opacity:.3;cursor:not-allowed;text-decoration:line-through}
+
+/* The stage fills whatever height the card has rather than sitting in the top
+   of it — otherwise the show plays in the upper two thirds with dead space
+   underneath, which is the opposite of a stage. */
+/* No min-height:0 here. The menu and end screens are position:absolute, so
+   they contribute no height — zeroing the minimum collapsed the flex column
+   to nothing and the root then swallowed the clicks meant for its own
+   buttons. The stage inside is what flexes; the root keeps its floor. */
+.game-root.kbc{display:flex;flex-direction:column}
+.kbc-stage{position:relative;flex:1;display:grid;grid-template-columns:1fr 200px;
+  grid-template-rows:auto 1fr;gap:12px;padding:0 12px 14px;min-height:0}
+/* The studio itself: one ornamental SVG pinned behind the stage. It carries
+   no text and takes no clicks, so nothing here can steal a tap from an
+   answer. Rigs, beams, a floor pool and three crowd rows — the whole set in
+   a single paint. */
+.kbc-airwrap{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:0}
+.kbc-air{width:100%;height:100%;display:block}
+.kbc-beam{opacity:.5;animation:kbcBeam 5s ease-in-out infinite alternate;animation-delay:calc(var(--i,0) * -.8s)}
+@keyframes kbcBeam{to{opacity:1}}
+.kbc-crowd{animation:kbcSway 6.5s ease-in-out infinite alternate;animation-delay:calc(var(--r,0) * -1.3s)}
+@keyframes kbcSway{from{transform:translateX(-3px)}to{transform:translateX(3px)}}
+
+/* The gallery strip: host, tally light and lower third. Treating the host as
+   a camera feed rather than a portrait is what puts "systems in view" — you
+   are watching a broadcast, not a cartoon. */
+.kbc-hostwrap{grid-column:1;display:flex;gap:11px;align-items:flex-end;z-index:3;min-height:96px}
+.kbc-cam{flex:none;width:104px;border-radius:11px;overflow:hidden;
+  border:1px solid rgba(245,197,66,.28);background:linear-gradient(180deg,#141b30,#080b16);
+  box-shadow:0 10px 24px rgba(0,0,0,.5)}
+.kbc-cam-feed{display:block;padding:5px 4px 0}
+.kbc-cam-strip{display:flex;align-items:center;gap:5px;padding:3px 7px;background:rgba(0,0,0,.6);
+  font-family:var(--mono);font-size:9px;letter-spacing:.09em;color:rgba(246,238,218,.7);white-space:nowrap}
+.kbc-tally{flex:none;width:6px;height:6px;border-radius:50%;background:#ef4444;
+  box-shadow:0 0 7px #ef4444;animation:kbcRec 1.6s ease-in-out infinite}
+.kbc-lower{flex:1;min-width:0}
+.kbc-lower-k{display:inline-block;font-family:var(--mono);font-size:9.5px;font-weight:800;
+  letter-spacing:.17em;color:#1a1200;padding:2px 10px;border-radius:6px 6px 0 0;
+  background:linear-gradient(90deg,var(--kbc-gold),#e8a33d)}
+
+/* The on-air bug reads the game back to you: LIVE while the question is
+   open, LOCKED through the pause after you commit, HOLD once it is over. */
+.kbc-bug{display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:9px;
+  background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.45);
+  font-family:var(--mono);font-size:10px;font-weight:800;letter-spacing:.15em;color:#fca5a5}
+.kbc-rec{flex:none;width:7px;height:7px;border-radius:50%;background:#ef4444;
+  box-shadow:0 0 8px #ef4444;animation:kbcRec 1.6s ease-in-out infinite}
+@keyframes kbcRec{50%{opacity:.2}}
+.kbc-bug.locked{background:rgba(245,197,66,.14);border-color:rgba(245,197,66,.5);color:var(--kbc-gold)}
+.kbc-bug.locked .kbc-rec{background:var(--kbc-gold);box-shadow:0 0 8px var(--kbc-gold);animation-duration:.55s}
+.kbc-bug.hold{background:rgba(255,255,255,.05);border-color:var(--rule);color:rgba(246,238,218,.6)}
+.kbc-bug.hold .kbc-rec{background:rgba(246,238,218,.45);box-shadow:none;animation:none}
+
+.kbc-host-svg{width:100%;height:auto;display:block}
+.kbc-host .kbc-body{transform-origin:60px 128px;animation:kbcBreathe 4s ease-in-out infinite alternate}
+@keyframes kbcBreathe{to{transform:scaleY(1.012)}}
+.kbc-host .kbc-head{transform-origin:60px 70px;animation:kbcIdle 6s ease-in-out infinite}
+@keyframes kbcIdle{0%,100%{transform:rotate(-1.2deg)}50%{transform:rotate(1.4deg)}}
+.kbc-host.talk .kbc-mouth{animation:kbcTalk .5s ease-in-out 3}
+@keyframes kbcTalk{50%{d:path('M53 61 Q60 68 67 61')}}
+.kbc-host.talk .kbc-arm{animation:kbcGesture .8s ease-in-out}
+@keyframes kbcGesture{50%{transform:rotate(-11deg)}}
+.kbc-host .kbc-arm{transform-origin:92px 88px}
+.game-root.kbc.suspense .kbc-brow-l,.game-root.kbc.suspense .kbc-brow-r{transform:translateY(-2px)}
+.kbc-bubble{background:rgba(10,14,26,.72);border:1px solid rgba(245,197,66,.22);
+  border-radius:0 12px 12px 12px;padding:8px 12px;font-size:13px;line-height:1.42;color:#dbe4ff;
+  min-height:38px;backdrop-filter:blur(3px)}
+.kbc-bubble.whisper{font-style:italic;color:var(--kbc-gold);border-color:rgba(245,197,66,.5);background:rgba(245,197,66,.09)}
+
+.kbc-qwrap{grid-column:1;display:flex;flex-direction:column;justify-content:center;gap:11px;z-index:3}
+.kbc-timer{display:flex;align-items:center;gap:9px}
+.kbc-timer-track{flex:1;height:7px;background:rgba(255,255,255,.09);border-radius:999px;overflow:hidden}
+.kbc-timer-bar{height:100%;width:100%;background:linear-gradient(90deg,#22d3ee,#22c55e);transition:width .25s linear}
+.kbc-timer-bar.warn{background:linear-gradient(90deg,#f59e0b,#ef4444)}
+.kbc-timer-num{font-family:var(--mono);font-size:14px;font-weight:800;min-width:28px;text-align:right}
+.kbc-q{background:linear-gradient(160deg,#251b24,#150f16);border:1.5px solid var(--kbc-gold);border-radius:15px;
+  padding:15px 18px;font-size:clamp(14px,3.4vw,17px);font-weight:700;text-align:center;
+  box-shadow:0 0 28px rgba(245,197,66,.16)}
+.game-root.kbc.suspense .kbc-q{box-shadow:0 0 44px rgba(245,197,66,.48)}
+.kbc-opts{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.kbc-opt{display:flex;align-items:center;gap:9px;text-align:left;font:inherit;cursor:pointer;
+  background:linear-gradient(160deg,#2a2230,#171015);border:1.5px solid rgba(245,197,66,.16);
+  border-radius:999px;padding:10px 15px;color:inherit;transition:transform .1s,border-color .15s,background .15s}
+.kbc-opt:hover:not(.lock){border-color:var(--kbc-gold);transform:translateY(-1px)}
+.kbc-opt-k{font-family:var(--mono);font-weight:900;color:var(--kbc-gold);flex:none}
+.kbc-opt-t{font-size:13.5px;line-height:1.3;min-width:0}
+.kbc-opt.sel{background:linear-gradient(160deg,#b45309,#f59e0b);border-color:#fff;color:#1a1200}
+.kbc-opt.sel .kbc-opt-k{color:#1a1200}
+.kbc-opt.locked-pick{animation:kbcPulse .8s ease-in-out infinite}
+@keyframes kbcPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,197,66,.55)}50%{box-shadow:0 0 0 13px rgba(245,197,66,0)}}
+.kbc-opt.right{background:linear-gradient(160deg,#15803d,#22c55e);border-color:#fff;color:#04210f}
+.kbc-opt.right .kbc-opt-k{color:#04210f}
+.kbc-opt.wrong{background:linear-gradient(160deg,#991b1b,#ef4444);border-color:#fff;color:#2a0606}
+.kbc-opt.wrong .kbc-opt-k{color:#2a0606}
+.kbc-opt.gone{visibility:hidden}
+.kbc-opt.lock{cursor:default}
+.kbc-actions{display:flex;gap:9px;justify-content:center;min-height:38px;flex-wrap:wrap}
+
+.kbc-ladder{grid-column:2;grid-row:1 / span 2;display:flex;flex-direction:column-reverse;
+  justify-content:center;gap:2px;overflow-y:auto;padding:8px 6px;z-index:3;
+  background:rgba(8,11,22,.6);border:1px solid rgba(245,197,66,.14);border-radius:12px;
+  backdrop-filter:blur(2px)}
+.kbc-rung{display:flex;justify-content:space-between;gap:8px;padding:4px 9px;border-radius:7px;
+  font-size:12px;font-weight:700;color:rgba(246,238,218,.5)}
+.kbc-rung-n{color:rgba(246,238,218,.32);font-family:var(--mono)}
+.kbc-rung.safe{color:rgba(246,238,218,.85)}
+.kbc-rung.done{color:#4ade80}
+.kbc-rung.cur{background:linear-gradient(90deg,#f59e0b,#b45309);color:#1a1200}
+.kbc-rung.cur .kbc-rung-n{color:#1a1200}
+
+.kbc-poll{flex:1;height:18px;background:rgba(0,0,0,.25);border-radius:5px;overflow:hidden}
+.kbc-poll i{display:block;height:100%;background:linear-gradient(90deg,#22d3ee,#3b82f6);
+  border-radius:5px;transition:width .6s ease}
+.kbc-friend{font-size:14px;line-height:1.55;background:rgba(0,0,0,.2);border:1px solid var(--rule);
+  border-radius:12px;padding:12px 14px}
+.kbc-cheque{background:linear-gradient(160deg,#fef3c7,#fde68a);color:#1a1200;border-radius:13px;
+  padding:15px 20px;width:min(400px,92%);text-align:left;box-shadow:0 16px 40px rgba(0,0,0,.45);transform:rotate(-1.2deg)}
+.kbc-cheque-bank{font-weight:900;font-size:12px;letter-spacing:1px}
+.kbc-cheque-pay{font-size:12px;margin-top:7px;color:#5b4a10}
+.kbc-cheque-amt{font-family:var(--mono);font-size:29px;font-weight:900;margin-top:2px}
+.kbc-cheque-sig{text-align:right;font-style:italic;margin-top:9px;font-size:11px;color:#5b4a10}
+
+@media(max-width:860px){
+  .kbc-stage{grid-template-columns:1fr;min-height:0}
+  .kbc-ladder{grid-column:1;grid-row:auto;order:-1;flex-direction:row;overflow-x:auto;
+    gap:5px;justify-content:flex-start}
+  .kbc-rung{flex:none;flex-direction:column;align-items:center;gap:0;padding:4px 9px;font-size:11px;
+    border:1px solid transparent}
+  .kbc-rung.safe{border-color:rgba(245,197,66,.25)}
+  .kbc-rung.cur{box-shadow:0 0 0 1px rgba(255,255,255,.35)}
+  .kbc-opts{grid-template-columns:1fr}
+  .kbc-cam{width:66px}
+  .kbc-cam-strip{font-size:8px;letter-spacing:.02em;padding:2px 5px}
+  .kbc-cam-src{display:none}
+  .kbc-ladder{padding:5px;background:rgba(8,11,22,.55)}
+  .kbc-hostwrap{min-height:0;gap:8px}
+}
+@media(prefers-reduced-motion:reduce){
+  .kbc-beam,.kbc-crowd,.kbc-rec,.kbc-tally,.kbc-host .kbc-body,.kbc-host .kbc-head,.kbc-opt.locked-pick{animation:none}
 }
 
 /* --- buttons ---------------------------------------------------------- */
@@ -11367,6 +11530,14 @@ async function launchGame(id) {
    because an instant jump in amplitude is heard as a click. */
 const NEAR_SILENT = 0.0001;
 
+/* One context for the life of the page, never one per game. Browsers cap the
+   number of concurrent AudioContexts (Chrome around six), so closing and
+   recreating one on every play would leave a student who opened and quit a
+   few games with no sound at all for the rest of the session — and nothing on
+   screen would say why. Teardown suspends; the next game resumes the same
+   graph. */
+let SHARED_AC = null;
+
 function GameAudio() {
   let ctx = null, master = null, muted = false;
   let bed = null;          // the sustained tension layer, if any
@@ -11374,8 +11545,12 @@ function GameAudio() {
 
   function ensure() {
     if (ctx) return ctx;
-    try { ctx = new (window.AudioContext || window.webkitAudioContext)(); }
-    catch (e) { return null; }
+    if (!SHARED_AC) {
+      try { SHARED_AC = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch (e) { return null; }
+    }
+    ctx = SHARED_AC;
+    if (ctx.state === 'suspended') ctx.resume();
     master = ctx.createGain();
     master.gain.value = muted ? NEAR_SILENT : 0.9;
     master.connect(ctx.destination);
@@ -11487,7 +11662,18 @@ function GameAudio() {
     stopAll() {
       stopBed();
       timers.forEach(clearInterval); timers.length = 0;
-      if (ctx) { try { ctx.close(); } catch (e) {} ctx = null; master = null; }
+      // Drop this game's own mixer, leave the shared context alive and idle.
+      if (master) {
+        try {
+          const t = ctx.currentTime;
+          master.gain.cancelScheduledValues(t);
+          master.gain.setValueAtTime(Math.max(master.gain.value, NEAR_SILENT), t);
+          master.gain.exponentialRampToValueAtTime(NEAR_SILENT, t + 0.15);
+        } catch (e) {}
+        const m = master;
+        setTimeout(() => { try { m.disconnect(); } catch (e) {} }, 300);
+      }
+      ctx = null; master = null;
     }
   };
 }
@@ -11793,6 +11979,560 @@ async function runBalloonPop(questions) {
       stem: current && current.stem, live: balloons.filter(b => b.alive).map(b => b.opt.letter) }),
     shootLetter: (L) => { const b = balloons.find(x => x.alive && x.opt.letter === L); if (b) shootAt(b); return !!b; },
     correctLetter: () => { const o = current && current.options.find(x => x.id === current.correctId); return o && o.letter; }
+  };
+}
+
+/* ---------- Kab Banega Crorepati ----------
+   An affectionate pastiche of the Indian quiz-show format, not the programme
+   itself: no real host, no real branding, no borrowed catchphrases. The pun
+   in the name is the point — "WHEN will you become a millionaire".
+
+   The show's whole engine is one person deciding whether to trust themselves.
+   Everything here serves that: the host leans on you, the lifelines are
+   unreliable in ways that are funny rather than useful, and the music tightens
+   as the ladder does. */
+
+const KBC_PRIZES = [1000, 2000, 3000, 5000, 10000, 20000, 40000, 80000,
+                    160000, 320000, 640000, 1250000, 2500000, 5000000, 10000000];
+const KBC_SAFE = [4, 9];   // rungs banked for good once passed
+
+function kbcMoney(n) {
+  if (n >= 10000000) return '₹1 Crore';
+  if (n >= 100000) return '₹' + (n / 100000) + ' Lakh';
+  const s = String(Math.round(n)), last = s.slice(-3), rest = s.slice(0, -3);
+  return '₹' + (rest ? rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' : '') + last;
+}
+
+/* The host has three jobs: raise the stakes, mislead you, and be funny when
+   you fall. Pools are separated by stake so the same tease never lands twice
+   in a run at the same emotional pitch. */
+const KBC_ASK_LOW = [
+  'Nice and easy to begin. {P} on the line.',
+  'Warm-up. {P}. Read all four before you decide.',
+  'Here we go — {P}. The clock is already running.',
+  '{P}. Settle in. No prizes for speed, only for being right.'
+];
+const KBC_ASK_MID = [
+  'Now it gets interesting. {P} riding on this one.',
+  '{P}. The room just went quiet. So did I.',
+  'Careful — {P} is real money. Read it twice.',
+  'Halfway. {P} on the table. This is where people get confident and lose.'
+];
+const KBC_ASK_HIGH = [
+  'Big one. {P}. Take your time. The clock will not.',
+  '{P}. My heart is going and I am only the host.',
+  'One question between you and the top. {P}. No pressure at all.',
+  'For {P}. Whatever you are about to say, say it slowly.'
+];
+const KBC_ASK_SLY = [
+  '{P}. Looks simple. Which is exactly what worries me.',
+  '{P}. Easy question. Or is it?',
+  'I will not say it is a trap. I will just leave that there.'
+];
+
+/* Misdirection: the host points at a wrong option, more often as the money
+   grows. Never at the right one — the joke is that he is unhelpful, not that
+   the game is rigged against knowledge. */
+const KBC_NUDGE = [
+  'Between us? I would have said {W}. But it is your money.',
+  'Really, {S}? Someone last week swore it was {W} and went home early.',
+  'I am not allowed to help. {W}. That is all I am saying.',
+  'My gut says {W}. My gut also bought crypto at the top.',
+  '{P} on the line and you pick {S}? {W} is right there.',
+  'Bold. {W} was the safe answer. But who likes safe?'
+];
+const KBC_STEADY = [
+  '{S}. Solid. Lock it when you are ready.',
+  'Confident? I like confident.',
+  'Tick tock. The clock is far less patient than I am.',
+  'You look certain. That is either very good or very expensive.'
+];
+const KBC_WRONG = [
+  'Ouch. It was {A}. Somewhere an examiner is quietly nodding.',
+  'No! It was {A}. Your ledger and your logic have separated.',
+  'Beep. {A}. The auditor has added a qualified opinion, just for you.',
+  'Oof. {A}. That one goes straight to the loss account.',
+  'So close to being completely wrong. It was {A}.',
+  '{A} was sitting right there. Now it is a bad debt. Write it off.',
+  'Not today. {A}. Somewhere, a control just failed.',
+  'And the answer was {A}. The silence you hear is the studio agreeing.'
+];
+const KBC_RIGHT = [
+  'Correct! And I genuinely tried to put you off.',
+  'Absolutely right. Well played.',
+  'Correct. The auditor approves.',
+  'Right answer. The room exhales.',
+  'Bang on. You did not fall for it.'
+];
+
+/* Phone a friend. Confidently unhelpful — and never names the right option,
+   because a friend who reliably points at a wrong answer becomes the strongest
+   lifeline in the game by elimination. Mostly vague, occasionally somewhere
+   else entirely. */
+const KBC_FRIEND_VAGUE = [
+  'Haan haan I know this one. It is the… the one about the… you know the one. Go with your gut.',
+  'Okay listen. Whichever one sounds most like a textbook wrote it. That is usually it. Usually.',
+  'I am ninety percent sure. Ninety. Maybe seventy. Look, pick the longest one, they are always right.',
+  'Do not overthink it! Actually, do think about it. Actually I do not know. Sorry.',
+  'The trick with these is to eliminate two, then panic between the other two. That is what I do.',
+  'It is definitely not the first one. Or it is. One of those.'
+];
+const KBC_FRIEND_OFF = [
+  'Sorry can you hear me, I am in the market. THREE KILOS. Not you. What was the question?',
+  'Bro I am at my cousin sister wedding. The food is incredible. You should have come. Bye.',
+  'One second, my mother is asking who is calling. IT IS FOR THE QUIZ, MA. She says hello.',
+  'I was going to study today but then I watched four hours of cricket. Ask me about cricket.',
+  'Is this about the money? How much money. HOW MUCH. Okay now I am too nervous, bye.',
+  'My phone is at eight percent and you are asking me accounting. Priorities, yaar.',
+  'Hold on, I am parking. …I am still parking. …Okay I have hit something. Call you back.'
+];
+
+/** The host, drawn once as SVG and animated by class. Deliberately a
+    stylised figure — a silhouette in a suit, not a likeness of anybody. */
+/** The studio itself: lighting truss, lamps with beams, and an audience in
+    the dark beyond. Built once as a string, animated purely by CSS, and
+    entirely ornamental — every word on screen stays real DOM so it can be
+    selected and read aloud. The crowd is three swaying ROWS rather than
+    sixty-six individually animated shapes, which is what keeps this cheap
+    enough to run behind a game on a phone. Abstract capsules only: no faces,
+    no limbs, nothing that could read as a caricature of anyone. */
+function kbcStudioSVG() {
+  const lamps = [120, 260, 400, 560, 700, 840].map((x, i) =>
+    '<g class="kbc-lamp" style="--i:' + i + '" transform="translate(' + x + ',54)">' +
+      '<path d="M-9,0 L9,0 L13,18 L-13,18 Z" fill="#2b3348"/>' +
+      '<circle cy="20" r="4.5" fill="var(--kbc-gold)" opacity=".9"/>' +
+      '<path class="kbc-beam" d="M-13,20 L-74,330 L74,330 L13,20 Z" fill="url(#kbcBeam)"/>' +
+    '</g>').join('');
+  const struts = Array.from({ length: 14 }, (_, i) => {
+    const x = -20 + i * 72;
+    return '<path d="M' + x + ',26 L' + (x + 36) + ',54 L' + (x + 36) + ',26 L' + x + ',54" stroke="#2b3348" stroke-width="1.6" fill="none" opacity=".55"/>';
+  }).join('');
+  const row = (n, step, y, h, op, r) => '<g class="kbc-crowd" style="--r:' + r + '">' +
+    Array.from({ length: n }, (_, i) =>
+      '<rect x="' + (i * step) + '" y="' + (y + Math.sin(i * 1.7) * 2).toFixed(1) + '" width="9" height="' + h + '" rx="4.5" fill="#8fa3d8" opacity="' + op + '"/>').join('') + '</g>';
+  return '<svg viewBox="0 0 960 540" preserveAspectRatio="xMidYMid slice" class="kbc-air" aria-hidden="true">' +
+    '<defs>' +
+      '<linearGradient id="kbcBeam" x1="0" y1="0" x2="0" y2="1">' +
+        '<stop offset="0" stop-color="#f5c542" stop-opacity=".30"/><stop offset="1" stop-color="#f5c542" stop-opacity="0"/></linearGradient>' +
+      '<radialGradient id="kbcPool" cx="50%" cy="78%" r="62%">' +
+        '<stop offset="0" stop-color="#f5c542" stop-opacity=".16"/><stop offset="1" stop-color="#f5c542" stop-opacity="0"/></radialGradient>' +
+      '<radialGradient id="kbcVig" cx="50%" cy="44%" r="76%">' +
+        '<stop offset=".55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".66"/></radialGradient>' +
+    '</defs>' +
+    '<line x1="0" y1="26" x2="960" y2="26" stroke="#2b3348" stroke-width="2" opacity=".5"/>' +
+    '<line x1="0" y1="54" x2="960" y2="54" stroke="#2b3348" stroke-width="2" opacity=".5"/>' +
+    struts + lamps +
+    '<ellipse cx="480" cy="470" rx="430" ry="112" fill="url(#kbcPool)"/>' +
+    row(26, 34, 402, 13, '.20', 0) + row(22, 40, 386, 13, '.15', 1) + row(18, 48, 372, 13, '.10', 2) +
+    '<rect width="960" height="540" fill="url(#kbcVig)"/>' +
+  '</svg>';
+}
+
+function kbcHostSVG() {
+  return '<svg viewBox="0 0 120 130" class="kbc-host-svg" aria-hidden="true">' +
+    '<defs><linearGradient id="kbcSuit" x1="0" y1="0" x2="0" y2="1">' +
+    '<stop offset="0" stop-color="#243056"/><stop offset="1" stop-color="#141a30"/></linearGradient></defs>' +
+    '<ellipse class="kbc-shadow" cx="60" cy="126" rx="34" ry="5" fill="rgba(0,0,0,.45)"/>' +
+    '<g class="kbc-body">' +
+      '<path d="M26 128 Q28 84 46 74 L74 74 Q92 84 94 128 Z" fill="url(#kbcSuit)"/>' +
+      '<path d="M60 74 L52 96 L60 104 L68 96 Z" fill="#e8ecff" opacity=".9"/>' +
+      '<path d="M60 78 L56 90 L60 95 L64 90 Z" fill="#c0392b"/>' +
+      '<g class="kbc-arm"><path d="M92 88 Q104 96 100 112" stroke="#1b2340" stroke-width="9" fill="none" stroke-linecap="round"/></g>' +
+    '</g>' +
+    '<g class="kbc-head">' +
+      '<circle cx="60" cy="52" r="21" fill="#c98d5e"/>' +
+      '<path d="M39 48 Q42 28 60 28 Q78 28 81 48 Q74 38 60 38 Q46 38 39 48 Z" fill="#241a16"/>' +
+      '<g class="kbc-eyes"><circle cx="52" cy="52" r="2.6" fill="#171a2b"/><circle cx="68" cy="52" r="2.6" fill="#171a2b"/></g>' +
+      '<path class="kbc-brow-l" d="M47 45 Q52 42 57 45" stroke="#241a16" stroke-width="2" fill="none" stroke-linecap="round"/>' +
+      '<path class="kbc-brow-r" d="M63 45 Q68 42 73 45" stroke="#241a16" stroke-width="2" fill="none" stroke-linecap="round"/>' +
+      '<path class="kbc-mouth" d="M53 61 Q60 65 67 61" stroke="#5a2f22" stroke-width="2.2" fill="none" stroke-linecap="round"/>' +
+    '</g></svg>';
+}
+
+async function runKBC(questions) {
+  const host = h('div', { class: 'game-root kbc', id: 'kbc' });
+  const target = $('#view');
+  State.view = 'games';
+  target.textContent = '';
+  target.appendChild(host);
+
+  const audio = GameAudio();
+  let ladder = [], rung = 0, picked = -1, locked = false, hidden = [];
+  let used = {}, timer = null, tleft = 0, tickHandle = null;
+
+  function teardown() {
+    if (timer) { clearInterval(timer); timer = null; }
+    if (tickHandle) { clearInterval(tickHandle); tickHandle = null; }
+    audio.stopAll();
+  }
+  const guard = setInterval(() => {
+    if (!document.body.contains(host)) { teardown(); clearInterval(guard); }
+  }, 500);
+
+  const say = (text, whisper) => {
+    const el = $('#kbc-say');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'kbc-bubble' + (whisper ? ' whisper' : '');
+    const fig = $('#kbc-host');
+    if (fig) { fig.classList.remove('talk'); void fig.offsetWidth; fig.classList.add('talk'); }
+  };
+  const bug = (text, cls) => {
+    const b = $('#kbc-bug'), t = $('#kbc-bug-t');
+    if (b) b.className = 'kbc-bug' + (cls ? ' ' + cls : '');
+    if (t) t.textContent = text;
+  };
+  const money = (i) => kbcMoney(KBC_PRIZES[i]);
+  const secured = () => { let a = 0; KBC_SAFE.forEach(s => { if (s <= rung - 1) a = KBC_PRIZES[s]; }); return a; };
+  const banked = () => (rung > 0 ? KBC_PRIZES[rung - 1] : 0);
+
+  function menu() {
+    teardown();
+    host.textContent = '';
+    host.appendChild(h('div', { class: 'game-screen' }, [
+      h('div', { class: 'kbc-logo' }, [
+        h('div', { class: 'kbc-logo-sub', text: 'Kab Banega' }),
+        h('div', { class: 'kbc-logo-main', text: 'CROREPATI' })
+      ]),
+      h('p', { class: 'game-sub', text: 'Fifteen questions from your own bank, worth ₹1,000 up to ₹1 Crore. Two rungs are banked for good. Three lifelines, none of them entirely trustworthy — and neither is the host.' }),
+      h('div', { class: 'row', style: 'gap:10px;justify-content:center;flex-wrap:wrap;margin-top:6px' }, [
+        h('button', { class: 'btn primary', onclick: start, text: 'Take the seat' }),
+        h('button', { class: 'btn ghost', onclick: () => go('games'), text: 'Back to games' })
+      ]),
+      h('div', { class: 'kbc-lifeline-legend' }, [
+        h('span', { text: '50:50' }), h('span', { text: 'Ask the audience' }), h('span', { text: 'Phone a friend' })
+      ])
+    ]));
+  }
+
+  function start() {
+    // Hardest last: the climb should feel like one, and a bank with graded
+    // difficulty gets used properly rather than shuffled flat.
+    const rank = { easy: 0, medium: 1, hard: 2 };
+    const pool = shuffle(questions).slice(0, KBC_PRIZES.length * 2);
+    pool.sort((a, b) => (rank[a.difficulty] == null ? 1 : rank[a.difficulty]) - (rank[b.difficulty] == null ? 1 : rank[b.difficulty]));
+    ladder = pool.slice(0, KBC_PRIZES.length);
+    if (ladder.length < KBC_PRIZES.length) { toast('Not enough questions for a full ladder', 'warn'); return; }
+    rung = 0; used = {}; locked = false; hidden = [];
+    audio.resume();
+    draw();
+  }
+
+  function draw() {
+    picked = -1; locked = false; hidden = [];
+    const q = ladder[rung];
+    host.textContent = '';
+
+    // CSS lays this out bottom-up (column-reverse), so build it in natural
+    // rung order and let the layout do the flipping — reversing in both places
+    // put ₹1,000 at the top of the ladder.
+    const ladderEl = h('div', { class: 'kbc-ladder' }, KBC_PRIZES.map((p, i) => i).map(i =>
+      h('div', {
+        class: 'kbc-rung' + (i === rung ? ' cur' : '') + (i < rung ? ' done' : '') + (KBC_SAFE.indexOf(i) >= 0 ? ' safe' : '')
+      }, [h('span', { class: 'kbc-rung-n', text: String(i + 1) }), h('span', { text: kbcMoney(KBC_PRIZES[i]) })])));
+
+    host.appendChild(h('div', { class: 'kbc-top' }, [
+      h('div', { class: 'kbc-bug', id: 'kbc-bug' }, [
+        h('i', { class: 'kbc-rec' }), h('span', { id: 'kbc-bug-t', text: 'LIVE' })
+      ]),
+      h('div', { class: 'kbc-stat' }, [h('span', { class: 'eyebrow', text: 'Question' }), h('b', { text: (rung + 1) + ' / ' + KBC_PRIZES.length })]),
+      h('div', { class: 'kbc-stat' }, [h('span', { class: 'eyebrow', text: 'Playing for' }), h('b', { text: money(rung) })]),
+      h('div', { class: 'kbc-stat' }, [h('span', { class: 'eyebrow', text: 'Banked' }), h('b', { text: kbcMoney(secured()) })]),
+      h('div', { class: 'spacer' }),
+      h('div', { class: 'kbc-lifelines' }, [
+        lifelineBtn('fifty', '50:50'), lifelineBtn('audience', '👥'), lifelineBtn('phone', '📞')
+      ]),
+      h('button', { class: 'btn sm ghost', onclick: () => { teardown(); go('games'); }, text: 'Quit' })
+    ]));
+
+    const stage = h('div', { class: 'kbc-stage' }, [
+      h('div', { class: 'kbc-airwrap', html: kbcStudioSVG() }),
+      h('div', { class: 'kbc-hostwrap' }, [
+        // The host is a camera feed rather than a portrait in a bubble: it
+        // shows a gallery cutting between sources, which is what "systems in
+        // view" means on a broadcast, and a small abstract PIP sidesteps any
+        // question of whose likeness this is.
+        h('div', { class: 'kbc-cam' }, [
+          h('div', { class: 'kbc-cam-feed kbc-host', id: 'kbc-host', html: kbcHostSVG() }),
+          h('div', { class: 'kbc-cam-strip' }, [
+            h('i', { class: 'kbc-tally' }), h('span', { text: 'CAM 2' }),
+            h('span', { class: 'kbc-cam-src', text: '· HOST' })
+          ])
+        ]),
+        h('div', { class: 'kbc-lower' }, [
+          h('div', { class: 'kbc-lower-k', text: 'THE HOST' }),
+          h('div', { class: 'kbc-bubble', id: 'kbc-say', text: '' })
+        ])
+      ]),
+      h('div', { class: 'kbc-qwrap' }, [
+        h('div', { class: 'kbc-timer' }, [
+          h('div', { class: 'kbc-timer-track' }, h('div', { class: 'kbc-timer-bar', id: 'kbc-bar' })),
+          h('span', { class: 'kbc-timer-num', id: 'kbc-num', text: '—' })
+        ]),
+        h('div', { class: 'kbc-q', id: 'kbc-q', text: q.stem }),
+        h('div', { class: 'kbc-opts', id: 'kbc-opts' }, q.options.map((o, i) =>
+          h('button', { class: 'kbc-opt', dataset: { i: String(i) }, onclick: () => pick(i) }, [
+            h('span', { class: 'kbc-opt-k', text: o.letter }), h('span', { class: 'kbc-opt-t', text: o.text })
+          ]))),
+        h('div', { class: 'kbc-actions', id: 'kbc-actions' })
+      ]),
+      ladderEl
+    ]);
+    host.appendChild(stage);
+
+    // On a phone the ladder is a horizontal strip roughly three times wider
+    // than the screen. Without this you climb to rung 8 with the marker
+    // parked off-screen and no way to see where you are. Scrolls the ladder
+    // itself only — never an ancestor, so the page cannot jump.
+    requestAnimationFrame(() => {
+      const cur = ladderEl.querySelector('.kbc-rung.cur');
+      if (!cur || !document.body.contains(cur)) return;
+      const lr = ladderEl.getBoundingClientRect(), cr = cur.getBoundingClientRect();
+      ladderEl.scrollLeft += (cr.left - lr.left) - (lr.width - cr.width) / 2;
+      ladderEl.scrollTop += (cr.top - lr.top) - (lr.height - cr.height) / 2;
+    });
+
+    // Pick the pool FIRST, then index that pool. Indexing the sly lines by the
+    // stake pool's length walked off the end of the shorter array roughly one
+    // time in five and said `undefined`.
+    const stakePool = rung >= 10 ? KBC_ASK_HIGH : rung >= 5 ? KBC_ASK_MID : KBC_ASK_LOW;
+    const pool = Math.random() < 0.2 ? KBC_ASK_SLY : stakePool;
+    say(pool[Math.floor(Math.random() * pool.length)].replace('{P}', money(rung)));
+    walkAwayBtn();
+    // The bed tightens as the ladder does: rung 1 and rung 15 are the same
+    // music played at different levels of nerve.
+    audio.bed(0.15 + (rung / (KBC_PRIZES.length - 1)) * 0.85);
+    startClock(rung < 5 ? 60 : rung < 10 ? 50 : 45);
+  }
+
+  function lifelineBtn(key, label) {
+    return h('button', {
+      class: 'kbc-ll' + (used[key] ? ' used' : ''), disabled: !!used[key],
+      onclick: () => useLifeline(key), text: label
+    });
+  }
+
+  function walkAwayBtn() {
+    const a = $('#kbc-actions');
+    if (!a) return;
+    a.textContent = '';
+    if (rung > 0) a.appendChild(h('button', { class: 'btn ghost', onclick: walkAway, text: 'Walk away with ' + kbcMoney(banked()) }));
+  }
+
+  function startClock(sec) {
+    if (timer) clearInterval(timer);
+    tleft = sec;
+    const bar = $('#kbc-bar'), num = $('#kbc-num');
+    if (num) num.textContent = String(sec);
+    if (bar) { bar.style.width = '100%'; bar.classList.remove('warn'); }
+    timer = setInterval(() => {
+      tleft--;
+      const b = $('#kbc-bar'), n = $('#kbc-num');
+      if (n) n.textContent = String(Math.max(0, tleft));
+      if (b) { b.style.width = (tleft / sec * 100) + '%'; if (tleft <= 10) b.classList.add('warn'); }
+      if (tleft <= 5 && tleft > 0) audio.sfx('tick');
+      if (tleft <= 0) { clearInterval(timer); timer = null; timeUp(); }
+    }, 1000);
+  }
+
+  function timeUp() {
+    if (locked) return;
+    say('Time. The clock does not negotiate.');
+    if (picked < 0) bug('OFF AIR', 'hold');
+    if (picked >= 0) lockIn(); else reveal(-1);
+  }
+
+  function pick(i) {
+    if (locked || hidden.indexOf(i) >= 0) return;
+    picked = i;
+    const q = ladder[rung];
+    Array.prototype.forEach.call($('#kbc-opts').children, (el) => {
+      el.classList.toggle('sel', Number(el.dataset.i) === i);
+    });
+    audio.sfx('pop');
+
+    const wrongs = [0, 1, 2, 3].filter(x => x !== i && hidden.indexOf(x) < 0 && q.options[x] && q.options[x].id !== q.correctId);
+    const chance = rung < 5 ? 0.4 : rung < 10 ? 0.62 : 0.82;
+    if (wrongs.length && Math.random() < chance) {
+      const w = q.options[wrongs[Math.floor(Math.random() * wrongs.length)]].letter;
+      say(KBC_NUDGE[Math.floor(Math.random() * KBC_NUDGE.length)]
+        .replace('{W}', w).replace('{S}', q.options[i].letter).replace('{P}', money(rung)), true);
+    } else if (Math.random() < 0.5) {
+      say(KBC_STEADY[Math.floor(Math.random() * KBC_STEADY.length)].replace('{S}', q.options[i].letter));
+    }
+
+    const a = $('#kbc-actions');
+    a.textContent = '';
+    a.appendChild(h('button', { class: 'btn primary', onclick: lockIn, text: 'Lock ' + q.options[i].letter }));
+    if (rung > 0) a.appendChild(h('button', { class: 'btn ghost', onclick: walkAway, text: 'Walk (' + kbcMoney(banked()) + ')' }));
+  }
+
+  function lockIn() {
+    if (locked || picked < 0) return;
+    locked = true;
+    if (timer) { clearInterval(timer); timer = null; }
+    const q = ladder[rung];
+    $('#kbc-actions').textContent = '';
+    Array.prototype.forEach.call($('#kbc-opts').children, el => {
+      el.classList.add('lock');
+      if (Number(el.dataset.i) === picked) el.classList.add('locked-pick');
+    });
+    say('Locked. ' + q.options[picked].letter + '. No going back.');
+    bug('LOCKED', 'locked');
+    host.classList.add('suspense');
+    audio.sfx('lock');
+    audio.bed(1);
+    const wait = rung < 5 ? 1600 : rung < 10 ? 2600 : 3600;
+    if (rung >= 8) setTimeout(() => { if (locked) say('…I could tell you now. Or I could let you sit with it.'); }, wait * 0.45);
+    setTimeout(() => reveal(picked), wait);
+  }
+
+  function reveal(sel) {
+    const q = ladder[rung];
+    host.classList.remove('suspense');
+    const correctIx = q.options.findIndex(o => o.id === q.correctId);
+    Array.prototype.forEach.call($('#kbc-opts').children, el => {
+      const i = Number(el.dataset.i);
+      el.classList.remove('sel', 'locked-pick');
+      if (i === correctIx) el.classList.add('right');
+      else if (i === sel) el.classList.add('wrong');
+    });
+    const good = sel === correctIx;
+    bug(good ? 'ON AIR' : 'OFF AIR', good ? '' : 'hold');
+    if (good) {
+      audio.sfx('right');
+      say(KBC_RIGHT[Math.floor(Math.random() * KBC_RIGHT.length)]);
+      if (KBC_SAFE.indexOf(rung) >= 0) setTimeout(() => audio.sfx('lifeline'), 400);
+      rung++;
+      setTimeout(() => { if (rung >= ladder.length) return end('won'); draw(); }, 1900);
+    } else {
+      audio.sfx('wrong');
+      audio.stopBed();
+      say(KBC_WRONG[Math.floor(Math.random() * KBC_WRONG.length)].replace('{A}', q.correctText));
+      setTimeout(() => end('lost'), 3000);
+    }
+  }
+
+  function walkAway() { if (locked) return; if (timer) clearInterval(timer); bug('HOLD', 'hold'); end('walk'); }
+
+  function useLifeline(key) {
+    if (used[key] || locked) return;
+    used[key] = true;
+    const btn = host.querySelector('.kbc-ll[disabled], .kbc-ll');
+    Array.prototype.forEach.call(host.querySelectorAll('.kbc-ll'), (el, i) => {
+      if (['fifty', 'audience', 'phone'][i] === key) { el.classList.add('used'); el.disabled = true; }
+    });
+    audio.sfx('lifeline');
+    const q = ladder[rung];
+    const correctIx = q.options.findIndex(o => o.id === q.correctId);
+
+    if (key === 'fifty') {
+      // The correct option is excluded BEFORE the two to hide are chosen, so
+      // it can never be one of them. That is the whole contract of 50:50.
+      const wrong = shuffle([0, 1, 2, 3].filter(i => i !== correctIx && q.options[i])).slice(0, 2);
+      hidden = wrong;
+      Array.prototype.forEach.call($('#kbc-opts').children, el => {
+        if (wrong.indexOf(Number(el.dataset.i)) >= 0) el.classList.add('gone');
+      });
+      say('Two gone. Easier now. Or is it.');
+      return;
+    }
+
+    if (key === 'audience') {
+      const avail = [0, 1, 2, 3].filter(i => q.options[i] && hidden.indexOf(i) < 0);
+      // The audience is usually right, occasionally confidently wrong — which
+      // is what makes consulting them a decision rather than a shortcut.
+      const misleads = Math.random() < 0.3;
+      const lead = misleads
+        ? (avail.filter(i => i !== correctIx)[0] != null ? shuffle(avail.filter(i => i !== correctIx))[0] : correctIx)
+        : correctIx;
+      const pct = {};
+      pct[lead] = misleads ? 38 + Math.floor(Math.random() * 12) : 52 + Math.floor(Math.random() * 20);
+      let left = 100 - pct[lead];
+      const rest = avail.filter(i => i !== lead);
+      rest.forEach((i, k) => {
+        const last = k === rest.length - 1;
+        pct[i] = last ? Math.max(2, left) : Math.max(2, Math.floor(Math.random() * (left / (rest.length - k))));
+        left -= pct[i];
+      });
+      modal({
+        title: 'Ask the audience',
+        body: h('div', { class: 'stack' }, [
+          h('div', { class: 'small muted', text: misleads ? 'The room is not sure about this one.' : 'The room has voted.' }),
+          h('div', { class: 'stack', style: 'gap:7px;margin-top:6px' }, avail.map(i =>
+            h('div', { class: 'row', style: 'gap:9px;align-items:center' }, [
+              h('span', { class: 'docnum', style: 'width:16px', text: q.options[i].letter }),
+              h('div', { class: 'kbc-poll' }, h('i', { style: 'width:' + (pct[i] || 2) + '%' })),
+              h('span', { class: 'tiny dim', style: 'width:34px;text-align:right', text: (pct[i] || 2) + '%' })
+            ])))
+        ]),
+        actions: [{ label: 'Thanks', value: null, kind: 'primary' }]
+      });
+      say('Remember, a room can be confidently wrong.');
+      return;
+    }
+
+    // Phone a friend: never names the correct option, and mostly names none at
+    // all. A friend who reliably pointed at a wrong answer would become the
+    // strongest lifeline in the game by elimination, which is the opposite of
+    // the joke.
+    const off = Math.random() < 0.35;
+    const line = off
+      ? KBC_FRIEND_OFF[Math.floor(Math.random() * KBC_FRIEND_OFF.length)]
+      : KBC_FRIEND_VAGUE[Math.floor(Math.random() * KBC_FRIEND_VAGUE.length)];
+    modal({
+      title: 'Phone a friend',
+      body: h('div', { class: 'stack' }, [
+        h('div', { class: 'kbc-friend', text: '“' + line + '”' }),
+        h('div', { class: 'tiny dim', style: 'margin-top:8px', text: 'Thirty seconds are up.' })
+      ]),
+      actions: [{ label: 'Hang up', value: null, kind: 'primary' }]
+    });
+    say('That is who you chose. Interesting.');
+  }
+
+  function end(how) {
+    teardown();
+    let amount, title, sub;
+    if (how === 'won') {
+      amount = KBC_PRIZES[KBC_PRIZES.length - 1];
+      title = 'Crorepati'; sub = 'Fifteen from fifteen, out of your own question bank.';
+      audio.sfx('fanfare');
+    } else if (how === 'walk') {
+      amount = banked(); title = 'Walked away';
+      sub = 'Banked before the risk. There is no shame in arithmetic.';
+    } else {
+      amount = secured(); title = 'That is the end of the road';
+      sub = amount ? 'You keep what you banked.' : 'Nothing banked — the first safe rung was still ahead.';
+    }
+    host.textContent = '';
+    host.appendChild(h('div', { class: 'game-screen' }, [
+      h('h1', { class: 'game-title', text: title }),
+      h('p', { class: 'game-sub', text: sub }),
+      h('div', { class: 'kbc-cheque' }, [
+        h('div', { class: 'kbc-cheque-bank', text: 'THE PRACTICE BANK' }),
+        h('div', { class: 'kbc-cheque-pay', text: 'Pay the contestant' }),
+        h('div', { class: 'kbc-cheque-amt', text: kbcMoney(amount) }),
+        h('div', { class: 'kbc-cheque-sig', text: 'Not legal tender. Obviously.' })
+      ]),
+      h('div', { class: 'row', style: 'gap:10px;justify-content:center;flex-wrap:wrap' }, [
+        h('button', { class: 'btn primary', onclick: start, text: 'Play again' }),
+        h('button', { class: 'btn ghost', onclick: () => go('games'), text: 'Back to games' })
+      ])
+    ]));
+  }
+
+  menu();
+  window.__kbc = {
+    state: () => ({ rung: rung, picked: picked, locked: locked, hidden: hidden.slice(), used: Object.keys(used),
+      stem: ladder[rung] && ladder[rung].stem, correct: ladder[rung] && ladder[rung].correctText }),
+    start: start,
+    pick: (i) => pick(i),
+    lock: () => lockIn(),
+    lifeline: (k) => useLifeline(k),
+    visibleLetters: () => Array.prototype.filter.call($('#kbc-opts').children, el => !el.classList.contains('gone'))
+      .map(el => el.querySelector('.kbc-opt-k').textContent),
+    correctLetter: () => { const q = ladder[rung]; const o = q && q.options.find(x => x.id === q.correctId); return o && o.letter; }
   };
 }
 
