@@ -1,6 +1,11 @@
 # Architecture
 
-A single HTML file with all JavaScript and CSS inlined. No build step at
+A single HTML file with all JavaScript and CSS inlined, plus `sw.js` — one
+small service worker, which is the sole exception and not a matter of taste: a
+browser will not accept a service worker inlined, imported from a `data:` URI,
+or built at runtime. It must be a separate same-origin file. It buys exactly
+one thing, the app opening with no network, and the app is fully functional
+without it. Everything else remains in the one file. No build step at
 runtime, no dependencies, and no network requests once loaded — except two
 opt-in, off-by-default paths a user can turn on for themselves: external OCR
 (an API key and endpoint of their own, read from a local file — see module 12)
@@ -29,6 +34,12 @@ the modules and re-concatenating is easier to maintain.
 15-settings.js    Settings, course management, diagnostics
 15b-filestore.js  The file-backed database
 16-tests-boot.js  Test suite and boot sequence
+```
+
+And, alongside the file rather than inside it:
+
+```
+sw.js             The offline shell — see "Offline" below
 ```
 
 `15b` is deliberately named to sort before `16`, because the boot sequence at
@@ -266,6 +277,69 @@ guessing between four options is right that often by luck. Attempts with no
 confidence — every answer in a timed mock, which deliberately asks nothing —
 are excluded rather than bucketed as unknown, and `calibrationVerdict()`
 returns null below five answers rather than calling a habit off a handful.
+
+## Working backwards from a date
+
+`studyPlan()` is a pure function: it takes the pool, the case pool, the
+attempts, the mastery target and a `YYYY-MM-DD` exam date, and returns the
+dashboard card's entire content, verdict sentence included. It reads no globals,
+so it can be tested against a hand-built bank rather than against a browser.
+
+Each question falls in **exactly one** bucket — never attempted, attempted and
+below target, or mastered with a review due before the day — so the three sum
+to the backlog. A question that is both weak and due is one job; counting it
+twice would inflate the target and report somebody as further behind than they
+are.
+
+Dates are `YYYY-MM-DD` local-date keys parsed by `dateKeyToLocal()`, never
+`new Date(str)`: that parses a bare date as UTC midnight, which is 05:30 on the
+day in India and 16:00 the day before in Los Angeles. `daysBetweenKeys()` rounds
+its difference, because a clocks-change day is 23 or 25 hours long.
+
+Today's progress and the seven-day pace both count **distinct questions**, not
+attempts — the backlog's unit is the question, and a target reachable by
+hammering one card would measure nothing.
+
+## The last mile, and the notebook
+
+`lastMilePick()` contains no rng at all, unlike every other selection in the
+app. A capped list has to be the worst N, and a shuffle would make it a sample
+of them. Classes are tried in order — `wrong`, `flagged`, `lucky`, `never` — and
+the first that applies is the question's single reason; within a class the sort
+is wrongStreak, then mastery, then the oldest attempt, then qid, so the same
+bank always yields the same list whatever order the index returned it in.
+
+Questions with no attempts are excluded by `lastMileClass()` returning null for
+them. `exportErrorNotebook()`'s "not since put right" scope calls that same
+function, which is what guarantees the printed page and the sat session cannot
+disagree about what is still broken.
+
+The mode reuses the `redo` wiring: `Session.create()` builds a paper the
+ordinary way — so marks, `s.marking` and the audit row are stamped exactly as
+for every other session — and the questions are then replaced with the ordered
+shortlist. Option order is still shuffled: knowing an answer by its position is
+precisely the false confidence the session exists to find.
+
+`PRINT_CSS` and `printableDoc()` are shared by both printable exports. Rules
+only one of them needs go in `extraCss` rather than into `PRINT_CSS`, so adding
+the notebook could not change a single byte of the question-bank export.
+
+## Offline
+
+`sw.js` is **network-first with the cache as fallback** — the opposite of the
+usual advice, deliberately. This app is one document with no bundle and no
+version manifest, so a cache-first worker would mean shipping a fix and nobody
+seeing it. Network-first costs nothing online and returns exactly what was
+missing offline.
+
+The worker only ever touches same-origin `GET`s, so Drive sync and an external
+OCR endpoint are untouched, and it caches only `200` responses — a cached 404
+would pin a broken page in place. Registration is relative (`./sw.js`), never
+absolute, because on GitHub Pages the app lives at `/reponame/`; it is skipped
+on `file://` and where there is no worker support; and a missing `sw.js` is
+caught and ignored, so `index.html` copied on its own behaves exactly as it did
+before this existed. Settings can unregister it and empty the cache, because a
+worker that needs devtools to undo is not one to ship.
 
 ## Sections, and changing your mind
 

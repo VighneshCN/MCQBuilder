@@ -21145,6 +21145,184 @@ test('Marks are said out loud with the right plural', () => {
   eq(marksLabel(-1), '−1 mark'.replace('−', '-'), 'a negative one is still singular');
 });
 
+
+/* ---- getting to the date ---- */
+
+// Date keys, relative to today, so these tests never go stale.
+const dayKey = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return todayKey(d); };
+const planQ = (o) => Object.assign({
+  uuid: 'p' + Math.random().toString(36).slice(2), qid: 'PQ',
+  flagged: false, nextReviewAt: null,
+  stats: { attempts: 0, mastery: 0, wrongStreak: 0, guessedCorrect: 0, lastResult: null, lastAttemptAt: null }
+}, o);
+
+test('Every question owes exactly one job, and the jobs add up', () => {
+  const pool = [
+    planQ({}),                                                                   // unseen
+    planQ({}),                                                                   // unseen
+    planQ({ stats: { attempts: 3, mastery: 40 } }),                              // weak
+    // Weak AND due. The whole point: this is one job, not two.
+    planQ({ stats: { attempts: 3, mastery: 40 }, nextReviewAt: nowISO() }),
+    planQ({ stats: { attempts: 5, mastery: 90 }, nextReviewAt: addDays(3) }),    // mastered, due in the window
+    planQ({ stats: { attempts: 5, mastery: 90 }, nextReviewAt: addDays(60) }),   // mastered, due long after
+    planQ({ stats: { attempts: 5, mastery: 90 } })                               // nothing owed
+  ];
+  const p = studyPlan({ examDate: dayKey(9), masteryTarget: 75, pool, attempts: [] });
+  eq(p.unseen, 2); eq(p.weak, 2); eq(p.dueBefore, 1); eq(p.settled, 2);
+  eq(p.unseen + p.weak + p.dueBefore + p.settled, pool.length, 'every question is classified exactly once');
+  eq(p.backlog, 5, 'and the backlog is the three that owe something');
+  // A review falling due ON the day is still inside the window.
+  const onTheDay = studyPlan({
+    examDate: dayKey(9), masteryTarget: 75, attempts: [],
+    pool: [planQ({ stats: { attempts: 5, mastery: 90 }, nextReviewAt: addDays(9) })]
+  });
+  eq(onTheDay.dueBefore, 1, 'due on the exam day is due before the exam is over');
+});
+
+test('The daily target counts today, and never divides by nothing', () => {
+  const pool = Array.from({ length: 20 }, () => planQ({}));
+  eq(studyPlan({ examDate: dayKey(9), pool, attempts: [] }).daysLeft, 10, 'nine days away plus today');
+  eq(studyPlan({ examDate: dayKey(9), pool, attempts: [] }).perDay, 2);
+  // The exam is today: one day left, not zero, and the whole list is today's.
+  const today = studyPlan({ examDate: dayKey(0), pool, attempts: [] });
+  eq(today.daysLeft, 1); eq(today.perDay, 20); eq(today.state, 'today');
+  // 21 over 10 days rounds up, because 2.1 a day is 2 a day and a shortfall.
+  eq(studyPlan({ examDate: dayKey(9), pool: pool.concat([planQ({})]), attempts: [] }).perDay, 3);
+});
+
+test('A date in the past, and an empty bank, give an answer rather than a NaN', () => {
+  const pool = [planQ({}), planQ({ stats: { attempts: 2, mastery: 10 } })];
+  const past = studyPlan({ examDate: dayKey(-4), pool, attempts: [] });
+  eq(past.state, 'past');
+  assert(past.past, 'and it says so');
+  assert(past.daysLeft >= 0 && past.perDay >= 0, 'never a negative countdown or target');
+  const empty = studyPlan({ examDate: dayKey(5), pool: [], attempts: [] });
+  eq(empty.backlog, 0); eq(empty.perDay, 0); eq(empty.state, 'clear');
+  ['daysLeft', 'perDay', 'backlog', 'doneToday', 'remainingToday'].forEach(k => {
+    assert(Number.isFinite(past[k]), k + ' must be a number on a past date');
+    assert(Number.isFinite(empty[k]), k + ' must be a number on an empty bank');
+  });
+  eq(studyPlan({ examDate: null, pool, attempts: [] }).set, false, 'no date, no plan');
+  eq(studyPlan({ examDate: 'not a date', pool, attempts: [] }).set, false, 'and neither is nonsense a date');
+});
+
+test('Today’s progress counts questions, not attempts', () => {
+  const pool = [planQ({}), planQ({})];
+  const att = [];
+  // Twenty goes at the same question is one question off the list.
+  for (let i = 0; i < 20; i++) att.push({ ts: nowISO(), questionUuid: 'same' });
+  att.push({ ts: nowISO(), questionUuid: 'other' });
+  // And yesterday's work is not today's.
+  att.push({ ts: addDays(-1), questionUuid: 'yesterday' });
+  const p = studyPlan({ examDate: dayKey(5), pool, attempts: att });
+  eq(p.doneToday, 2, 'two distinct questions today');
+
+  // The pace is distinct question-days over seven days, ending yesterday —
+  // divided by seven, not by the days actually practised, because skipping
+  // four days a week is what the number exists to show.
+  const hist = [];
+  [1, 2, 3].forEach(d => { for (let i = 0; i < 7; i++) hist.push({ ts: addDays(-d), questionUuid: 'q' + d + '-' + i }); });
+  const paced = studyPlan({ examDate: dayKey(5), pool, attempts: hist });
+  eq(Math.round(paced.recentPerDay * 100) / 100, 3, '21 question-days over 7 days');
+  eq(studyPlan({ examDate: dayKey(5), pool, attempts: [] }).recentPerDay, null, 'no history, no claim');
+});
+
+/* ---- the last mile ---- */
+
+const lmQ = (qid, st, flagged) => ({
+  uuid: qid, qid, flagged: !!flagged,
+  stats: Object.assign({ attempts: 0, mastery: 0, wrongStreak: 0, guessedCorrect: 0, lastResult: null, lastAttemptAt: null }, st)
+});
+const lmPool = () => [
+  lmQ('U1', { attempts: 0 }),
+  lmQ('U2', { attempts: 0 }, true),                                             // unseen AND flagged
+  lmQ('W1', { attempts: 4, lastResult: 'incorrect', wrongStreak: 3, mastery: 10, lastAttemptAt: '2026-01-01' }),
+  lmQ('W2', { attempts: 2, lastResult: 'incorrect', wrongStreak: 1, mastery: 20, lastAttemptAt: '2026-02-01' }),
+  lmQ('F1', { attempts: 3, lastResult: 'correct', mastery: 95, lastAttemptAt: '2026-03-01' }, true),
+  lmQ('L1', { attempts: 3, lastResult: 'correct', mastery: 40, guessedCorrect: 2, lastAttemptAt: '2026-04-01' }),
+  lmQ('N1', { attempts: 3, lastResult: 'correct', mastery: 50, lastAttemptAt: '2026-05-01' }),
+  lmQ('OK', { attempts: 5, lastResult: 'correct', mastery: 90, lastAttemptAt: '2026-06-01' })
+];
+
+test('The last mile is worst first, one reason each, and the same every time', () => {
+  const pool = lmPool();
+  const p = lastMilePick(pool, 99, 75);
+  eq(p.questions.map(q => q.qid).join(','), 'W1,W2,F1,L1,N1', 'wrong, then flagged, then lucky, then never mastered');
+  eq(p.questions.map(q => p.reasons[q.uuid]).join(','), 'wrong,wrong,flagged,lucky,never');
+  eq(Object.keys(p.reasons).length, p.questions.length, 'exactly one reason per question');
+  eq(p.available, 5);
+  // A flagged question is on the list however well it is going.
+  eq(p.reasons.F1, 'flagged');
+  // No rng anywhere: the same bank, and the same bank in another order, give
+  // the same answer. A capped list must be the worst of them, not a sample.
+  eq(JSON.stringify(lastMilePick(pool, 99, 75).questions.map(q => q.qid)),
+     JSON.stringify(p.questions.map(q => q.qid)), 'stable across calls');
+  eq(JSON.stringify(lastMilePick(pool.slice().reverse(), 99, 75).questions.map(q => q.qid)),
+     JSON.stringify(p.questions.map(q => q.qid)), 'and independent of the order it was handed');
+  eq(lastMilePick(pool, 3, 75).questions.map(q => q.qid).join(','), 'W1,W2,F1', 'the cap takes the worst three');
+});
+
+test('The last mile never puts an unseen question in front of you', () => {
+  const p = lastMilePick(lmPool(), 99, 75);
+  assert(p.questions.every(q => q.stats.attempts > 0), 'nothing never attempted, however it is flagged');
+  // Even asked for far more than qualifies, it does not go looking for filler.
+  const wide = lastMilePick(lmPool(), 500, 75);
+  eq(wide.questions.length, 5, 'the list is as long as the damage, not as long as you asked');
+  assert(wide.questions.every(q => q.stats.attempts > 0));
+  const none = lastMilePick([lmQ('X', { attempts: 0 })], 40, 75);
+  eq(none.questions.length, 0);
+  eq(describeLastMile(none), '', 'and an empty list says nothing rather than saying nothing well');
+  eq(lastMilePick([], 40, 75).available, 0, 'an empty bank is not an error');
+});
+
+test('The notebook and the last mile agree on what is still broken', () => {
+  // Both ask lastMileClass, so a question the session would put in front of
+  // you is exactly a question the "not since fixed" notebook prints.
+  const fixed = lmQ('FIXED', { attempts: 3, lastResult: 'correct', mastery: 92, lastAttemptAt: '2026-05-01' });
+  const stillWrong = lmQ('BAD', { attempts: 3, lastResult: 'incorrect', wrongStreak: 1, mastery: 30 });
+  const stillWeak = lmQ('WEAK', { attempts: 3, lastResult: 'correct', mastery: 40 });
+  eq(lastMileClass(fixed, 75), null, 'answered right and at the target: nothing owed');
+  eq(lastMileClass(stillWrong, 75), 'wrong');
+  eq(lastMileClass(stillWeak, 75), 'never');
+  // The mastery target is the caller's, not a constant hidden in here.
+  eq(lastMileClass(fixed, 95), 'never', 'raise the bar and the same question is owed again');
+});
+
+test('The printed page is built in one place', () => {
+  const doc = printableDoc('T', 'H', 'S', '<article>x</article>');
+  assert(doc.indexOf('<!DOCTYPE html>') === 0, 'a real document');
+  assert(doc.indexOf('<title>T</title>') > 0);
+  assert(doc.indexOf('<h1>H</h1><p>S</p>') > 0, 'heading and subtitle, in that order');
+  assert(doc.indexOf(PRINT_CSS) > 0, 'and the one stylesheet');
+  // Extra rules must not leak into a document that did not ask for them: this
+  // is what keeps the question-bank export byte-for-byte what it always was.
+  const plain = printableDoc('T', 'H', 'S', '');
+  const withExtra = printableDoc('T', 'H', 'S', '', '.x{color:red}');
+  assert(plain.indexOf('.x{color:red}') < 0, 'no extra css unless asked for');
+  assert(withExtra.indexOf('.x{color:red}') > 0);
+  eq(withExtra.length - plain.length, '.x{color:red}'.length, 'and nothing else changes');
+});
+
+test('The offline switch is honest about where it cannot work', () => {
+  // The guard is the whole safety story: a page served from disk, or a
+  // browser with no worker support, must be left completely alone.
+  eq(typeof OFFLINE_OK, 'boolean');
+  eq(OFFLINE_OK, 'serviceWorker' in navigator && /^https?:$/.test(location.protocol),
+    'available exactly when the browser supports it and the page came over http');
+  // Registration is a no-op when switched off, whatever the browser can do.
+  // Restored in a finally: this test flips a setting somebody is actually
+  // using, and a failure here must not quietly leave their offline copy off.
+  const was = Settings.get('offlineEnabled');
+  return (async () => {
+    try {
+      await Settings.set('offlineEnabled', false);
+      eq(await registerOffline(), null, 'switched off means nothing is registered');
+    } finally {
+      await Settings.set('offlineEnabled', was);
+    }
+  })();
+});
+
 /* ============================================================================
    Boot
    ========================================================================== */

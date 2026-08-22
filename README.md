@@ -214,9 +214,10 @@ folder means no cards, which is the correct behaviour for a published repo —
 
 ## 4. Practising
 
-Eight modes: Learning, Domain drill, Weak topics, Incorrect & guessed, Mixed
-revision, Timed mock exam, Spaced repetition, Custom practice. A ninth, **Case
-study questions**, appears once you have a case study — see section 5.
+Nine modes: Learning, Domain drill, Weak topics, Incorrect & guessed,
+**Last-mile revision**, Mixed revision, Timed mock exam, Spaced repetition,
+Custom practice. A tenth, **Case study questions**, appears once you have a
+case study — see section 5.
 
 After each answer you record how you got there — knew it, reasoned it out,
 unsure between two, guessed. This matters more than it looks: a correct guess is
@@ -233,6 +234,66 @@ than treated as knowing it.
 
 Mock exams draw questions weighted to the course blueprint, and can carry a
 case-study section — see section 5.
+
+### How many a day, and how many days
+
+Set an exam date in Settings → **Practice and mock** — or from the dashboard —
+and the dashboard stops describing the past and starts working backwards from
+the date.
+
+It counts what your bank still owes you, and each question owes exactly one
+thing: it has **never been attempted**, or it has been attempted and is **still
+below your mastery target**, or it is mastered but its **review falls due before
+the day**. Nothing is counted twice, so the three add up to the number of
+questions you have left, and dividing that by the days remaining — today
+included — is the number you have to get through daily.
+
+Today's progress is counted in *questions*, not attempts: twenty goes at the
+same question is one off the list. Underneath, a reality check from the last
+seven days — *"At your recent 38 a day you would reach 950 of the 1,240"* —
+averaged over all seven days rather than only the ones you practised, because
+skipping four days a week is exactly the thing worth seeing.
+
+None of this appears until you set a date. There is no card, no countdown and
+no nag beyond a single line offering to set one.
+
+### The last week
+
+**Last-mile revision** is the shortlist for the final days, and it is the one
+mode with no shuffle in it. Everything else randomises, which is right when you
+are working through a bank over weeks and wrong three days out: if you ask for
+forty questions you should get the *worst* forty, not a random forty of the bad
+ones.
+
+Four reasons put a question on the list, and each question appears once, under
+the highest that applies — **wrong last time** (and not since put right),
+**you flagged it**, **guessed it right** (which is not the same as knowing it),
+**never mastered**. The reason is shown against the question when the answer is
+revealed, so you always know why it is in front of you. Before you start, the
+setup shows exactly what the list is made of and what a shorter one would leave
+behind.
+
+It never shows you a question you have never attempted. Meeting new material in
+the last week buys a fresh wrong answer at the moment there is no time left to
+fix it — that is coverage work, and the daily target above is what drives it.
+
+### The error notebook
+
+**Backup & Restore → Error notebook**, or the button on Analytics → Mistake.
+Everything the app has recorded about what you got wrong, on one printable page
+per question: the question with the right answer marked, **the wrong option you
+keep choosing** and how often, **why it went wrong** from the causes you
+recorded at the time, the explanation, and your own learning point — with a
+blank rule to write on where you have not written one yet.
+
+It names a distractor only when one genuinely dominates; where your wrong
+answers are split between two options it lists them as fact rather than telling
+you what you believe. Grouped by domain, with case-study questions printed
+under their scenario — a scenario question with no scenario cannot be revised.
+
+You are asked which you want: everything you have ever got wrong, or only what
+you have not since put right. The second uses the same test Last-mile revision
+uses, so the page you print and the session you sit cannot disagree.
 
 ### Would that have been a pass?
 
@@ -423,6 +484,23 @@ rest or together with it.
 
 Spaced repetition never surfaces a case-study question on its own. Anything due
 comes back through Case study practice instead.
+
+### Opening it without a network
+
+The app keeps a copy of itself so it opens on a train. Everything else was
+already offline — the font and the app manifest are embedded in the page, and
+your bank is in the browser database and in your own data folder — so the only
+thing that ever needed a connection was fetching the page itself.
+
+It is on by default, and it never gets in the way of an update: **when you are
+online you always get the current version**, and the stored copy is only ever
+the fallback. Settings → **Offline** says which state it is actually in, and
+turns it off entirely if you would rather it did not.
+
+This is why the app is `index.html` **and** `sw.js`. A browser will not accept
+a service worker inlined into a page — it has to be a separate file in the same
+folder. If you only ever copy `index.html`, everything works exactly as before;
+you simply need the network to open it.
 
 ## 6. Checking what the app could not confirm
 

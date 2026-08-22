@@ -1,7 +1,8 @@
 # Publishing this to GitHub Pages
 
-The app is a single self-contained `index.html`. Pages serves it as-is — there
-is no build step, no framework, no Actions workflow to configure.
+The app is a self-contained `index.html`, plus a small `sw.js` that lets it
+open with no network. Pages serves both as-is — there is no build step, no
+framework, no Actions workflow to configure.
 
 ---
 
@@ -36,6 +37,7 @@ commit.
 
    ```
    index.html                 the app
+   sw.js                      lets it open offline (optional, see below)
    .gitignore                 keeps your bank out of the repo
    README.md
    ARCHITECTURE.md
@@ -44,6 +46,11 @@ commit.
    Start MCQ Mastery.bat      for running it locally
    serve.ps1
    ```
+
+   `sw.js` must sit **beside** `index.html`, not in a subfolder — a service
+   worker can only control pages at or below its own path. Leaving it out is
+   perfectly safe: the app then simply needs a connection to open, and says so
+   in Settings → Offline.
 
    Uploading through the web interface will not accept a file named
    `.gitignore` by drag-and-drop reliably. Use **Add file → Create new file**,
@@ -100,6 +107,12 @@ Replace `index.html` and commit. Pages redeploys within a minute or two.
 Your bank is not affected by an update: it lives in your data folder and in
 browser storage, both independent of the app file. Hard-refresh (Ctrl+Shift+R)
 if you still see the old version — Pages caches.
+
+The offline copy does not hold an old version in place: `sw.js` fetches the
+page from the network first every time and only falls back to its copy when
+there is no connection. If you have hard-refreshed and still see the old app,
+that is Pages' own cache, not this — but Settings → Offline → **Check for an
+update** will rule it out.
 
 ## If history contains something it should not
 

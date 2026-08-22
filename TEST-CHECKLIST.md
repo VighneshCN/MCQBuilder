@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 162 passed, 0 failed, of 162.**
+**Current result: 171 passed, 0 failed, of 171.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -153,6 +153,17 @@ nine different requested counts.
 99. A section reports what it was asked and what it cost
 100. Durations past an hour read as hours
 101. Marks are said out loud with the right plural
+
+### Getting to the date (9)
+102. Every question owes exactly one job, and the jobs add up
+103. The daily target counts today, and never divides by nothing
+104. A date in the past, and an empty bank, give an answer rather than a NaN
+105. Today’s progress counts questions, not attempts
+106. The last mile is worst first, one reason each, and the same every time
+107. The last mile never puts an unseen question in front of you
+108. The notebook and the last mile agree on what is still broken
+109. The printed page is built in one place
+110. The offline switch is honest about where it cannot work
 
 ### Everything else (4)
 29. Practice settings are per course, app preferences are shared
@@ -322,3 +333,27 @@ Automated tests cannot verify rendering or real browser storage.
 - [ ] Backup & Restore → Printable HTML: each scenario is printed once with its
       questions under it, never a case question on its own
 - [ ] Settings → Diagnostics → Run tests reports 50 of 50
+
+### Getting to the date
+
+- [ ] With no exam date set, the dashboard is exactly as it was — no countdown
+      card, no "Exam in" figure, just the one line offering to set a date
+- [ ] Set a date three weeks out: the three buckets add up to the backlog, and
+      hand-counting the bank agrees with them
+- [ ] Answer some questions: today's figure moves by the number of *distinct*
+      questions, not by the number of attempts
+- [ ] Set the date to today, and to a date in the past — both read sensibly and
+      neither shows a negative countdown or target
+- [ ] Last-mile revision: the setup shows what the list is made of, and asking
+      for fewer keeps the worst rather than sampling
+- [ ] Sit it: each question carries the reason it is on the list, and no
+      question you have never attempted appears
+- [ ] Export the error notebook both ways: "not since fixed" leaves out one you
+      have put right, and "everything" includes it
+- [ ] Open the notebook: the option you keep choosing is named, the cause and
+      explanation are there, and a case-study question sits under its scenario
+- [ ] Load the app, then go offline and reload — it opens
+- [ ] Back online, replace index.html and reload — the new version is served,
+      not the stored copy
+- [ ] Settings → Offline → turn it off, reload offline — it correctly does not
+      open, proving the switch really unregisters
