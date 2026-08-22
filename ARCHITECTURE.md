@@ -193,6 +193,21 @@ domain, a difficulty, "never attempted") would remove *some* of a scenario's
 questions and hand back a case that is no longer whole, which is the one thing
 this is for.
 
+**A scenario nobody can read is not one anybody can be asked about.**
+`caseEligiblePool()` answers "is this question itself ready";
+`drawableCasePool()` answers "can it be asked", which additionally requires the
+scenario to exist, not be archived, and have text. Every draw and every
+readiness count uses the second — otherwise an import that found a case
+reference but no passage produced questions the app warned about and then drew
+anyway.
+
+**A staging candidate is already in the case bank.** `isCaseQuestion()` reads
+`caseRef` as well as `caseStudyId`, because a candidate on the staging screen
+knows its scenario but that scenario has no id until admission. Reading only
+`caseStudyId` put every incoming case-study candidate in the standalone bank
+for exactly as long as duplicate detection had to run, which switched it off
+for the case that matters most: re-importing a file.
+
 **Duplicate detection is partitioned** by `comparablePair()`. The same wording
 can honestly appear once in the abstract and once about a specific scenario, and
 pairing those puts a row in the review queue that neither side can resolve. Two

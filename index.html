@@ -2010,8 +2010,17 @@ function optionCountOk(q) {
     this one predicate: a case-study question is only comprehensible next to
     its scenario, so it is never drawn by anything that cannot show the
     scenario alongside it. Written as a function rather than read inline so
-    there is exactly one definition of "is this a case-study question". */
-function isCaseQuestion(q) { return !!(q && q.caseStudyId); }
+    there is exactly one definition of "is this a case-study question".
+
+    `caseRef` is the same fact in its in-flight form: a candidate on the
+    staging screen knows which scenario it belongs to, but that scenario has
+    no id until admission writes it. Reading only caseStudyId put every
+    incoming case-study candidate in the standalone bank for the length of
+    the import, which silently switched duplicate detection off for the one
+    case it matters most in: re-importing the same file. admitBatch swaps
+    caseRef for the real caseStudyId and deletes it, so no stored record
+    ever carries both. */
+function isCaseQuestion(q) { return !!(q && (q.caseStudyId || q.caseRef)); }
 
 /** A question may only enter a test session if it is Active and answer-verified. */
 function isPracticeEligible(q) {
@@ -3936,6 +3945,26 @@ function weaknessScore(g, minSample) {
 function eligiblePool(all) { return all.filter(q => isPracticeEligible(q) && !isCaseQuestion(q)); }
 function caseEligiblePool(all) { return all.filter(q => isPracticeEligible(q) && isCaseQuestion(q)); }
 
+/* A case-study question is only answerable if its scenario can actually be put
+   in front of the candidate. caseEligiblePool() answers "is this question
+   itself ready"; these two answer "can it be asked", which is the stricter
+   question every draw and every readiness count has to use.
+
+   Three ways a question passes the first and fails the second: its scenario
+   was deleted out from under it, its scenario is archived, or its scenario has
+   no text yet — an import that found a case reference but no passage, which
+   the Case Studies screen already warns about and, until this existed, then
+   went ahead and drew anyway. */
+function drawableCaseIds(caseRecords) {
+  return new Set((caseRecords || [])
+    .filter(c => !c.archived && String(c.text || '').trim())
+    .map(c => c.id));
+}
+function drawableCasePool(all, caseRecords) {
+  const ok = drawableCaseIds(caseRecords);
+  return caseEligiblePool(all).filter(q => ok.has(q.caseStudyId));
+}
+
 function applyFilters(pool, f) {
   const now = new Date();
   return pool.filter(q => {
@@ -4346,7 +4375,10 @@ const Session = {
     // draws from both. Every other mode reaches eligiblePool() exactly as it
     // always has, and cannot see a case-study question at all.
     const isCaseMode = !!(MODES[mode] && MODES[mode].caseBank);
-    const pool0 = isCaseMode ? caseEligiblePool(all) : eligiblePool(all);
+    // Read once, and only when a case section is actually in prospect.
+    const needsCases = isCaseMode || (mode === 'mock' && (config.caseCount || 0) > 0);
+    const caseRecords = needsCases ? await CaseStudies.byCourse(State.course.id) : [];
+    const pool0 = isCaseMode ? drawableCasePool(all, caseRecords) : eligiblePool(all);
     let filtered = applyFilters(pool0, config.filters || {});
 
     // The case-study section is settled FIRST, so the ordinary paper is built
@@ -4362,12 +4394,18 @@ const Session = {
       // some of a scenario's questions and hand back a case that is no longer
       // whole — the exact thing this selection exists to prevent.
       const picked = ((isCaseMode ? (config.filters || {}) : (config.caseFilters || {})).caseStudies) || [];
-      const casePool = applyFilters(caseEligiblePool(all), { caseStudies: picked });
+      const casePool = applyFilters(drawableCasePool(all, caseRecords), { caseStudies: picked });
       caseBlock = pickCaseBlock(casePool, caseWant, rng);
       if (!caseBlock.taken) {
-        throw new Error(isCaseMode
-          ? 'No case study in this course has a practice-ready question yet. Write one from Case Studies, or confirm its answers on the review queue.'
-          : 'You asked for ' + caseWant + ' case-study question(s), but no case study in this course has a practice-ready question yet.');
+        // Distinguish "no ready questions" from "ready questions whose
+        // scenario cannot be shown", because they are fixed in different
+        // places and the second one looks inexplicable otherwise.
+        const ready = caseEligiblePool(all).length;
+        const shown = drawableCasePool(all, caseRecords).length;
+        const why = ready && !shown
+          ? ready + ' case-study question(s) are ready, but every scenario they belong to is archived or has no text yet — open Case Studies and write the scenario in.'
+          : 'No case study in this course has a practice-ready question yet. Write one from Case Studies, or confirm its answers on the review queue.';
+        throw new Error(isCaseMode ? why : 'You asked for ' + caseWant + ' case-study question(s). ' + why);
       }
     }
     const caseQuestions = caseBlock ? caseBlock.questions : [];
@@ -4808,7 +4846,11 @@ async function refreshBadges() {
   if (!State.course) return;
   const all = await State.questions();
   setBadge('import', all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0).length);
-  const due = all.filter(q => isPracticeEligible(q) && q.nextReviewAt && new Date(q.nextReviewAt) <= new Date()).length;
+  // Counted over the standalone bank only: this badge means "Spaced
+  // repetition has something for you", and Spaced repetition cannot draw a
+  // case-study question. Counting them made the badge promise work that the
+  // mode behind it would then not have.
+  const due = eligiblePool(all).filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date()).length;
   setBadge('practice', due);
 }
 
@@ -4827,7 +4869,14 @@ ROUTES.onboarding = async (root) => {
 /* ---------- dashboard ---------- */
 ROUTES.dashboard = async (root) => {
   const all = await State.questions();
-  const active = all.filter(isPracticeEligible);
+  // Everything below drives recommendations that lead to the ordinary
+  // practice modes, and those modes cannot draw a case-study question. A
+  // headline "12 due today" that sends you to Spaced repetition to find
+  // nothing there is worse than no headline at all — so the numbers are the
+  // standalone bank's, and the case bank gets a line of its own.
+  const active = eligiblePool(all);
+  const caseRecords = await CaseStudies.byCourse(State.course.id);
+  const caseActive = drawableCasePool(all, caseRecords);
   const attempts = (await DB.byIndex('attempts', 'courseId', State.course.id));
   const firstAttempts = new Map();
   attempts.forEach(a => { if (!firstAttempts.has(a.questionUuid)) firstAttempts.set(a.questionUuid, a); });
@@ -4844,9 +4893,10 @@ ROUTES.dashboard = async (root) => {
 
   await band('Dashboard', 'Position at a glance', [
     { k: 'Active', v: String(active.length) },
+    caseActive.length ? { k: 'Case study', v: String(caseActive.length) } : null,
     { k: 'In review', v: String(inReview.length), color: inReview.length ? 'var(--amber)' : null },
     { k: 'Due today', v: String(due.length), color: due.length ? 'var(--pencil)' : null }
-  ], [h('button', { class: 'btn primary', onclick: () => go('practice'), text: 'Start practice' })]);
+  ].filter(Boolean), [h('button', { class: 'btn primary', onclick: () => go('practice'), text: 'Start practice' })]);
 
   // A course-level note (currently only ever set by the DISA quick-add
   // template, pointing at its single placeholder domain) is only still
@@ -4864,6 +4914,8 @@ ROUTES.dashboard = async (root) => {
   else if (inReview.length > active.length * 0.25 && inReview.length > 5) rec = { t: inReview.length + ' question(s) waiting for verification', d: 'Only verified questions can be practised. Clearing the queue widens the pool you draw from.', a: 'Check them now', go: 'review' };
   else if (due.length) rec = { t: due.length + ' question(s) due for review', d: 'Spaced repetition works best on the day it falls due.', a: 'Start due review', go: 'practice', mode: 'spaced' };
   else if (never.length) rec = { t: never.length + ' question(s) never attempted', d: 'Coverage is what a mock actually measures. Work through unseen questions first.', a: 'Practise unseen', go: 'practice', mode: 'mixed' };
+  else if (caseActive.length && caseActive.filter(q => q.stats.attempts === 0).length)
+    rec = { t: caseActive.filter(q => q.stats.attempts === 0).length + ' case-study question(s) never attempted', d: 'These are only asked with their scenario in front of you, so nothing else will surface them.', a: 'Practise case studies', go: 'practice', mode: 'casestudy' };
   else rec = { t: 'Sit a timed mock', d: 'Coverage and review are current. A full-length weighted mock is the useful next test.', a: 'Configure mock', go: 'practice', mode: 'mock' };
 
   root.appendChild(h('div', { class: 'card', style: 'margin-bottom:16px' }, [
@@ -4960,13 +5012,24 @@ ROUTES.dashboard = async (root) => {
 ROUTES.practice = async (root, preselect) => {
   const all = await State.questions();
   const pool = eligiblePool(all);
-  const casePool = caseEligiblePool(all);
+  const caseRecords = await CaseStudies.byCourse(State.course.id);
+  const casePool = drawableCasePool(all, caseRecords);
+  const heldByScenario = caseEligiblePool(all).length - casePool.length;
   const due = pool.filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date());
   await band('Practice', 'Choose how to work', [
     { k: 'Eligible', v: String(pool.length) },
     casePool.length ? { k: 'Case study', v: String(casePool.length) } : null,
     { k: 'Due', v: String(due.length), color: due.length ? 'var(--pencil)' : null }
   ].filter(Boolean));
+
+  // Ready questions whose scenario is archived or still has no text cannot be
+  // asked, and saying nothing about them makes the count look simply wrong.
+  if (heldByScenario > 0) {
+    root.appendChild(h('div', { class: 'notice warn small', style: 'margin-bottom:14px' }, [
+      heldByScenario + ' case-study question(s) are ready but cannot be asked yet — their scenario is archived, or has no text written in. ',
+      h('a', { href: '#', onclick: (e) => { e.preventDefault(); go('cases'); }, text: 'Open Case Studies →' })
+    ]));
+  }
 
   const resumable = await Session.resumeLatest(State.course.id);
   if (resumable) {
@@ -5210,11 +5273,11 @@ function compositionEditor(cfg, pool, filters) {
 async function configureMode(mode) {
   const all = await State.questions();
   const isCaseMode = !!(MODES[mode] && MODES[mode].caseBank);
-  const pool = isCaseMode ? caseEligiblePool(all) : eligiblePool(all);
-  const casePool = caseEligiblePool(all);
-  // Titles for the picker, and the count of ready questions each scenario
+  // Titles for the picker, and the count of askable questions each scenario
   // actually has — which is not always all of them.
-  const caseRecords = (casePool.length || isCaseMode) ? await CaseStudies.byCourse(State.course.id) : [];
+  const caseRecords = await CaseStudies.byCourse(State.course.id);
+  const casePool = drawableCasePool(all, caseRecords);
+  const pool = isCaseMode ? casePool : eligiblePool(all);
   const caseCounts = new Map();
   casePool.forEach(q => caseCounts.set(q.caseStudyId, (caseCounts.get(q.caseStudyId) || 0) + 1));
   const allCaseQs = all.filter(isCaseQuestion);
@@ -5333,11 +5396,22 @@ async function configureMode(mode) {
     const drawCaseNote = () => {
       const sizes = readyCases.map(c => caseCounts.get(c.id));
       const held = allCaseQs.length - casePool.length;
-      caseNote.textContent = cfg.caseCount === 0
-        ? 'None. The paper will be exactly the standalone questions above, as it has always been.'
-        : readyCases.length + ' case stud' + (readyCases.length === 1 ? 'y is' : 'ies are') + ' ready (' + sizes.join(' + ') + ' questions). ' +
-          'They are drawn whole and placed as the last section, so the total lands on the nearest sum of whole scenarios' +
-          (held ? ' — ' + held + ' case-study question(s) are still waiting on you and cannot be drawn.' : '.');
+      if (cfg.caseCount === 0) {
+        caseNote.textContent = 'None. The paper will be exactly the standalone questions above, as it has always been.';
+        return;
+      }
+      // The number this will actually land on, worked out now rather than
+      // discovered on the results screen. Which scenarios get picked depends
+      // on the session's seed; how many questions that comes to does not.
+      const preview = pickCaseBlock(casePool, cfg.caseCount, mulberry32(1));
+      caseNote.textContent =
+        (preview.taken === cfg.caseCount
+          ? 'Exactly ' + preview.taken + ', from ' + preview.cases.length + ' whole case stud' + (preview.cases.length === 1 ? 'y' : 'ies') + '.'
+          : 'This will come to ' + preview.taken + ', not ' + cfg.caseCount + ' — ' + preview.cases.length + ' whole case stud' +
+            (preview.cases.length === 1 ? 'y' : 'ies') + ' is the closest fit, and a case is never split.') +
+        ' Placed as the last section of the paper. ' +
+        readyCases.length + ' scenario(s) available (' + sizes.join(' + ') + ' questions)' +
+        (held ? '; a further ' + held + ' case-study question(s) cannot be drawn yet — their scenario is archived or has no text.' : '.');
     };
     drawCaseNote();
     body.appendChild(h('div', { class: 'field' }, [
@@ -6148,6 +6222,36 @@ async function showResults(s) {
   domCard.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, ['Domain', 'Asked', 'Correct', '', 'Accuracy'].map(x => h('th', { text: x })))), tb])));
   target.appendChild(domCard);
 
+  /* What the paper is actually made of. Recorded on every session since the
+     beginning and, until now, shown nowhere — so a case-study section that
+     deliberately did not match the number asked for said so to no one.
+
+     Three shapes end up in here: weightedPick's per-domain rows, composeTest's
+     per-quota rows, and a plain sentence from the case-study block. A domain or
+     quota that was met in full is left out, because the By domain table below
+     already says how many of each were asked — only the ones that could not be
+     met are news. */
+  const noteLine = (n) => {
+    if (typeof n === 'string') return n;
+    if (!n || typeof n !== 'object') return '';
+    if (n.domainId !== undefined) {
+      return n.supplied === n.requested ? ''
+        : State.domainName(n.domainId) + ' — ' + n.supplied + ' of the ' + n.requested + ' asked for';
+    }
+    if (n.label !== undefined) {
+      return n.got === n.want ? ''
+        : (n.dimension ? n.dimension + ' · ' : '') + n.label + ' — ' + n.got + ' of the ' + n.want + ' asked for';
+    }
+    return '';
+  };
+  const noteLines = (s.selectionNotes || []).map(noteLine).filter(Boolean);
+  if (noteLines.length) {
+    target.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:16px' }, [
+      h('div', { class: 'eyebrow', style: 'margin-bottom:4px', text: 'How this paper was made up' }),
+      ...noteLines.map(t => h('div', { text: t }))
+    ]));
+  }
+
   if (s.shortfalls && s.shortfalls.length) {
     // Two selection methods produce shortfalls with different shapes:
     // weightedPick's carry a domain id, a composed paper's carry their own
@@ -6220,9 +6324,13 @@ ROUTES.bank = async (root) => {
   const all = everything.filter(q => isCaseQuestion(q) === onCase);
   const sources = await DB.byIndex('sources', 'courseId', State.course.id);
   const batches = await DB.byIndex('batches', 'courseId', State.course.id);
+  // On the case side "practice-ready" has to mean askable, which needs the
+  // scenario to exist and have text — otherwise this number and the one on
+  // the Practice screen disagree, and the Practice one is the true one.
+  const readyHere = onCase ? drawableCasePool(everything, caseRecords).length : all.filter(isPracticeEligible).length;
   await band('Question Bank', onCase ? 'Case-study register' : 'Controlled register', [
     { k: 'Records', v: String(all.length) },
-    { k: 'Practice-ready', v: String(all.filter(isPracticeEligible).length), color: 'var(--green)' }
+    { k: 'Practice-ready', v: String(readyHere), color: 'var(--green)' }
   ], [
     h('button', { class: 'btn', onclick: () => go('import'), text: 'Import' }),
     onCase
@@ -6553,7 +6661,12 @@ async function openQuestion(uuidStr) {
             h('b', { text: caseRec.title || caseRec.csid || 'untitled' }),
             ' (' + passageWords(caseRec.text) + ' words). It is only ever asked with that scenario in front of the candidate.'])
         : h('span', { class: 'small' }, 'This is filed under a case study that is no longer in the bank. Until that is fixed it cannot be answered fairly — see the integrity check in Settings.'),
-      caseRec ? h('button', { class: 'btn sm', style: 'margin-left:8px', onclick: () => { const b = document.querySelector('.modal'); if (b && b._close) b._close(null); go('cases'); }, text: 'Open Case Studies' }) : null
+      // Opened from inside the case-study editor there are two dialogs
+      // stacked, and querySelector('.modal') returns the outer one — so this
+      // used to close the editor and leave the question detail sitting over
+      // a screen it had just navigated away from. Navigating away closes
+      // both.
+      caseRec ? h('button', { class: 'btn sm', style: 'margin-left:8px', onclick: () => { $$('.modal').forEach(m => { if (m._close) m._close(null); }); go('cases'); }, text: 'Open Case Studies' }) : null
     ].filter(Boolean)));
   }
   // Opening the record directly (rather than through the Answer Conflicts
@@ -7438,6 +7551,13 @@ async function archiveCaseStudy(cs, archive) {
   for (const q of qs) {
     const prev = q.status;
     q.status = archive ? 'archived' : deriveEntryStatus(q);
+    // deriveEntryStatus reads the question's own content and knows nothing
+    // about who it disagrees with. Without this, a record archived while in
+    // answer conflict came back reading "Active" with its conflict flag
+    // still set: out of practice, out of the review queue, and impossible to
+    // find again. normalizePairState re-derives both from the pairings that
+    // are actually still there.
+    if (!archive) normalizePairState(q);
     q.updatedAt = nowISO();
     await DB.put('questions', q);
     await audit(archive ? 'archive' : 'edit', 'question', q.qid || q.uuid, { status: prev }, { status: q.status }, 'case study ' + (archive ? 'archived' : 'restored'));
@@ -8069,8 +8189,21 @@ async function runParse(files, meta) {
       defaultDomainId: meta.defaultDomainId, trustSourceAnswers: meta.trustSourceAnswers
     };
     (out.caseStudies || []).forEach(cs => {
+      // One reference is one scenario. A JSON file that lists the same ref
+      // twice used to produce two records with the same key, of which the
+      // second silently claimed every question and the first was written
+      // with none — so the two halves are folded together instead, first
+      // non-empty value winning, exactly as repeated spreadsheet rows do.
+      const key = f.filename + '\u0000' + cs.ref;
+      const already = staging.caseStudies.find(x => x.key === key);
+      if (already) {
+        if (!already.title && cs.title) already.title = cs.title;
+        if (!already.text && cs.text) already.text = cs.text;
+        if (!already.topic && cs.topic) already.topic = cs.topic;
+        return;
+      }
       staging.caseStudies.push({
-        key: f.filename + '\u0000' + cs.ref, ref: cs.ref, file: f.filename,
+        key, ref: cs.ref, file: f.filename,
         title: cs.title || cs.ref, text: cs.text || '',
         domainId: resolveDomain(State.course, cs.domainRaw) || meta.defaultDomainId || null,
         topic: cs.topic || ''
@@ -8499,8 +8632,19 @@ async function admitBatch() {
   st.items.forEach(it => {
     if (it.decision !== 'reject' && it.decision !== 'merge' && it.q.caseRef) keptCaseKeys.add(it.q.caseRef);
   });
+  // A scenario whose passage is word-for-word one already in this course is
+  // that scenario, not a new one. Without this, re-importing a file — the
+  // ordinary way of picking up a corrected copy — left the bank holding two
+  // of every scenario, and no amount of duplicate detection on the questions
+  // would clean that up, because scenarios are not questions.
+  const existingCases = await CaseStudies.byCourse(st.batch.courseId);
+  const byText = new Map();
+  existingCases.forEach(c => { const k = normText(c.text || ''); if (k) byText.set(k, c); });
+  let reusedCases = 0;
   for (const cs of (st.caseStudies || [])) {
     if (!keptCaseKeys.has(cs.key)) continue;
+    const sameText = byText.get(normText(cs.text || ''));
+    if (sameText) { caseIdByKey.set(cs.key, sameText.id); reusedCases++; continue; }
     const rec = blankCaseStudy(st.batch.courseId);
     rec.ref = cs.ref;
     rec.title = cs.title || cs.ref;
@@ -8511,8 +8655,10 @@ async function admitBatch() {
     rec.batchId = st.batch.id;
     rec.importedAt = nowISO();
     await CaseStudies.save(rec, 'batch ' + st.batch.id.slice(0, 8));
+    byText.set(normText(rec.text || ''), rec);
     caseIdByKey.set(cs.key, rec.id);
   }
+  if (reusedCases) setTimeout(() => toast(reusedCases + ' scenario(s) already in the bank were reused rather than duplicated.', 'info', 6000), 900);
   st.items.forEach(it => {
     if (!it.q.caseRef) { delete it.q.caseRef; return; }
     it.q.caseStudyId = caseIdByKey.get(it.q.caseRef) || null;
@@ -9310,6 +9456,10 @@ async function renderReviewQueue(root) {
   }
   const all = await State.questions();
   const queue = all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0);
+  // Both banks queue here — a case-study question needing its answer
+  // confirmed is confirmed in the same place as any other. Which bank it
+  // belongs to changes where it will show up afterwards, so rows say so.
+  const caseTitles = new Map((await CaseStudies.byCourse(State.course.id)).map(c => [c.id, c.title || c.csid || 'Untitled']));
   const conflicts = queue.filter(q => q.status === 'answer_conflict' || q.conflict);
   const dupes = queue.filter(q => q.status === 'possible_dup');
   const noAnswer = queue.filter(q => q.status === 'needs_answer');
@@ -9405,6 +9555,7 @@ async function renderReviewQueue(root) {
   const quickRow = (q, extra) => h('div', { style: 'border-left:3px solid var(--rule);padding-left:12px' }, [
     h('div', { class: 'row wrap', style: 'gap:8px' }, [
       h('span', { class: 'docnum dim', text: q.qid || '(no id)' }), statusBadge(q),
+      q.caseStudyId ? h('span', { class: 'badge b-info', title: 'Belongs to the case study bank', text: '❐ ' + (caseTitles.get(q.caseStudyId) || 'case study') }) : null,
       h('span', { class: 'tiny dim', text: (q.sourceRefs[0] || {}).sourceTitle || '' }),
       h('div', { class: 'spacer' }),
       h('button', { class: 'btn sm', onclick: () => openQuestion(q.uuid), text: 'Open' })
@@ -9738,6 +9889,10 @@ const AnaState = { by: 'domain', days: 0, bank: 'all' };
 ROUTES.analytics = async (root) => {
   const everything = await State.questions();
   const caseTotal = everything.filter(isCaseQuestion).length;
+  // The switch is only drawn when there is a case bank to switch to, so a
+  // course without one must not inherit "Case study only" from the last
+  // course looked at — there would be no control on screen to undo it with.
+  if (!caseTotal) AnaState.bank = 'all';
   // Case-study attempts are real attempts and belong in these numbers. But a
   // scenario question and a standalone one measure slightly different things,
   // so they can also be read apart without leaving the screen.
@@ -10393,10 +10548,14 @@ async function restoreFlow(file) {
 async function exportQuestionsJSON() {
   const all = await State.questions();
   const sources = await DB.byIndex('sources', 'courseId', State.course.id);
+  // The scenarios go with them. Without this the file held case-study
+  // questions pointing at nothing, which is a silent loss in the one export
+  // whose whole promise is "full structure".
+  const caseStudies = await CaseStudies.byCourse(State.course.id);
   const payload = {
     schema: 'mcq-mastery-bank/1', exportedAt: nowISO(),
     course: { id: State.course.id, code: State.course.code, name: State.course.name, blueprint: State.course.blueprint },
-    sources, questions: all
+    sources, caseStudies, questions: all
   };
   download(State.course.code + '-question-bank-' + todayKey() + '.json', new Blob([JSON.stringify(payload, null, 1)], { type: 'application/json' }));
   toast('Exported ' + all.length + ' question(s)', 'ok');
@@ -10416,7 +10575,7 @@ async function exportAudit() {
 async function exportPrintable() {
   const all = (await State.questions()).filter(q => q.status !== 'rejected' && q.status !== 'merged');
   const esc2 = esc;
-  const parts = all.map(q => {
+  const one = (q) => {
     const ci = q.options.findIndex(o => o.id === q.correctOptionId);
     return '<article><h3>' + esc2(q.qid) + ' <small>' + esc2(State.domainName(q.domainId)) + (q.topic ? ' · ' + esc2(q.topic) : '') + '</small></h3>' +
       '<p class="stem">' + esc2(q.stem) + '</p><ol type="A">' +
@@ -10424,13 +10583,30 @@ async function exportPrintable() {
       '</ol>' + (q.explanation ? '<p class="ex"><b>Explanation.</b> ' + esc2(q.explanation) + '</p>' : '') +
       (q.learningPoint ? '<p class="lp"><b>My learning point.</b> ' + esc2(q.learningPoint) + '</p>' : '') +
       '<p class="src">' + esc2((q.sourceRefs || []).map(r => (r.sourceTitle || '') + (r.locator ? ' (' + r.locator + ')' : '')).join(' · ')) + '</p></article>';
-  }).join('\n');
+  };
+  // Printing a case-study question on its own produces a page of "in the
+  // context of the above" with no above. Each scenario is printed once, with
+  // its questions under it, in the order they were written.
+  const standalone = all.filter(q => !isCaseQuestion(q));
+  const caseRecords = await CaseStudies.byCourse(State.course.id);
+  const caseParts = caseRecords.map(cs => {
+    const mine = all.filter(q => q.caseStudyId === cs.id).sort((a, b) => (a.caseSeq || 0) - (b.caseSeq || 0));
+    if (!mine.length) return '';
+    return '<section class="case"><h2>' + esc2(cs.csid || '') + ' — ' + esc2(cs.title || 'Untitled case study') + '</h2>' +
+      '<div class="passage">' + esc2(cs.text || '(no scenario text)') + '</div>' +
+      mine.map(one).join('') + '</section>';
+  }).filter(Boolean).join('\n');
+  const parts = standalone.map(one).join('\n') +
+    (caseParts ? '<h1 class="sect">Case studies</h1>' + caseParts : '');
   const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + esc2(State.course.code) + ' question bank</title><style>' +
     'body{font:14px/1.55 Georgia,serif;max-width:820px;margin:32px auto;padding:0 18px;color:#16202B}' +
     'h1{font-size:22px}h3{font-size:13px;font-family:ui-monospace,monospace;letter-spacing:.06em;margin:26px 0 6px;color:#1F4E79}' +
     'h3 small{color:#71828F;font-weight:400}.stem{margin:0 0 8px}ol{margin:0 0 8px 22px}li.c{font-weight:700}' +
     'li.c::after{content:" ✓";color:#12654C}.ex,.lp{font-size:14px;background:#F3F6F8;padding:8px 10px;border-left:3px solid #C3D0DA;margin:6px 0}' +
     '.src{font-family:ui-monospace,monospace;font-size:10.5px;color:#71828F;margin:4px 0 0}article{page-break-inside:avoid}' +
+    'h1.sect{margin-top:38px;border-top:2px solid #C3D0DA;padding-top:14px}' +
+    'section.case{margin-top:28px;page-break-before:auto}section.case h2{font-size:16px;color:#1F4E79;margin:0 0 8px}' +
+    '.passage{white-space:pre-wrap;background:#F3F6F8;border-left:3px solid #1F4E79;padding:12px 14px;margin:0 0 14px}' +
     '</style></head><body><h1>' + esc2(State.course.name) + ' — question bank</h1><p>' + all.length + ' records · exported ' + fmtDate(nowISO(), true) + '</p>' + parts + '</body></html>';
   download(State.course.code + '-question-bank-' + todayKey() + '.html', new Blob([html], { type: 'text/html' }));
   toast('Printable report exported', 'ok');
@@ -18279,6 +18455,148 @@ test('A question whose scenario has gone is reported, not left to be answered', 
     assert(found, 'the integrity check must have an orphan-scenario check at all');
     assert(found.items.indexOf('ZZO-Q-000001') >= 0, 'and it must name this record: ' + JSON.stringify(found.items));
   } finally { await DB.del('questions', orphan.uuid); }
+});
+
+
+/* ---- the defects an audit of the above turned up ---- */
+
+test('A case-study candidate is in the case bank from the moment it is parsed', async () => {
+  // It carries caseRef and not yet caseStudyId all the way through staging,
+  // and reading only caseStudyId put it in the standalone bank for exactly as
+  // long as duplicate detection had to run — so re-importing a case file added
+  // every question again, unflagged.
+  const inBank = mkCaseQ('Word for word the same question?', ['one', 'two', 'three', 'four'], 0, 'cs-1', 1);
+  const staged = mkQ('Word for word the same question?', ['one', 'two', 'three', 'four'], 0, { caseRef: 'file CS-1' });
+  await recomputeFingerprint(inBank); await recomputeFingerprint(staged);
+  eq(inBank.fingerprint, staged.fingerprint, 'the two really are identical');
+  assert(isCaseQuestion(staged), 'a caseRef alone must read as a case-study question');
+  assert(comparablePair(staged, inBank), 'so it is comparable with what is already in that bank');
+  const v = detectDuplicates([staged], [inBank]).get(staged.uuid);
+  assert(v && v.cls === 'definite', 'and re-importing it must be caught, not silently duplicated');
+  // and it must still be kept apart from an identical STANDALONE question
+  const plain = mkActive('Word for word the same question?', ['one', 'two', 'three', 'four'], 0);
+  await recomputeFingerprint(plain);
+  eq(detectDuplicates([staged], [plain]).get(staged.uuid), null, 'without collapsing the partition it exists for');
+});
+
+test('A scenario nobody can read is not one anybody can be asked about', () => {
+  const qs = [
+    mkCaseQ('Question against a written scenario?', ['a', 'b', 'c', 'd'], 0, 'good', 1),
+    mkCaseQ('Question against an empty scenario?', ['a', 'b', 'c', 'd'], 0, 'blank', 1),
+    mkCaseQ('Question against an archived scenario?', ['a', 'b', 'c', 'd'], 0, 'gone', 1),
+    mkCaseQ('Question against a deleted scenario?', ['a', 'b', 'c', 'd'], 0, 'ghost', 1)
+  ];
+  const records = [
+    { id: 'good', text: 'A real scenario, several paragraphs long.', archived: false },
+    { id: 'blank', text: '   ', archived: false },
+    { id: 'gone', text: 'Perfectly good text.', archived: true }
+    // 'ghost' deliberately absent
+  ];
+  eq(caseEligiblePool(qs).length, 4, 'all four are ready as questions');
+  const drawable = drawableCasePool(qs, records);
+  eq(drawable.length, 1, 'but only one can actually be put in front of someone');
+  eq(drawable[0].caseStudyId, 'good');
+  eq(drawableCasePool(qs, []).length, 0, 'and with no scenarios at all, none of them');
+});
+
+test('The due count and the mode behind it cannot disagree', () => {
+  const due = new Date(Date.now() - 86400000).toISOString();
+  const all = [
+    mkActive('A standalone question that is due?', ['a', 'b', 'c', 'd'], 0, { nextReviewAt: due }),
+    mkCaseQ('A case-study question that is due?', ['a', 'b', 'c', 'd'], 0, 'cs-1', 1)
+  ];
+  all[1].nextReviewAt = due;
+  // What the dashboard tile and the sidebar badge count, and what Spaced
+  // repetition will actually hand you, are now the same number.
+  const badgeCounts = eligiblePool(all).filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date()).length;
+  const spacedGives = applyFilters(eligiblePool(all), { due: true }).length;
+  eq(badgeCounts, spacedGives, 'a badge must never promise work the mode behind it has none of');
+  eq(badgeCounts, 1, 'and the case-study one is not in it');
+});
+
+test('Restoring an archived case study does not lose a conflict', () => {
+  const q = mkCaseQ('A question that disagrees with another?', ['a', 'b', 'c', 'd'], 0, 'cs-1', 1);
+  q.domainId = 'D1';
+  q.conflictWith = ['the-other-record']; q.conflict = true; q.status = 'answer_conflict';
+  q.status = 'archived';                       // archive
+  q.status = deriveEntryStatus(q);             // restore, before the fix
+  eq(q.status, 'active', 'content alone says this record is fine');
+  normalizePairState(q);                       // restore, after the fix
+  eq(q.status, 'answer_conflict', 'but it still disagrees with something, and must say so');
+  assert(REVIEW_STATUSES.indexOf(q.status) >= 0, 'so it is findable in the review queue again');
+  assert(!isPracticeEligible(q), 'and still held out of practice');
+  // a clean one really does come back clean
+  const ok = mkCaseQ('A question that disagrees with nothing?', ['a', 'b', 'c', 'd'], 0, 'cs-1', 2);
+  ok.domainId = 'D1';
+  ok.status = 'archived';
+  ok.status = deriveEntryStatus(ok); normalizePairState(ok);
+  eq(ok.status, 'active');
+});
+
+test('One case reference is one scenario, however often a file repeats it', () => {
+  // JSON listing the same ref twice: the halves fold together rather than
+  // producing a second record that steals every question from the first.
+  const out = jsonToCandidates({
+    caseStudies: [
+      { ref: 'D', title: 'The scenario', questions: [{ stem: 'First question here?', options: ['a', 'b'], answer: 'A' }] },
+      { ref: 'D', text: 'The passage arrived separately.', questions: [{ stem: 'Second question here?', options: ['a', 'b'], answer: 'A' }] }
+    ]
+  });
+  eq(out.caseStudies.length, 2, 'the parser reports what the file literally said');
+  eq(out.candidates.length, 2);
+  eq(out.candidates[0].caseRef, 'D'); eq(out.candidates[1].caseRef, 'D');
+  // The fold happens where the staging key is built, which is what admitBatch
+  // then writes from — reproduced here exactly as runParse does it.
+  const folded = [];
+  out.caseStudies.forEach(cs => {
+    const key = 'f ' + cs.ref;
+    const already = folded.find(x => x.key === key);
+    if (already) {
+      if (!already.title && cs.title) already.title = cs.title;
+      if (!already.text && cs.text) already.text = cs.text;
+      return;
+    }
+    folded.push({ key, ref: cs.ref, title: cs.title || cs.ref, text: cs.text || '' });
+  });
+  eq(folded.length, 1, 'one scenario is written, not two');
+  eq(folded[0].title, 'The scenario', 'keeping the title from the half that had one');
+  eq(folded[0].text, 'The passage arrived separately.', 'and the passage from the half that had that');
+});
+
+test('A scenario already in the bank is reused, not written a second time', async () => {
+  const cid = 'test-course-reuse-' + Date.now();
+  await DB.put('courses', makeCourse('ZZR', 'Scratch reuse course', [{ id: 'D1', name: 'One', weight: 100 }], { id: cid, qidPrefix: 'ZZR' }));
+  try {
+    const first = blankCaseStudy(cid);
+    first.title = 'Kaveri Textiles'; first.text = 'The scenario runs on for a page or so.';
+    await CaseStudies.save(first, 'test');
+    // The match admitBatch makes: same course, word-for-word the same passage.
+    const existing = await CaseStudies.byCourse(cid);
+    const byText = new Map();
+    existing.forEach(c => { const k = normText(c.text || ''); if (k) byText.set(k, c); });
+    assert(byText.get(normText('The scenario runs on for a page or so.')), 'an identical passage is recognised');
+    assert(byText.get(normText('  The scenario   runs on for a PAGE or so. ')), 'and normalisation makes whitespace and case irrelevant');
+    assert(!byText.get(normText('A different scenario entirely.')), 'a different one is not');
+    assert(!byText.get(normText('')), 'and an empty passage never matches anything');
+  } finally {
+    for (const c of await CaseStudies.byCourse(cid)) await DB.del('caseStudies', c.id);
+    await DB.del('courses', cid);
+    await DB.del('idRegister', cid);
+  }
+});
+
+test('A paper says what it was actually made of', () => {
+  const pool = mkCases([5, 5, 5, 5]);
+  const exact = pickCaseBlock(pool, 10, mulberry32(1));
+  const off = pickCaseBlock(pool, 12, mulberry32(1));
+  assert(describeCaseBlock(exact).length, 'an exact landing still describes itself');
+  assert(describeCaseBlock(off).indexOf('you asked for 12') >= 0, 'and one that could not match says so');
+  // The preview shown before Start and the paper built afterwards must agree
+  // on the number, whatever seed the session ends up with.
+  for (let seed = 1; seed < 12; seed++) {
+    eq(pickCaseBlock(pool, 12, mulberry32(seed)).taken, off.taken,
+      'the count must not depend on the seed, or the preview would be a lie at seed ' + seed);
+  }
 });
 
 /* ============================================================================

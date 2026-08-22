@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 128 passed, 0 failed, of 128.**
+**Current result: 135 passed, 0 failed, of 135.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -108,6 +108,15 @@ nine different requested counts.
 65. Case study IDs are their own sequence and never collide with question IDs
 66. Case studies reach the file, the backup and the merge
 67. A question whose scenario has gone is reported, not left to be answered
+
+### Defects an audit of the above turned up (7)
+68. A case-study candidate is in the case bank from the moment it is parsed
+69. A scenario nobody can read is not one anybody can be asked about
+70. The due count and the mode behind it cannot disagree
+71. Restoring an archived case study does not lose a conflict
+72. One case reference is one scenario, however often a file repeats it
+73. A scenario already in the bank is reused, not written a second time
+74. A paper says what it was actually made of
 
 ### Everything else (4)
 29. Practice settings are per course, app preferences are shared
@@ -215,4 +224,14 @@ Automated tests cannot verify rendering or real browser storage.
 - [ ] Archive a case study: its questions leave practice with it, and Restore
       brings both back
 - [ ] Export a backup ZIP; it contains `data/caseStudies.json`
+- [ ] Import the same case-study file twice — the second time adds no new
+      scenarios and flags every question as a duplicate
+- [ ] Blank a scenario's text: its questions leave the practice count, Practice
+      says how many are held back and why, and no session draws them
+- [ ] Mock exam → type a case-study count: the line under it says the number the
+      paper will actually land on, before you start
+- [ ] Finish any session: "How this paper was made up" states the case-study
+      section and any quota that could not be met
+- [ ] Backup & Restore → Printable HTML: each scenario is printed once with its
+      questions under it, never a case question on its own
 - [ ] Settings → Diagnostics → Run tests reports 50 of 50
