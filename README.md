@@ -107,6 +107,39 @@ Nothing is written until you confirm. Every question that enters the parser is
 accounted for on the reconciliation screen — imported, held for review, or
 rejected. Nothing is silently dropped or guessed.
 
+### Writing one question yourself
+
+You do not need a file. **Write a question by hand** — the first entry under
+"Other ways in", and the **New question** button on the Question Bank — opens a
+form for exactly one question: the stem, as many options as your course expects,
+and which one is right.
+
+It tells you as you type whether what you have written will actually reach
+practice, and when it will not, the specific things still to do. It checks the
+bank as you type and warns you, with the Question ID and a side-by-side
+comparison, if you are retyping something already there. **Save & add another**
+keeps the domain, topic, difficulty and source and clears only the question, so
+typing twenty questions from one chapter means setting the domain once.
+
+Nothing is written, and no Question ID is spent, until you press Save.
+
+### If the app cannot read your column headings
+
+A spreadsheet whose headings it recognises imports straight away. One whose
+headings it does not — your own export, someone else's template, a file in
+another language — **asks** rather than guessing. Every column in the file is
+listed with the first few values actually in it, next to a dropdown naming what
+it means; anything it did recognise is filled in already. There is also a
+checkbox for "this file has no header row at all", which reads every row
+positionally.
+
+**Start from a template** on the same screen gives you four files already in the
+right shape: a question spreadsheet, a question JSON file, and the case-study
+versions of both. A `.csv` opened and re-saved as `.xlsx` imports identically.
+Next to them, **"See every column and key the app reads"** lists every accepted
+heading and JSON key — generated from the parser's own table, so it cannot
+advertise a column the app then ignores.
+
 ### Two settings that matter on import
 
 **"Treat an answer printed in the source as verified"** — tick this when your
@@ -153,9 +186,9 @@ It also copes with `The correct answer is: B.`, answers stated in the same
 paragraph as the explanation, options split across lines, and answer keys
 (`1-B, 2-C, 3-A`) at the end of a document.
 
-**Download CSV / JSON templates** in Add Questions gives you a worked example of
-every supported field. The app generates these itself; there are no template
-files to find.
+**Start from a template** in Add Questions gives you a worked example of every
+supported field. The app generates these itself; there are no template files to
+find.
 
 ### Shipping question sets with the app
 
@@ -182,7 +215,8 @@ folder means no cards, which is the correct behaviour for a published repo —
 ## 4. Practising
 
 Eight modes: Learning, Domain drill, Weak topics, Incorrect & guessed, Mixed
-revision, Timed mock exam, Spaced repetition, Custom practice.
+revision, Timed mock exam, Spaced repetition, Custom practice. A ninth, **Case
+study questions**, appears once you have a case study — see section 5.
 
 After each answer you record how you got there — knew it, reasoned it out,
 unsure between two, guessed. This matters more than it looks: a correct guess is
@@ -197,7 +231,8 @@ reasoned 7; knew it 14, then 30, 60, 90 on repeat successes. A timed mock asks
 for no confidence, so a correct answer there is held to a short interval rather
 than treated as knowing it.
 
-Mock exams draw questions weighted to the course blueprint.
+Mock exams draw questions weighted to the course blueprint, and can carry a
+case-study section — see section 5.
 
 **Practice settings are per course.** Mock length, time limit, mastery target
 and all spaced-repetition intervals are set separately for CISA and DISA, since
@@ -224,9 +259,55 @@ that, but it cannot judge whether a game fits your subject. Only you can.
 
 Games draw from the same pool practice does — Active questions with a verified
 answer — but they **never write back**. No attempt is recorded, no review date
-moves. Playing cannot disturb your spaced-repetition schedule.
+moves. Playing cannot disturb your spaced-repetition schedule. They never draw
+case-study questions, for the same reason no other mode does.
 
-## 5. Checking what the app could not confirm
+## 5. Case studies
+
+Some questions only make sense against a scenario — a page or two of context,
+followed by four or five questions about it. Mixed into the ordinary bank they
+would turn up in Learning, Weak topics, Spaced repetition and every game
+stripped of the only thing that makes them answerable. So they are a **second
+bank**, with its own tab.
+
+**Where they appear.** Two places, both deliberate:
+
+- **Case study questions**, a practice mode that draws whole scenarios.
+- **Timed mock exam**, where you say how many case-study questions the paper
+  should carry. That number is remembered per course, alongside the mock's own
+  length and time limit, and defaults to none.
+
+Nothing else reaches them — not the other seven modes, not the games.
+
+**Cases are never split.** Ask a mock for twenty and it works out which whole
+scenarios come closest: four fives is twenty exactly; if your scenarios are
+sixes and fours it will tell you what it actually reached. You are never given
+three of a scenario's five questions, because that means reading two pages for
+a fragment. The section sits at the end of the paper, and the question palette
+shows where it starts, so you can see the long reads coming.
+
+**Reading it.** On a wide screen the scenario sits beside the question and
+scrolls on its own, so you keep your place in it across all five questions. On a
+phone it stacks above the question and collapses.
+
+**Getting them in.** Write one on the **Case Studies** tab — a title, the
+scenario with no length limit, then its questions through the same composer as
+any other. Or import: the JSON template nests each scenario's questions inside
+it, so the link cannot be lost; the spreadsheet template groups rows by a shared
+**Case ref** column and takes the passage from a single cell, so you need not
+repeat two pages down every row. Both go through the same preview, where the
+scenario itself is still editable, and the same duplicate check.
+
+Archiving a case study takes its questions with it, and is reversible. The
+Question Bank has a **Standalone / Case study** switch that hands its filters,
+bulk actions and export to either bank; Analytics has a **Both / Standalone /
+Case study** switch, so you can read your scenario performance apart from the
+rest or together with it.
+
+Spaced repetition never surfaces a case-study question on its own. Anything due
+comes back through Case study practice instead.
+
+## 6. Checking what the app could not confirm
 
 Adding questions is two steps, both on the **Add Questions** screen.
 
@@ -241,7 +322,7 @@ practising it.
 The step badge shows how many are waiting, and the sidebar carries the same
 count on Add Questions, so a queue left half-finished is never invisible.
 
-## 6. Known limitations
+## 7. Known limitations
 
 **Complex PDFs may refuse to import.** The built-in PDF reader has no external
 dependencies and handles straightforward text-layer PDFs. It cannot reliably
@@ -270,7 +351,7 @@ it grows.
 **Deliberately not included:** it does not read your notes, chat with you,
 generate questions, or sync anywhere.
 
-## 7. If something goes wrong
+## 8. If something goes wrong
 
 **"Storage unavailable" at startup** — you opened `index.html` directly, or you
 are in a private window. See section 1.
@@ -289,7 +370,7 @@ point at a different folder.
 **Built-in self-test:** Settings → Diagnostics → Run tests. 50 automated tests,
 listed in `TEST-CHECKLIST.md`.
 
-## 8. Licence
+## 9. Licence
 
 Copyright 2026 Vighnesh CN. Licensed under the
 [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0),

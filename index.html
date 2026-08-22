@@ -3994,33 +3994,57 @@ function pickCaseBlock(pool, want, rng) {
     if (!byCase.has(q.caseStudyId)) byCase.set(q.caseStudyId, []);
     byCase.get(q.caseStudyId).push(q);
   });
-  const cases = Array.from(byCase.entries()).map(([id, qs]) => ({
+  const order = shuffle(Array.from(byCase.entries()).map(([id, qs]) => ({
     id,
     questions: qs.slice().sort((a, b) => (a.caseSeq || 0) - (b.caseSeq || 0) || String(a.qid || '').localeCompare(String(b.qid || '')))
-  }));
-  const order = shuffle(cases, rng);
-  const taken = [], left = [];
-  let n = 0;
-  order.forEach(c => {
-    if (n + c.questions.length <= want) { taken.push(c); n += c.questions.length; } else left.push(c);
-  });
-  // One deliberate overshoot, and only when it is genuinely closer. `left` is
-  // already in shuffled order and the sort is stable, so the same seed always
-  // reaches the same paper.
-  if (left.length) {
-    const best = left.slice().sort((a, b) =>
-      Math.abs(n + a.questions.length - want) - Math.abs(n + b.questions.length - want))[0];
-    if (best && Math.abs(n + best.questions.length - want) < Math.abs(n - want)) {
-      taken.push(best); n += best.questions.length;
+  })), rng);
+  if (!order.length) return { cases: [], questions: [], asked: want, taken: 0, available: 0 };
+
+  /* Which whole scenarios to take is a subset-sum, and taking them greedily in
+     shuffled order gets it wrong in both directions: cases of 4, 6 and 3 asked
+     for 10 can land on 7 while 4 + 6 sits right there, and asking for one
+     question from a bank of five-question scenarios can land on none at all.
+     Neither is defensible to someone who typed a number.
+
+     So: every total reachable by some set of whole scenarios, and the one
+     closest to what was asked. Ties go to the smaller total, which keeps more
+     of the paper for standalone questions. The empty set is excluded — a
+     candidate who asked for a case-study section gets one, even when the
+     nearest whole scenario overshoots badly, because the alternative is
+     silently ignoring the request. Cost is one pass per scenario over the
+     range of totals, which for any real bank is a fraction of a millisecond. */
+  const sizes = order.map(c => c.questions.length);
+  const total = sizes.reduce((a, b) => a + b, 0);
+  // step[t] = how total t was first reached: which scenario completed it, and
+  // the total before it. Descending inner loop is what stops one scenario being
+  // counted twice; first-write-wins is what makes the earliest scenarios in the
+  // shuffled order the ones actually chosen, so the seed still decides which.
+  const step = new Array(total + 1);
+  step[0] = null;
+  for (let i = 0; i < sizes.length; i++) {
+    for (let t = total; t >= sizes[i]; t--) {
+      if (step[t] === undefined && step[t - sizes[i]] !== undefined) step[t] = { item: i, prev: t - sizes[i] };
     }
   }
+  let bestTotal = null;
+  for (let t = 1; t <= total; t++) {
+    if (step[t] === undefined) continue;
+    if (bestTotal === null || Math.abs(t - want) < Math.abs(bestTotal - want)) bestTotal = t;
+  }
+  if (bestTotal === null) return { cases: [], questions: [], asked: want, taken: 0, available: pool.length };
+
+  const idx = [];
+  for (let t = bestTotal; t > 0;) { const stp = step[t]; idx.push(stp.item); t = stp.prev; }
+  idx.sort((a, b) => a - b);
+  const taken = idx.map(i => order[i]);
+
   const questions = [];
   const ranges = taken.map(c => {
     const from = questions.length;
     c.questions.forEach(q => questions.push(q));
     return { caseStudyId: c.id, from, to: questions.length - 1, count: c.questions.length };
   });
-  return { cases: ranges, questions, asked: want, taken: n, available: pool.length };
+  return { cases: ranges, questions, asked: want, taken: questions.length, available: pool.length };
 }
 
 /** What the case-study section came to, said plainly, because it is almost
@@ -17936,6 +17960,326 @@ async function runSelfTests() {
   await audit('test', 'system', '', null, { pass, fail, skip }, '');
   return dlg;
 }
+
+
+/* ---- the two banks ---- */
+const mkCaseQ = (stem, opts, correctIx, caseStudyId, caseSeq) =>
+  mkQ(stem, opts, correctIx, { caseStudyId, caseSeq: caseSeq || 1, status: 'active', answerVerified: 'verified' });
+const mkActive = (stem, opts, correctIx, extra) =>
+  mkQ(stem, opts, correctIx, Object.assign({ status: 'active', answerVerified: 'verified' }, extra || {}));
+
+test('The two banks are separated by one predicate, and it holds both ways', () => {
+  const std = mkActive('Which control is preventive?', ['Log review', 'Segregation of duties', 'Reconciliation', 'Audit trail'], 1);
+  const cse = mkCaseQ('Given the scenario, which control is preventive?', ['Log review', 'Segregation of duties', 'Reconciliation', 'Audit trail'], 1, 'case-1', 1);
+  const all = [std, cse];
+  assert(!isCaseQuestion(std), 'a question with no caseStudyId is standalone');
+  assert(isCaseQuestion(cse), 'a question with a caseStudyId is not');
+  eq(eligiblePool(all).length, 1, 'the ordinary pool holds only the standalone question');
+  eq(eligiblePool(all)[0].uuid, std.uuid);
+  eq(caseEligiblePool(all).length, 1, 'the case pool holds only the case question');
+  eq(caseEligiblePool(all)[0].uuid, cse.uuid);
+  // A record written before case studies existed carries no field at all.
+  const legacy = mkActive('An older record', ['a', 'b'], 0);
+  delete legacy.caseStudyId;
+  assert(!isCaseQuestion(legacy), 'a record predating the field must read as standalone');
+  eq(eligiblePool([legacy]).length, 1, 'and must still be practisable');
+});
+
+test('No ordinary filter can reach a case-study question', () => {
+  const all = [];
+  for (let i = 0; i < 6; i++) all.push(mkActive('Standalone question number ' + i + ' about controls?', ['a' + i, 'b' + i, 'c' + i, 'd' + i], 0, { domainId: 'D1', flagged: true }));
+  for (let i = 0; i < 6; i++) {
+    const q = mkCaseQ('Scenario question number ' + i + ' about controls?', ['w' + i, 'x' + i, 'y' + i, 'z' + i], 0, 'case-1', i + 1);
+    q.domainId = 'D1'; q.flagged = true;
+    q.stats.attempts = 3; q.stats.incorrect = 2; q.stats.guessedCorrect = 1; q.stats.confidence = 0.2;
+    q.nextReviewAt = new Date(Date.now() - 86400000).toISOString();
+    all.push(q);
+  }
+  const pool = eligiblePool(all);
+  // Every filter the practice modes actually use, including the ones the case
+  // questions above were deliberately made to match.
+  const FILTERS = [{}, { domains: ['D1'] }, { flagged: true }, { due: true }, { incorrect: true },
+    { guessed: true }, { lowConfidence: true }, { attemptedOnly: true }, { neverAttempted: true },
+    { notMastered: true, masteryTarget: 75 }, { difficulty: ['medium'] }];
+  FILTERS.forEach((f, i) => {
+    const got = applyFilters(pool, f).filter(isCaseQuestion);
+    eq(got.length, 0, 'filter ' + i + ' (' + JSON.stringify(f) + ') must not reach the case bank');
+  });
+  // And spaced repetition specifically, which is the one that would otherwise
+  // drag a scenario question out on its own the day it fell due.
+  eq(applyFilters(pool, { due: true }).length, 0, 'nothing standalone is due here, and nothing case-study may substitute');
+  eq(applyFilters(caseEligiblePool(all), { due: true }).length, 6, 'the case questions really were due — the exclusion is what stopped them');
+});
+
+test('Games draw through the same seam, so they cannot see a scenario either', async () => {
+  const all = [];
+  for (let i = 0; i < 5; i++) all.push(mkActive('Standalone game question ' + i + '?', ['a' + i, 'b' + i, 'c' + i, 'd' + i], 0));
+  for (let i = 0; i < 5; i++) all.push(mkCaseQ('Scenario game question ' + i + '?', ['w' + i, 'x' + i, 'y' + i, 'z' + i], 0, 'case-1', i + 1));
+  const realQuestions = State.questions;
+  try {
+    State.questions = async () => all;
+    const out = await gameQuestions({});
+    eq(out.length, 5, 'a game gets exactly the standalone questions');
+    const caseUuids = new Set(all.filter(isCaseQuestion).map(q => q.uuid));
+    eq(out.filter(g => caseUuids.has(g.uuid)).length, 0, 'and none of the case-study ones');
+    const four = await gameQuestions({ optionCount: 4 });
+    eq(four.filter(g => caseUuids.has(g.uuid)).length, 0, 'nor through an option-count request');
+  } finally { State.questions = realQuestions; }
+});
+
+/* ---- whole-case selection ---- */
+const mkCases = (spec) => {
+  const out = [];
+  spec.forEach((n, ci) => {
+    for (let i = 0; i < n; i++) out.push(mkCaseQ('Case ' + ci + ' question ' + i + '?', ['a', 'b', 'c', 'd'], 0, 'case-' + ci, i + 1));
+  });
+  return out;
+};
+
+test('A case study is never split, whatever number is asked for', () => {
+  const pool = mkCases([5, 5, 5, 5]);
+  const sizeOf = (block) => {
+    const per = {};
+    block.questions.forEach(q => { per[q.caseStudyId] = (per[q.caseStudyId] || 0) + 1; });
+    return per;
+  };
+  [[20, 20], [10, 10], [5, 5], [3, 5], [8, 10], [12, 10], [17, 15], [40, 20], [1, 5]].forEach(([want, expect]) => {
+    const b = pickCaseBlock(pool, want, mulberry32(want));
+    eq(b.taken, expect, 'asking for ' + want + ' should land on ' + expect);
+    eq(b.questions.length, expect, 'the questions returned must match the count reported');
+    Object.keys(sizeOf(b)).forEach(cid => eq(sizeOf(b)[cid], 5, 'case ' + cid + ' must arrive whole'));
+  });
+});
+
+test('Uneven case studies still come whole, and the closest fit wins', () => {
+  const pool = mkCases([4, 6, 3]);
+  const b = pickCaseBlock(pool, 10, mulberry32(1));
+  eq(b.taken, 10, 'two cases sum exactly to ten');
+  eq(b.cases.length, 2);
+  const only = pickCaseBlock(mkCases([7]), 2, mulberry32(1));
+  eq(only.taken, 7, 'one case of seven is closer to two than nothing is');
+  const none = pickCaseBlock(mkCases([9]), 2, mulberry32(1));
+  eq(none.taken, 9, 'and still whole even when it overshoots badly — there is no other option');
+});
+
+test('A case block is contiguous, in printed order, and describes itself', () => {
+  const pool = mkCases([3, 3]);
+  // Deliberately shuffled input: order must come from caseSeq, not arrival.
+  const scrambled = pool.slice().reverse();
+  const b = pickCaseBlock(scrambled, 6, mulberry32(4));
+  eq(b.questions.length, 6);
+  b.cases.forEach(c => {
+    const seqs = b.questions.slice(c.from, c.to + 1).map(q => q.caseSeq);
+    eq(seqs.join(','), '1,2,3', 'each case must run in the order it was printed');
+    eq(new Set(b.questions.slice(c.from, c.to + 1).map(q => q.caseStudyId)).size, 1, 'and be one unbroken run');
+  });
+  assert(describeCaseBlock(b).indexOf('2 case studies × 3 = 6') >= 0, 'it should say what it reached: ' + describeCaseBlock(b));
+  const short = pickCaseBlock(mkCases([5, 5]), 7, mulberry32(2));
+  assert(describeCaseBlock(short).indexOf('you asked for 7') >= 0, 'and say so when that is not the number asked for');
+  eq(describeCaseBlock(null), '', 'and say nothing at all when there is no section');
+});
+
+test('The same seed composes the same case section twice', () => {
+  const pool = mkCases([5, 5, 5, 5]);
+  const a = pickCaseBlock(pool, 10, mulberry32(77));
+  const b = pickCaseBlock(pool, 10, mulberry32(77));
+  eq(a.questions.map(q => q.uuid).join(), b.questions.map(q => q.uuid).join(), 'reproducible under a seed');
+  const c = pickCaseBlock(pool, 10, mulberry32(78));
+  assert(a.cases.map(x => x.caseStudyId).join() !== c.cases.map(x => x.caseStudyId).join() || pool.length <= 10,
+    'a different seed should generally pick different scenarios');
+});
+
+/* ---- import ---- */
+test('A hand-supplied column mapping is used instead of the header row', () => {
+  const rows = [
+    ['Sl', 'Item Text', 'First', 'Second', 'Third', 'Fourth', 'Right One'],
+    ['1', 'What does RTO measure?', 'Data loss tolerance', 'Time to restore service', 'Backup window', 'Retention period', 'B']
+  ];
+  // Left to itself, none of those headings is recognised.
+  eq(mapHeader(rows[0]).stem, undefined, 'the header must genuinely be unrecognised');
+  const guessed = rowsToCandidates(rows);
+  assert(guessed.candidates.length === 0 || guessed.candidates[0].stem !== 'What does RTO measure?',
+    'without a mapping it cannot know which column is the question');
+  const out = rowsToCandidates(rows, { map: { stem: 1, a: 2, b: 3, c: 4, d: 5, answer: 6 } });
+  eq(out.candidates.length, 1);
+  eq(out.candidates[0].stem, 'What does RTO measure?');
+  eq(out.candidates[0].answerLetter, 'B');
+  eq(out.candidates[0].options.length, 4);
+  // And "no header row at all" reaches the positional reading deliberately.
+  const headerless = rowsToCandidates(rows, { headerless: true });
+  eq(headerless.candidates.length, 2, 'both rows are data when there is no header');
+});
+
+test('A recognised header still parses exactly as it always did', () => {
+  const rows = [
+    ['Question', 'A', 'B', 'C', 'D', 'Answer', 'Domain'],
+    ['Which is a detective control?', 'Firewall', 'Log review', 'Encryption', 'Training', 'B', 'D5']
+  ];
+  const out = rowsToCandidates(rows);
+  eq(out.candidates.length, 1);
+  eq(out.candidates[0].answerLetter, 'B');
+  eq(out.candidates[0].domainRaw, 'D5');
+  eq((out.caseStudies || []).length, 0, 'an ordinary file declares no case studies');
+});
+
+test('JSON case studies carry their own questions, in order', () => {
+  const out = jsonToCandidates({
+    caseStudies: [
+      { ref: 'CS-1', title: 'Kaveri Textiles', text: 'A long scenario.', domain: 'D4',
+        questions: [
+          { stem: 'First question about the scenario?', options: ['a', 'b', 'c', 'd'], answer: 'A' },
+          { stem: 'Second question about the scenario?', options: ['a', 'b', 'c', 'd'], answer: 'B' }
+        ] },
+      { ref: 'CS-2', title: 'Nilgiri Bank', text: 'Another scenario.',
+        questions: [{ stem: 'A question about the other scenario?', options: ['a', 'b', 'c', 'd'], answer: 'C' }] }
+    ]
+  });
+  eq(out.caseStudies.length, 2);
+  eq(out.caseStudies[0].title, 'Kaveri Textiles');
+  eq(out.caseStudies[0].text, 'A long scenario.');
+  eq(out.candidates.length, 3);
+  eq(out.candidates[0].caseRef, 'CS-1'); eq(out.candidates[0].caseSeq, 1);
+  eq(out.candidates[1].caseRef, 'CS-1'); eq(out.candidates[1].caseSeq, 2);
+  eq(out.candidates[2].caseRef, 'CS-2'); eq(out.candidates[2].caseSeq, 1);
+  // "title" and "text" inside a QUESTION must not be read as the scenario's.
+  const plain = jsonToCandidates({ questions: [{ text: 'A stem given under the "text" key?', options: ['a', 'b'], answer: 'A', title: 'not a case study' }] });
+  eq(plain.candidates.length, 1);
+  eq(plain.candidates[0].stem, 'A stem given under the "text" key?');
+  eq(plain.candidates[0].caseRef, '', 'and the question is standalone');
+});
+
+test('Spreadsheet rows sharing a case reference become one scenario', () => {
+  const rows = [
+    ['Case ref', 'Case title', 'Case text', 'Question', 'A', 'B', 'Answer'],
+    ['CS-1', 'Kaveri Textiles', 'The whole two-page scenario, in one cell.', 'First question?', 'a', 'b', 'A'],
+    ['CS-1', '', '', 'Second question?', 'a', 'b', 'B'],
+    ['CS-2', 'Nilgiri Bank', 'A different scenario.', 'Third question?', 'a', 'b', 'A']
+  ];
+  const out = rowsToCandidates(rows);
+  eq(out.caseStudies.length, 2, 'two references, two scenarios');
+  eq(out.caseStudies[0].ref, 'CS-1');
+  eq(out.caseStudies[0].text, 'The whole two-page scenario, in one cell.', 'the passage need only appear once');
+  eq(out.candidates.length, 3);
+  eq(out.candidates[0].caseSeq, 1);
+  eq(out.candidates[1].caseSeq, 2, 'sequence follows row order within a reference');
+  eq(out.candidates[2].caseRef, 'CS-2');
+  eq(out.candidates[2].caseSeq, 1, 'and restarts for the next scenario');
+});
+
+test('Duplicate detection is partitioned, and still works inside each bank', async () => {
+  const std = mkActive('Which control BEST prevents unauthorised production changes?', ['Segregation of duties', 'Log review', 'Annual recertification', 'Change minutes'], 0);
+  const cse = mkCaseQ('Which control BEST prevents unauthorised production changes?', ['Segregation of duties', 'Log review', 'Annual recertification', 'Change minutes'], 0, 'case-1', 1);
+  const cse2 = mkCaseQ('Which control BEST prevents unauthorised production changes?', ['Segregation of duties', 'Log review', 'Annual recertification', 'Change minutes'], 0, 'case-2', 1);
+  await recomputeFingerprint(std); await recomputeFingerprint(cse); await recomputeFingerprint(cse2);
+  eq(std.fingerprint, cse.fingerprint, 'the two are word-for-word identical, so the fingerprints must match');
+  assert(!comparablePair(std, cse), 'a standalone and a case question are not comparable');
+  assert(comparablePair(cse, cse2), 'two case questions are');
+  assert(comparablePair(std, mkActive('x', ['a', 'b'], 0)), 'two standalone questions are');
+  eq(detectDuplicates([cse], [std]).get(cse.uuid), null, 'so an identical standalone must not be raised against it');
+  const across = detectDuplicates([cse2], [cse]).get(cse2.uuid);
+  assert(across && across.cls === 'definite', 'but an identical question under another scenario must be — that is a real duplicate');
+});
+
+/* ---- hand entry ---- */
+test('A hand-written question earns exactly the status its content deserves', () => {
+  const base = () => {
+    const q = blankQuestion('test-course');
+    q.options = [makeOption('one'), makeOption('two'), makeOption('three'), makeOption('four')];
+    q.stem = 'A perfectly ordinary question?';
+    q.correctOptionId = q.options[1].id;
+    q.answerVerified = 'verified';
+    q.domainId = 'D1';
+    return q;
+  };
+  eq(deriveEntryStatus(base()), 'active', 'answered, checked and filed is ready');
+  const noAnswer = base(); noAnswer.correctOptionId = null;
+  eq(deriveEntryStatus(noAnswer), 'needs_answer');
+  const unchecked = base(); unchecked.answerVerified = 'unverified';
+  eq(deriveEntryStatus(unchecked), 'needs_answer', 'an unconfirmed answer is not a verified one');
+  const noDomain = base(); noDomain.domainId = null;
+  eq(deriveEntryStatus(noDomain), 'needs_class');
+  const oneOption = base(); oneOption.options = [makeOption('only')];
+  eq(deriveEntryStatus(oneOption), 'parsing');
+  // The status it earns and the practice pool must never disagree.
+  State.courses = (State.courses || []).concat([{ id: 'test-course', code: 'TST' }]);
+  try {
+    const ready = base();
+    eq(deriveEntryStatus(ready), 'active');
+    ready.status = 'active';
+    assert(isPracticeEligible(ready), 'what deriveEntryStatus calls active must actually be practisable');
+    [noAnswer, unchecked, noDomain, oneOption].forEach(q => {
+      q.status = deriveEntryStatus(q);
+      assert(!isPracticeEligible(q), 'and what it holds back must actually be held back');
+    });
+  } finally { State.courses = State.courses.filter(c => c.id !== 'test-course'); }
+});
+
+test('Blockers name what is left to do, and go quiet when nothing is', () => {
+  const q = blankQuestion('test-course');
+  q.options = [makeOption(''), makeOption('')];
+  eq(entryBlockers(q, null).length, 4, 'an empty form has four things outstanding: ' + JSON.stringify(entryBlockers(q, null)));
+  q.stem = 'A question?';
+  q.options = [makeOption('one'), makeOption('two')];
+  q.correctOptionId = q.options[0].id;
+  q.answerVerified = 'verified';
+  q.domainId = 'D1';
+  eq(entryBlockers(q, null).length, 0, 'a complete one has none');
+  const strict = { code: 'TST', optionCount: 4, enforceOptionCount: true };
+  eq(entryBlockers(q, strict).length, 1, 'until the course insists on four options');
+  assert(entryBlockers(q, strict)[0].indexOf('exactly 4') >= 0, 'and it should say so plainly');
+});
+
+/* ---- storage ---- */
+test('Case study IDs are their own sequence and never collide with question IDs', async () => {
+  const cid = 'test-course-cases-' + Date.now();
+  await DB.put('courses', makeCourse('ZZC', 'Scratch case course', [{ id: 'D1', name: 'One', weight: 100 }], { id: cid, qidPrefix: 'ZZC' }));
+  try {
+    const q = await IdRegister.next(cid, 2, { note: 'test' });
+    const c = await IdRegister.nextCase(cid, 2, { note: 'test' });
+    eq(q[0], 'ZZC-Q-000001'); eq(q[1], 'ZZC-Q-000002');
+    eq(c[0], 'ZZC-CS-0001'); eq(c[1], 'ZZC-CS-0002');
+    const q2 = await IdRegister.next(cid, 1, { note: 'test' });
+    eq(q2[0], 'ZZC-Q-000003', 'issuing case IDs must not disturb the question sequence');
+    const c2 = await IdRegister.nextCase(cid, 1, { note: 'test' });
+    eq(c2[0], 'ZZC-CS-0003', 'nor the other way round');
+    eq(IdRegister.caseSeqOf('ZZC-CS-0003'), 3);
+    eq(IdRegister.seqOf('ZZC-CS-0003'), 0, 'a case ID must not read as a question ID');
+    await IdRegister.reserveCaseUpTo(cid, 900);
+    eq((await IdRegister.nextCase(cid, 1, { note: 'test' }))[0], 'ZZC-CS-0901', 'a restore watermark must push it past restored IDs');
+  } finally {
+    await DB.del('courses', cid);
+    await DB.del('idRegister', cid);
+  }
+});
+
+test('Case studies reach the file, the backup and the merge', async () => {
+  assert(syncStores().indexOf('caseStudies') >= 0, 'the data file must carry them');
+  assert(BACKUP_STORES.indexOf('caseStudies') >= 0, 'so must the backup package');
+  const mk = (id, title, when) => ({ id, courseId: 'test-course', csid: id, title, text: 'scenario', createdAt: when, updatedAt: when });
+  const older = '2026-01-01T00:00:00.000Z', newer = '2026-06-01T00:00:00.000Z';
+  const empty = { attempts: [], questions: [], sessions: [], audit: [], images: [], idRegister: [], tombstones: [], presets: [], notes: [], questionVersions: [], courses: [], sources: [], batches: [], settings: [] };
+  const local = { savedAt: older, stores: Object.assign({}, empty, { caseStudies: [mk('c1', 'Local name', older), mk('c2', 'Only here', older)] }) };
+  const remote = { savedAt: newer, stores: Object.assign({}, empty, { caseStudies: [mk('c1', 'Renamed on the other device', newer), mk('c3', 'Only there', newer)] }) };
+  const { merged, report } = await mergeBankPayloads(local, remote);
+  const byId = new Map(merged.stores.caseStudies.map(c => [c.id, c]));
+  eq(merged.stores.caseStudies.length, 3, 'every scenario either side holds must survive');
+  eq(byId.get('c1').title, 'Renamed on the other device', 'and the newer edit wins on a shared one');
+  assert(byId.has('c2') && byId.has('c3'), 'the ones unique to each side are carried over');
+  eq(report.stores.caseStudies.added, 1);
+  eq(report.stores.caseStudies.updated, 1);
+});
+
+test('A question whose scenario has gone is reported, not left to be answered', async () => {
+  const orphan = mkCaseQ('A question with no scenario behind it?', ['a', 'b', 'c', 'd'], 0, 'case-that-does-not-exist', 1);
+  orphan.qid = 'ZZO-Q-000001';
+  await DB.put('questions', orphan);
+  try {
+    const issues = await integrityChecks();
+    const found = issues.find(i => i.key === 'orphanCase');
+    assert(found, 'the integrity check must have an orphan-scenario check at all');
+    assert(found.items.indexOf('ZZO-Q-000001') >= 0, 'and it must name this record: ' + JSON.stringify(found.items));
+  } finally { await DB.del('questions', orphan.uuid); }
+});
 
 /* ============================================================================
    Boot

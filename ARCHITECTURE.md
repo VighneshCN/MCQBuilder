@@ -21,7 +21,7 @@ the modules and re-concatenating is easier to maintain.
 07-session.js     Practice modes, selection, blueprint weighting
 08-shell.js       App shell, routing, navigation, theming
 09-practice.js    The practice runner
-10-bank.js        Bank table, detail view, editing, review queue
+10-bank.js        Bank table, detail view, editing, review queue, hand entry
 11-import.js      Add Questions, staging, reconciliation, admission
 12-image.js       Image intake, crop/rotate/adjust, transcription
 13-analytics.js   Performance analytics and error-cause breakdown
@@ -50,12 +50,12 @@ Restore is the only safety net.
 
 ### Object stores
 
-Database `mcq_mastery`, schema version 2.
+Database `mcq_mastery`, schema version 4.
 
 | Store | Key | Indexes |
 |---|---|---|
 | `courses` | `id` | — |
-| `questions` | `uuid` | courseId, qid, status, fingerprint, batchId, sourceId, nextReviewAt, domainId, canonicalUuid |
+| `questions` | `uuid` | courseId, qid, status, fingerprint, batchId, sourceId, nextReviewAt, domainId, canonicalUuid, caseStudyId |
 | `questionVersions` | auto | questionUuid |
 | `sources` | `id` | courseId, fileHash |
 | `batches` | `id` | courseId |
@@ -68,6 +68,7 @@ Database `mcq_mastery`, schema version 2.
 | `tombstones` | `qid` | — |
 | `presets` | `id` | courseId |
 | `fsmeta` | `k` | — |
+| `caseStudies` | `id` | courseId |
 
 Every course-owned record carries `courseId`. There is no global question pool;
 switching courses is a filter, not a migration.
@@ -137,6 +138,70 @@ its stores, and hold exactly the expected question count before it is trusted.
 a replace-restore runs a full backup first and verifies it landed. If it fails,
 the destructive operation is abandoned.
 
+## Two banks, one register
+
+A question written against a one-to-two-page scenario is not a question without
+the scenario. Drawn into Learning, Weak topics, Spaced repetition or a game it
+arrives stripped of the only thing that makes it answerable — so case-study
+questions are a **separate bank**.
+
+Separate to the user; not separate underneath. The *passages* get their own
+store (`caseStudies`); their *questions* stay in `questions`, carrying a
+`caseStudyId` and a `caseSeq`. That way versioning, duplicate detection,
+attempt history, mastery, the QID register, the backup package, folder and
+Drive sync and the merge engine all apply to them without a second
+implementation to keep in step.
+
+The separation is enforced at exactly one place:
+
+```js
+function isCaseQuestion(q) { return !!(q && q.caseStudyId); }
+function eligiblePool(all)     { return all.filter(q => isPracticeEligible(q) && !isCaseQuestion(q)); }
+function caseEligiblePool(all) { return all.filter(q => isPracticeEligible(q) &&  isCaseQuestion(q)); }
+```
+
+`eligiblePool()` is the only pool every practice mode, every game
+(`gameQuestions()`) and both readiness counters draw from, so that one line
+excludes case-study questions from all eight existing modes and every
+registered game at once — including modes and games added later, which is the
+point of putting it there rather than in each of them.
+
+Two callers reach the other side, both explicitly: a timed mock when the
+candidate has asked for a case-study section, and the `casestudy` mode, which
+is marked `caseBank: true` in `MODES`.
+
+`null`/absent `caseStudyId` reads as standalone, so every record written before
+this existed needs no migration.
+
+**Whole scenarios only.** `pickCaseBlock()` never returns part of a case study:
+three of a scenario's five questions means reading two pages for a fragment.
+Which whole scenarios to take is a subset-sum over their sizes — every total
+reachable by some set of whole cases, and the one closest to the number asked
+for, ties going to the smaller total. Greedy selection was tried and is wrong in
+both directions: cases of 4, 6 and 3 asked for 10 land on 7 while 4 + 6 sits
+there, and asking for 1 from a bank of fives lands on 0. The empty set is
+excluded, so a request for a case-study section always produces one. The number
+actually reached is reported rather than assumed (`describeCaseBlock()`).
+
+The block is appended after the standalone selection, contiguous and in
+`caseSeq` order, and `session.caseSection` records where it starts. When
+`caseCount` is 0 — every mode but an opted-in mock — the selection path is
+byte-identical to what it was before any of this existed.
+
+**Only case-level filters reach the case pool.** A per-question filter (a
+domain, a difficulty, "never attempted") would remove *some* of a scenario's
+questions and hand back a case that is no longer whole, which is the one thing
+this is for.
+
+**Duplicate detection is partitioned** by `comparablePair()`. The same wording
+can honestly appear once in the abstract and once about a specific scenario, and
+pairing those puts a row in the review queue that neither side can resolve. Two
+case-study questions still pair, including across different scenarios, because
+that is a real duplicate.
+
+**Spaced repetition never surfaces one**, by construction rather than by rule:
+it filters `eligiblePool()`. Anything due surfaces inside Case study practice.
+
 ## Question identity
 
 Human-readable IDs (`CISA-Q-000042`) are allocated from a per-course register at
@@ -190,14 +255,44 @@ checked against itself without a growing linear scan.
 
 ```
 file(s) → readFile() → extractor (docx/xlsx/pdf/csv/json/txt)
+        → columnMapDialog() when a spreadsheet header is unrecognised
         → parseText() / rowsToCandidates() / jsonToCandidates()
-        → candidates with per-field confidence
+        → candidates with per-field confidence (+ caseRef / caseSeq)
         → candidateToQuestion() + fingerprint
-        → duplicate detection against the bank
-        → staging screen (preview, per-item decisions)
-        → admitBatch() → QID allocation → written
+        → duplicate detection against the bank (within its own partition)
+        → staging screen (preview, per-item decisions, scenario editing)
+        → admitBatch() → case studies written → QID allocation → written
         → reconciliation report
 ```
+
+### The contract is stated, not implied
+
+`IMPORT_FIELDS` is the single description of every importable field: its name,
+whether it is required, its spreadsheet headings and its JSON keys.
+`COLUMN_ALIASES` is derived from it, `jsonToCandidates()` reads through it
+(`JSON_ALIASES` / `jsonPick`), and the reference panel on Add Questions is
+rendered from it. The app therefore cannot advertise a column it does not read,
+or read one it does not advertise. The case fields (`caseRef`, `caseTitle`,
+`caseText`) are marked `caseField` and excluded from `JSON_ALIASES`, because
+inside a *question* object `title` and `text` mean something else.
+
+A spreadsheet whose header matches nothing used to fall silently through to
+positional guessing. It now opens `columnMapDialog()`: every column with the
+values actually in it, a dropdown per column, whatever the header *did* match
+pre-filled, and a deliberate "no header row at all" escape to the positional
+reading. `rowsToCandidates(rows, opts)` takes that mapping; called with no
+second argument — every pre-existing caller — it behaves exactly as before.
+
+### Case studies through the same pipeline
+
+JSON nests each scenario's questions inside it, which is the shape in which the
+link cannot be lost. A spreadsheet groups rows by a shared `caseRef`, taking the
+first non-empty `caseText` under that reference, so a two-page passage is pasted
+into one cell rather than repeated down every row. Scenarios are keyed by
+*file plus reference* through staging, since two spreadsheets in one batch can
+each call their first case "1". `admitBatch()` writes the scenarios **before**
+the questions, and only those that actually keep a question, so a case-study
+question is never in the bank pointing at a case study that does not exist.
 
 The reconciliation report is the point: every question that entered the parser
 is accounted for. Low confidence does not block import; it routes the question
@@ -235,6 +330,14 @@ nonsense questions would be far worse than an error message.
 adding either in a future version is additive and safe on existing databases.
 The data file carries its own schema version and is refused if it is newer than
 the running app.
+
+Version 4 added the `caseStudies` store and the `caseStudyId` index. Bumping it
+is the point, not a side effect: the same number goes into the data file, so an
+older copy of the app now stops with "written by a newer version" rather than
+opening a bank whose case studies it would silently drop on its next snapshot.
+`syncStores()` derives from `STORES`, so the new store reached the data file
+and both sync backends without being listed anywhere; `BACKUP_STORES` and
+`mergeBankPayloads()` name their stores by hand and were updated.
 
 ## Google Drive sync (optional)
 
@@ -364,7 +467,7 @@ point local and remote content can meet:
 Merge strategy is deliberately different per store, because "newest wins"
 is not a safe default for every one of them:
 
-- **questions, courses, sources, batches, presets, notes** — keyed rows;
+- **questions, courses, sources, batches, presets, notes, caseStudies** — keyed rows;
   newest `updatedAt` (falling back to `createdAt`) wins on a shared key,
   every key unique to one side is carried over untouched. Merged questions
   are then re-checked with the existing `rescanCourseForPairs()` sweep, so
