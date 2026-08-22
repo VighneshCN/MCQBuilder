@@ -4528,7 +4528,7 @@ ROUTES.dashboard = async (root) => {
 
   // recommended next action
   let rec = null;
-  if (!all.length) rec = { t: 'Import your first questions', d: 'The bank is empty. Bring in a .docx, .csv, .json, .xlsx or PDF and the Add Questions screen will reconcile every candidate it finds.', a: 'Open Add Questions', go: 'import' };
+  if (!all.length) rec = { t: 'Put your first questions in', d: 'The bank is empty. Bring in a .docx, .csv, .json, .xlsx or PDF and the Add Questions screen will reconcile every candidate it finds — or just write one yourself.', a: 'Open Add Questions', go: 'import', alt: { label: 'Write one by hand', run: () => newQuestion() } };
   else if (conflicts.length) rec = { t: conflicts.length + ' answer conflict(s) to resolve', d: 'Two sources disagree on the correct answer. These cannot enter practice until you decide.', a: 'Resolve conflicts', go: 'review' };
   else if (inReview.length > active.length * 0.25 && inReview.length > 5) rec = { t: inReview.length + ' question(s) waiting for verification', d: 'Only verified questions can be practised. Clearing the queue widens the pool you draw from.', a: 'Check them now', go: 'review' };
   else if (due.length) rec = { t: due.length + ' question(s) due for review', d: 'Spaced repetition works best on the day it falls due.', a: 'Start due review', go: 'practice', mode: 'spaced' };
@@ -4542,6 +4542,7 @@ ROUTES.dashboard = async (root) => {
         h('h3', { style: 'margin:6px 0 4px', text: rec.t }),
         h('p', { class: 'muted small', style: 'margin:0', text: rec.d })
       ]),
+      rec.alt ? h('button', { class: 'btn', onclick: rec.alt.run, text: rec.alt.label }) : null,
       h('button', { class: 'btn primary', onclick: () => go(rec.go, rec.mode), text: rec.a })
     ])
   ]));
@@ -4674,8 +4675,9 @@ ROUTES.practice = async (root, preselect) => {
   if (!pool.length) {
     root.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, [
       h('h3', { text: 'No question is ready for practice yet' }),
-      h('p', { class: 'muted', text: all.length ? 'You have ' + all.length + ' record(s), but a question only becomes eligible once it is Active with a verified correct answer.' : 'Import questions to get started.' }),
+      h('p', { class: 'muted', text: all.length ? 'You have ' + all.length + ' record(s), but a question only becomes eligible once it is Active with a verified correct answer.' : 'Import a file of questions, or write one yourself — either way takes a couple of minutes.' }),
       h('div', { class: 'row', style: 'justify-content:center;margin-top:10px' }, [
+        !all.length ? h('button', { class: 'btn', onclick: () => newQuestion({ onSaved: () => { } }).then(n => { if (n) go('practice'); }), text: 'Write a question' }) : null,
         h('button', { class: 'btn primary', onclick: () => go(all.length ? 'review' : 'import'), text: all.length ? 'Open Needs Checking' : 'Open Add Questions' })
       ])
     ])));
@@ -6318,18 +6320,297 @@ async function openQuestion(uuidStr) {
   }
 }
 
-async function newQuestion() {
-  const q = blankQuestion(State.course.id);
-  q.options = [makeOption(''), makeOption(''), makeOption(''), makeOption('')];
-  q.status = 'draft';
-  const ids = await IdRegister.next(State.course.id, 1, { note: 'manual entry' });
-  q.qid = ids[0];
-  q.sourceRefs = [{ sourceTitle: 'Entered by hand', locator: '', importedAt: nowISO() }];
-  await recomputeFingerprint(q);
-  await DB.put('questions', q);
-  await audit('create', 'question', q.qid, null, { manual: true }, '');
-  State.invalidate();
-  openQuestion(q.uuid);
+/* ---------- writing a question by hand ----------
+   Importing is the bulk path; this is the single-question one, and it used to
+   be neither: a button that immediately wrote a draft record, spent a
+   permanent Question ID on it before a character was typed, and dropped you
+   into the six-tab detail editor where making the thing practisable meant
+   finding the Classification tab and setting two separate fields. Abandoning
+   it left a junk draft holding an ID that can never be handed out again.
+
+   So: a form that is about writing one question, that says at every moment
+   whether what you have typed will actually reach practice and why not, that
+   warns if the bank already has it, and that spends nothing at all until you
+   press Save.                                                              */
+
+/** The status a question earns from its own content — the same rules
+    admitBatch() applies to an imported one, in one place so hand entry and
+    import can never drift apart on what "ready" means. */
+function deriveEntryStatus(q) {
+  if ((q.options || []).length < 2) return 'parsing';
+  if (!q.correctOptionId) return 'needs_answer';
+  if (q.answerVerified !== 'verified') return 'needs_answer';
+  if (!optionCountOk(q)) return 'needs_content';
+  if (!q.domainId) return 'needs_class';
+  return 'active';
+}
+/** Why a question is not practisable yet, in the order a person would fix it.
+    Phrased as the thing still to do, never as a complaint about what is
+    there. */
+function entryBlockers(q, course) {
+  const out = [];
+  if (!String(q.stem || '').trim()) out.push('write the question itself');
+  const filled = (q.options || []).filter(o => String(o.text || '').trim());
+  if (filled.length < 2) out.push('give at least two answer options');
+  if (!q.correctOptionId || !filled.some(o => o.id === q.correctOptionId)) out.push('mark which option is correct');
+  else if (q.answerVerified !== 'verified') out.push('confirm you have checked that answer');
+  if (course && course.enforceOptionCount && filled.length && filled.length !== course.optionCount) {
+    out.push(course.code + ' expects exactly ' + course.optionCount + ' options — this has ' + filled.length);
+  }
+  if (!q.domainId) out.push('file it under a domain');
+  return out;
+}
+
+function autoGrow(el, min) {
+  const fit = () => { el.style.height = 'auto'; el.style.height = Math.max(min || 90, el.scrollHeight + 2) + 'px'; };
+  el.addEventListener('input', fit);
+  setTimeout(fit, 0);
+  return el;
+}
+
+/**
+ * Write one question by hand.
+ *   opts.caseStudy  — the case study record it belongs to, if any. Its
+ *                     questions are the case-study bank; everything else is
+ *                     the standalone one.
+ *   opts.defaults   — classification to start from (carried between
+ *                     questions by "Save & add another").
+ *   opts.onSaved    — called with each saved record.
+ * Returns the number of questions actually saved.
+ */
+async function questionComposer(opts) {
+  opts = opts || {};
+  const course = State.course;
+  const cs = opts.caseStudy || null;
+  const wantOptions = clamp((course && course.optionCount) || 4, 2, 8);
+  const bank = (await State.questions()).filter(q => q.status !== 'merged' && q.status !== 'rejected');
+  let saved = 0;
+
+  const draft = Object.assign({
+    stem: '', explanation: '', learningPoint: '',
+    domainId: null, topic: '', subtopic: '', srcModule: '',
+    difficulty: 'medium', tags: '', answerChecked: true, lockOptionOrder: false
+  }, opts.defaults || {});
+  draft.options = Array.from({ length: wantOptions }, () => makeOption(''));
+  draft.correctOptionId = null;
+
+  const body = h('div', { class: 'stack' });
+  const readiness = h('div', {});
+  const dupBox = h('div', {});
+  const optWrap = h('div', { class: 'stack' });
+
+  if (cs) {
+    body.appendChild(h('div', { class: 'notice small' }, [
+      h('b', { text: 'Case study question' }), ' — filed under ',
+      h('span', { class: 'docnum', text: cs.csid || '' }), ' ' + (cs.title || 'untitled') + '. ',
+      h('span', { class: 'dim' }, 'It will only ever be asked with this scenario in front of you: in Case study practice, or in a mock exam you have asked for a case-study section in.')
+    ]));
+  }
+
+  const stem = autoGrow(h('textarea', {
+    style: 'min-height:96px', placeholder: 'e.g. An IS auditor finds a control weakness during fieldwork. What should the auditor do FIRST?',
+    oninput: () => { draft.stem = stem.value; refresh(); dupCheck(); }
+  }), 96);
+  body.appendChild(h('div', { class: 'field' }, [h('label', { text: 'The question' }), stem]));
+
+  function drawOptions() {
+    optWrap.textContent = '';
+    draft.options.forEach((o, i) => {
+      const ta = autoGrow(h('textarea', {
+        style: 'min-height:42px', value: o.text, placeholder: 'Option ' + letterOf(i),
+        oninput: (e) => { o.text = e.target.value; refresh(); }
+      }), 42);
+      optWrap.appendChild(h('div', { class: 'row', style: 'gap:8px;align-items:flex-start' }, [
+        h('label', { class: 'check', style: 'margin-top:8px' }, [
+          h('input', {
+            type: 'radio', name: 'composerCorrect', checked: draft.correctOptionId === o.id,
+            onchange: () => { draft.correctOptionId = o.id; refresh(); }
+          }),
+          h('span', { class: 'docnum', text: letterOf(i) })
+        ]),
+        ta,
+        h('button', {
+          class: 'btn sm ghost', style: 'margin-top:8px', title: 'Remove this option',
+          disabled: draft.options.length <= 2,
+          onclick: () => {
+            if (draft.options.length <= 2) return;
+            if (draft.options[i].id === draft.correctOptionId) draft.correctOptionId = null;
+            draft.options.splice(i, 1); drawOptions(); refresh();
+          }, text: '✕'
+        })
+      ]));
+    });
+    optWrap.appendChild(h('div', { class: 'row', style: 'gap:8px' }, [
+      h('button', {
+        class: 'btn sm', disabled: draft.options.length >= 8,
+        onclick: () => { draft.options.push(makeOption('')); drawOptions(); refresh(); }, text: '+ Add option'
+      }),
+      course && course.enforceOptionCount
+        ? h('span', { class: 'tiny dim', text: course.code + ' expects exactly ' + course.optionCount + ' options' })
+        : null
+    ]));
+  }
+  drawOptions();
+  body.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Options — choose the correct one' }), optWrap]));
+  body.appendChild(readiness);
+  body.appendChild(dupBox);
+
+  const grid = h('div', { class: 'grid g3' });
+  const domSel = h('select', { onchange: e => { draft.domainId = e.target.value || null; refresh(); } },
+    [h('option', { value: '' }, 'Unmapped')].concat((course.blueprint || []).map(d =>
+      h('option', { value: d.id, selected: draft.domainId === d.id }, d.id + ' · ' + d.name))));
+  grid.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Domain' }), domSel]));
+  grid.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Topic' }),
+    h('input', { type: 'text', value: draft.topic, oninput: e => draft.topic = e.target.value })]));
+  grid.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Difficulty' }),
+    h('select', { onchange: e => draft.difficulty = e.target.value },
+      DIFFICULTY.map(d => h('option', { value: d, selected: draft.difficulty === d }, d)))]));
+  grid.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Source module' }),
+    h('input', { type: 'text', placeholder: 'Optional', value: draft.srcModule, oninput: e => draft.srcModule = e.target.value })]));
+  grid.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Tags (comma separated)' }),
+    h('input', { type: 'text', placeholder: 'Optional', value: draft.tags, oninput: e => draft.tags = e.target.value })]));
+  body.appendChild(grid);
+
+  const expl = autoGrow(h('textarea', {
+    style: 'min-height:58px', placeholder: 'Why the correct answer is correct — shown after you answer',
+    oninput: e => draft.explanation = e.target.value
+  }), 58);
+  body.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Explanation' }), expl]));
+
+  const checkedBox = h('input', { type: 'checkbox', checked: draft.answerChecked, onchange: e => { draft.answerChecked = e.target.checked; refresh(); } });
+  body.appendChild(h('label', { class: 'check' }, [checkedBox,
+    h('span', {}, ['I have checked this answer ',
+      h('span', { class: 'dim tiny', text: '— you are the source here, so this is on by default. Untick it and the question waits in the review queue.' })])]));
+
+  const lockBox = h('input', { type: 'checkbox', checked: draft.lockOptionOrder, onchange: e => draft.lockOptionOrder = e.target.checked });
+  const lockHint = h('span', { class: 'dim tiny' });
+  body.appendChild(h('label', { class: 'check' }, [lockBox, h('span', {}, ['Never shuffle these options ', lockHint])]));
+
+  /** The record as it would be written right now. */
+  function build() {
+    const q = blankQuestion(course.id);
+    q.stem = String(draft.stem || '').trim();
+    q.options = draft.options.filter(o => String(o.text || '').trim()).map(o => ({ id: o.id, text: o.text.trim() }));
+    q.correctOptionId = q.options.some(o => o.id === draft.correctOptionId) ? draft.correctOptionId : null;
+    q.explanation = String(draft.explanation || '').trim();
+    q.domainId = draft.domainId || null;
+    q.topic = String(draft.topic || '').trim();
+    q.srcModule = String(draft.srcModule || '').trim();
+    q.difficulty = draft.difficulty;
+    // Choosing a difficulty here is a person judging it, exactly as choosing
+    // one in the detail editor is — so it counts as graded and the
+    // in-practice prompt never asks again.
+    q.difficultyVerified = 'verified';
+    q.tags = String(draft.tags || '').split(',').map(x => x.trim()).filter(Boolean);
+    q.answerVerified = draft.answerChecked && q.correctOptionId ? 'verified' : 'unverified';
+    if (q.answerVerified === 'verified') { q.verifiedAt = nowISO(); q.verifyNote = 'Entered and checked by hand'; }
+    q.lockOptionOrder = !!draft.lockOptionOrder;
+    q.sourceRefs = [{ sourceTitle: 'Entered by hand', locator: '', importedAt: nowISO() }];
+    q.importedAt = nowISO();
+    if (cs) { q.caseStudyId = cs.id; q.caseSeq = (opts.nextSeq || 0) + saved; }
+    q.status = deriveEntryStatus(q);
+    return q;
+  }
+
+  function refresh() {
+    const q = build();
+    const blockers = entryBlockers(q, course);
+    readiness.textContent = '';
+    if (!blockers.length) {
+      readiness.appendChild(h('div', { class: 'notice ok small' }, [
+        h('b', { text: '✓ Ready to practise. ' }),
+        'Saving admits it as Active, so it can appear in your very next session.'
+      ]));
+    } else {
+      readiness.appendChild(h('div', { class: 'notice warn small' }, [
+        h('div', {}, [h('b', { text: 'Not practisable yet.' }), ' You can still save it — it waits in the review queue until:']),
+        h('ul', { style: 'margin:6px 0 0 18px;padding:0' }, blockers.map(b => h('li', { class: 'small', text: b })))
+      ]));
+    }
+    const suggest = autoLockOrder(q.stem, q.options);
+    lockHint.textContent = suggest && !draft.lockOptionOrder ? '— suggested: this question refers to a fixed position' : '';
+  }
+
+  /* Checking against the bank as you type, rather than discovering at Save
+     that you have retyped something already there. Advisory only: an exact
+     match is worth knowing about, but the person typing is the one who can
+     tell a duplicate from a deliberate variant. */
+  const dupCheck = debounce(async () => {
+    dupBox.textContent = '';
+    const q = build();
+    if (!q.stem || q.options.length < 2) return;
+    await recomputeFingerprint(q);
+    const verdict = detectDuplicates([q], bank).get(q.uuid);
+    if (!verdict) return;
+    const other = verdict.other;
+    dupBox.appendChild(h('div', { class: 'notice ' + (verdict.conflict ? 'bad' : 'warn') + ' small' }, [
+      h('div', {}, [
+        h('b', { text: verdict.conflict ? 'This contradicts a question already in your bank. ' : 'Your bank may already have this. ' }),
+        (other.qid || 'An existing record') + ' is a ' + verdict.cls + ' match at ' + Math.round(verdict.sim.score * 100) + '%.'
+      ]),
+      h('div', { class: 'small', style: 'margin-top:4px', text: (other.stem || '').slice(0, 200) }),
+      h('div', { class: 'row', style: 'margin-top:6px' }, h('button', {
+        class: 'btn sm', onclick: () => compareDialog(q, verdict, null, () => { }, 'What you are typing'), text: 'Compare side by side'
+      }))
+    ]));
+  }, 500);
+
+  refresh();
+
+  /** Validate, write, and either reset for the next one or finish. Returning
+      false from a modal action keeps the dialog open. */
+  async function commit(andAnother) {
+    const q = build();
+    if (!q.stem) { toast('The question itself is still empty', 'bad'); stem.focus(); return false; }
+    if (q.options.length < 2) { toast('A question needs at least two answer options', 'bad'); return false; }
+
+    const ids = await IdRegister.next(course.id, 1, { note: cs ? 'hand entry — case study' : 'hand entry' });
+    q.qid = ids[0];
+    await Questions.save(q, 'entered by hand');
+    await audit('create', 'question', q.qid, null, { manual: true, caseStudyId: q.caseStudyId || null }, '');
+    State.invalidate();
+    bank.push(q);
+    saved++;
+    if (opts.onSaved) await opts.onSaved(q);
+
+    const label = q.qid + (q.status === 'active' ? ' saved and ready to practise' : ' saved — ' + (STATUS[q.status] || {}).label);
+    toast(label, q.status === 'active' ? 'ok' : 'warn', 4200);
+    if (!andAnother) return true;
+
+    // Keep everything that describes WHERE the question came from; clear only
+    // the question itself. Typing twenty questions from one chapter should
+    // mean setting the domain once.
+    draft.stem = ''; stem.value = ''; stem.dispatchEvent(new Event('input'));
+    draft.explanation = ''; expl.value = ''; expl.dispatchEvent(new Event('input'));
+    draft.options = Array.from({ length: wantOptions }, () => makeOption(''));
+    draft.correctOptionId = null;
+    draft.lockOptionOrder = false; lockBox.checked = false;
+    drawOptions();
+    dupBox.textContent = '';
+    refresh();
+    stem.focus();
+    return false;
+  }
+
+  const res = await modal({
+    title: cs ? 'Add a question to ' + (cs.csid || 'this case study') : 'Write a question',
+    body, wide: true, sticky: true,
+    actions: [
+      { label: 'Done', value: null },
+      { label: 'Save & add another', value: 'again', before: () => commit(true) },
+      { label: 'Save', value: 'save', kind: 'primary', before: () => commit(false) }
+    ]
+  });
+  void res;
+  return saved;
+}
+
+/** Kept under its old name because that is what the Question Bank's button
+    calls; it is now the composer above rather than a pre-written draft. */
+async function newQuestion(opts) {
+  const n = await questionComposer(opts);
+  if (n && State.view === 'bank') go('bank');
+  return n;
 }
 
 async function exportBank(list) {
@@ -6627,6 +6908,7 @@ ROUTES.import = async (root) => {
   document.addEventListener('paste', paste);
 
   const IMPORT_METHODS = [
+    { ico: '✎', title: 'Write a question by hand', desc: 'One question at a time — the stem, the options, which one is right. It tells you as you type whether it will reach practice, and warns you if the bank already has it.', action: () => newQuestion({ onSaved: () => { } }).then(n => { if (n) go('import'); }) },
     { ico: '▣', title: 'Add from image or camera', desc: 'Photograph or screenshot a page, crop and straighten it, then transcribe it — by hand or with OCR.', action: () => imageWorkflow(null) },
     { ico: '¶', title: 'Paste raw text', desc: 'Already have the questions as text somewhere? Paste them in and see exactly what gets found before anything is kept.', action: () => pasteTextWorkflow() },
     { ico: '⇩', title: 'Download CSV / JSON templates', desc: 'A blank spreadsheet or JSON file in the exact shape the parser expects — fill it in and drop it back in above.', action: () => downloadTemplates() }
@@ -7378,6 +7660,10 @@ function exportSourceRegister(sources) {
 }
 
 /* ---------- side-by-side duplicate comparison ---------- */
+/** `item` is the staging row whose decision the buttons act on. Called
+    without one — comparing something not yet in a batch at all, like a
+    question being typed by hand — there is no decision to take, so the
+    dialog is the comparison alone. */
 function compareDialog(q, dup, item, redraw, label) {
   const other = dup.other;
   const d = diffWords(q.stem, other.stem);
@@ -7405,12 +7691,12 @@ function compareDialog(q, dup, item, redraw, label) {
         ])
       ])])
     ]),
-    actions: [
+    actions: item ? [
       { label: 'Cancel', value: null },
       { label: 'Keep separate', value: 'sep', kind: 'primary' },
       { label: 'Reject incoming', value: 'rej', kind: 'danger' },
       { label: 'Merge into existing', value: 'merge' }
-    ]
+    ] : [{ label: 'Close', value: null }]
   }).then(async v => {
     if (!v) return;
     if (v === 'sep') {
@@ -16642,7 +16928,7 @@ async function boot() {
     if (window._imageWorkflowOpen) { e.preventDefault(); e.returnValue = ''; }
   });
   // expose a small surface for debugging without opening the internals
-  self.MCQ = { State, DB, Settings, runSelfTests, runIntegrity, APP };
+  self.MCQ = { State, DB, Settings, runSelfTests, runIntegrity, APP, TESTS };
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
 else boot();
