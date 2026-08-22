@@ -4250,6 +4250,21 @@ function featureLock(key, pool) {
   }
   return null;
 }
+/* A mock opens at the length you said your real paper is — unless the bank
+   cannot fill that yet, in which case it opens at what the bank has and scales
+   the clock to match. Nobody's first mock should open already warning that it
+   cannot be built; that is the app telling somebody their bank is wrong when it
+   is merely new.
+
+   It never writes anything back: the stored mockCount is what you intend your
+   real paper to be, and this is only where the field starts. */
+function mockOpeningFor(have, wantSetting, minsSetting) {
+  const want = Math.max(1, wantSetting || 1);
+  const mins = Math.max(5, minsSetting || 60);
+  if (!have || have >= want) return { count: want, minutes: mins, clamped: false, want };
+  return { count: have, minutes: Math.max(5, Math.round(mins * have / want)), clamped: true, want };
+}
+
 /* Half the practice modes can do nothing on somebody's first day: there is no
    review due, nothing has been got wrong, no topic has enough evidence to be
    called weak. They were shown at full strength beside the three that work,
@@ -6363,19 +6378,8 @@ async function configureMode(mode) {
   const body = h('div', { class: 'stack' });
   const f = { domains: [], topics: [], sources: [], modules: [], difficulty: [], batches: [], caseStudies: [] };
 
-  /* A mock opens at the length you said your real paper is — unless the bank
-     cannot fill that yet, in which case it opens at what the bank has and
-     scales the clock to match. Nobody's first mock should open already warning
-     that it cannot be built; that is the app telling somebody their bank is
-     wrong when it is merely new. The stored setting is untouched: that is what
-     you intend the real paper to be, this is only where the field starts. */
-  const mockOpening = (() => {
-    const want = Math.max(1, Settings.get('mockCount') || 1);
-    const mins = Math.max(5, Settings.get('mockMinutes') || 60);
-    const have = pool.length + casePool.length;
-    if (!have || have >= want) return { count: want, minutes: mins, clamped: false };
-    return { count: have, minutes: Math.max(5, Math.round(mins * have / want)), clamped: true, want };
-  })();
+  const mockOpening = mockOpeningFor(pool.length + casePool.length,
+    Settings.get('mockCount'), Settings.get('mockMinutes'));
   const cfg = {
     filters: f,
     // A last-mile session defaults to forty rather than twenty: it is the one
@@ -21583,6 +21587,140 @@ test('The offline switch is honest about where it cannot work', () => {
       await Settings.set('offlineEnabled', was);
     }
   })();
+});
+
+
+/* ---- out of the student's way ---- */
+
+const gateQ = (over) => {
+  const q = blankQuestion('test-course');
+  q.stem = 'An ordinary question?';
+  q.options = [makeOption('one'), makeOption('two'), makeOption('three'), makeOption('four')];
+  q.correctOptionId = q.options[1].id;
+  q.answerVerified = 'verified';
+  q.domainId = 'D1';
+  q.status = 'active';
+  return Object.assign(q, over || {});
+};
+
+test('What blocks practice is written once, in the status table', () => {
+  // The gate must agree with STATUS[...].practice for every status there is,
+  // so adding a status later cannot silently change who may practise.
+  Object.keys(STATUS).forEach(k => {
+    const q = gateQ({ status: k });
+    eq(isPracticeEligible(q), !!STATUS[k].practice, k + ' must match its own table entry');
+  });
+  // And BLOCKING_STATUSES is that same table read the other way round.
+  REVIEW_STATUSES.forEach(k => {
+    eq(BLOCKING_STATUSES.indexOf(k) >= 0, !STATUS[k].practice, k + ' is blocking exactly when it cannot practise');
+  });
+  eq(BLOCKING_STATUSES.indexOf('needs_class'), -1, 'unclassified is not blocked');
+  eq(BLOCKING_STATUSES.indexOf('needs_content'), -1, 'nor is unchecked wording');
+  assert(BLOCKING_STATUSES.indexOf('needs_answer') >= 0, 'but no answer key still is');
+});
+
+test('A question nobody has filed still practises; one nobody can mark does not', () => {
+  // The whole failure this fixes: a course with no keyword hints files nothing
+  // automatically, and every question used to fall out of practice for it.
+  const unfiled = gateQ({ domainId: null, status: 'needs_class' });
+  assert(isPracticeEligible(unfiled), 'no domain is not a reason to be unable to answer a question');
+  assert(isBlocked(unfiled) === false, 'and it is not counted as stuck');
+  assert(REVIEW_STATUSES.indexOf(unfiled.status) >= 0, 'though it is still listed for tidying');
+
+  const shaky = gateQ({ status: 'needs_content' });
+  assert(isPracticeEligible(shaky), 'wording nobody has double-checked is still answerable');
+
+  // Everything that genuinely cannot be marked stays out.
+  [['needs_answer', {}], ['possible_dup', {}], ['answer_conflict', {}], ['parsing', {}], ['draft', {}]]
+    .forEach(([st]) => assert(!isPracticeEligible(gateQ({ status: st })), st + ' must stay out'));
+  assert(!isPracticeEligible(gateQ({ answerVerified: 'unverified' })), 'an unconfirmed answer stays out');
+  assert(!isPracticeEligible(gateQ({ conflict: true })), 'a conflict stays out');
+  assert(!isPracticeEligible(gateQ({ correctOptionId: null })), 'no answer key stays out');
+});
+
+test('A bank that was already fine is completely unaffected', () => {
+  // Regression: every question classified, verified and active — the state a
+  // CISA or DISA bank has always been in — must select exactly as before.
+  const all = [];
+  for (let i = 0; i < 12; i++) all.push(gateQ({ domainId: 'D' + (i % 4 + 1) }));
+  eq(eligiblePool(all).length, 12, 'nothing about a healthy bank changed');
+  // And the case-study seam is untouched by any of this.
+  const cased = gateQ({ caseStudyId: 'cs-1' });
+  all.push(cased);
+  eq(eligiblePool(all).length, 12, 'a case-study question still reaches no ordinary mode');
+  eq(caseEligiblePool(all).length, 1);
+  // Including when it is the soft statuses that carry it.
+  const unfiledCase = gateQ({ caseStudyId: 'cs-2', domainId: null, status: 'needs_class' });
+  all.push(unfiledCase);
+  eq(eligiblePool(all).length, 12, 'and an unfiled case-study question does not leak either');
+  eq(caseEligiblePool(all).length, 2);
+});
+
+test('A feature that has nothing to run on says so, and lets go by itself', () => {
+  const ungraded = [gateQ({ domainId: null }), gateQ({ domainId: null })];
+  const dl = featureLock('domains', ungraded);
+  assert(dl && dl.why.length > 0 && dl.action.length > 0, 'locked, with a reason and a way out');
+  const gl = featureLock('difficulty', ungraded);
+  assert(gl, 'difficulty is locked on a bank nobody has graded');
+
+  // One is enough to switch each of them on — no threshold, no ceremony.
+  eq(featureLock('domains', ungraded.concat([gateQ({ domainId: 'D1' })])), null);
+  eq(featureLock('difficulty', ungraded.concat([gateQ({ difficulty: 'medium', difficultyVerified: 'verified' })])), null);
+  // A difficulty somebody typed but never confirmed is not a graded question.
+  assert(featureLock('difficulty', [gateQ({ difficulty: 'hard' })]), 'an unverified grade does not count');
+  eq(featureLock('nonsense', ungraded), null, 'an unknown key locks nothing');
+});
+
+test('A mode with nothing to draw closes; one that is merely quiet stays open', () => {
+  const ctx = { due: 0, redo: 0, lastmile: 0, domainsLocked: true, weakReady: false, minSample: 5 };
+  ['spaced', 'redo', 'lastmile'].forEach(m => {
+    const l = modeLock(m, ctx);
+    assert(l && l.hard, m + ' has nothing at all to draw, so it must not open');
+  });
+  ['domain', 'weak'].forEach(m => {
+    const l = modeLock(m, ctx);
+    assert(l && !l.hard, m + ' still runs — dimming is a warning, disabling is a removal');
+  });
+  // And nothing is dimmed once there is something to work with.
+  const live = { due: 3, redo: 2, lastmile: 4, domainsLocked: false, weakReady: true, minSample: 5 };
+  ['spaced', 'redo', 'lastmile', 'domain', 'weak'].forEach(m => eq(modeLock(m, live), null, m + ' should be awake'));
+  eq(modeLock('learning', ctx), null, 'a mode that always works is never dimmed');
+});
+
+test('A mock opens at something the bank can actually build', () => {
+  // The usual case: the bank is big enough, so the setting is used untouched.
+  const plenty = mockOpeningFor(400, 150, 240);
+  eq(plenty.count, 150); eq(plenty.minutes, 240); eq(plenty.clamped, false);
+  // The first-week case: 20 questions, so 20 — and the clock scales with it
+  // rather than offering four hours for twenty questions.
+  const small = mockOpeningFor(20, 150, 240);
+  eq(small.count, 20); eq(small.minutes, 32); eq(small.clamped, true); eq(small.want, 150);
+  // An empty bank falls back to the setting; the dialog's own warning covers it.
+  eq(mockOpeningFor(0, 150, 240).count, 150);
+  // Never a zero-length paper or a zero-length clock.
+  assert(mockOpeningFor(1, 150, 240).count >= 1);
+  assert(mockOpeningFor(1, 150, 240).minutes >= 5, 'a one-question paper still gets a usable clock');
+});
+
+test('The marking scheme reads as a sentence before you open the card', () => {
+  const line = markingSummary('test-course');
+  assert(line.indexOf('1 mark a question') >= 0, 'the default is one mark: ' + line);
+  assert(line.indexOf('no negative marking') >= 0);
+  assert(line.indexOf('pass at') >= 0);
+});
+
+test('Nothing is a blocker that the composer will not also let you save', () => {
+  // The composer's two lists must not overlap: anything it calls a blocker
+  // stops the save, anything it calls an unlock must not.
+  const q = blankQuestion('test-course');
+  q.stem = 'A question?';
+  q.options = [makeOption('one'), makeOption('two')];
+  q.correctOptionId = q.options[0].id;
+  q.answerVerified = 'verified';
+  const blockers = entryBlockers(q, null), unlocks = entryUnlocks(q);
+  eq(blockers.length, 0, 'this one is ready');
+  assert(unlocks.length > 0, 'and still has things it would like');
+  blockers.forEach(b => assert(unlocks.indexOf(b) < 0, 'nothing may be in both lists'));
 });
 
 /* ============================================================================

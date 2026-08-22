@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 171 passed, 0 failed, of 171.**
+**Current result: 179 passed, 0 failed, of 179.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -164,6 +164,16 @@ nine different requested counts.
 108. The notebook and the last mile agree on what is still broken
 109. The printed page is built in one place
 110. The offline switch is honest about where it cannot work
+
+### Out of the student's way (8)
+111. What blocks practice is written once, in the status table
+112. A question nobody has filed still practises; one nobody can mark does not
+113. A bank that was already fine is completely unaffected
+114. A feature that has nothing to run on says so, and lets go by itself
+115. A mode with nothing to draw closes; one that is merely quiet stays open
+116. A mock opens at something the bank can actually build
+117. The marking scheme reads as a sentence before you open the card
+118. Nothing is a blocker that the composer will not also let you save
 
 ### Everything else (4)
 29. Practice settings are per course, app preferences are shared
@@ -357,3 +367,28 @@ Automated tests cannot verify rendering or real browser storage.
       not the stored copy
 - [ ] Settings → Offline → turn it off, reload offline — it correctly does not
       open, proving the switch really unregisters
+
+### Out of the student's way
+
+- [ ] Make a course with your own domains (not a CISA/DISA template) and import
+      a file with no domain column: every question is practisable, and the
+      review badge does not light up
+- [ ] Question Bank shows them as **Unclassified**, and the queue groups them
+      under "already in practice"
+- [ ] Open a mock on that bank: both mix toggles are disabled, each saying what
+      it runs on and how to feed it
+- [ ] Grade one question's difficulty as you practise — the difficulty mix
+      switches itself on with no reload
+- [ ] File one question under a domain — the domain mix and Domain drill wake up
+- [ ] Fresh course, no attempts: Practice dims the modes that cannot help yet;
+      the three with nothing at all to draw do not open, Weak topics and Domain
+      drill still do
+- [ ] The mock dialog opens with no warning, asks how many and how long first,
+      and says why it opened shorter than your usual paper
+- [ ] Settings → *How this exam is marked* is folded, with the scheme in force
+      readable on the fold
+- [ ] Add Questions shows no six-step map until a file is in
+- [ ] Install it from the browser's own Install button; it opens in its own
+      window and still works with the network cut
+- [ ] With Drive connected, reload — the bar says "reconnecting", never "Local
+      only"; go offline and reload — it says offline and promises to sync

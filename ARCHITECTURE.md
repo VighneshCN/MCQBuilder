@@ -1,11 +1,14 @@
 # Architecture
 
-A single HTML file with all JavaScript and CSS inlined, plus `sw.js` — one
-small service worker, which is the sole exception and not a matter of taste: a
-browser will not accept a service worker inlined, imported from a `data:` URI,
-or built at runtime. It must be a separate same-origin file. It buys exactly
-one thing, the app opening with no network, and the app is fully functional
-without it. Everything else remains in the one file. No build step at
+A single HTML file with all JavaScript and CSS inlined, plus two small files a
+browser refuses to accept any other way: `sw.js`, because a service worker
+cannot be inlined, imported from a `data:` URI, or built at runtime; and
+`manifest.webmanifest`, because a `data:` URI manifest has no base for
+`start_url` to resolve against, so Chrome discards it and the app is not
+installable — checked with `Page.getInstallabilityErrors`, which named
+`start-url-not-valid` before and reports nothing after. Between them they buy
+the app opening with no network and installing as an app. It is fully
+functional without either. Everything else remains in the one file. No build step at
 runtime, no dependencies, and no network requests once loaded — except two
 opt-in, off-by-default paths a user can turn on for themselves: external OCR
 (an API key and endpoint of their own, read from a local file — see module 12)
@@ -40,6 +43,7 @@ And, alongside the file rather than inside it:
 
 ```
 sw.js             The offline shell — see "Offline" below
+manifest.webmanifest   Name, icon and start URL, so it can be installed
 ```
 
 `15b` is deliberately named to sort before `16`, because the boot sequence at
@@ -277,6 +281,51 @@ guessing between four options is right that often by luck. Attempts with no
 confidence — every answer in a timed mock, which deliberately asks nothing —
 are excluded rather than bucketed as unknown, and `calibrationVerdict()`
 returns null below five answers rather than calling a habit off a handful.
+
+## What blocks practice, and what merely locks a feature
+
+`isPracticeEligible()` reads `STATUS[q.status].practice` rather than naming a
+status. That flag had been in the table since the first version and nothing
+read it; the gate hardcoded `=== 'active'` instead. Two statuses now carry it:
+`needs_class` (no domain) and `needs_content` (the parser was not fully
+confident it read the wording). Both describe something **missing**, not
+something **wrong**.
+
+This was not cosmetic. `deriveEntryStatus()` files a question as `needs_class`
+whenever it has no `domainId`, and `suggestDomain()` can only guess from
+`course.hints`, which only the CISA and DISA templates ship. So a course
+somebody sets up themselves classified nothing, and every question fell out of
+practice. Measured in a browser on a self-made course with a plain question
+file: 30 imported, 30 practisable now, 0 before.
+
+`BLOCKING_STATUSES` is derived from the same table — the review statuses whose
+`practice` flag is false — so the gate, the nav badge, the dashboard prompt and
+the admission summary cannot drift apart about what is actually stuck.
+
+`featureLock(key, pool)` returns null or a reason, and `lockedToggle()` renders
+the disabled control that names it. `modeLock(mode, ctx)` does the same for the
+practice grid and distinguishes **hard** (nothing to draw at all — the card does
+not open, because opening it could only produce an error) from **soft** (the
+mode runs exactly as it always did, it just cannot do the clever part yet — so
+it is dimmed and stays clickable). Dimming is a warning; disabling is a
+removal, and nothing here removes a mode somebody could already run.
+
+## Installing, and where the bank lives
+
+`manifest.webmanifest` carries the icon as an inline SVG `data:` URI, so no PNG
+files are needed; the icon itself is the rail's tick mark. Its mark sits inside
+the central 80% of the canvas, so the same file serves as `maskable`.
+
+`DriveSync` keeps two separate ideas apart. `connected` means a live OAuth token
+exists right now; `configured` means this browser's bank lives on Drive. The
+second survives a reload and is true on a train — the first is false for the
+first second after every reload while a silent token is fetched, and false
+forever offline. `updateStorageBar()` used to ask only the first and, finding it
+false, fall through to `FileStore.status()` → "Local only — not saving to a
+file", with a Connect button, for somebody whose entire bank is on Drive. The
+bar now belongs to Drive whenever Drive is the backend, with honest states for
+reconnecting and for offline; `configured` is kept in step at connect,
+disconnect, and the branch where a local folder wins.
 
 ## Working backwards from a date
 

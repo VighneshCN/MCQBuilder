@@ -107,6 +107,35 @@ Nothing is written until you confirm. Every question that enters the parser is
 accounted for on the reconciliation screen — imported, held for review, or
 rejected. Nothing is silently dropped or guessed.
 
+### What a question actually needs
+
+Three things, and only three:
+
+| Needed to practise a question | Why |
+|---|---|
+| The question text | Obvious |
+| At least two options, one marked correct | Otherwise there is nothing to mark |
+| That answer confirmed | The app will not drill you on an answer key nobody has checked. One tick at import — *"Treat an answer printed in the source as verified"* — does this for a whole file |
+
+**Everything else is optional and unlocks something.** Nothing else holds a
+question out of practice:
+
+| Not filled in | What stays switched off until you do |
+|---|---|
+| Domain | Domain drill focuses on everything instead; a weighted mock cannot follow the blueprint; accuracy by domain has nothing to split |
+| Difficulty | Papers built to a difficulty mix |
+| Explanation | Nothing is shown to you at reveal beyond the right answer |
+| Per-option reasons | The "why the option you picked was wrong" box |
+| Marks | Every question is worth one |
+| Case study link | It stays in the standalone bank |
+
+You will see this in the app rather than have to remember it: a control that
+cannot do anything yet is **shown, disabled, saying what it runs on** — not
+hidden, and never offered and then refused. Tick nothing, import a plain file
+of questions and answers, and you can practise immediately; fill things in
+later and features switch themselves on. Grading a single question's difficulty
+is enough to unlock difficulty-based papers.
+
 ### Writing one question yourself
 
 You do not need a file. **Write a question by hand** — the first entry under
@@ -485,6 +514,16 @@ rest or together with it.
 Spaced repetition never surfaces a case-study question on its own. Anything due
 comes back through Case study practice instead.
 
+### Installing it as an app
+
+From Chrome or Edge, the address bar offers an **Install** button; on Android,
+*Add to Home screen*; on iOS, Share → *Add to Home Screen*. It then opens in its
+own window with its own icon, no address bar, and works with no connection.
+
+This changes nothing about your data. It is the same app, the same browser
+database, the same folder on your disk. Nothing is uploaded by installing it,
+and there is no account to make.
+
 ### Opening it without a network
 
 The app keeps a copy of itself so it opens on a train. Everything else was
@@ -497,10 +536,11 @@ online you always get the current version**, and the stored copy is only ever
 the fallback. Settings → **Offline** says which state it is actually in, and
 turns it off entirely if you would rather it did not.
 
-This is why the app is `index.html` **and** `sw.js`. A browser will not accept
-a service worker inlined into a page — it has to be a separate file in the same
+This is why the app is `index.html`, `sw.js` and `manifest.webmanifest`. A
+browser will not accept a service worker inlined into a page, and it discards a
+manifest supplied as a `data:` URI — both have to be real files in the same
 folder. If you only ever copy `index.html`, everything works exactly as before;
-you simply need the network to open it.
+you simply need the network to open it, and it cannot be installed.
 
 ## 6. Checking what the app could not confirm
 

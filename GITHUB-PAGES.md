@@ -1,7 +1,8 @@
 # Publishing this to GitHub Pages
 
-The app is a self-contained `index.html`, plus a small `sw.js` that lets it
-open with no network. Pages serves both as-is — there is no build step, no
+The app is a self-contained `index.html`, plus two small files: `sw.js`, which
+lets it open with no network, and `manifest.webmanifest`, which lets it be
+installed as an app. Pages serves all three as-is — there is no build step, no
 framework, no Actions workflow to configure.
 
 ---
@@ -38,6 +39,7 @@ commit.
    ```
    index.html                 the app
    sw.js                      lets it open offline (optional, see below)
+   manifest.webmanifest       lets it be installed as an app (optional)
    .gitignore                 keeps your bank out of the repo
    README.md
    ARCHITECTURE.md
@@ -47,10 +49,16 @@ commit.
    serve.ps1
    ```
 
-   `sw.js` must sit **beside** `index.html`, not in a subfolder — a service
-   worker can only control pages at or below its own path. Leaving it out is
-   perfectly safe: the app then simply needs a connection to open, and says so
-   in Settings → Offline.
+   `sw.js` and `manifest.webmanifest` must sit **beside** `index.html`, not in
+   a subfolder — a service worker can only control pages at or below its own
+   path. Leaving either out is perfectly safe: without `sw.js` the app needs a
+   connection to open, and says so in Settings → Offline; without the manifest
+   it runs normally in a browser tab but cannot be installed.
+
+   Pages serves over HTTPS, which is what both of them require. Installing is
+   then offered by the browser itself — Chrome and Edge put an Install button
+   in the address bar, Android offers *Add to Home screen*, iOS offers it from
+   the Share menu.
 
    Uploading through the web interface will not accept a file named
    `.gitignore` by drag-and-drop reliably. Use **Add file → Create new file**,
