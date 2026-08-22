@@ -267,6 +267,26 @@ confidence — every answer in a timed mock, which deliberately asks nothing —
 are excluded rather than bucketed as unknown, and `calibrationVerdict()`
 returns null below five answers rather than calling a habit off a handful.
 
+## Sections, and changing your mind
+
+`sectionsFor()` returns sections only for a mock that has both a standalone run
+and a case-study block; every other paper is one undifferentiated run and
+`session.sections` is simply absent. Budgets come from
+`defaultSectionBudgets()`, proportional to the **marks** each section carries —
+identical to splitting by question count when the sections are weighted the
+same — and an explicit case-study budget takes its remainder from the other, so
+the two always sum to the paper's limit. It takes a courseId rather than
+reading `State.course`: it is arithmetic over a paper, and nothing about it
+should depend on which course happens to be selected when it runs.
+
+`carryAnswerChanges(prev, rec)` moves the change history onto each successive
+response, keeping `firstOptionId` — the first answer ever given to that question
+in that session — and appending to `changes` only when the selection actually
+differs. `answerChangeReport()` classifies on **first against final**, not on
+each hop, because the hops say nothing about instinct and nobody remembers
+them. A change that lands back where it started is counted as a change and
+appears in none of the three outcomes, because it changed nothing.
+
 ## The distractors
 
 An option is `{ id, text }` and optionally `rationale` — why *that* option is

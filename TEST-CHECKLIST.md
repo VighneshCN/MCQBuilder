@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 154 passed, 0 failed, of 154.**
+**Current result: 162 passed, 0 failed, of 162.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -143,6 +143,16 @@ nine different requested counts.
 91. One miss is not a pattern, and an even split is not a belief
 92. An option a later edit removed is counted apart, not silently dropped
 93. The line said at reveal is right, or is not said at all
+
+### Sections and changing your mind (8)
+94. A change keeps the first answer, however many times you go round
+95. Changes are priced on the first answer against the last
+96. An untouched paper reports nothing rather than zeroes
+97. A section budget follows the marks, and the parts sum to the whole
+98. Only a mock with a case-study block is sectioned
+99. A section reports what it was asked and what it cost
+100. Durations past an hour read as hours
+101. Marks are said out loud with the right plural
 
 ### Everything else (4)
 29. Practice settings are per course, app preferences are shared
@@ -284,6 +294,23 @@ Automated tests cannot verify rendering or real browser storage.
       option dominates rather than inventing one
 - [ ] Analytics → Mistake lists the repeat offenders; Question Bank filters to
       them
+
+### Sections and changing your mind
+
+- [ ] Configure a mock with case-study questions: the section note reacts to
+      the question count, the case count and the time limit
+- [ ] Give the scenarios a set number of minutes — the other section takes the
+      remainder and the two sum to the limit
+- [ ] Sit it: the header names the section and counts down its own budget, and
+      turns red when the section is projected to overrun
+- [ ] Finish: the By section table is there, and the overrun sentence names the
+      section that ate the clock
+- [ ] Change four answers in a mock; the results say how many went each way and
+      what it cost in marks, and list the ones it cost
+- [ ] Change one and change it back — it is counted as changed but costs
+      nothing and is in none of the three outcomes
+- [ ] A mock with no case-study questions has no sections and no By section
+      card, exactly as before
 - [ ] Import the same case-study file twice — the second time adds no new
       scenarios and flags every question as a duplicate
 - [ ] Blank a scenario's text: its questions leave the practice count, Practice

@@ -4161,14 +4161,17 @@ function pickCaseBlock(pool, want, rng) {
 
 /** The sections a paper has, or null. Only a timed mock with a case-study
     block is sectioned; everything else is one run and says so by having none. */
-function sectionsFor(mode, standalone, caseQuestions, config, ordered) {
+function sectionsFor(mode, standalone, caseQuestions, config, ordered, courseId) {
   if (mode !== 'mock' || !caseQuestions.length || !standalone.length) return null;
-  const worth = (list) => list.reduce((t, q) => t + marksOf(q, State.course.id), 0);
+  // Takes the course rather than reaching for the active one: this is pure
+  // arithmetic over a paper, and nothing about it should depend on which
+  // course happens to be selected when it runs.
+  const worth = (list) => list.reduce((t, q) => t + marksOf(q, courseId), 0);
   const secs = [
     { key: 'main', label: 'Standalone questions', from: 0, to: standalone.length - 1, count: standalone.length, marks: worth(standalone) },
     { key: 'case', label: 'Case studies', from: standalone.length, to: ordered.length - 1, count: caseQuestions.length, marks: worth(caseQuestions) }
   ];
-  const totalMs = (config.minutes || Settings.get('mockMinutes')) * 60000;
+  const totalMs = (config.minutes || Settings.get('mockMinutes', courseId)) * 60000;
   const auto = defaultSectionBudgets(secs, totalMs);
   // An explicit budget for the case block is the one a candidate actually
   // plans with ("I'll give the scenarios an hour"); the rest of the clock is
@@ -4600,7 +4603,7 @@ const Session = {
       // A sectioned paper: the standalone run and the case-study block, each
       // with its own share of the clock. Absent on every paper that is one
       // undifferentiated run, which is all of them but this.
-      sections: sectionsFor(mode, chosen, caseQuestions, config, ordered),
+      sections: sectionsFor(mode, chosen, caseQuestions, config, ordered, State.course.id),
       optionOrders, responses: {}, flags: {}, cursor: 0,
       // What each question is worth, fixed at the moment the paper is made.
       // Without this, changing the course's marks after sitting a paper would
@@ -20297,6 +20300,166 @@ test('The line said at reveal is right, or is not said at all', () => {
   assert(fixed.text.indexOf('twice') >= 0, 'twice, not "2 times": ' + fixed.text);
   const once = repeatMissLine([mkAtt(q, logs.id, false)], q, true);
   assert(once.text.indexOf('once') >= 0, once.text);
+});
+
+
+/* ---- changing your mind ---- */
+
+test('A change keeps the first answer, however many times you go round', () => {
+  const first = carryAnswerChanges(undefined, { selectedOptionId: 'a', at: '1' });
+  eq(first.firstOptionId, 'a', 'the first answer is itself');
+  assert(!first.changes, 'and answering once is not a change');
+
+  const second = carryAnswerChanges(first, { selectedOptionId: 'b', at: '2' });
+  eq(second.firstOptionId, 'a', 'the first answer survives the second');
+  eq(second.changes.length, 1);
+  eq(second.changes[0].from, 'a'); eq(second.changes[0].to, 'b');
+
+  const third = carryAnswerChanges(second, { selectedOptionId: 'c', at: '3' });
+  eq(third.firstOptionId, 'a', 'and the third');
+  eq(third.changes.length, 2);
+
+  // Re-picking the same option is not a change of mind.
+  const same = carryAnswerChanges(third, { selectedOptionId: 'c', at: '4' });
+  eq(same.changes.length, 2, 'choosing what is already chosen changes nothing');
+  eq(same.firstOptionId, 'a');
+});
+
+test('Changes are priced on the first answer against the last', () => {
+  const q1 = mkQ('Right then wrong?', ['a', 'b'], 0);
+  const q2 = mkQ('Wrong then right?', ['a', 'b'], 0);
+  const q3 = mkQ('Wrong then wrong?', ['a', 'b', 'c'], 0);
+  const q4 = mkQ('Right, away, and back again?', ['a', 'b'], 0);
+  const q5 = mkQ('Never touched?', ['a', 'b'], 0);
+  const byId = new Map([q1, q2, q3, q4, q5].map(q => [q.uuid, q]));
+  const opt = (q, i) => q.options[i].id;
+  const s = {
+    courseId: 'test-course',
+    questionUuids: [q1, q2, q3, q4, q5].map(q => q.uuid),
+    marks: {}, responses: {}
+  };
+  [q1, q2, q3, q4, q5].forEach(q => { s.marks[q.uuid] = 2; });
+  // right -> wrong
+  s.responses[q1.uuid] = { firstOptionId: opt(q1, 0), selectedOptionId: opt(q1, 1), correct: false, changes: [{}] };
+  // wrong -> right
+  s.responses[q2.uuid] = { firstOptionId: opt(q2, 1), selectedOptionId: opt(q2, 0), correct: true, changes: [{}] };
+  // wrong -> a different wrong
+  s.responses[q3.uuid] = { firstOptionId: opt(q3, 1), selectedOptionId: opt(q3, 2), correct: false, changes: [{}] };
+  // right -> wrong -> right again: changed, but cost nothing
+  s.responses[q4.uuid] = { firstOptionId: opt(q4, 0), selectedOptionId: opt(q4, 0), correct: true, changes: [{}, {}] };
+  // never changed at all
+  s.responses[q5.uuid] = { firstOptionId: opt(q5, 0), selectedOptionId: opt(q5, 0), correct: true };
+
+  const r = answerChangeReport(s, byId);
+  eq(r.changed, 4, 'four questions were revisited; the fifth never was');
+  eq(r.rightToWrong.length, 1);
+  eq(r.wrongToRight.length, 1);
+  eq(r.wrongToWrong.length, 1);
+  eq(r.marksLost, 2, 'priced at what the paper said the question was worth');
+  eq(r.marksGained, 2);
+  eq(r.net, 0);
+  // The one that came back to where it started is counted as a change but
+  // appears in none of the three outcomes, because it changed nothing.
+  eq(r.rightToWrong.length + r.wrongToRight.length + r.wrongToWrong.length, 3);
+});
+
+test('An untouched paper reports nothing rather than zeroes', () => {
+  const q = mkQ('Answered once?', ['a', 'b'], 0);
+  const byId = new Map([[q.uuid, q]]);
+  const s = { courseId: 'test-course', questionUuids: [q.uuid], marks: { [q.uuid]: 1 }, responses: {} };
+  s.responses[q.uuid] = { firstOptionId: q.options[0].id, selectedOptionId: q.options[0].id, correct: true };
+  eq(answerChangeReport(s, byId).changed, 0);
+  const empty = { courseId: 'test-course', questionUuids: [q.uuid], marks: {}, responses: {} };
+  eq(answerChangeReport(empty, byId).changed, 0, 'and an unanswered one certainly does');
+});
+
+/* ---- sections ---- */
+
+test('A section budget follows the marks, and the parts sum to the whole', () => {
+  const secs = [{ marks: 15 }, { marks: 20 }];
+  const b = defaultSectionBudgets(secs, 60 * 60000);
+  eq(Math.round(b[0] / 60000), 26, '15 of 35 marks is about 26 of 60 minutes');
+  eq(Math.round(b[1] / 60000), 34);
+  // Equal marks split evenly, which is also what splitting by count would do.
+  const even = defaultSectionBudgets([{ marks: 10 }, { marks: 10 }], 60 * 60000);
+  eq(even[0], even[1]);
+  // No marks anywhere is not a division by zero.
+  const none = defaultSectionBudgets([{ marks: 0 }, { marks: 0 }], 60 * 60000);
+  eq(none[0], none[1]);
+  eq(none[0], 30 * 60000);
+});
+
+test('Only a mock with a case-study block is sectioned', () => {
+  const std = [mkQ('a?', ['x', 'y'], 0), mkQ('b?', ['x', 'y'], 0)];
+  const cse = [mkCaseQ('c?', ['x', 'y'], 0, 'cs-1', 1)];
+  const ordered = std.concat(cse);
+  const cfg = { minutes: 60 };
+  eq(sectionsFor('learning', std, cse, cfg, ordered), null, 'a learning session is one run');
+  eq(sectionsFor('mock', std, [], cfg, std), null, 'so is a mock with no scenarios');
+  eq(sectionsFor('mock', [], cse, cfg, cse), null, 'and one that is nothing but scenarios');
+  const secs = sectionsFor('mock', std, cse, cfg, ordered);
+  eq(secs.length, 2);
+  eq(secs[0].from, 0); eq(secs[0].to, 1);
+  eq(secs[1].from, 2); eq(secs[1].to, 2);
+  eq(secs[0].budgetMs + secs[1].budgetMs, 60 * 60000, 'the budgets always sum to the time limit');
+  // An explicit case budget takes the rest from the other section.
+  const set = sectionsFor('mock', std, cse, { minutes: 60, caseMinutes: 40 }, ordered);
+  eq(set[1].budgetMs, 40 * 60000);
+  eq(set[0].budgetMs, 20 * 60000);
+  // And it can never be given more than the paper has.
+  const silly = sectionsFor('mock', std, cse, { minutes: 60, caseMinutes: 999 }, ordered);
+  eq(silly[1].budgetMs, 60 * 60000);
+  eq(silly[0].budgetMs, 0);
+});
+
+test('A section reports what it was asked and what it cost', () => {
+  const a = mkQ('one?', ['x', 'y'], 0), b = mkQ('two?', ['x', 'y'], 0), c = mkQ('three?', ['x', 'y'], 0);
+  const byId = new Map([a, b, c].map(q => [q.uuid, q]));
+  const s = {
+    courseId: 'test-course',
+    questionUuids: [a.uuid, b.uuid, c.uuid],
+    marks: { [a.uuid]: 1, [b.uuid]: 1, [c.uuid]: 2 },
+    responses: {
+      [a.uuid]: { correct: true, ms: 60000 },
+      [b.uuid]: { correct: false, ms: 120000 },
+      [c.uuid]: { correct: true, ms: 300000 }
+    },
+    sections: [
+      { key: 'main', label: 'Standalone questions', from: 0, to: 1, budgetMs: 10 * 60000 },
+      { key: 'case', label: 'Case studies', from: 2, to: 2, budgetMs: 3 * 60000 }
+    ]
+  };
+  const rows = sectionReport(s, byId);
+  eq(rows.length, 2);
+  eq(rows[0].count, 2); eq(rows[0].answered, 2); eq(rows[0].correct, 1);
+  eq(rows[0].marksEarned, 1); eq(rows[0].marksTotal, 2);
+  eq(rows[0].ms, 180000);
+  eq(rows[0].over, 180000 - 600000, 'well inside its budget');
+  eq(rows[1].marksEarned, 2, 'a case-study question worth two carries two');
+  eq(rows[1].over, 300000 - 180000, 'and two minutes over its own');
+  eq(Math.round(rows[1].perQuestion / 1000), 300);
+  eq(sectionReport({ questionUuids: [], responses: {} }, byId), null, 'no sections, no report');
+  eq(sectionAt(s, 0).key, 'main');
+  eq(sectionAt(s, 2).key, 'case');
+  eq(sectionAt({ questionUuids: [] }, 0), null);
+});
+
+test('Durations past an hour read as hours', () => {
+  eq(fmtDur(45000), '45s');
+  eq(fmtDur(90000), '1m 30s');
+  eq(fmtDur(3599000), '59m 59s');
+  eq(fmtDur(3600000), '1h 00m', 'an hour is not 60m 00s');
+  eq(fmtDur(4 * 3600000 + 20 * 60000), '4h 20m', 'and a real paper is not 260m 00s');
+  eq(fmtDur(-90000), '−1m 30s', 'and it signs its own negatives');
+  eq(fmtDur(null), '—');
+});
+
+test('Marks are said out loud with the right plural', () => {
+  eq(marksLabel(1), '1 mark');
+  eq(marksLabel(2), '2 marks');
+  eq(marksLabel(0), '0 marks');
+  eq(marksLabel(1.5), '1.5 marks');
+  eq(marksLabel(-1), '−1 mark'.replace('−', '-'), 'a negative one is still singular');
 });
 
 /* ============================================================================

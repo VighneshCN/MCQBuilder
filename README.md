@@ -275,6 +275,37 @@ the median question time:
 Each opens to the questions in it. Analytics → **Time** shows the same split
 across everything you have answered, and which domains the slow ones sit in.
 
+### A paper with sections
+
+A mock that carries a case-study block is a sectioned paper, because a
+two-page scenario and a one-line recall question are not the same unit of work.
+The clock is split between them by marks — the same as splitting by question
+count when they are worth the same — and you can give the scenarios a set
+number of minutes instead, which is how anybody actually plans a paper. The two
+always add up to the time limit.
+
+While you sit it, the header names the section you are in and what is left of
+its budget, worked out from the pace you are keeping *in that section*. When
+you finish, a **By section** table gives each one its answered count, marks,
+accuracy, time against budget and time per question, with the overrun in a
+sentence: *"Case studies took 43m 20s against the 34m 17s you gave it — 9m 03s
+that came out of the rest of the paper."*
+
+### When you changed your mind
+
+Almost everyone believes their second thought is better than their first. The
+app now keeps the receipts: every answer you change in a mock is recorded, and
+the results say how many you changed, how many turned a right answer wrong, how
+many rescued a wrong one, and what that came to in marks — with the ones it
+cost you listed by name, showing what you first chose and what you settled on.
+
+It is judged on your **first** answer against the one you submitted, not each
+hop in between. Changing your mind and landing back where you started costs
+nothing and gets no line. And it says nothing at all until at least four
+changes actually decided something, because telling you your instinct is better
+on a sample of two would be worse than silence — you would take it into the
+real exam.
+
 ### Why the option you picked was wrong
 
 An MCQ's wrong answers are the syllabus. Each one is a specific misconception
