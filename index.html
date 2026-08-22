@@ -4569,6 +4569,83 @@ function describeShortfalls(shortfalls, count) {
     shortfalls.map(s => s.label + ' (asked ' + s.want + ', available ' + s.available + ')').join('; ');
 }
 
+/* ---------- the last mile ----------
+   The shortlist for the final days. Every other repair mode shuffles, which is
+   right when you are working through a list over weeks. It is wrong here: a
+   candidate who asks for forty questions three days out must get the WORST
+   forty, not a random forty of the bad ones. So there is no rng in this
+   function at all, and the same bank always produces the same list.
+
+   Questions never attempted are deliberately excluded. Meeting new material in
+   the last week is coverage work, and the daily target on the dashboard already
+   drives that; putting an unseen question in a last-mile session buys a fresh
+   wrong answer at exactly the moment there is no time left to fix it.
+
+   Each question is listed once, under the highest class that applies, so the
+   reasons add up to the paper.                                              */
+const LASTMILE_REASONS = [
+  ['wrong',   'Wrong last time',  'wrong and not since put right'],
+  ['flagged', 'You flagged it',   'flagged by you'],
+  ['lucky',   'Guessed it right', 'got right off a guess'],
+  ['never',   'Never mastered',   'still below your mastery target']
+];
+function lastMileClass(q, target) {
+  const st = (q && q.stats) || {};
+  if (!st.attempts) return null;
+  if (st.lastResult === 'incorrect') return 'wrong';
+  // No mastery condition: you marked it to come back to, so you come back to
+  // it, however well the score says it is going.
+  if (q.flagged) return 'flagged';
+  if (st.guessedCorrect > 0 && (st.mastery || 0) < target) return 'lucky';
+  if ((st.mastery || 0) < target) return 'never';
+  return null;
+}
+function lastMilePick(pool, cap, masteryTarget) {
+  const target = masteryTarget != null ? masteryTarget : 75;
+  const order = LASTMILE_REASONS.map(r => r[0]);
+  const rows = [];
+  const counts = {};
+  order.forEach(k => counts[k] = 0);
+  (pool || []).forEach(q => {
+    const cls = lastMileClass(q, target);
+    if (!cls) return;
+    rows.push({ q, cls });
+    counts[cls]++;
+  });
+  /* Worst first inside each class: the longest run of wrong answers, then the
+     lowest mastery, then the one left longest — a question you last saw in
+     June has had more time to go than one you saw on Tuesday. The qid is the
+     final key purely so the list is stable rather than at the mercy of however
+     the bank came back from the index. */
+  rows.sort((a, b) =>
+    order.indexOf(a.cls) - order.indexOf(b.cls) ||
+    (b.q.stats.wrongStreak || 0) - (a.q.stats.wrongStreak || 0) ||
+    (a.q.stats.mastery || 0) - (b.q.stats.mastery || 0) ||
+    String(a.q.stats.lastAttemptAt || '').localeCompare(String(b.q.stats.lastAttemptAt || '')) ||
+    String(a.q.qid || a.q.uuid).localeCompare(String(b.q.qid || b.q.uuid)));
+
+  const taken = rows.slice(0, Math.max(0, cap == null ? rows.length : cap));
+  const reasons = {};
+  const takenCounts = {};
+  order.forEach(k => takenCounts[k] = 0);
+  taken.forEach(r => { reasons[r.q.uuid] = r.cls; takenCounts[r.cls]++; });
+  return {
+    questions: taken.map(r => r.q), reasons,
+    counts: takenCounts, available: rows.length, availableCounts: counts
+  };
+}
+/** The line the results screen shows under "How this paper was made up". */
+function describeLastMile(picked) {
+  if (!picked || !picked.questions.length) return '';
+  const parts = LASTMILE_REASONS
+    .filter(([k]) => picked.counts[k])
+    .map(([k, , phrase]) => picked.counts[k] + ' ' + phrase);
+  return 'Last-mile revision: ' + parts.join(', ') +
+    (picked.available > picked.questions.length
+      ? ' — the worst ' + picked.questions.length + ' of ' + picked.available + ' that qualify'
+      : ' — everything that qualifies');
+}
+
 function weakFirstPick(pool, count, rng, minSample) {
   const byTopic = groupStats(pool, q => q.topic || State.domainName(q.domainId));
   const w = new Map();
@@ -4597,6 +4674,9 @@ const MODES = {
   domain:   { label: 'Domain drill', reveal: true, confidence: true, desc: 'Focus on chosen domains of the blueprint.' },
   weak:     { label: 'Weak topics', reveal: true, confidence: true, desc: 'Prioritises where the evidence says you are weak.' },
   redo:     { label: 'Incorrect & guessed', reveal: true, confidence: true, desc: 'Everything you missed, guessed or flagged.' },
+  // Its sibling, for the last week rather than the long middle: the same
+  // material, but worst-first and capped instead of shuffled and complete.
+  lastmile: { label: 'Last-mile revision', reveal: true, confidence: true, desc: 'The shortlist for the final days — wrong and not since fixed, flagged, or never mastered, hardest first. Never anything you have not already attempted.' },
   mixed:    { label: 'Mixed revision', reveal: true, confidence: true, desc: 'Across the whole bank, optionally exam-weighted.' },
   mock:     { label: 'Timed mock exam', reveal: false, confidence: false, desc: 'Full length, timed, no confidence asked, nothing revealed until you submit.' },
   spaced:   { label: 'Spaced repetition', reveal: true, confidence: true, desc: 'Whatever has fallen due today, from every mode you have practised.' },
@@ -5955,6 +6035,7 @@ ROUTES.practice = async (root, preselect) => {
     let count = null;
     if (m === 'spaced') count = due.length;
     if (m === 'redo') count = applyFilters(pool, { incorrect: true }).length + applyFilters(pool, { guessed: true }).length;
+    if (m === 'lastmile') count = lastMilePick(pool, 0, Settings.get('masteryTarget')).available;
     if (info.caseBank) count = casePool.length;
     grid.appendChild(h('button', {
       class: 'card clickable', style: 'text-align:left;border:1px solid var(--rule);padding:0' + (resumable ? ';opacity:.5' : ''),
@@ -6150,7 +6231,14 @@ async function configureMode(mode) {
   const f = { domains: [], topics: [], sources: [], modules: [], difficulty: [], batches: [], caseStudies: [] };
   const cfg = {
     filters: f,
-    count: mode === 'mock' ? Settings.get('mockCount') : (isCaseMode ? Math.min(10, pool.length) : 20),
+    // A last-mile session defaults to forty rather than twenty: it is the one
+    // people sit as a single long sweep of everything still broken, and it is
+    // capped by what actually qualifies so the field never opens on a number
+    // the bank cannot fill.
+    count: mode === 'mock' ? Settings.get('mockCount')
+      : isCaseMode ? Math.min(10, pool.length)
+        : mode === 'lastmile' ? Math.max(1, Math.min(40, lastMilePick(pool, 0, Settings.get('masteryTarget')).available))
+          : 20,
     weighted: mode === 'mixed' || mode === 'mock', minutes: Settings.get('mockMinutes'),
     caseCount: mode === 'mock' ? clamp(Settings.get('mockCaseCount') || 0, 0, casePool.length) : 0,
     caseFilters: { caseStudies: [] }
@@ -6164,6 +6252,8 @@ async function configureMode(mode) {
   // Assigned once the section note exists; the time-limit field can change
   // before that, so it is checked rather than assumed.
   let drawCaseNoteRef = null;
+  // Same again for the last-mile breakdown, which follows the question count.
+  let drawLastMileRef = null;
   const recount = () => {
     let p = applyFilters(pool, f);
     if (mode === 'spaced') p = p.filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date());
@@ -6180,6 +6270,7 @@ async function configureMode(mode) {
     if (compositionPanel && compositionPanel.refresh) compositionPanel.refresh();
     if (typeof drawMarksRef === 'function') drawMarksRef();
     if (typeof drawCaseNoteRef === 'function') drawCaseNoteRef();
+    if (typeof drawLastMileRef === 'function') drawLastMileRef();
   };
   const warn = h('div', { class: 'notice warn hidden' });
 
@@ -6254,6 +6345,37 @@ async function configureMode(mode) {
     })]));
   }
   body.appendChild(row);
+
+  /* What the shortlist is actually made of, before you sit it — so the number
+     in the box above is a decision rather than a guess. */
+  if (mode === 'lastmile') {
+    const note = h('div', { class: 'notice small' });
+    const drawLastMile = () => {
+      const p = lastMilePick(applyFilters(pool, f), cfg.count, Settings.get('masteryTarget'));
+      note.textContent = '';
+      if (!p.available) {
+        note.className = 'notice warn small';
+        note.appendChild(h('div', {}, 'Nothing qualifies yet. This mode draws only on questions you have already attempted — once something is wrong, flagged, guessed right or still below your mastery target of ' + Settings.get('masteryTarget') + ', it appears here.'));
+        return;
+      }
+      note.className = 'notice small';
+      note.appendChild(h('div', { class: 'eyebrow', style: 'margin-bottom:4px', text: 'What you would sit' }));
+      LASTMILE_REASONS.forEach(([k, label]) => {
+        if (!p.availableCounts[k]) return;
+        note.appendChild(h('div', { class: 'row', style: 'gap:8px' }, [
+          h('span', { class: 'num small', style: 'min-width:44px;text-align:right', text: String(p.counts[k]) }),
+          h('span', { class: 'small', style: 'flex:1', text: label }),
+          h('span', { class: 'tiny dim nowrap', text: p.counts[k] === p.availableCounts[k] ? 'all of them' : 'of ' + p.availableCounts[k] })
+        ]));
+      });
+      note.appendChild(h('div', { class: 'tiny dim', style: 'margin-top:5px', text: p.available > p.questions.length
+        ? 'Hardest first, so a shorter list is the worst of the ' + p.available + ', never a sample of them.'
+        : 'Everything that qualifies fits in this session.' }));
+    };
+    drawLastMile();
+    drawLastMileRef = drawLastMile;
+    body.appendChild(note);
+  }
 
   /* A mock is the one ordinary paper that carries case studies, because it is
      the one imitating a real one. How many is the candidate's call. */
@@ -6371,12 +6493,42 @@ async function configureMode(mode) {
   if (!res) return;
   if (mode === 'spaced') { f.due = true; }
   if (mode === 'redo') { cfg.redo = true; }
+  if (mode === 'lastmile') { cfg.lastmile = true; }
   if (res === 'preset') {
     const name = prompt('Name this preset');
     if (name) { await DB.put('presets', { id: uuid(), courseId: State.course.id, name, mode, config: cfg, createdAt: nowISO() }); toast('Preset saved', 'ok'); }
     return;
   }
   try {
+    if (cfg.lastmile) {
+      // Same shape as the redo branch below: let Session.create build a paper
+      // the ordinary way — so the marks, the marking scheme and the audit row
+      // are all stamped exactly as they are for every other session — then
+      // replace the questions with the ordered shortlist.
+      const picked = lastMilePick(applyFilters(pool, f), cfg.count, Settings.get('masteryTarget'));
+      if (!picked.questions.length) {
+        toast('Nothing qualifies for last-mile revision yet — it draws only on questions you have already attempted.', 'warn', 5200);
+        return;
+      }
+      const s = await Session.create(mode, Object.assign({}, cfg, { filters: { ...f } }));
+      s.questionUuids = picked.questions.map(q => q.uuid);
+      s.optionOrders = {};
+      s.marks = {};
+      // Why each question is here, shown at reveal. The reason is the whole
+      // point of the mode: a shortlist you cannot interrogate is just a list.
+      s.lastMile = { reasons: picked.reasons, counts: picked.counts, available: picked.available };
+      s.selectionNotes = (s.selectionNotes || []).concat([describeLastMile(picked)]);
+      // The option order still gets shuffled — knowing an answer by its
+      // position is exactly the false confidence this session exists to find.
+      const rng3 = mulberry32(s.seed ^ 0x5bf03635);
+      picked.questions.forEach(q => {
+        s.optionOrders[q.uuid] = (Settings.get('shuffleOptions') && !q.lockOptionOrder) ? shuffle(q.options.map(o => o.id), rng3) : q.options.map(o => o.id);
+        s.marks[q.uuid] = marksOf(q, State.course.id);
+      });
+      await Session.save(s);
+      runSession(s);
+      return;
+    }
     if (cfg.redo) {
       // union of incorrect / guessed / low confidence / flagged
       const base = applyFilters(pool, f);
@@ -6998,6 +7150,12 @@ async function runSession(s) {
       })();
       rev.appendChild(h('div', { class: 'row' }, [
         h('span', { class: 'badge ' + (rec.correct ? 'b-active' : 'b-conflict'), text: rec.correct ? '✓ Correct' : '✕ Incorrect' }),
+        // Why this one is on the shortlist, in a last-mile session only.
+        (s.lastMile && s.lastMile.reasons && s.lastMile.reasons[q.uuid])
+          ? h('span', {
+            class: 'badge b-review', title: 'Why this question is in your last-mile list',
+            text: (LASTMILE_REASONS.find(r => r[0] === s.lastMile.reasons[q.uuid]) || [, 'On your list'])[1]
+          }) : null,
         h('span', { class: 'small muted', text: 'Answer: ' + letterOf(order.indexOf(q.correctOptionId)) + ' · ' + fmtDur(rec.ms) }),
         q.srReason ? h('span', { class: 'small dim', text: '· ' + q.srReason }) : null
       ]));
@@ -11403,7 +11561,11 @@ ROUTES.analytics = async (root) => {
     rows = Array.from(m.entries()).sort((a, b) => b[1] - a[1]).map(([k, v]) => ({
       key: (MISTAKES.find(x => x[0] === k) || [, 'Unclassified'])[1], n: v, share: v / total
     }));
-    card.appendChild(h('div', { class: 'card-h' }, [h('h3', { text: 'Why answers went wrong' }), h('div', { class: 'spacer' }), h('span', { class: 'tiny dim', text: total + ' incorrect attempt(s)' })]));
+    card.appendChild(h('div', { class: 'card-h' }, [h('h3', { text: 'Why answers went wrong' }), h('div', { class: 'spacer' }),
+      // This screen is where somebody is standing when they want the whole lot
+      // on paper, so the export is offered here as well as in Backup & Restore.
+      h('button', { class: 'btn sm ghost', onclick: () => exportErrorNotebook(), text: 'Error notebook →' }),
+      h('span', { class: 'tiny dim', text: total + ' incorrect attempt(s)' })]));
     rows.forEach(r => tb.appendChild(h('tr', {}, [
       h('td', { text: r.key }), h('td', { class: 'num', text: String(r.n) }),
       h('td', {}, h('div', { class: 'bar' }, h('i', { class: 'r', style: 'width:' + Math.round(r.share * 100) + '%' }))),
@@ -11882,7 +12044,8 @@ ROUTES.backup = async (root) => {
         h('div', { class: 'eyebrow', text: 'Question bank' }),
         h('button', { class: 'btn', onclick: () => exportQuestionsJSON(), text: 'JSON (full structure)' }),
         h('button', { class: 'btn', onclick: async () => exportBank(await State.questions()), text: 'CSV (human review)' }),
-        h('button', { class: 'btn', onclick: () => exportPrintable(), text: 'Printable HTML' })
+        h('button', { class: 'btn', onclick: () => exportPrintable(), text: 'Printable HTML' }),
+        h('button', { class: 'btn', onclick: () => exportErrorNotebook(), text: 'Error notebook' })
       ]),
       h('div', { class: 'stack' }, [
         h('div', { class: 'eyebrow', text: 'Progress only' }),
@@ -12167,6 +12330,30 @@ async function exportAudit() {
   (await DB.all('audit')).forEach(a => rows.push([a.ts, a.action, a.entityType, a.entityId, JSON.stringify(a.prev || ''), JSON.stringify(a.next || ''), a.note || '']));
   download('audit-log-' + todayKey() + '.csv', new Blob([toCSV(rows)], { type: 'text/csv' }));
 }
+/* ---------- printed pages ----------
+   Two exports put questions on paper — the whole bank, and the error notebook
+   — and they are the same document with different contents. The stylesheet and
+   the wrapper live here once so they cannot drift apart.
+
+   Callers pass HTML that is ALREADY escaped: these build a page, they do not
+   sanitise one. Extra rules go in `extraCss` rather than into PRINT_CSS, so a
+   class only one export needs cannot change the other's output.            */
+const PRINT_CSS =
+  'body{font:14px/1.55 Georgia,serif;max-width:820px;margin:32px auto;padding:0 18px;color:#16202B}' +
+  'h1{font-size:22px}h3{font-size:13px;font-family:ui-monospace,monospace;letter-spacing:.06em;margin:26px 0 6px;color:#1F4E79}' +
+  'h3 small{color:#71828F;font-weight:400}.stem{margin:0 0 8px}ol{margin:0 0 8px 22px}li.c{font-weight:700}' +
+  'li.c::after{content:" ✓";color:#12654C}.ex,.lp{font-size:14px;background:#F3F6F8;padding:8px 10px;border-left:3px solid #C3D0DA;margin:6px 0}' +
+  '.src{font-family:ui-monospace,monospace;font-size:10.5px;color:#71828F;margin:4px 0 0}article{page-break-inside:avoid}' +
+  'li .why{font-size:12.5px;color:#4A5A68;margin:2px 0 6px;font-weight:400}' +
+  'h1.sect{margin-top:38px;border-top:2px solid #C3D0DA;padding-top:14px}' +
+  'section.case{margin-top:28px;page-break-before:auto}section.case h2{font-size:16px;color:#1F4E79;margin:0 0 8px}' +
+  '.passage{white-space:pre-wrap;background:#F3F6F8;border-left:3px solid #1F4E79;padding:12px 14px;margin:0 0 14px}';
+function printableDoc(title, heading, subtitle, body, extraCss) {
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + title + '</title><style>' +
+    PRINT_CSS + (extraCss || '') + '</style></head><body><h1>' + heading + '</h1><p>' + subtitle + '</p>' +
+    body + '</body></html>';
+}
+
 async function exportPrintable() {
   const all = (await State.questions()).filter(q => q.status !== 'rejected' && q.status !== 'merged');
   const esc2 = esc;
@@ -12196,19 +12383,146 @@ async function exportPrintable() {
   }).filter(Boolean).join('\n');
   const parts = standalone.map(one).join('\n') +
     (caseParts ? '<h1 class="sect">Case studies</h1>' + caseParts : '');
-  const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + esc2(State.course.code) + ' question bank</title><style>' +
-    'body{font:14px/1.55 Georgia,serif;max-width:820px;margin:32px auto;padding:0 18px;color:#16202B}' +
-    'h1{font-size:22px}h3{font-size:13px;font-family:ui-monospace,monospace;letter-spacing:.06em;margin:26px 0 6px;color:#1F4E79}' +
-    'h3 small{color:#71828F;font-weight:400}.stem{margin:0 0 8px}ol{margin:0 0 8px 22px}li.c{font-weight:700}' +
-    'li.c::after{content:" ✓";color:#12654C}.ex,.lp{font-size:14px;background:#F3F6F8;padding:8px 10px;border-left:3px solid #C3D0DA;margin:6px 0}' +
-    '.src{font-family:ui-monospace,monospace;font-size:10.5px;color:#71828F;margin:4px 0 0}article{page-break-inside:avoid}' +
-    'li .why{font-size:12.5px;color:#4A5A68;margin:2px 0 6px;font-weight:400}' +
-    'h1.sect{margin-top:38px;border-top:2px solid #C3D0DA;padding-top:14px}' +
-    'section.case{margin-top:28px;page-break-before:auto}section.case h2{font-size:16px;color:#1F4E79;margin:0 0 8px}' +
-    '.passage{white-space:pre-wrap;background:#F3F6F8;border-left:3px solid #1F4E79;padding:12px 14px;margin:0 0 14px}' +
-    '</style></head><body><h1>' + esc2(State.course.name) + ' — question bank</h1><p>' + all.length + ' records · exported ' + fmtDate(nowISO(), true) + '</p>' + parts + '</body></html>';
+  const html = printableDoc(
+    esc2(State.course.code) + ' question bank',
+    esc2(State.course.name) + ' — question bank',
+    all.length + ' records · exported ' + fmtDate(nowISO(), true),
+    parts);
   download(State.course.code + '-question-bank-' + todayKey() + '.html', new Blob([html], { type: 'text/html' }));
   toast('Printable report exported', 'ok');
+}
+
+/* ---------- the error notebook ----------
+   Everything needed for this has been recorded since the first version and has
+   never been put on one page: which wrong option you keep choosing, how often
+   you have missed it, the cause you picked at the time, the explanation, and
+   the learning point you wrote yourself. Apart it is five screens; together it
+   is the thing people keep in a paper notebook and revise from on the morning.
+
+   Scope 'open' means "not since put right", and it is deliberately the SAME
+   test the last-mile session uses (lastMileClass), so the notebook you print
+   and the session you sit cannot disagree about what is still broken.       */
+const NOTEBOOK_CSS =
+  '.hits{font-size:12.5px;color:#95203A;margin:6px 0 2px}' +
+  '.chose{font-size:13.5px;background:#FBE3E7;border-left:3px solid #95203A;padding:8px 10px;margin:6px 0}' +
+  '.cause{font-size:13px;color:#48596A;margin:6px 0}' +
+  '.blank{border:1px dashed #C3D0DA;border-radius:4px;height:52px;margin:8px 0 0}' +
+  'h1.dom{margin-top:34px;border-top:2px solid #C3D0DA;padding-top:12px;font-size:18px;color:#1F4E79}';
+
+function notebookEntry(q, attempts, letterFor) {
+  const esc2 = esc;
+  const mine = (attempts || []).filter(a => a.questionUuid === q.uuid);
+  const p = distractorProfile(mine, q);
+  const ci = q.options.findIndex(o => o.id === q.correctOptionId);
+  const wrongOnes = mine.filter(a => !a.correct);
+  const last = wrongOnes.map(a => a.ts).sort().slice(-1)[0];
+
+  let chose = '';
+  if (p.dominant) {
+    const opt = q.options.find(o => o.id === p.dominant.id);
+    const i = q.options.indexOf(opt);
+    chose = '<p class="chose"><b>You chose ' + letterFor(i) + ' — ' + esc2(p.dominant.text) + '</b>' +
+      // Same idiom as repeatMissLine uses at reveal: "every time" reads as the
+      // finding it is, where "3 of the 3 times" reads as arithmetic.
+      ' <span>(' + (p.dominant.n === p.misses ? 'every time you missed it' : p.dominant.n + ' of the ' + p.misses + ' times you missed it') + ')</span>' +
+      (opt && opt.rationale ? '<br>' + esc2(opt.rationale) : '') + '</p>';
+  } else if (p.wrong.length) {
+    // No single option dominates, so the picks are listed as fact rather than
+    // as a diagnosis — "you keep choosing C" about a 2-2 split is not true.
+    chose = '<p class="chose"><b>What you picked instead:</b> ' +
+      p.wrong.map(r => letterFor(q.options.findIndex(o => o.id === r.id)) + ' × ' + r.n).join(', ') + '</p>';
+  }
+
+  const causes = new Map();
+  wrongOnes.forEach(a => { if (a.mistake) causes.set(a.mistake, (causes.get(a.mistake) || 0) + 1); });
+  const causeLine = causes.size
+    ? '<p class="cause"><b>Why it went wrong.</b> ' +
+      Array.from(causes.entries()).sort((a, b) => b[1] - a[1])
+        .map(([k, n]) => esc2((MISTAKES.find(x => x[0] === k) || [, k])[1]) + (n > 1 ? ' (×' + n + ')' : '')).join(' · ') + '</p>'
+    : '';
+
+  return '<article><h3>' + esc2(q.qid) + ' <small>' + esc2(State.domainName(q.domainId)) +
+    (q.topic ? ' · ' + esc2(q.topic) : '') + '</small></h3>' +
+    '<p class="stem">' + esc2(q.stem) + '</p><ol type="A">' +
+    q.options.map((o, i) => '<li' + (i === ci ? ' class="c"' : '') + '>' + esc2(o.text) +
+      (o.rationale ? '<div class="why">' + esc2(o.rationale) + '</div>' : '') + '</li>').join('') +
+    '</ol>' +
+    '<p class="hits">Missed ' + (p.misses === 1 ? 'once' : p.misses === 2 ? 'twice' : p.misses + ' times') +
+    (last ? ', last on ' + esc2(fmtDate(last)) : '') + '.</p>' +
+    chose + causeLine +
+    (q.explanation ? '<p class="ex"><b>Explanation.</b> ' + esc2(q.explanation) + '</p>' : '') +
+    (q.learningPoint
+      ? '<p class="lp"><b>My learning point.</b> ' + esc2(q.learningPoint) + '</p>'
+      // A blank rule instead: the point of a notebook is that you write in it,
+      // and an entry with nothing to write on is just a reprint.
+      : '<p class="lp"><b>My learning point.</b></p><div class="blank"></div>') +
+    '</article>';
+}
+
+async function exportErrorNotebook() {
+  const scope = await modal({
+    title: 'Error notebook',
+    body: h('div', { class: 'stack' }, [
+      h('p', { class: 'small', style: 'margin:0' },
+        'Every question you have got wrong, with the option you kept choosing, the cause you recorded, the explanation and your own learning point — laid out to print and revise from.'),
+      h('p', { class: 'small muted', style: 'margin:0' },
+        'Case-study questions are printed under their scenario, because a scenario question with no scenario cannot be revised.')
+    ]),
+    actions: [
+      { label: 'Cancel', value: null },
+      { label: 'Everything I have ever got wrong', value: 'all' },
+      { label: 'Only what I have not since fixed', value: 'open', kind: 'primary' }
+    ]
+  });
+  if (!scope) return;
+
+  const esc2 = esc;
+  const letterFor = (i) => i < 0 ? '?' : String.fromCharCode(65 + i);
+  const all = (await State.questions()).filter(q => q.status !== 'rejected' && q.status !== 'merged');
+  const attempts = await DB.byIndex('attempts', 'courseId', State.course.id);
+  const missedUuids = new Set(attempts.filter(a => !a.correct).map(a => a.questionUuid));
+  const target = Settings.get('masteryTarget');
+  const chosen = all.filter(q => missedUuids.has(q.uuid) &&
+    (scope === 'all' || lastMileClass(q, target) !== null));
+
+  if (!chosen.length) {
+    toast(scope === 'open'
+      ? 'Nothing outstanding — every question you have got wrong has since been put right.'
+      : 'Nothing to write up yet: no question in this course has been answered wrongly.', 'ok', 5200);
+    return;
+  }
+
+  const entry = (q) => notebookEntry(q, attempts, letterFor);
+  const standalone = chosen.filter(q => !isCaseQuestion(q));
+  // Grouped by domain, in blueprint order, so it reads like a revision book
+  // rather than like the order the bank happened to be imported in.
+  const domains = State.course.blueprint.concat([{ id: null, name: 'Unmapped' }]);
+  const domParts = domains.map(d => {
+    const mine = standalone.filter(q => (q.domainId || null) === (d.id || null));
+    if (!mine.length) return '';
+    return '<h1 class="dom">' + esc2(d.id ? d.id + ' · ' + d.name : 'Unmapped') +
+      ' <small>' + mine.length + ' question(s)</small></h1>' + mine.map(entry).join('');
+  }).filter(Boolean).join('\n');
+
+  const caseRecords = await CaseStudies.byCourse(State.course.id);
+  const caseParts = caseRecords.map(cs => {
+    const mine = chosen.filter(q => q.caseStudyId === cs.id).sort((a, b) => (a.caseSeq || 0) - (b.caseSeq || 0));
+    if (!mine.length) return '';
+    return '<section class="case"><h2>' + esc2(cs.csid || '') + ' — ' + esc2(cs.title || 'Untitled case study') + '</h2>' +
+      '<div class="passage">' + esc2(cs.text || '(no scenario text)') + '</div>' +
+      mine.map(entry).join('') + '</section>';
+  }).filter(Boolean).join('\n');
+
+  const html = printableDoc(
+    esc2(State.course.code) + ' error notebook',
+    esc2(State.course.name) + ' — error notebook',
+    chosen.length + ' question(s) · ' +
+    (scope === 'open' ? 'wrong and not since put right' : 'everything ever answered wrongly') +
+    ' · exported ' + fmtDate(nowISO(), true),
+    domParts + (caseParts ? '<h1 class="sect">Case studies</h1>' + caseParts : ''),
+    NOTEBOOK_CSS);
+  download(State.course.code + '-error-notebook-' + todayKey() + '.html', new Blob([html], { type: 'text/html' }));
+  toast('Error notebook exported — ' + chosen.length + ' question(s)', 'ok');
 }
 
 /* ---------- integrity ---------- */
