@@ -12,6 +12,85 @@ You import your own.
 
 ---
 
+## How it works, start to finish
+
+The nine sections below cover everything in detail. This is the shape of it.
+
+**1. Set up a course.** A course is one exam — CISA, CA Final Audit, whatever
+you are sitting. You give it chapters (the app calls them domains) and the
+weight each one carries in the real paper. That weighting is what later makes a
+mock resemble the exam rather than resemble your bank.
+
+**2. Get questions in.** Four ways in: drop a file (Word, Excel, CSV, JSON,
+plain text, text-based PDF), photograph a page, paste raw text, or type one by
+hand. The app reads them, shows you everything it found, and **writes nothing
+until you confirm**.
+
+**3. It sorts what it read into three piles.**
+
+- **Ready.** It has a question, options, a correct answer, and that answer is
+  confirmed. Straight into practice.
+- **Waiting on you.** No answer key was found, two sources disagree about the
+  answer, or it looks like something already in your bank. These **cannot be
+  practised** until you decide — drilling yourself on a wrong answer key is
+  worse than not drilling at all.
+- **In practice, but not fully filled in.** No domain, or wording the parser
+  was not fully confident it read. These **practise normally**. They simply
+  cannot yet do the things that need the missing information.
+
+That third pile is the whole design: see
+[What a question actually needs](#what-a-question-actually-needs) for exactly
+what is required and what each optional field switches on.
+
+**4. Practise.** Nine modes, plus a tenth once you have a case study. Five work
+from the moment you have questions: Learning, Domain drill, Mixed revision,
+Timed mock exam and Custom practice. Four need some history behind them before
+they can say anything — Weak topics, Incorrect & guessed, Last-mile revision and
+Spaced repetition — and until then each is dimmed and says on its own card what
+will wake it, rather than showing you a zero.
+
+**5. Every answer records four things.** Whether you got it right, how long you
+took, how you got there (knew it, reasoned it out, unsure between two, guessed),
+and — when you got it wrong — why. That last one is a list you pick from:
+misread it, missed a FIRST/BEST/MOST qualifier, confused two concepts, rushed.
+
+The first time you answer a question it also asks how hard it was, in the same
+dialog. Once graded, it never asks again.
+
+**6. Every answer also schedules when that question comes back.** Wrong →
+tomorrow. Guessed right → tomorrow too, because a lucky guess is not knowledge.
+Unsure → 3 days. Reasoned it out → 7. Knew it → 14, then 30, 60, 90 on repeat
+successes. Spaced repetition is not the mode that creates this schedule; it is
+the mode that practises whatever has fallen due.
+
+**7. What comes back to you.** Marks and whether that would have been a pass.
+Where your time went, and which questions cost you the clock. Whether you knew
+what you thought you knew. Which wrong option keeps catching you, and on which
+questions. What you changed your mind about, and what changing it cost.
+
+**8. Getting to the date.** Set an exam date and the dashboard works backwards
+from what your bank still owes you to a questions-a-day target. In the last
+week, Last-mile revision hands you the worst of what is still broken, and the
+error notebook prints everything you have got wrong so you can revise from
+paper.
+
+**9. Where your data lives.** One home at a time — a folder on your disk **or**
+your Google Drive, never both at once. The browser database is a working copy,
+rebuilt from that home every time you open the app.
+
+### The one thing that unlocks the most
+
+**Filing questions under domains.** Without it, domain drill cannot focus, a
+mock cannot follow your exam weights, and accuracy-by-domain has nothing to
+split. With it, all three switch on. You can do it whenever you like — in bulk
+from the Question Bank, or as one field at import for a whole file.
+
+Two smaller ones: **difficulty** unlocks papers built to a difficulty mix (grade
+them as you practise, one question at a time, and it switches on the moment the
+first one is graded), and **explanations** are what you are shown at reveal.
+
+---
+
 ## 1. Running it
 
 ### Windows, locally
