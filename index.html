@@ -1273,6 +1273,10 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 [data-theme="dark"] .pal.answered{color:#0B141C}
 .pal.flagged::after{content:"";position:absolute;top:2px;right:2px;width:6px;height:6px;background:var(--pencil);border-radius:50%}
 .pal.cur{outline:2px solid var(--focus);outline-offset:1px}
+/* The per-question clock sits quietly beside the paper clock: same shape,
+   deliberately lower contrast, so a glance separates them without effort. */
+.timer.qtimer{font-size:.82em;opacity:.6;font-weight:500}
+.timer.qtimer.over{opacity:1;color:var(--pencil)}
 .timer{font-family:var(--mono);font-size:19px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:.02em}
 .timer.low{color:var(--pencil)}
 
@@ -1710,6 +1714,9 @@ const Settings = {
     scaledScore: null,
     shuffleOptions: true,
     confirmLeaveMock: true,
+    // A second clock on screen is a distraction unless you have asked for
+    // one, so this is off until somebody decides they want it.
+    mockShowQuestionTimer: false,
     ocrEnabled: false,
     ocrScriptPath: 'vendor/tesseract.min.js',
     externalOcrEnabled: false,
@@ -4635,6 +4642,56 @@ const Session = {
   async abandon(s) { s.status = 'abandoned'; s.endedAt = nowISO(); await this.save(s); }
 };
 
+/* ---------- where the time went ----------
+   Milliseconds have been recorded on every answer since the beginning and
+   reported as one average. An average is the least useful thing you can say
+   about them: it hides the question that ate four minutes, it hides the fact
+   that you sped up after the halfway mark and started making mistakes, and it
+   cannot tell "wrong because I did not know it" from "wrong because I read it
+   too fast" — which need opposite fixes.
+
+   Split on the MEDIAN rather than the mean. One six-minute question drags a
+   mean far enough to put genuinely slow answers on the fast side of it. */
+
+const median = (arr) => {
+  if (!arr.length) return 0;
+  const a = arr.slice().sort((x, y) => x - y);
+  const m = a.length >> 1;
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+};
+
+/* The four cells, and what each one is actually telling you to do about it.
+   Ordered as they are read: the two that cost marks first. */
+const TIME_CELLS = [
+  { k: 'fastWrong', label: 'Fast and wrong', tone: 'bad',
+    reading: 'Read too quickly. These are the marks you are giving away — the qualifier, the "NOT", the option you did not finish reading.' },
+  { k: 'slowWrong', label: 'Slow and wrong', tone: 'bad',
+    reading: 'You did not know it, and paid for the attempt twice — in the mark and in the minutes. This is what to revise.' },
+  { k: 'slowRight', label: 'Slow but right', tone: 'warn',
+    reading: 'You know it but you are not fluent in it. Nothing wrong with the mark; this is what makes you run out of time.' },
+  { k: 'fastRight', label: 'Fast and right', tone: 'ok',
+    reading: 'Solid. The more of the paper that sits here, the more time the rest of it gets.' }
+];
+
+/**
+ * Split answered questions four ways on the median time and correctness.
+ * `items` is [{ uuid, ms, correct }]; anything with no recorded time is left
+ * out entirely rather than being counted as instant.
+ */
+function timeSplit(items) {
+  const timed = (items || []).filter(x => x && x.ms > 0);
+  const cut = median(timed.map(x => x.ms));
+  const cells = { fastRight: [], fastWrong: [], slowRight: [], slowWrong: [] };
+  timed.forEach(x => {
+    // Strictly greater than the median counts as slow, so a paper where every
+    // question took the same time lands entirely on the fast side rather than
+    // being split arbitrarily down the middle.
+    const slow = x.ms > cut;
+    cells[(slow ? 'slow' : 'fast') + (x.correct ? 'Right' : 'Wrong')].push(x);
+  });
+  return { cut, timed: timed.length, untimed: (items || []).length - timed.length, cells };
+}
+
 const round2 = (n) => Math.round(n * 100) / 100;
 
 /* ---------- marking ----------
@@ -6083,6 +6140,14 @@ async function runSession(s) {
         t.classList.toggle('urgent', left < 600000 && left >= 120000);
         t.classList.toggle('critical', left < 120000);
       }
+      // Counted from when this question was rendered, not from the start of
+      // the paper — it answers "am I stuck on this one", nothing else.
+      const qt = $('#qTimer');
+      if (qt) {
+        const on = Math.max(0, nowT - qStart);
+        qt.textContent = clock(on);
+        qt.classList.toggle('over', on > 120000);
+      }
       if (announcer) announcer.tick(s.elapsedMs);
       if (left <= 0) { clearInterval(tickTimer); toast('Time is up. The exam has been submitted.', 'warn', 5000); await submitMock(); return; }
       if (s.elapsedMs % 15000 < 1100) await Session.save(s);
@@ -6180,6 +6245,8 @@ async function runSession(s) {
       h('span', { class: 'badge b-info', text: MODES[s.mode].label }),
       !isMock ? h('span', { class: 'badge b-draft', text: State.domainShort(q.domainId) }) : null,
       h('div', { class: 'spacer' }),
+      isMock && Settings.get('mockShowQuestionTimer')
+        ? h('span', { class: 'timer qtimer', id: 'qTimer', title: 'Time on this question', text: '0:00' }) : null,
       isMock ? h('span', { class: 'timer', id: 'mockTimer', text: clock(s.timeLimitMs - (s.elapsedMs || 0)) }) : null,
       h('button', {
         class: 'btn sm', 'aria-pressed': String(!!s.flags[q.uuid]),
@@ -6451,6 +6518,115 @@ function passVerdict(s, mk) {
   return h('div', { class: 'notice ' + cls, style: 'margin-bottom:16px' }, lines);
 }
 
+/** The pace line: cumulative minutes against the straight line you would have
+    drawn had every question taken its fair share. Falling behind shows as the
+    curve climbing above the diagonal, and the gap at the end is the overrun. */
+function paceSvg(cumMs, limitMs) {
+  const W = 620, H = 130, PADL = 36, PADB = 20, PADT = 10;
+  const n = cumMs.length;
+  const totalMs = cumMs[n - 1] || 1;
+  const topMs = Math.max(totalMs, limitMs || 0) * 1.02;
+  const x = (i) => PADL + (n === 1 ? (W - PADL - 8) / 2 : i * (W - PADL - 8) / (n - 1));
+  const y = (ms) => PADT + (1 - clamp(ms / topMs, 0, 1)) * (H - PADT - PADB);
+  const path = cumMs.map((v, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(v).toFixed(1)).join(' ');
+  const ideal = 'M' + x(0).toFixed(1) + ' ' + y(totalMs / n).toFixed(1) +
+    ' L' + x(n - 1).toFixed(1) + ' ' + y(totalMs).toFixed(1);
+  const limitLine = limitMs
+    ? '<line x1="' + PADL + '" y1="' + y(limitMs).toFixed(1) + '" x2="' + (W - 8) + '" y2="' + y(limitMs).toFixed(1) +
+      '" stroke="var(--pencil)" stroke-dasharray="4 3" stroke-width="1.5"/>' +
+      '<text x="' + (W - 10) + '" y="' + (y(limitMs) - 4).toFixed(1) + '" text-anchor="end" font-size="9.5" fill="var(--pencil)">time limit</text>'
+    : '';
+  return '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Minutes used across the paper against an even pace" style="width:100%;height:auto">' +
+    '<text x="' + (PADL - 6) + '" y="' + (y(0) + 3.5).toFixed(1) + '" text-anchor="end" font-size="9" fill="currentColor" fill-opacity=".5">0m</text>' +
+    '<text x="' + (PADL - 6) + '" y="' + (y(topMs) + 9).toFixed(1) + '" text-anchor="end" font-size="9" fill="currentColor" fill-opacity=".5">' + Math.round(topMs / 60000) + 'm</text>' +
+    limitLine +
+    '<path d="' + ideal + '" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="1.5" stroke-dasharray="3 3"/>' +
+    '<path d="' + path + '" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linejoin="round"/>' +
+    '</svg>';
+}
+
+/** "Where the time went" — the card the results screen gains. */
+function timeCard(s, byId) {
+  const items = s.questionUuids.map(u => {
+    const rec = s.responses[u];
+    return rec ? { uuid: u, ms: rec.ms || 0, correct: !!rec.correct } : null;
+  }).filter(Boolean);
+  const split = timeSplit(items);
+  if (!split.timed) return null;
+
+  const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
+    h('div', { class: 'card-h' }, [h('h3', { text: 'Where the time went' }), h('div', { class: 'spacer' }),
+      h('span', { class: 'tiny dim', text: 'median ' + fmtDur(split.cut) + ' a question' })])
+  ]);
+  const b = h('div', { class: 'card-b stack' });
+
+  // ---- pace ----
+  const used = items.reduce((t, x) => t + x.ms, 0);
+  const cum = []; let run = 0;
+  s.questionUuids.forEach(u => { const rec = s.responses[u]; if (rec) { run += rec.ms || 0; cum.push(run); } });
+  const limit = s.timeLimitMs || 0;
+  b.appendChild(h('div', { html: paceSvg(cum, limit), style: 'color:var(--txt-2)' }));
+  const answered = items.length, left = s.questionUuids.length - answered;
+  const paceMs = answered ? used / answered : 0;
+  const paceLine = [
+    fmtDur(used) + ' across ' + answered + ' answered question' + (answered === 1 ? '' : 's'),
+    'averaging ' + fmtDur(paceMs)
+  ];
+  if (limit) {
+    const wouldTake = paceMs * s.questionUuids.length;
+    paceLine.push(wouldTake > limit
+      ? 'at that rate the full paper needs ' + fmtDur(wouldTake) + ' against a ' + fmtDur(limit) + ' limit — ' + fmtDur(wouldTake - limit) + ' over'
+      : 'at that rate the full paper takes ' + fmtDur(wouldTake) + ', leaving ' + fmtDur(limit - wouldTake) + ' spare');
+  } else if (left) {
+    paceLine.push(left + ' unanswered');
+  }
+  b.appendChild(h('div', { class: 'small muted', style: 'margin:0', text: paceLine.join('  ·  ') + '.' }));
+
+  // ---- the four cells ----
+  const grid = h('div', { class: 'grid g2', style: 'margin-top:6px' });
+  TIME_CELLS.forEach(cell => {
+    const list = split.cells[cell.k];
+    const box = h('div', { class: 'notice ' + cell.tone + ' small' + (list.length ? '' : ' dim'), style: 'margin:0' }, [
+      h('div', { class: 'row', style: 'gap:8px;align-items:baseline' }, [
+        h('b', { text: cell.label }),
+        h('span', { class: 'docnum', text: String(list.length) }),
+        h('span', { class: 'tiny dim', text: pct(list.length, split.timed) })
+      ]),
+      h('div', { class: 'tiny', style: 'margin-top:3px', text: cell.reading })
+    ]);
+    if (list.length) {
+      const detail = h('div', { class: 'stack', style: 'margin-top:6px;display:none' });
+      list.slice().sort((a, c) => c.ms - a.ms).forEach(x => {
+        const q = byId.get(x.uuid);
+        if (!q) return;
+        detail.appendChild(h('div', { class: 'row', style: 'gap:8px' }, [
+          h('span', { class: 'docnum dim', text: q.qid || '—' }),
+          h('span', { class: 'tiny num', text: fmtDur(x.ms) }),
+          h('span', { class: 'tiny', style: 'flex:1;min-width:0', text: (q.stem || '').slice(0, 80) }),
+          h('button', { class: 'btn sm ghost', onclick: () => openQuestion(q.uuid), text: 'Open' })
+        ]));
+      });
+      box.appendChild(h('button', {
+        class: 'btn sm ghost', style: 'margin-top:6px',
+        onclick: (e) => {
+          const on = detail.style.display === 'none';
+          detail.style.display = on ? 'block' : 'none';
+          e.currentTarget.textContent = on ? 'Hide these' : 'Show these';
+        }, text: 'Show these'
+      }));
+      box.appendChild(detail);
+    }
+    grid.appendChild(box);
+  });
+  b.appendChild(grid);
+
+  if (split.untimed) {
+    b.appendChild(h('div', { class: 'tiny dim', text: split.untimed + ' answer(s) carry no recorded time and are left out of this.' }));
+  }
+  card.appendChild(b);
+  return card;
+}
+
 async function showResults(s) {
   const all = await State.questions();
   const byId = new Map(all.map(q => [q.uuid, q]));
@@ -6518,6 +6694,9 @@ async function showResults(s) {
     }
     return '';
   };
+  const tCard = timeCard(s, byId);
+  if (tCard) target.appendChild(tCard);
+
   const noteLines = (s.selectionNotes || []).map(noteLine).filter(Boolean);
   if (noteLines.length) {
     target.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:16px' }, [
@@ -10240,7 +10419,7 @@ ROUTES.analytics = async (root) => {
     'Coverage is separate from accuracy: you have seen ' + seen + ' of ' + active.length + ' active questions (' + pct(seen, active.length) + '). Repeating the same questions raises accuracy but not coverage.'));
 
   const tabs = h('div', { class: 'btn-group', style: 'margin-bottom:14px' });
-  [['domain', 'Domain'], ['topic', 'Topic'], ['module', 'Source module'], ['source', 'Source'], ['difficulty', 'Difficulty'], ['mistake', 'Mistake'], ['mode', 'Mode']]
+  [['domain', 'Domain'], ['topic', 'Topic'], ['module', 'Source module'], ['source', 'Source'], ['difficulty', 'Difficulty'], ['mistake', 'Mistake'], ['mode', 'Mode'], ['time', 'Time']]
     .forEach(([k, label]) => tabs.appendChild(h('button', { 'aria-pressed': String(AnaState.by === k), onclick: () => { AnaState.by = k; go('analytics'); }, text: label })));
   root.appendChild(tabs);
 
@@ -10277,6 +10456,64 @@ ROUTES.analytics = async (root) => {
       h('td', { class: 'num right', text: fmtDur(g.ms / g.n) })
     ])));
     card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, ['Mode', 'Attempts', 'Correct', '', 'Accuracy', 'Avg time'].map(x => h('th', { text: x })))), tb])));
+    root.appendChild(card);
+    return;
+  }
+
+  if (AnaState.by === 'time') {
+    /* The same four-way split the results screen applies to one paper, applied
+       to every attempt in the period — so "I read too fast" or "I know it but
+       I am slow" shows up as a habit rather than as one bad afternoon. */
+    const items = attempts.map(a => ({ uuid: a.questionUuid, ms: a.ms || 0, correct: !!a.correct }));
+    const split = timeSplit(items);
+    card.appendChild(h('div', { class: 'card-h' }, [h('h3', { text: 'Where your time goes' }), h('div', { class: 'spacer' }),
+      h('span', { class: 'tiny dim', text: split.timed ? 'median ' + fmtDur(split.cut) + ' a question, over ' + split.timed + ' timed attempt(s)' : '' })]));
+    const b = h('div', { class: 'card-b stack' });
+    if (!split.timed) {
+      b.appendChild(h('div', { class: 'empty' }, [h('h3', { text: 'No timed attempts yet' }),
+        h('p', { class: 'muted', text: 'Time is recorded from the moment a question appears. Practise a few and this fills in.' })]));
+    } else {
+      const grid = h('div', { class: 'grid g2' });
+      TIME_CELLS.forEach(cell => {
+        const n = split.cells[cell.k].length;
+        grid.appendChild(h('div', { class: 'notice ' + cell.tone + ' small' + (n ? '' : ' dim'), style: 'margin:0' }, [
+          h('div', { class: 'row', style: 'gap:8px;align-items:baseline' }, [
+            h('b', { text: cell.label }), h('span', { class: 'docnum', text: String(n) }),
+            h('span', { class: 'tiny dim', text: pct(n, split.timed) })
+          ]),
+          h('div', { class: 'tiny', style: 'margin-top:3px', text: cell.reading })
+        ]));
+      });
+      b.appendChild(grid);
+
+      // and where the slow ones are concentrated, which is the actionable part
+      const byDomain = new Map();
+      attempts.forEach(a => {
+        const q = byUuid.get(a.questionUuid); if (!q || !(a.ms > 0)) return;
+        const k = q.domainId || '—';
+        if (!byDomain.has(k)) byDomain.set(k, { n: 0, ms: [], slowWrong: 0 });
+        const g = byDomain.get(k);
+        g.n++; g.ms.push(a.ms);
+        if (a.ms > split.cut && !a.correct) g.slowWrong++;
+      });
+      const rows = Array.from(byDomain.entries())
+        .map(([k, g]) => ({ k, n: g.n, med: median(g.ms), avg: g.ms.reduce((x, y) => x + y, 0) / g.n, slowWrong: g.slowWrong }))
+        .sort((x, y) => y.med - x.med);
+      const tb2 = h('tbody');
+      rows.forEach(r => tb2.appendChild(h('tr', {}, [
+        h('td', { text: r.k === '—' ? 'Unmapped' : State.domainName(r.k) }),
+        h('td', { class: 'num', text: String(r.n) }),
+        h('td', { class: 'num', text: fmtDur(r.med) }),
+        h('td', { class: 'num', text: fmtDur(r.avg) }),
+        h('td', {}, h('div', { class: 'bar' }, h('i', { class: r.med > split.cut ? 'r' : 'g', style: 'width:' + Math.round(clamp(r.med / (split.cut * 2 || 1), 0, 1) * 100) + '%' }))),
+        h('td', { class: 'num right', text: String(r.slowWrong) })
+      ])));
+      b.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [
+        h('thead', {}, h('tr', {}, ['Domain', 'Timed', 'Median', 'Average', 'vs your median', 'Slow and wrong'].map(x => h('th', { text: x })))), tb2
+      ])));
+      b.appendChild(h('div', { class: 'tiny dim', text: 'Median, not average: one question you walked away from should not move where the line sits.' }));
+    }
+    card.appendChild(b);
     root.appendChild(card);
     return;
   }
@@ -11264,6 +11501,7 @@ ROUTES.settings = async (root) => {
       h('span', { class: 'badge b-review', text: 'All courses' })]),
     h('div', { class: 'card-b stack' }, [
       checkField('Confirm before leaving a running mock', 'confirmLeaveMock'),
+      checkField('Show how long you have spent on the current question', 'mockShowQuestionTimer', 'During a timed mock only. Off by default \u2014 a second clock is a distraction unless you are working on pace deliberately.'),
       checkField('Shuffle answer options', 'shuffleOptions', 'Questions that refer to a fixed position keep their order regardless.')
     ])
   ]));
