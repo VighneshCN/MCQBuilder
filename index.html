@@ -1191,6 +1191,49 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 
 /* --- practice / question rendering ------------------------------------ */
 .q-shell{max-width:840px;margin:0 auto}
+/* A case-study question is unreadable without its scenario, so on anything
+   wide enough the passage sits beside the question and scrolls in its own
+   right — you can keep your place in two pages of context while working
+   through five questions against it. Narrower than that it stacks above,
+   collapsible, because a phone cannot show both at once and the question is
+   what you came back to. */
+.q-shell:has(.case-layout){max-width:1240px}
+.case-layout{display:block}
+.case-main{min-width:0}
+.case-pane{
+  border:1px solid var(--rule);border-radius:var(--r-lg);background:var(--surface-2);
+  margin-bottom:14px;overflow:hidden;
+}
+.case-pane-h{
+  display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;
+  padding:11px 14px;border-bottom:1px solid var(--rule);background:var(--surface);
+}
+.case-pane-h h4{margin:0;font-size:14.5px;line-height:1.35}
+.case-pane-b{
+  padding:14px;font-size:14.6px;line-height:1.62;white-space:pre-wrap;
+  overflow-wrap:break-word;word-break:break-word;overflow-y:auto;
+}
+.case-pane[data-open="0"] .case-pane-b{display:none}
+@media(min-width:1000px){
+  .case-layout{display:grid;grid-template-columns:minmax(300px,1fr) minmax(380px,1.15fr);gap:20px;align-items:start}
+  .case-pane{margin-bottom:0;position:sticky;top:12px;max-height:calc(100vh - 40px);display:flex;flex-direction:column}
+  .case-pane-b{flex:1;min-height:0}
+  /* Never collapsed side by side: there is room for both, and hiding the
+     passage there would only hide it from someone who can see it. */
+  .case-pane[data-open="0"] .case-pane-b{display:block}
+  .case-pane-toggle{display:none}
+}
+.case-chip{
+  display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;
+  border:1px solid var(--rule);background:var(--surface-2);font-size:11.5px;
+  letter-spacing:.04em;text-transform:uppercase;color:var(--txt-2)
+}
+/* Where the scenarios begin in a mock's palette. */
+.pal-break{
+  grid-column:1/-1;display:flex;align-items:center;gap:8px;margin:8px 0 2px;
+  font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--txt-2)
+}
+.pal-break::after{content:"";flex:1;height:1px;background:var(--rule)}
 .q-stem{font-size:17.5px;line-height:1.62;margin:4px 0 18px;white-space:pre-wrap;overflow-wrap:break-word;word-break:break-word}
 @media(max-width:640px){.q-stem{font-size:16.5px}}
 .opts{display:flex;flex-direction:column;gap:9px}
@@ -1620,7 +1663,7 @@ const DB = {
    Some settings describe the app (theme, OCR); those stay global.
    Others describe how a *qualification* is practised — a CISA mock is not
    a DISA mock — and those are stored per course, keyed 'name@courseId'.  */
-const COURSE_SETTINGS = ['mockCount', 'mockMinutes', 'mockAllowPause', 'srIntervals', 'weakMinSample', 'masteryTarget'];
+const COURSE_SETTINGS = ['mockCount', 'mockMinutes', 'mockAllowPause', 'srIntervals', 'weakMinSample', 'masteryTarget', 'mockCaseCount'];
 function isCourseSetting(k) { return COURSE_SETTINGS.indexOf(k) >= 0; }
 function courseKey(k, courseId) { return k + '@' + courseId; }
 
@@ -1645,6 +1688,9 @@ const Settings = {
     // a setting is the starting point, not the rule.
     repeatSeenPct: 30,
     masteryTarget: 75,
+    // How many case-study questions a mock should carry. Zero, so a mock is
+    // exactly the paper it has always been until someone asks otherwise.
+    mockCaseCount: 0,
     shuffleOptions: true,
     confirmLeaveMock: true,
     ocrEnabled: false,
@@ -3459,7 +3505,19 @@ const IMPORT_FIELDS = [
     cols: ['learning point', 'my learning point', 'note', 'personal note'], json: ['learningPoint'] },
   { f: 'lockOptionOrder', label: 'Never shuffle these options',
     note: 'yes / true / 1. Set automatically anyway for "All of the above" and anything naming a position.',
-    cols: ['lock option order', 'lock', 'fixed order'], json: ['lockOptionOrder'] }
+    cols: ['lock option order', 'lock', 'fixed order'], json: ['lockOptionOrder'] },
+  /* Case studies. A spreadsheet groups rows into one scenario by sharing a
+     case reference; the first non-empty case text under that reference is the
+     scenario, so a two-page passage need only be pasted into one cell. In JSON
+     the scenario carries its questions instead, which is the sturdier form. */
+  { f: 'caseRef', label: 'Case study reference', caseField: true,
+    note: 'Rows sharing this value become one case study. Leave the column out entirely for ordinary standalone questions.',
+    cols: ['case ref', 'case id', 'case', 'case study', 'case study ref', 'scenario ref', 'scenario id'], json: ['ref', 'caseRef'] },
+  { f: 'caseTitle', label: 'Case study title', caseField: true,
+    cols: ['case title', 'case study title', 'scenario title', 'scenario'], json: ['title'] },
+  { f: 'caseText', label: 'The scenario itself', caseField: true,
+    note: 'The full passage. No length limit — a page or two is normal.',
+    cols: ['case text', 'case study text', 'scenario text', 'passage', 'case description'], json: ['text', 'scenario', 'passage'] }
 ];
 /** Fields whose value in a JSON file is read by name. Options and the answer
     are handled structurally in jsonToCandidates (an array, an object, a bare
@@ -3467,10 +3525,25 @@ const IMPORT_FIELDS = [
     driven from here. */
 const JSON_ALIASES = (() => {
   const m = {};
-  IMPORT_FIELDS.forEach(x => { if (x.json && x.json.length) m[x.f] = x.json; });
+  // Case fields are excluded: inside a QUESTION object, "title" and "text"
+  // would otherwise be read as the scenario's, and "text" is already one of
+  // the stem's own spellings.
+  IMPORT_FIELDS.forEach(x => { if (!x.caseField && x.json && x.json.length) m[x.f] = x.json; });
   m.options = ['options', 'choices'];
   return m;
 })();
+/** The same lookup for the scenario wrapper, where those keys DO mean the
+    case study. Kept separate for exactly that reason. */
+const CASE_JSON_ALIASES = (() => {
+  const m = {};
+  IMPORT_FIELDS.forEach(x => { if (x.caseField && x.json && x.json.length) m[x.f] = x.json; });
+  return m;
+})();
+function casePick(o, field) {
+  const keys = CASE_JSON_ALIASES[field] || [];
+  for (const k of keys) { const v = o[k]; if (v != null && v !== '') return v; }
+  return undefined;
+}
 /** First named key that actually carries something. Deliberately treats an
     empty string as absent, the way the `a || b || c` chain it replaces did. */
 function jsonPick(o, field) {
@@ -3508,6 +3581,7 @@ function rowsToCandidates(rows, opts) {
   if (!rows.length) return { candidates: [], unresolved: [], keyMap: {} };
   const map = opts.map || mapHeader(rows[0]);
   const candidates = [], unresolved = [];
+  const caseByRef = new Map();
   if (opts.headerless || map.stem === undefined) {
     // headerless: treat as tab-style table
     rows.forEach((r, i) => { const c = tableRowToCandidate(r.map(String), i + 1); if (c) candidates.push(c); else unresolved.push({ line: i + 1, text: r.join(' | ').slice(0, 160) }); });
@@ -3527,6 +3601,20 @@ function rowsToCandidates(rows, opts) {
       const hit = opts.findIndex(o => normText(o.text) === normText(ansRaw));
       if (hit >= 0) letter = opts[hit].letter;
     }
+    // Rows sharing a case reference are one scenario. The first non-empty
+    // scenario text under that reference wins, so a two-page passage only has
+    // to be pasted into one cell rather than repeated down every row — and
+    // repeating it anyway is harmless.
+    const caseRef = get('caseRef');
+    if (caseRef) {
+      let rec = caseByRef.get(caseRef);
+      if (!rec) { rec = { ref: caseRef, title: '', text: '', domainRaw: '', topic: '', seq: 0 }; caseByRef.set(caseRef, rec); }
+      if (!rec.title && get('caseTitle')) rec.title = get('caseTitle');
+      if (!rec.text && get('caseText')) rec.text = get('caseText');
+      if (!rec.domainRaw && get('domain')) rec.domainRaw = get('domain');
+      if (!rec.topic && get('topic')) rec.topic = get('topic');
+      rec.seq++;
+    }
     candidates.push({
       line: i + 1, originalNumber: get('originalNumber'), externalId: get('externalId'),
       stem, options: opts, answerRaw: ansRaw, answerLetter: letter,
@@ -3535,17 +3623,35 @@ function rowsToCandidates(rows, opts) {
       srcModule: get('module'), srcChapter: get('chapter'), srcSection: get('section'),
       difficulty: (get('difficulty') || '').toLowerCase(), tags: get('tags'),
       lockOptionOrder: /^(1|y|yes|true)$/i.test(get('lockOptionOrder')),
+      caseRef: caseRef || '', caseSeq: caseRef ? caseByRef.get(caseRef).seq : 0,
       conf: { stem: 1, options: opts.length >= 2 ? 1 : 0.2, answer: letter ? 1 : (ansRaw ? 0.5 : 0), explanation: get('explanation') ? 1 : 0 }
     });
   }
-  return { candidates, unresolved, keyMap: {} };
+  return {
+    candidates, unresolved, keyMap: {},
+    caseStudies: Array.from(caseByRef.values()).map(r => ({ ref: r.ref, title: r.title, text: r.text, domainRaw: r.domainRaw, topic: r.topic }))
+  };
 }
 
+/**
+ * A JSON file, which may be:
+ *   an array of questions,
+ *   { questions: [...] },
+ *   { caseStudies: [ { ref, title, text, questions: [...] } ] },
+ *   or the last two together.
+ * A scenario carries its own questions rather than the questions pointing at
+ * a scenario, because that is the shape in which the link cannot be lost:
+ * there is no way to write a question whose case study is missing.
+ */
 function jsonToCandidates(json) {
   const arr = Array.isArray(json) ? json : (json && Array.isArray(json.questions) ? json.questions : null);
-  if (!arr) throw new Error('JSON must be an array of questions, or an object with a "questions" array.');
-  const candidates = [], unresolved = [];
-  arr.forEach((o, i) => {
+  const caseArr = (json && Array.isArray(json.caseStudies)) ? json.caseStudies : null;
+  if (!arr && !caseArr) throw new Error('JSON must be an array of questions, an object with a "questions" array, or an object with a "caseStudies" array.');
+  const candidates = [], unresolved = [], caseStudies = [];
+  let lineNo = 0;
+
+  const readQuestion = (o, caseRef, caseSeq) => {
+    const i = lineNo++;
     const stem = jsonPick(o, 'stem') || '';
     let opts = jsonPick(o, 'options') || [];
     if (!Array.isArray(opts)) opts = Object.keys(opts).map((k, ix) => ({ letter: k.toUpperCase() || letterOf(ix), text: opts[k] }));
@@ -3570,10 +3676,26 @@ function jsonToCandidates(json) {
       difficulty: pick('difficulty').toLowerCase(),
       tags: Array.isArray(tagsRaw) ? tagsRaw.join(',') : (tagsRaw == null ? '' : String(tagsRaw)),
       lockOptionOrder: !!jsonPick(o, 'lockOptionOrder'),
+      caseRef: caseRef || '', caseSeq: caseSeq || 0,
       conf: { stem: 1, options: 1, answer: letter ? 1 : (ansRaw ? 0.5 : 0), explanation: pick('explanation') ? 1 : 0 }
     });
+  };
+
+  (arr || []).forEach(o => readQuestion(o, '', 0));
+  (caseArr || []).forEach((c, ci) => {
+    const ref = String(casePick(c, 'caseRef') || ('CASE-' + (ci + 1)));
+    const qs = Array.isArray(c.questions) ? c.questions : [];
+    caseStudies.push({
+      ref,
+      title: String(casePick(c, 'caseTitle') || ''),
+      text: String(casePick(c, 'caseText') || ''),
+      domainRaw: String(jsonPick(c, 'domain') || ''),
+      topic: String(jsonPick(c, 'topic') || '')
+    });
+    if (!qs.length) unresolved.push({ line: 0, text: 'Case study "' + (casePick(c, 'caseTitle') || ref) + '" carries no questions.' });
+    qs.forEach((o, qi) => readQuestion(o, ref, qi + 1));
   });
-  return { candidates, unresolved, keyMap: {} };
+  return { candidates, unresolved, keyMap: {}, caseStudies };
 }
 
 /* ---------- candidate → question record ---------- */
@@ -3629,6 +3751,10 @@ function candidateToQuestion(c, ctx) {
   q.locator = c.line ? ('line ' + c.line) : '';
   q.sourceRefs = [{ sourceId: ctx.sourceId, sourceTitle: ctx.sourceTitle, filename: ctx.filename, locator: q.locator, originalNumber: q.originalNumber, importedAt: q.importedAt }];
   q.lockOptionOrder = !!c.lockOptionOrder || autoLockOrder(q.stem, q.options);
+  // Still the reference from the file at this point. admitBatch swaps it for
+  // the real caseStudyId once the scenario itself has been written.
+  q.caseRef = c.caseRef || '';
+  q.caseSeq = c.caseSeq || 0;
 
   // correct answer, resolved against stable option IDs
   if (c.answerLetter) {
@@ -3814,6 +3940,7 @@ function applyFilters(pool, f) {
   const now = new Date();
   return pool.filter(q => {
     if (f.domains && f.domains.length && f.domains.indexOf(q.domainId) < 0) return false;
+    if (f.caseStudies && f.caseStudies.length && f.caseStudies.indexOf(q.caseStudyId) < 0) return false;
     if (f.topics && f.topics.length && f.topics.indexOf(q.topic || '—') < 0) return false;
     if (f.sources && f.sources.length && f.sources.indexOf(q.sourceId) < 0) return false;
     if (f.modules && f.modules.length && f.modules.indexOf(q.srcModule || '—') < 0) return false;
@@ -3846,6 +3973,67 @@ function applyFilters(pool, f) {
     if (f.sinceDays) { const cut = new Date(Date.now() - f.sinceDays * 86400000); if (!q.stats.lastAttemptAt || new Date(q.stats.lastAttemptAt) < cut) return false; }
     return true;
   });
+}
+
+/**
+ * Draw case-study questions as WHOLE scenarios.
+ *
+ * Asking for twenty and getting three of one case's five questions is worse
+ * than getting eighteen: the candidate reads two pages of context for a
+ * fragment of the set it was written for, and the paper stops resembling the
+ * exam it is imitating. So cases are taken entire — greedily while they fit,
+ * then one more if overshooting lands nearer the target than stopping does —
+ * and the number actually reached is reported rather than quietly assumed.
+ *
+ * Questions within a case keep the order they were printed in (caseSeq),
+ * because a scenario's questions frequently build on one another.
+ */
+function pickCaseBlock(pool, want, rng) {
+  const byCase = new Map();
+  pool.forEach(q => {
+    if (!byCase.has(q.caseStudyId)) byCase.set(q.caseStudyId, []);
+    byCase.get(q.caseStudyId).push(q);
+  });
+  const cases = Array.from(byCase.entries()).map(([id, qs]) => ({
+    id,
+    questions: qs.slice().sort((a, b) => (a.caseSeq || 0) - (b.caseSeq || 0) || String(a.qid || '').localeCompare(String(b.qid || '')))
+  }));
+  const order = shuffle(cases, rng);
+  const taken = [], left = [];
+  let n = 0;
+  order.forEach(c => {
+    if (n + c.questions.length <= want) { taken.push(c); n += c.questions.length; } else left.push(c);
+  });
+  // One deliberate overshoot, and only when it is genuinely closer. `left` is
+  // already in shuffled order and the sort is stable, so the same seed always
+  // reaches the same paper.
+  if (left.length) {
+    const best = left.slice().sort((a, b) =>
+      Math.abs(n + a.questions.length - want) - Math.abs(n + b.questions.length - want))[0];
+    if (best && Math.abs(n + best.questions.length - want) < Math.abs(n - want)) {
+      taken.push(best); n += best.questions.length;
+    }
+  }
+  const questions = [];
+  const ranges = taken.map(c => {
+    const from = questions.length;
+    c.questions.forEach(q => questions.push(q));
+    return { caseStudyId: c.id, from, to: questions.length - 1, count: c.questions.length };
+  });
+  return { cases: ranges, questions, asked: want, taken: n, available: pool.length };
+}
+
+/** What the case-study section came to, said plainly, because it is almost
+    never exactly the number that was typed. */
+function describeCaseBlock(block) {
+  if (!block || !block.cases.length) return '';
+  const sizes = block.cases.map(c => c.count);
+  const same = sizes.every(x => x === sizes[0]);
+  const sum = same && sizes.length > 1
+    ? block.cases.length + ' case studies × ' + sizes[0]
+    : block.cases.length + ' case stud' + (block.cases.length === 1 ? 'y' : 'ies') + ' (' + sizes.join(' + ') + ')';
+  return 'Case study section: ' + sum + ' = ' + block.taken + ' question(s)' +
+    (block.taken === block.asked ? '' : ' — you asked for ' + block.asked + ', and a case is never split');
 }
 
 /** Domain-weighted selection with transparent rounding (largest remainder). */
@@ -4118,24 +4306,59 @@ const MODES = {
   mixed:    { label: 'Mixed revision', reveal: true, confidence: true, desc: 'Across the whole bank, optionally exam-weighted.' },
   mock:     { label: 'Timed mock exam', reveal: false, confidence: false, desc: 'Full length, timed, no confidence asked, nothing revealed until you submit.' },
   spaced:   { label: 'Spaced repetition', reveal: true, confidence: true, desc: 'Whatever has fallen due today, from every mode you have practised.' },
-  custom:   { label: 'Custom practice', reveal: true, confidence: true, desc: 'Your own filter combination, savable as a preset.' }
+  custom:   { label: 'Custom practice', reveal: true, confidence: true, desc: 'Your own filter combination, savable as a preset.' },
+  // Its own mode because its questions are its own bank: they are drawn as
+  // whole scenarios, with the passage in front of you, and they appear in no
+  // other mode at all.
+  casestudy: { label: 'Case study questions', reveal: true, confidence: true, caseBank: true, desc: 'Whole case studies, passage and all — the only mode besides a mock that asks them.' }
 };
 
 const Session = {
   async create(mode, config) {
     const all = await State.questions();
-    const pool0 = eligiblePool(all);
     const seed = config.seed || newSeed();
     const rng = mulberry32(seed);
+    // Case study practice draws from the other bank entirely; a timed mock
+    // draws from both. Every other mode reaches eligiblePool() exactly as it
+    // always has, and cannot see a case-study question at all.
+    const isCaseMode = !!(MODES[mode] && MODES[mode].caseBank);
+    const pool0 = isCaseMode ? caseEligiblePool(all) : eligiblePool(all);
     let filtered = applyFilters(pool0, config.filters || {});
-    const wanted = Math.max(1, config.count || 20);
+
+    // The case-study section is settled FIRST, so the ordinary paper is built
+    // for however many questions the whole scenarios actually came to rather
+    // than being trimmed afterwards.
+    const caseWant = isCaseMode
+      ? Math.max(1, config.count || 10)
+      : (mode === 'mock' ? Math.max(0, config.caseCount || 0) : 0);
+    let caseBlock = null;
+    if (caseWant > 0) {
+      // Only case-level filters reach the case pool. A per-question filter
+      // (a domain, a difficulty, "never attempted") would silently remove
+      // some of a scenario's questions and hand back a case that is no longer
+      // whole — the exact thing this selection exists to prevent.
+      const picked = ((isCaseMode ? (config.filters || {}) : (config.caseFilters || {})).caseStudies) || [];
+      const casePool = applyFilters(caseEligiblePool(all), { caseStudies: picked });
+      caseBlock = pickCaseBlock(casePool, caseWant, rng);
+      if (!caseBlock.taken) {
+        throw new Error(isCaseMode
+          ? 'No case study in this course has a practice-ready question yet. Write one from Case Studies, or confirm its answers on the review queue.'
+          : 'You asked for ' + caseWant + ' case-study question(s), but no case study in this course has a practice-ready question yet.');
+      }
+    }
+    const caseQuestions = caseBlock ? caseBlock.questions : [];
+    const wanted = isCaseMode ? 0 : Math.max(0, (config.count || 20) - caseQuestions.length);
     let chosen, notes = [], shortfalls = [];
 
     let composition = null;
     let spec = config.composition;
     const hasSpec = spec && ((spec.domainMix && spec.domainMix.length) || (spec.difficultyMix && spec.difficultyMix.length) || (spec.seenMix && spec.seenMix.seenPct != null));
 
-    if (hasSpec) {
+    if (wanted <= 0) {
+      // Either Case study practice (whose whole paper is the case block) or a
+      // mock the candidate asked to be entirely case studies.
+      chosen = [];
+    } else if (hasSpec) {
       // An explicit mix always wins over the mode's default selection: the
       // candidate has said exactly what paper they want.
       //
@@ -4179,22 +4402,36 @@ const Session = {
     } else {
       chosen = shuffle(filtered, rng).slice(0, wanted);
     }
-    if (!chosen.length) {
+    if (!chosen.length && !caseQuestions.length) {
       const reason = pool0.length === 0
-        ? 'No question in this course is Active with a verified answer yet. Confirm them on the Needs Checking screen first.'
+        ? (isCaseMode
+          ? 'No case-study question in this course is Active with a verified answer yet. Confirm them on the review queue first.'
+          : 'No question in this course is Active with a verified answer yet. Confirm them on the Needs Checking screen first.')
         : 'No question matches those filters. ' + pool0.length + ' question(s) are eligible in total.';
       throw new Error(reason);
     }
+    // The case-study section sits at the END of the paper, whole and
+    // contiguous, the way a printed paper puts its scenarios after the
+    // standalone questions — so the candidate meets one long read at a known
+    // point rather than being interrupted by two pages every few questions.
+    const ordered = chosen.concat(caseQuestions);
+    if (caseBlock) notes = notes.concat([describeCaseBlock(caseBlock)]);
     const shuffleOpts = Settings.get('shuffleOptions');
     const optionOrders = {};
-    chosen.forEach(q => {
+    ordered.forEach(q => {
       const ids = q.options.map(o => o.id);
       optionOrders[q.uuid] = (shuffleOpts && !q.lockOptionOrder) ? shuffle(ids, rng) : ids;
     });
     const s = {
       id: uuid(), courseId: State.course.id, mode, seed,
       config: JSON.parse(JSON.stringify(config)),
-      questionUuids: chosen.map(q => q.uuid),
+      questionUuids: ordered.map(q => q.uuid),
+      // Where the scenarios start, and which questions belong to which — read
+      // by the runner to show the passage and by the palette to mark the break.
+      caseSection: caseBlock ? {
+        startIndex: chosen.length, asked: caseBlock.asked, taken: caseBlock.taken,
+        cases: caseBlock.cases.map(c => ({ caseStudyId: c.caseStudyId, from: chosen.length + c.from, to: chosen.length + c.to, count: c.count }))
+      } : null,
       optionOrders, responses: {}, flags: {}, cursor: 0,
       startedAt: nowISO(), endedAt: null, status: 'active',
       timeLimitMs: mode === 'mock' ? (config.minutes || Settings.get('mockMinutes')) * 60000 : null,
@@ -4203,7 +4440,7 @@ const Session = {
       poolSize: filtered.length, eligibleTotal: pool0.length
     };
     await DB.put('sessions', s);
-    await audit('create', 'session', s.id, null, { mode, count: chosen.length, seed }, '');
+    await audit('create', 'session', s.id, null, { mode, count: ordered.length, caseQuestions: caseQuestions.length, seed }, '');
     return s;
   },
   async save(s) { s.updatedAt = nowISO(); await DB.put('sessions', s); },
@@ -4314,6 +4551,7 @@ const VIEWS = [
   { id: 'dashboard', label: 'Dashboard',        ico: '▤' },
   { id: 'import',    label: 'Add Questions',    ico: '↧' },
   { id: 'bank',      label: 'Question Bank',    ico: '≡' },
+  { id: 'cases',     label: 'Case Studies',     ico: '❐' },
   { id: 'notes',     label: 'Notes',            ico: '▧' },
   { id: 'practice',  label: 'Practice',         ico: '▶' },
   { id: 'games',     label: 'Games',            ico: '◈' },
@@ -4698,11 +4936,13 @@ ROUTES.dashboard = async (root) => {
 ROUTES.practice = async (root, preselect) => {
   const all = await State.questions();
   const pool = eligiblePool(all);
+  const casePool = caseEligiblePool(all);
   const due = pool.filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date());
   await band('Practice', 'Choose how to work', [
     { k: 'Eligible', v: String(pool.length) },
+    casePool.length ? { k: 'Case study', v: String(casePool.length) } : null,
     { k: 'Due', v: String(due.length), color: due.length ? 'var(--pencil)' : null }
-  ]);
+  ].filter(Boolean));
 
   const resumable = await Session.resumeLatest(State.course.id);
   if (resumable) {
@@ -4741,7 +4981,7 @@ ROUTES.practice = async (root, preselect) => {
     )));
   }
 
-  if (!pool.length) {
+  if (!pool.length && !casePool.length) {
     root.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, [
       h('h3', { text: 'No question is ready for practice yet' }),
       h('p', { class: 'muted', text: all.length ? 'You have ' + all.length + ' record(s), but a question only becomes eligible once it is Active with a verified correct answer.' : 'Import a file of questions, or write one yourself — either way takes a couple of minutes.' }),
@@ -4756,9 +4996,14 @@ ROUTES.practice = async (root, preselect) => {
   const grid = h('div', { class: 'grid g3 stretch' });
   Object.keys(MODES).forEach(m => {
     const info = MODES[m];
+    // A mode that draws on a bank with nothing in it is a dead end, so the
+    // case-study card is simply absent until there is a case study to sit.
+    if (info.caseBank && !casePool.length) return;
+    if (!info.caseBank && !pool.length) return;
     let count = null;
     if (m === 'spaced') count = due.length;
     if (m === 'redo') count = applyFilters(pool, { incorrect: true }).length + applyFilters(pool, { guessed: true }).length;
+    if (info.caseBank) count = casePool.length;
     grid.appendChild(h('button', {
       class: 'card clickable', style: 'text-align:left;border:1px solid var(--rule);padding:0' + (resumable ? ';opacity:.5' : ''),
       disabled: !!resumable,
@@ -4940,20 +5185,37 @@ function compositionEditor(cfg, pool, filters) {
 
 async function configureMode(mode) {
   const all = await State.questions();
-  const pool = eligiblePool(all);
+  const isCaseMode = !!(MODES[mode] && MODES[mode].caseBank);
+  const pool = isCaseMode ? caseEligiblePool(all) : eligiblePool(all);
+  const casePool = caseEligiblePool(all);
+  // Titles for the picker, and the count of ready questions each scenario
+  // actually has — which is not always all of them.
+  const caseRecords = (casePool.length || isCaseMode) ? await CaseStudies.byCourse(State.course.id) : [];
+  const caseCounts = new Map();
+  casePool.forEach(q => caseCounts.set(q.caseStudyId, (caseCounts.get(q.caseStudyId) || 0) + 1));
+  const allCaseQs = all.filter(isCaseQuestion);
   const body = h('div', { class: 'stack' });
-  const f = { domains: [], topics: [], sources: [], modules: [], difficulty: [], batches: [] };
-  const cfg = { filters: f, count: mode === 'mock' ? Settings.get('mockCount') : 20, weighted: mode === 'mixed' || mode === 'mock', minutes: Settings.get('mockMinutes') };
+  const f = { domains: [], topics: [], sources: [], modules: [], difficulty: [], batches: [], caseStudies: [] };
+  const cfg = {
+    filters: f,
+    count: mode === 'mock' ? Settings.get('mockCount') : (isCaseMode ? Math.min(10, pool.length) : 20),
+    weighted: mode === 'mixed' || mode === 'mock', minutes: Settings.get('mockMinutes'),
+    caseCount: mode === 'mock' ? clamp(Settings.get('mockCaseCount') || 0, 0, casePool.length) : 0,
+    caseFilters: { caseStudies: [] }
+  };
 
   const countLabel = h('span', { class: 'docnum' });
   let compositionPanel = null;
   const recount = () => {
     let p = applyFilters(pool, f);
     if (mode === 'spaced') p = p.filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date());
+    // A mock's case-study section comes out of the same total, so the pool
+    // that has to satisfy the rest is smaller by however many it takes.
+    const needStandalone = Math.max(0, cfg.count - (mode === 'mock' ? (cfg.caseCount || 0) : 0));
     countLabel.textContent = p.length + ' eligible';
-    countLabel.style.color = p.length < cfg.count ? 'var(--pencil)' : 'var(--green)';
-    warn.classList.toggle('hidden', p.length >= cfg.count);
-    warn.textContent = 'Only ' + p.length + ' question(s) match. The session will run with what is available rather than repeating any question.';
+    countLabel.style.color = p.length < needStandalone ? 'var(--pencil)' : 'var(--green)';
+    warn.classList.toggle('hidden', p.length >= needStandalone);
+    warn.textContent = 'Only ' + p.length + ' question(s) match, and this paper needs ' + needStandalone + '. The session will run with what is available rather than repeating any question.';
     // Every filter chip, keyword keystroke and count change routes through
     // here, so this is the one place that can keep the feasibility verdict
     // honest as the request changes underneath it.
@@ -4978,8 +5240,18 @@ async function configureMode(mode) {
     return h('div', { class: 'field' }, [h('label', { text: label }), box]);
   };
 
-  if (mode !== 'spaced') {
+  if (mode !== 'spaced' && !isCaseMode) {
     body.appendChild(chipRow('Domains — leave empty for all', State.course.blueprint.map(d => ({ v: d.id, label: d.id + ' · ' + d.name.split(' ').slice(0, 4).join(' ') })).concat([{ v: null, label: 'Unmapped' }]), f.domains));
+  }
+  if (isCaseMode) {
+    // No domain or difficulty filter here on purpose: a filter that removes
+    // SOME of a scenario's questions would hand back a case that is no longer
+    // whole, which is the one thing this mode exists to guarantee.
+    const ready = caseRecords.filter(c => caseCounts.get(c.id));
+    body.appendChild(chipRow('Case studies — leave empty for all',
+      ready.map(c => ({ v: c.id, label: (c.title || c.csid || 'Untitled') + ' · ' + caseCounts.get(c.id) })), f.caseStudies));
+    body.appendChild(h('div', { class: 'notice small' },
+      'Whole case studies only — you will always get every ready question a scenario has, so the number you ask for is a target rather than an exact count.'));
   }
   if (mode === 'domain' || mode === 'custom') {
     const topics = Array.from(new Set(pool.map(q => q.topic).filter(Boolean))).sort().slice(0, 40);
@@ -5019,6 +5291,36 @@ async function configureMode(mode) {
     row.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Time limit (minutes)' }), h('input', { type: 'number', min: '5', max: '600', value: String(cfg.minutes), onchange: (e) => cfg.minutes = clamp(parseInt(e.target.value, 10) || 60, 5, 600) })]));
   }
   body.appendChild(row);
+
+  /* A mock is the one ordinary paper that carries case studies, because it is
+     the one imitating a real one. How many is the candidate's call. */
+  if (mode === 'mock' && casePool.length) {
+    const caseNote = h('div', { class: 'tiny dim' });
+    const caseCountInput = h('input', {
+      type: 'number', min: '0', max: String(casePool.length), value: String(cfg.caseCount),
+      onchange: async (e) => {
+        cfg.caseCount = clamp(parseInt(e.target.value, 10) || 0, 0, casePool.length);
+        e.target.value = String(cfg.caseCount);
+        await Settings.set('mockCaseCount', cfg.caseCount);
+        drawCaseNote(); recount();
+      }
+    });
+    const readyCases = caseRecords.filter(c => caseCounts.get(c.id));
+    const drawCaseNote = () => {
+      const sizes = readyCases.map(c => caseCounts.get(c.id));
+      const held = allCaseQs.length - casePool.length;
+      caseNote.textContent = cfg.caseCount === 0
+        ? 'None. The paper will be exactly the standalone questions above, as it has always been.'
+        : readyCases.length + ' case stud' + (readyCases.length === 1 ? 'y is' : 'ies are') + ' ready (' + sizes.join(' + ') + ' questions). ' +
+          'They are drawn whole and placed as the last section, so the total lands on the nearest sum of whole scenarios' +
+          (held ? ' — ' + held + ' case-study question(s) are still waiting on you and cannot be drawn.' : '.');
+    };
+    drawCaseNote();
+    body.appendChild(h('div', { class: 'field' }, [
+      h('label', { text: 'Of those, how many should be case-study questions?' }),
+      caseCountInput, caseNote
+    ]));
+  }
   if (mode === 'mixed') {
     body.appendChild(h('label', { class: 'check' }, [h('input', { type: 'checkbox', checked: true, onchange: (e) => cfg.weighted = e.target.checked }), h('span', { text: 'Distribute by official exam weights (' + State.course.blueprint.map(d => d.weight + '%').join(' / ') + ')' })]));
   }
@@ -5416,6 +5718,18 @@ async function runSession(s) {
   const all = await State.questions();
   const byId = new Map(all.map(q => [q.uuid, q]));
   const isMock = s.mode === 'mock';
+  // The scenarios this paper needs, read once. A session with none — every
+  // mode but a mock with a case section and Case study practice — does no
+  // work here at all.
+  const caseById = new Map();
+  for (const id of new Set(s.questionUuids.map(u => (byId.get(u) || {}).caseStudyId).filter(Boolean))) {
+    const rec = await CaseStudies.get(id);
+    if (rec) caseById.set(id, rec);
+  }
+  // Whether each passage is expanded, on the narrow layout that can only show
+  // one at a time. Deliberately not persisted: it is a reading position, not
+  // a preference.
+  const casePaneOpen = {};
   const target = $('#view');
   let idx = s.cursor || 0;
   let qStart = Date.now();
@@ -5479,6 +5793,57 @@ async function runSession(s) {
   };
   State.runnerStop = leaveGuarded;
 
+  /** Where question `i` sits among the paper's scenarios. Derived from the
+      paper itself rather than from anything stored on the session, so it is
+      right for a session created before case studies existed just as much as
+      for one created after. */
+  function caseContext(i) {
+    const q = byId.get(s.questionUuids[i]);
+    if (!q || !q.caseStudyId) return null;
+    const sameCase = (j) => {
+      const x = byId.get(s.questionUuids[j]);
+      return !!x && x.caseStudyId === q.caseStudyId;
+    };
+    let from = i, to = i;
+    while (from > 0 && sameCase(from - 1)) from--;
+    while (to < s.questionUuids.length - 1 && sameCase(to + 1)) to++;
+    const ids = [];
+    s.questionUuids.forEach(u => {
+      const x = byId.get(u);
+      if (x && x.caseStudyId && ids.indexOf(x.caseStudyId) < 0) ids.push(x.caseStudyId);
+    });
+    return {
+      caseStudyId: q.caseStudyId, record: caseById.get(q.caseStudyId) || null,
+      index: ids.indexOf(q.caseStudyId), total: ids.length,
+      within: i - from + 1, count: to - from + 1
+    };
+  }
+
+  function casePane(ctx) {
+    const rec = ctx.record;
+    const open = casePaneOpen[ctx.caseStudyId] !== false;
+    const pane = h('div', { class: 'case-pane', dataset: { open: open ? '1' : '0' } });
+    const toggle = h('button', {
+      class: 'btn sm ghost case-pane-toggle',
+      onclick: () => { casePaneOpen[ctx.caseStudyId] = !open; render(); },
+      text: open ? 'Hide' : 'Show'
+    });
+    pane.appendChild(h('div', { class: 'case-pane-h' }, [
+      h('span', { class: 'case-chip', text: 'Case study' + (ctx.total > 1 ? ' ' + (ctx.index + 1) + ' of ' + ctx.total : '') }),
+      h('h4', { text: rec ? (rec.title || 'Untitled case study') : 'This case study is no longer in the bank' }),
+      h('div', { class: 'spacer' }),
+      h('span', { class: 'tiny dim', text: 'Question ' + ctx.within + ' of ' + ctx.count }),
+      toggle
+    ]));
+    pane.appendChild(h('div', { class: 'case-pane-b' }, rec && rec.text
+      ? [h('div', { text: rec.text }),
+         h('div', { class: 'srcline', style: 'margin-top:12px', text: (rec.csid || '') + (rec.text ? ' · ' + passageWords(rec.text) + ' words' : '') })]
+      : [h('div', { class: 'notice bad small' }, rec
+          ? 'This case study has no scenario text. Add it from Case Studies — the question cannot be answered fairly without it.'
+          : 'The scenario this question belongs to is missing from the bank. Answer it if you can; the integrity check in Settings will list it.')]));
+    return pane;
+  }
+
   function render() {
     target.textContent = '';
     const q = byId.get(s.questionUuids[idx]);
@@ -5514,9 +5879,15 @@ async function runSession(s) {
       h('button', { class: 'btn sm ghost', onclick: () => leave(), text: isMock ? (Settings.get('mockAllowPause') ? 'Pause' : 'Leave') : 'Exit' })
     ]);
 
-    const shell = h('div', { class: 'q-shell' });
-    shell.appendChild(head);
-    if (isMock) shell.appendChild(mockPaletteBar());
+    // Header, timer and palette stay full width; only the question itself
+    // moves into a column beside its scenario. With no scenario, `shell` IS
+    // `outer` and the markup is exactly what it has always been.
+    const ctx = caseContext(idx);
+    const outer = h('div', { class: 'q-shell' });
+    outer.appendChild(head);
+    if (isMock) outer.appendChild(mockPaletteBar());
+    const shell = ctx ? h('div', { class: 'case-main' }) : outer;
+    if (ctx) outer.appendChild(h('div', { class: 'case-layout' }, [casePane(ctx), shell]));
     if (!isMock) shell.appendChild(h('div', { class: 'qmeta' }, [h('span', { class: 'docnum dim', text: q.qid || '(unassigned)' })]));
     shell.appendChild(h('div', { class: 'q-stem', text: q.stem }));
     if (q.imageId) shell.appendChild(h('div', { id: 'qimg', class: 'imgstage', style: 'margin-bottom:14px' }));
@@ -5557,7 +5928,7 @@ async function runSession(s) {
         : h('button', { class: 'btn primary', onclick: () => isMock ? confirmSubmit() : finish(), text: isMock ? 'Submit exam' : 'Finish session' })
     ]);
     shell.appendChild(navRow);
-    target.appendChild(shell);
+    target.appendChild(outer);
     if (q.imageId) loadImageInto('#qimg', q.imageId);
     qStart = Date.now();
   }
@@ -5573,6 +5944,12 @@ async function runSession(s) {
     ]));
     const pal = h('div', { class: 'palette' });
     s.questionUuids.forEach((u, i) => {
+      // A candidate deciding what to leave until last needs to see where the
+      // two-page reads begin, not discover it by clicking into one.
+      const here = byId.get(u), before = i ? byId.get(s.questionUuids[i - 1]) : null;
+      if (here && here.caseStudyId && (!before || !before.caseStudyId)) {
+        pal.appendChild(h('div', { class: 'pal-break', text: 'Case study section' }));
+      }
       pal.appendChild(h('button', {
         class: 'pal' + (s.responses[u] ? ' answered' : '') + (s.flags[u] ? ' flagged' : '') + (i === idx ? ' cur' : ''),
         onclick: () => { saveTime(); idx = i; s.cursor = i; Session.save(s); render(); },
@@ -5804,19 +6181,50 @@ async function showResults(s) {
    10 · Question Bank — search, filter, bulk control, detail and editing
    ========================================================================== */
 
-const BankState = { q: '', status: '', domain: '', source: '', batch: '', verif: '', learn: '', diff: '', sort: 'qid', dir: 1, page: 0, size: 50, view: 'table', sel: new Set() };
+// `bank` defaults to standalone, so this screen opens on exactly the records
+// it has always shown; the case-study side is a deliberate switch away.
+const BankState = { q: '', status: '', domain: '', source: '', batch: '', verif: '', learn: '', diff: '', bank: 'standalone', caseStudy: '', sort: 'qid', dir: 1, page: 0, size: 50, view: 'table', sel: new Set() };
 
 ROUTES.bank = async (root) => {
-  const all = await State.questions();
+  const everything = await State.questions();
+  const caseRecords = await CaseStudies.byCourse(State.course.id);
+  const caseTitle = new Map(caseRecords.map(c => [c.id, c.title || c.csid || 'Untitled']));
+  // The two banks are shown one at a time. Every filter, bulk action, export
+  // and rescan below then works on whichever is in front of you, without any
+  // of them needing to know the other exists.
+  const onCase = BankState.bank === 'case';
+  const all = everything.filter(q => isCaseQuestion(q) === onCase);
   const sources = await DB.byIndex('sources', 'courseId', State.course.id);
   const batches = await DB.byIndex('batches', 'courseId', State.course.id);
-  await band('Question Bank', 'Controlled register', [
+  await band('Question Bank', onCase ? 'Case-study register' : 'Controlled register', [
     { k: 'Records', v: String(all.length) },
     { k: 'Practice-ready', v: String(all.filter(isPracticeEligible).length), color: 'var(--green)' }
   ], [
     h('button', { class: 'btn', onclick: () => go('import'), text: 'Import' }),
-    h('button', { class: 'btn primary', onclick: () => newQuestion(), text: 'New question' })
+    onCase
+      ? h('button', { class: 'btn primary', onclick: () => go('cases'), text: 'Open Case Studies' })
+      : h('button', { class: 'btn primary', onclick: () => newQuestion(), text: 'New question' })
   ]);
+
+  const caseCount = everything.filter(isCaseQuestion).length;
+  if (caseCount || onCase) {
+    root.appendChild(h('div', { class: 'seg', style: 'margin-bottom:14px' }, [
+      h('button', {
+        class: 'btn' + (!onCase ? ' primary' : ''),
+        onclick: () => { BankState.bank = 'standalone'; BankState.page = 0; BankState.caseStudy = ''; BankState.sel.clear(); go('bank'); },
+        text: 'Standalone · ' + (everything.length - caseCount)
+      }),
+      h('button', {
+        class: 'btn' + (onCase ? ' primary' : ''),
+        onclick: () => { BankState.bank = 'case'; BankState.page = 0; BankState.sel.clear(); go('bank'); },
+        text: 'Case study · ' + caseCount
+      })
+    ]));
+    if (onCase) root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:14px' }, [
+      'These are only ever asked with their scenario in front of you — in Case study practice, or in a mock you have given a case-study section. They appear in no other practice mode and in no game. ',
+      h('a', { href: '#', onclick: (e) => { e.preventDefault(); go('cases'); }, text: 'Manage the scenarios →' })
+    ]));
+  }
 
   const filters = h('div', { class: 'card', style: 'margin-bottom:14px' });
   const fb = h('div', { style: 'margin-top:10px' });
@@ -5843,6 +6251,8 @@ ROUTES.bank = async (root) => {
   ]));
   fb.appendChild(line1);
   const line2 = h('div', { class: 'grid g4', style: 'margin-top:10px' });
+  if (onCase) line2.appendChild(mkSel('Case study', 'caseStudy', [{ v: '', label: 'Any case study' }]
+    .concat(caseRecords.map(c => ({ v: c.id, label: c.title || c.csid || 'Untitled' })))));
   line2.appendChild(mkSel('Source', 'source', [{ v: '', label: 'Any source' }].concat(sources.map(s => ({ v: s.id, label: s.title })))));
   line2.appendChild(mkSel('Import batch', 'batch', [{ v: '', label: 'Any batch' }].concat(batches.slice().reverse().map(b => ({ v: b.id, label: b.label || fmtDate(b.startedAt, true) })))));
   line2.appendChild(mkSel('Verification', 'verif', [{ v: '', label: 'Any' }, { v: 'verified', label: 'Answer verified' }, { v: 'unverified', label: 'Answer unverified' }, { v: 'doubtful', label: 'Answer doubtful' }]));
@@ -5875,6 +6285,7 @@ ROUTES.bank = async (root) => {
     let list = all.filter(q => {
       if (BankState.status && q.status !== BankState.status) return false;
       if (BankState.domain) { if (BankState.domain === 'none') { if (q.domainId) return false; } else if (q.domainId !== BankState.domain) return false; }
+      if (BankState.caseStudy && q.caseStudyId !== BankState.caseStudy) return false;
       if (BankState.source && q.sourceId !== BankState.source) return false;
       if (BankState.batch && q.batchId !== BankState.batch) return false;
       if (BankState.verif && q.answerVerified !== BankState.verif) return false;
@@ -5892,7 +6303,7 @@ ROUTES.bank = async (root) => {
       if (L === 'due' && !(q.nextReviewAt && new Date(q.nextReviewAt) <= now)) return false;
       if (L === 'flagged' && !q.flagged) return false;
       if (term) {
-        const hay = (q.qid || '') + ' ' + q.stem + ' ' + q.options.map(o => o.text).join(' ') + ' ' + (q.topic || '') + ' ' + (q.aliasQids || []).join(' ');
+        const hay = (q.qid || '') + ' ' + q.stem + ' ' + q.options.map(o => o.text).join(' ') + ' ' + (q.topic || '') + ' ' + (q.aliasQids || []).join(' ') + ' ' + (caseTitle.get(q.caseStudyId) || '');
         if (hay.toLowerCase().indexOf(term) < 0) return false;
       }
       return true;
@@ -6097,6 +6508,7 @@ async function openQuestion(uuidStr) {
   const source = q.sourceId ? await DB.get('sources', q.sourceId) : null;
   const m = masteryOf(q, attempts);
 
+  const caseRec = q.caseStudyId ? await CaseStudies.get(q.caseStudyId) : null;
   const body = h('div', { class: 'stack' });
   const tabs = h('div', { class: 'btn-group', style: 'margin-bottom:12px' });
   const pane = h('div', { class: 'stack' });
@@ -6107,8 +6519,19 @@ async function openQuestion(uuidStr) {
     h('span', { class: 'docnum', text: q.qid || '(no id yet)' }), statusBadge(q),
     q.answerVerified === 'verified' ? h('span', { class: 'badge b-active', text: '✓ Answer verified' }) : h('span', { class: 'badge b-review', text: 'Answer ' + q.answerVerified }),
     q.conflict ? h('span', { class: 'badge b-conflict', text: 'Conflict' }) : null,
-    h('span', { class: 'badge b-draft', text: 'v' + q.version })
-  ]));
+    h('span', { class: 'badge b-draft', text: 'v' + q.version }),
+    q.caseStudyId ? h('span', { class: 'badge b-info', text: '❐ Case study' }) : null
+  ].filter(Boolean)));
+  if (q.caseStudyId) {
+    body.appendChild(h('div', { class: 'notice small', style: 'margin-top:8px' }, [
+      caseRec
+        ? h('span', {}, ['Question ', h('b', { text: String(q.caseSeq || '?') }), ' of the scenario ',
+            h('b', { text: caseRec.title || caseRec.csid || 'untitled' }),
+            ' (' + passageWords(caseRec.text) + ' words). It is only ever asked with that scenario in front of the candidate.'])
+        : h('span', { class: 'small' }, 'This is filed under a case study that is no longer in the bank. Until that is fixed it cannot be answered fairly — see the integrity check in Settings.'),
+      caseRec ? h('button', { class: 'btn sm', style: 'margin-left:8px', onclick: () => { const b = document.querySelector('.modal'); if (b && b._close) b._close(null); go('cases'); }, text: 'Open Case Studies' }) : null
+    ].filter(Boolean)));
+  }
   // Opening the record directly (rather than through the Answer Conflicts
   // queue) used to give no way to even see what the other side claims,
   // let alone resolve it — just a generic Save with no indication that
@@ -6683,16 +7106,21 @@ async function newQuestion(opts) {
 }
 
 async function exportBank(list) {
-  const rows = [['Question ID', 'Status', 'Stem', 'A', 'B', 'C', 'D', 'E', 'Correct answer', 'Explanation', 'Domain', 'Topic', 'Subtopic', 'Source module', 'Source', 'Source locator', 'Answer verification', 'Attempts', 'Accuracy', 'Mastery']];
+  // The case study columns go on the END so an existing importer, script or
+  // spreadsheet reading this file by position is not shifted by one.
+  const rows = [['Question ID', 'Status', 'Stem', 'A', 'B', 'C', 'D', 'E', 'Correct answer', 'Explanation', 'Domain', 'Topic', 'Subtopic', 'Source module', 'Source', 'Source locator', 'Answer verification', 'Attempts', 'Accuracy', 'Mastery', 'Case ref', 'Case title', 'Case question no.']];
   const sources = await DB.byIndex('sources', 'courseId', State.course.id);
   const srcName = (id) => { const s = sources.find(x => x.id === id); return s ? s.title : ''; };
+  const caseRecs = new Map((await CaseStudies.byCourse(State.course.id)).map(c => [c.id, c]));
   list.forEach(q => {
     const o = q.options.map(x => x.text);
+    const cs = q.caseStudyId ? caseRecs.get(q.caseStudyId) : null;
     const ci = q.options.findIndex(x => x.id === q.correctOptionId);
     rows.push([q.qid, (STATUS[q.status] || {}).label, q.stem, o[0] || '', o[1] || '', o[2] || '', o[3] || '', o[4] || '',
       ci >= 0 ? letterOf(ci) : '', q.explanation, q.domainId ? State.domainName(q.domainId) : 'Unmapped', q.topic, q.subtopic,
       q.srcModule, srcName(q.sourceId), q.locator, q.answerVerified, q.stats.attempts,
-      q.stats.attempts ? Math.round(q.stats.correct / q.stats.attempts * 100) + '%' : '', q.stats.mastery || 0]);
+      q.stats.attempts ? Math.round(q.stats.correct / q.stats.attempts * 100) + '%' : '', q.stats.mastery || 0,
+      cs ? (cs.csid || '') : '', cs ? (cs.title || '') : '', cs ? (q.caseSeq || '') : '']);
   });
   download(State.course.code + '-question-bank-' + todayKey() + '.csv', new Blob(['\uFEFF' + toCSV(rows)], { type: 'text/csv;charset=utf-8' }));
   toast('Exported ' + list.length + ' question(s) to CSV', 'ok');
@@ -6864,6 +7292,245 @@ ROUTES.notes = async (root) => {
 
 
 /* ============================================================================
+   Case Studies — the second question bank
+
+   A case-study question is only answerable next to its scenario, so it cannot
+   sit in the ordinary bank: drawn into Learning, Weak topics, Spaced
+   repetition or a game it arrives stripped of the only thing that makes it a
+   question. It is a separate register, reachable from exactly two places —
+   Case study practice, and a timed mock the candidate has asked for a
+   case-study section in — and invisible everywhere else.
+
+   The passages live in their own store; their questions live in `questions`
+   carrying caseStudyId, so every mechanism the ordinary bank already has
+   (versions, duplicate detection, attempt history, mastery, backup, sync)
+   applies to them without being written a second time.
+   ========================================================================== */
+
+const CaseState = { showArchived: false };
+
+ROUTES.cases = async (root) => {
+  const cases = await CaseStudies.byCourse(State.course.id);
+  const all = await State.questions();
+  const caseQs = all.filter(isCaseQuestion);
+  const readyByCase = new Map(), totalByCase = new Map();
+  caseQs.forEach(q => {
+    totalByCase.set(q.caseStudyId, (totalByCase.get(q.caseStudyId) || 0) + 1);
+    if (isPracticeEligible(q)) readyByCase.set(q.caseStudyId, (readyByCase.get(q.caseStudyId) || 0) + 1);
+  });
+
+  await band('Case Studies', 'Scenario-based questions, kept apart', [
+    { k: 'Case studies', v: String(cases.filter(c => !c.archived).length) },
+    { k: 'Questions', v: String(caseQs.length) },
+    { k: 'Practice-ready', v: String(caseQs.filter(isPracticeEligible).length), color: 'var(--green)' }
+  ], [
+    h('button', { class: 'btn primary', onclick: () => newCaseStudy(), text: 'New case study' })
+  ], {
+    title: 'Why these are a separate bank',
+    body: h('div', { class: 'stack' }, [
+      h('div', { class: 'small' }, 'A question written against a two-page scenario means nothing on its own. Mixed into the ordinary bank it would turn up in Learning, Weak topics, Spaced repetition and every game with none of its context — so it is kept out of all of them.'),
+      h('div', { class: 'eyebrow', style: 'margin-top:4px', text: 'Where they DO appear' }),
+      h('div', { class: 'small' }, 'Case study practice, which draws whole scenarios; and a timed mock, where you say how many case-study questions the paper should carry. Nothing else reaches them — not the other practice modes, and not the games.'),
+      h('div', { class: 'eyebrow', style: 'margin-top:4px', text: 'Whole scenarios only' }),
+      h('div', { class: 'small' }, 'You are never given three of a scenario’s five questions. Cases are drawn entire, so the number you ask for in a mock is a target: the paper lands on the nearest sum of whole case studies, and says which.')
+    ])
+  });
+
+  const live = cases.filter(c => !c.archived);
+  const archived = cases.filter(c => c.archived);
+
+  if (!live.length && !archived.length) {
+    root.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, [
+      h('h3', { text: 'No case studies yet' }),
+      h('p', { class: 'muted', text: 'A case study is a scenario — often a page or two — and the questions that only make sense against it. Write one here, or bring a batch in from the case-study template on the Add Questions screen.' }),
+      h('div', { class: 'row', style: 'justify-content:center;margin-top:10px;gap:8px' }, [
+        h('button', { class: 'btn', onclick: () => { State.importStep = 'add'; go('import'); }, text: 'Import case studies' }),
+        h('button', { class: 'btn primary', onclick: () => newCaseStudy(), text: 'Write one' })
+      ])
+    ])));
+    return;
+  }
+
+  const card = (c) => {
+    const total = totalByCase.get(c.id) || 0;
+    const ready = readyByCase.get(c.id) || 0;
+    const words = passageWords(c.text);
+    const box = h('div', { class: 'card', style: 'margin-bottom:14px' + (c.archived ? ';opacity:.62' : '') });
+    box.appendChild(h('div', { class: 'card-h' }, [
+      h('span', { class: 'docnum', text: c.csid || '(no id yet)' }),
+      h('h3', { style: 'font-size:15.5px', text: c.title || 'Untitled case study' }),
+      h('div', { class: 'spacer' }),
+      c.archived ? h('span', { class: 'badge b-arch', text: 'Archived' }) : null,
+      h('span', { class: 'badge ' + (ready === total && total ? 'b-active' : total ? 'b-review' : 'b-draft'), text: total ? ready + ' of ' + total + ' ready' : 'no questions yet' })
+    ].filter(Boolean)));
+    const b = h('div', { class: 'card-b stack' });
+    b.appendChild(h('div', { class: 'tiny dim', text: [
+      words ? words.toLocaleString() + ' words' : 'no scenario text yet',
+      c.domainId ? State.domainShort(c.domainId) : null,
+      c.topic || null,
+      'added ' + fmtDate(c.createdAt)
+    ].filter(Boolean).join('  ·  ') }));
+    if (!words) b.appendChild(h('div', { class: 'notice warn small' }, 'This scenario has no text. Its questions cannot be answered fairly until you add it, so none of them will be drawn.'));
+    else b.appendChild(h('p', { class: 'small muted', style: 'margin:0', text: c.text.slice(0, 260) + (c.text.length > 260 ? '…' : '') }));
+    b.appendChild(h('div', { class: 'row wrap', style: 'gap:8px;margin-top:4px' }, [
+      h('button', { class: 'btn sm primary', onclick: () => openCaseStudy(c.id), text: 'Open' }),
+      !c.archived && ready ? h('button', { class: 'btn sm', onclick: () => configureMode('casestudy'), text: 'Practise' }) : null,
+      !c.archived ? h('button', { class: 'btn sm ghost', onclick: () => archiveCaseStudy(c, true), text: 'Archive' }) : null,
+      c.archived ? h('button', { class: 'btn sm', onclick: () => archiveCaseStudy(c, false), text: 'Restore' }) : null,
+      c.archived && !total ? h('button', { class: 'btn sm danger', onclick: () => deleteEmptyCaseStudy(c), text: 'Delete' }) : null
+    ].filter(Boolean)));
+    box.appendChild(b);
+    return box;
+  };
+
+  live.forEach(c => root.appendChild(card(c)));
+
+  if (archived.length) {
+    root.appendChild(h('div', { class: 'row', style: 'margin:6px 0 12px' }, h('button', {
+      class: 'btn sm', onclick: () => { CaseState.showArchived = !CaseState.showArchived; go('cases'); },
+      text: (CaseState.showArchived ? 'Hide' : 'Show') + ' ' + archived.length + ' archived case stud' + (archived.length === 1 ? 'y' : 'ies')
+    })));
+    if (CaseState.showArchived) archived.forEach(c => root.appendChild(card(c)));
+  }
+};
+
+async function newCaseStudy() {
+  const cs = blankCaseStudy(State.course.id);
+  await openCaseStudy(cs, true);
+}
+
+/** Archiving takes the scenario AND its questions out of practice together —
+    half a case study in the pool is worse than none of it. Reversible, and it
+    keeps every Question ID, source and attempt, exactly as archiving one
+    question does. */
+async function archiveCaseStudy(cs, archive) {
+  const qs = await CaseStudies.questionsOf(cs.id);
+  const ok = await confirmBox(
+    archive ? 'Archive this case study?' : 'Restore this case study?',
+    archive
+      ? 'It and its ' + qs.length + ' question(s) leave the practice pool together. Question IDs, sources and attempt history are all kept, and this can be undone.'
+      : 'It and its ' + qs.length + ' question(s) come back. Each question returns to whatever state its own content earns — ready to practise, or waiting on an answer or a domain.');
+  if (!ok) return;
+  for (const q of qs) {
+    const prev = q.status;
+    q.status = archive ? 'archived' : deriveEntryStatus(q);
+    q.updatedAt = nowISO();
+    await DB.put('questions', q);
+    await audit(archive ? 'archive' : 'edit', 'question', q.qid || q.uuid, { status: prev }, { status: q.status }, 'case study ' + (archive ? 'archived' : 'restored'));
+  }
+  cs.archived = !!archive;
+  await CaseStudies.save(cs, archive ? 'archived' : 'restored');
+  State.invalidate();
+  toast(archive ? 'Archived with its ' + qs.length + ' question(s)' : 'Restored', 'ok');
+  go('cases');
+}
+
+async function deleteEmptyCaseStudy(cs) {
+  const qs = await CaseStudies.questionsOf(cs.id);
+  if (qs.length) { toast('This case study still has questions — archive it instead, or remove them first.', 'warn', 5000); return; }
+  const ok = await confirmBox('Delete ' + (cs.csid || 'this case study') + ' for good?',
+    'It has no questions, so nothing else goes with it. The case study ID is not reused.', true);
+  if (!ok) return;
+  await CaseStudies.remove(cs);
+  State.invalidate();
+  toast('Deleted');
+  go('cases');
+}
+
+/**
+ * The scenario itself, and the questions filed under it.
+ * Takes a record or an id; `isNew` means nothing is written unless Save is
+ * pressed, so a case study ID is never spent on an abandoned scenario.
+ */
+async function openCaseStudy(csOrId, isNew) {
+  const cs = typeof csOrId === 'string' ? await CaseStudies.get(csOrId) : csOrId;
+  if (!cs) { toast('That case study no longer exists', 'bad'); return; }
+  let questions = isNew ? [] : await CaseStudies.questionsOf(cs.id);
+
+  const edit = { title: cs.title, text: cs.text, domainId: cs.domainId, topic: cs.topic, tags: (cs.tags || []).join(', ') };
+  const body = h('div', { class: 'stack' });
+  const wordCount = h('span', { class: 'tiny dim' });
+  const qList = h('div', { class: 'stack' });
+
+  const text = autoGrow(h('textarea', {
+    style: 'min-height:260px;line-height:1.6', value: edit.text,
+    placeholder: 'Paste or type the scenario here. There is no length limit — a page or two is normal, and it is kept exactly as you write it, paragraph breaks and all.',
+    oninput: (e) => { edit.text = e.target.value; drawWords(); }
+  }), 260);
+  const drawWords = () => {
+    const w = passageWords(edit.text);
+    wordCount.textContent = w ? w.toLocaleString() + ' words · about ' + Math.max(1, Math.round(w / 230)) + ' min to read' : 'empty';
+  };
+  drawWords();
+
+  body.appendChild(h('div', { class: 'grid g3' }, [
+    h('div', { class: 'field' }, [h('label', { text: 'Title' }),
+      h('input', { type: 'text', value: edit.title, placeholder: 'e.g. Kaveri Textiles — ERP migration', oninput: e => edit.title = e.target.value })]),
+    h('div', { class: 'field' }, [h('label', { text: 'Domain' }),
+      h('select', { onchange: e => edit.domainId = e.target.value || null },
+        [h('option', { value: '' }, 'Unmapped')].concat(State.course.blueprint.map(d =>
+          h('option', { value: d.id, selected: edit.domainId === d.id }, d.id + ' · ' + d.name))))]),
+    h('div', { class: 'field' }, [h('label', { text: 'Topic' }),
+      h('input', { type: 'text', placeholder: 'Optional', value: edit.topic, oninput: e => edit.topic = e.target.value })])
+  ]));
+  body.appendChild(h('div', { class: 'field' }, [
+    h('div', { class: 'row' }, [h('label', { text: 'The scenario', style: 'flex:1' }), wordCount]), text
+  ]));
+
+  function drawQuestions() {
+    qList.textContent = '';
+    if (isNew) {
+      qList.appendChild(h('div', { class: 'notice small' }, 'Save the scenario first — then you can add its questions.'));
+      return;
+    }
+    if (!questions.length) {
+      qList.appendChild(h('div', { class: 'notice warn small' }, 'No questions yet. A scenario with no questions can never be practised.'));
+    }
+    questions.forEach((q, i) => {
+      qList.appendChild(h('div', { class: 'row wrap', style: 'gap:10px;padding:8px 0;border-top:1px solid var(--rule)' }, [
+        h('span', { class: 'docnum', text: String(i + 1) }),
+        h('span', { class: 'tick', dataset: { mark: markFor(q) }, style: 'border:0;width:auto', text: (STATUS[q.status] || {}).mark }),
+        h('div', { style: 'flex:1;min-width:200px' }, [
+          h('div', { class: 'small', text: (q.stem || '(no question text)').slice(0, 150) }),
+          h('div', { class: 'tiny dim', text: (q.qid || '') + ' · ' + (STATUS[q.status] || {}).label })
+        ]),
+        h('button', { class: 'btn sm', onclick: () => openQuestion(q.uuid), text: 'Edit' })
+      ]));
+    });
+    qList.appendChild(h('div', { class: 'row', style: 'margin-top:10px' }, h('button', {
+      class: 'btn sm primary', disabled: isNew,
+      onclick: async () => {
+        const n = await questionComposer({
+          caseStudy: cs,
+          nextSeq: questions.length ? Math.max.apply(null, questions.map(x => x.caseSeq || 0)) + 1 : 1,
+          defaults: { domainId: edit.domainId, topic: edit.topic }
+        });
+        if (n) { questions = await CaseStudies.questionsOf(cs.id); drawQuestions(); }
+      }, text: '+ Add a question to this scenario'
+    })));
+  }
+  drawQuestions();
+  body.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Its questions' }), qList]));
+
+  const res = await modal({
+    title: isNew ? 'New case study' : 'Case study ' + (cs.csid || ''), body, wide: true, sticky: true,
+    actions: [{ label: 'Close', value: null }, { label: isNew ? 'Create' : 'Save changes', value: 'save', kind: 'primary' }]
+  });
+  if (res !== 'save') { if (!isNew) go('cases'); return; }
+  if (!edit.title.trim() && !edit.text.trim()) { toast('Give it a title or a scenario before saving', 'bad'); return; }
+  cs.title = edit.title.trim();
+  cs.text = edit.text;
+  cs.domainId = edit.domainId || null;
+  cs.topic = edit.topic.trim();
+  cs.tags = edit.tags.split(',').map(x => x.trim()).filter(Boolean);
+  await CaseStudies.save(cs, isNew ? 'created by hand' : 'edited');
+  State.invalidate();
+  toast(isNew ? cs.csid + ' created — now add its questions' : 'Saved', 'ok');
+  go('cases');
+  if (isNew) setTimeout(() => openCaseStudy(cs.id), 60);
+}
+
+/* ============================================================================
    11 · Add Questions — intake, preview, reconciliation, admission
    Nothing reaches the practice pool without passing through this screen.
    ========================================================================== */
@@ -6871,7 +7538,9 @@ ROUTES.notes = async (root) => {
 /** What "Start from a template" offers. The case study bank appends to this. */
 const IMPORT_TEMPLATES = [
   { id: 'csv', ico: '▦', label: 'Question spreadsheet (.csv)', desc: 'One question per row, with its options in their own columns. Opens in Excel, Numbers or Sheets.', run: () => downloadQuestionTemplateCSV() },
-  { id: 'json', ico: '{ }', label: 'Question file (.json)', desc: 'The same fields as structured data, for anything generating questions programmatically.', run: () => downloadQuestionTemplateJSON() }
+  { id: 'json', ico: '{ }', label: 'Question file (.json)', desc: 'The same fields as structured data, for anything generating questions programmatically.', run: () => downloadQuestionTemplateJSON() },
+  { id: 'case-csv', ico: '❐', label: 'Case study spreadsheet (.csv)', desc: 'Rows sharing a case reference become one scenario. Paste the passage into one cell; you need not repeat it down every row.', run: () => downloadCaseTemplateCSV() },
+  { id: 'case-json', ico: '❐', label: 'Case study file (.json)', desc: 'Each scenario carries its own questions, so the link between them cannot be lost. The sturdier of the two for long passages.', run: () => downloadCaseTemplateJSON() }
 ];
 
 const IMPORT_STEPS = [
@@ -7331,7 +8000,9 @@ async function columnMapDialog(rows, autoMap, filename) {
 async function runParse(files, meta) {
   const batchId = uuid();
   const batch = { id: batchId, courseId: State.course.id, startedAt: nowISO(), label: meta.title, sourceIds: [], report: null };
-  const staging = { batch, meta, items: [], unresolved: [], sources: [], rejected: [] };
+  // Scenarios are keyed by file as well as by reference: two spreadsheets in
+  // one batch can each call their first case "1" without meaning the same one.
+  const staging = { batch, meta, items: [], unresolved: [], sources: [], rejected: [], caseStudies: [] };
 
   for (const f of files) {
     const existing = (await DB.byIndex('sources', 'fileHash', f.fileHash)).filter(s => s.courseId === State.course.id)[0];
@@ -7373,8 +8044,17 @@ async function runParse(files, meta) {
       filename: f.filename, batchId, srcModule: meta.srcModule, srcChapter: meta.srcChapter,
       defaultDomainId: meta.defaultDomainId, trustSourceAnswers: meta.trustSourceAnswers
     };
+    (out.caseStudies || []).forEach(cs => {
+      staging.caseStudies.push({
+        key: f.filename + '\u0000' + cs.ref, ref: cs.ref, file: f.filename,
+        title: cs.title || cs.ref, text: cs.text || '',
+        domainId: resolveDomain(State.course, cs.domainRaw) || meta.defaultDomainId || null,
+        topic: cs.topic || ''
+      });
+    });
     out.candidates.forEach(c => {
       const q = candidateToQuestion(c, ctx);
+      if (q.caseRef) q.caseRef = f.filename + '\u0000' + q.caseRef;
       staging.items.push({ q, cand: c, keep: true, dup: null, decision: 'import' });
     });
     out.unresolved.forEach(u => staging.unresolved.push({ file: f.filename, line: u.line, text: u.text }));
@@ -7481,6 +8161,45 @@ function renderStaging(root) {
   };
   drawSummary();
   root.appendChild(summary);
+
+  if (st.caseStudies && st.caseStudies.length) {
+    const card = h('div', { class: 'card', style: 'margin-bottom:14px' }, [
+      h('div', { class: 'card-h' }, [
+        h('span', { class: 'method-ico', text: '❐' }),
+        h('h3', { text: 'Case studies in this batch' }),
+        h('span', { class: 'badge b-review', text: String(st.caseStudies.length) })
+      ])
+    ]);
+    const cb = h('div', { class: 'card-b stack' });
+    cb.appendChild(h('p', { class: 'small muted', style: 'margin:0' },
+      'These go into the case study bank, not the ordinary one — their questions are only ever asked with the scenario in front of the candidate. Check each scenario reads properly before admitting; this is the last point at which nothing has been written.'));
+    st.caseStudies.forEach(cs => {
+      const mine = () => st.items.filter(it => it.q.caseRef === cs.key);
+      const kept = () => mine().filter(it => it.decision !== 'reject' && it.decision !== 'merge').length;
+      const wordLabel = h('span', { class: 'tiny dim' });
+      const ta = autoGrow(h('textarea', {
+        style: 'min-height:120px', value: cs.text,
+        placeholder: 'No scenario text was found in the file. Paste it here — without it these questions cannot be answered fairly.',
+        oninput: (e) => { cs.text = e.target.value; drawWords(); }
+      }), 120);
+      const drawWords = () => {
+        const w = passageWords(cs.text);
+        wordLabel.textContent = (w ? w.toLocaleString() + ' words' : 'no scenario text') + ' · ' + kept() + ' of ' + mine().length + ' question(s) kept';
+      };
+      drawWords();
+      cb.appendChild(h('div', { class: 'stack', style: 'gap:6px;padding-top:10px;border-top:1px solid var(--rule)' }, [
+        h('div', { class: 'row wrap', style: 'gap:8px' }, [
+          h('span', { class: 'docnum', text: cs.ref }),
+          h('input', { type: 'text', value: cs.title, placeholder: 'Title for this scenario', style: 'flex:1;min-width:200px', oninput: e => cs.title = e.target.value }),
+          wordLabel
+        ]),
+        ta,
+        passageWords(cs.text) ? null : h('div', { class: 'notice warn small' }, 'This scenario has no text, so none of its questions will be drawn until you add it.')
+      ].filter(Boolean)));
+    });
+    card.appendChild(cb);
+    root.appendChild(card);
+  }
 
   if (st.duplicateFileWarning) root.appendChild(h('div', { class: 'notice warn', style: 'margin-bottom:12px' }, 'One of these files has the same hash as a source already in the register. It has been reused rather than duplicated, and its questions will be matched against what is already in the bank.'));
 
@@ -7642,6 +8361,7 @@ function renderStaging(root) {
       statusBadge(q),
       h('span', { class: 'badge ' + (it.decision === 'reject' ? 'b-arch' : it.decision === 'import' ? 'b-active' : 'b-review'), text: STAGING_DECISION_LABELS[it.decision] || it.decision }),
       it.dup ? h('span', { class: 'badge ' + (it.dup.conflict ? 'b-conflict' : 'b-dup'), text: (it.dup.conflict ? 'answer conflict · ' : '') + it.dup.cls + ' duplicate · ' + Math.round(it.dup.sim.score * 100) + '%' }) : null,
+      q.caseRef ? h('span', { class: 'badge b-info', title: 'Goes into the case study bank', text: '❐ ' + ((st.caseStudies.find(c => c.key === q.caseRef) || {}).title || q.caseRef.split('\u0000').pop()) + ' · Q' + (q.caseSeq || '?') }) : null,
       h('div', { class: 'spacer' }),
       h('span', { class: 'tiny dim', text: 'stem' }), conf(q.parseConf && q.parseConf.stem),
       h('span', { class: 'tiny dim', text: 'options' }), conf(q.parseConf && q.parseConf.options),
@@ -7745,6 +8465,36 @@ function renderStaging(root) {
 async function admitBatch() {
   const st = State.staging;
   for (const s of st.sources) await DB.put('sources', s);
+
+  /* Scenarios are written before their questions, so a case-study question is
+     never in the bank pointing at a case study that does not exist yet. Only
+     scenarios that actually keep a question are written — a batch whose every
+     case-study candidate was rejected leaves nothing behind. */
+  const caseIdByKey = new Map();
+  const keptCaseKeys = new Set();
+  st.items.forEach(it => {
+    if (it.decision !== 'reject' && it.decision !== 'merge' && it.q.caseRef) keptCaseKeys.add(it.q.caseRef);
+  });
+  for (const cs of (st.caseStudies || [])) {
+    if (!keptCaseKeys.has(cs.key)) continue;
+    const rec = blankCaseStudy(st.batch.courseId);
+    rec.ref = cs.ref;
+    rec.title = cs.title || cs.ref;
+    rec.text = cs.text || '';
+    rec.domainId = cs.domainId || null;
+    rec.topic = cs.topic || '';
+    rec.sourceId = (st.sources[0] || {}).id || null;
+    rec.batchId = st.batch.id;
+    rec.importedAt = nowISO();
+    await CaseStudies.save(rec, 'batch ' + st.batch.id.slice(0, 8));
+    caseIdByKey.set(cs.key, rec.id);
+  }
+  st.items.forEach(it => {
+    if (!it.q.caseRef) { delete it.q.caseRef; return; }
+    it.q.caseStudyId = caseIdByKey.get(it.q.caseRef) || null;
+    delete it.q.caseRef;
+  });
+
   const toAdmit = [], toMerge = [], rejected = [], needsRecheck = [];
   st.items.forEach(it => {
     if (it.decision === 'reject') { rejected.push(it); return; }
@@ -8026,6 +8776,64 @@ function downloadQuestionTemplateJSON() {
     }]
   }, null, 2);
   download('question-import-template.json', new Blob([json], { type: 'application/json' }));
+  toast('Template downloaded', 'ok');
+}
+
+function downloadCaseTemplateCSV() {
+  const passage = 'Kaveri Textiles Ltd is a mid-sized garment manufacturer with three plants and a central warehouse. Over the last eighteen months it has replaced a set of standalone accounting, payroll and inventory systems with a single ERP, cut over plant by plant. The final plant went live six weeks ago.\n\nDuring the cutover the project team was granted temporary access to production so that data migration errors could be corrected quickly. That access has not been withdrawn. Two developers still hold accounts that can post journal entries and adjust inventory quantities, and the emergency change procedure written for the cutover — a verbal approval from the project manager, documented afterwards — is still the one being followed for defect fixes.\n\nThe internal audit team has been asked to review the post-implementation position before the financial year closes. Its first pass finds that reconciliations between the ERP inventory ledger and the physical stock counts at two plants have not been completed since go-live, that the ERP’s own audit log is enabled but has never been reviewed, and that the disaster recovery plan still names the retired systems. Management’s response is that the plants are running, orders are shipping, and the team is stretched.';
+  const rows = [
+    ['Case ref', 'Case title', 'Case text', 'Question', 'A', 'B', 'C', 'D', 'Answer', 'Explanation', 'Domain', 'Difficulty'],
+    ['CS-1', 'Kaveri Textiles — ERP post-implementation', passage,
+      'Which finding should the IS auditor report as the MOST significant?',
+      'The disaster recovery plan still names the retired systems',
+      'Developers retain production access granted for the cutover',
+      'The ERP audit log has never been reviewed',
+      'Inventory reconciliations are outstanding at two plants',
+      'B', 'Standing developer access to production is the finding that makes every other control unreliable, because it permits unrecorded change.', 'D5', 'medium'],
+    ['CS-1', '', '',
+      'The emergency change procedure used during cutover is still in force. What should the auditor recommend FIRST?',
+      'Withdraw the procedure and apply the standard change process',
+      'Document the verbal approvals retrospectively',
+      'Ask management to accept the risk formally',
+      'Test a sample of emergency changes',
+      'A', 'The cutover justification has expired, so the compensating procedure should end with it.', 'D3', 'medium'],
+    ['CS-1', '', '',
+      'Management responds that the plants are running and the team is stretched. What is the auditor’s correct course?',
+      'Close the findings as accepted by management',
+      'Escalate directly to the external auditor',
+      'Report the findings with the risk stated, and let those accountable decide',
+      'Defer the review until after the year end',
+      'C', 'The auditor reports and states risk; accepting it is a management decision, recorded as such.', 'D1', 'hard']
+  ];
+  download('case-study-import-template.csv', new Blob(['﻿' + toCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+  toast('Template downloaded', 'ok');
+}
+
+function downloadCaseTemplateJSON() {
+  const json = JSON.stringify({
+    schema: 'mcq-mastery-import/1',
+    caseStudies: [{
+      ref: 'CS-1',
+      title: 'Kaveri Textiles — ERP post-implementation',
+      text: 'Kaveri Textiles Ltd is a mid-sized garment manufacturer with three plants and a central warehouse. Over the last eighteen months it has replaced a set of standalone accounting, payroll and inventory systems with a single ERP, cut over plant by plant. The final plant went live six weeks ago.\n\nDuring the cutover the project team was granted temporary access to production so that data migration errors could be corrected quickly. That access has not been withdrawn. Two developers still hold accounts that can post journal entries and adjust inventory quantities, and the emergency change procedure written for the cutover — a verbal approval from the project manager, documented afterwards — is still the one being followed for defect fixes.\n\nThe internal audit team has been asked to review the post-implementation position before the financial year closes. Its first pass finds that reconciliations between the ERP inventory ledger and the physical stock counts at two plants have not been completed since go-live, that the ERP’s own audit log is enabled but has never been reviewed, and that the disaster recovery plan still names the retired systems. Management’s response is that the plants are running, orders are shipping, and the team is stretched.',
+      domain: 'D5',
+      questions: [
+        {
+          stem: 'Which finding should the IS auditor report as the MOST significant?',
+          options: ['The disaster recovery plan still names the retired systems', 'Developers retain production access granted for the cutover', 'The ERP audit log has never been reviewed', 'Inventory reconciliations are outstanding at two plants'],
+          answer: 'B', domain: 'D5', difficulty: 'medium',
+          explanation: 'Standing developer access to production is the finding that makes every other control unreliable, because it permits unrecorded change.'
+        },
+        {
+          stem: 'The emergency change procedure used during cutover is still in force. What should the auditor recommend FIRST?',
+          options: ['Withdraw the procedure and apply the standard change process', 'Document the verbal approvals retrospectively', 'Ask management to accept the risk formally', 'Test a sample of emergency changes'],
+          answer: 'A', domain: 'D3', difficulty: 'medium',
+          explanation: 'The cutover justification has expired, so the compensating procedure should end with it.'
+        }
+      ]
+    }]
+  }, null, 2);
+  download('case-study-import-template.json', new Blob([json], { type: 'application/json' }));
   toast('Template downloaded', 'ok');
 }
 
@@ -8899,28 +9707,45 @@ async function reviewDuplicate(q) {
    13 · Analytics — drill-down that keeps coverage and accuracy distinct
    ========================================================================== */
 
-const AnaState = { by: 'domain', days: 0 };
+// `bank` defaults to 'all', so these numbers open exactly as they always
+// have; reading the two banks apart is a deliberate switch.
+const AnaState = { by: 'domain', days: 0, bank: 'all' };
 
 ROUTES.analytics = async (root) => {
-  const all = await State.questions();
+  const everything = await State.questions();
+  const caseTotal = everything.filter(isCaseQuestion).length;
+  // Case-study attempts are real attempts and belong in these numbers. But a
+  // scenario question and a standalone one measure slightly different things,
+  // so they can also be read apart without leaving the screen.
+  const inBank = (q) => AnaState.bank === 'all' || (AnaState.bank === 'case') === isCaseQuestion(q);
+  const all = everything.filter(inBank);
   const active = all.filter(isPracticeEligible);
+  const byUuid = new Map(everything.map(q => [q.uuid, q]));
   let attempts = await DB.byIndex('attempts', 'courseId', State.course.id);
   if (AnaState.days) { const cut = Date.now() - AnaState.days * 86400000; attempts = attempts.filter(a => new Date(a.ts).getTime() >= cut); }
+  if (AnaState.bank !== 'all') {
+    // An attempt whose question has since been deleted cannot be placed in
+    // either bank, so it is left out of a bank-specific view rather than
+    // silently counted in the wrong one.
+    attempts = attempts.filter(a => { const q = byUuid.get(a.questionUuid); return q && inBank(q); });
+  }
   const sources = await DB.byIndex('sources', 'courseId', State.course.id);
-  const byUuid = new Map(all.map(q => [q.uuid, q]));
 
   await band('Analytics', 'Where the evidence points', [
     { k: 'Attempts', v: String(attempts.length) },
     { k: 'Questions seen', v: String(new Set(attempts.map(a => a.questionUuid)).size) }
   ], [
+    caseTotal ? h('select', {
+      onchange: e => { AnaState.bank = e.target.value; go('analytics'); }
+    }, [['all', 'Both banks'], ['standalone', 'Standalone only'], ['case', 'Case study only']].map(([v, l]) => h('option', { value: v, selected: AnaState.bank === v }, l))) : null,
     h('select', {
       onchange: e => { AnaState.days = +e.target.value; go('analytics'); }
     }, [[0, 'All time'], [7, 'Last 7 days'], [30, 'Last 30 days'], [90, 'Last 90 days']].map(([v, l]) => h('option', { value: v, selected: AnaState.days === v }, l)))
-  ]);
+  ].filter(Boolean));
 
   if (!attempts.length) {
     root.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, [
-      h('h3', { text: 'No attempts in this period' }),
+      h('h3', { text: AnaState.bank === 'case' ? 'No case-study attempts in this period' : AnaState.bank === 'standalone' ? 'No standalone attempts in this period' : 'No attempts in this period' }),
       h('p', { class: 'muted', text: 'Analytics fill in as you practise. Start a session and come back.' }),
       h('div', { class: 'row', style: 'justify-content:center;margin-top:10px' }, [h('button', { class: 'btn primary', onclick: () => go('practice'), text: 'Start practice' })])
     ])));
