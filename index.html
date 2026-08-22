@@ -1248,6 +1248,8 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 .opt:disabled{cursor:default}
 /* A control that is off because the bank cannot feed it yet, rather than off
    because you turned it off. */
+.card.clickable.asleep{opacity:.55}
+.card.clickable.asleep h3{color:var(--txt-2)}
 .check.locked{opacity:.6;cursor:default}
 .check.locked input{cursor:default}
 .opt .lt{
@@ -4242,6 +4244,35 @@ function featureLock(key, pool) {
   }
   return null;
 }
+/* Half the practice modes can do nothing on somebody's first day: there is no
+   review due, nothing has been got wrong, no topic has enough evidence to be
+   called weak. They were shown at full strength beside the three that work,
+   three of them wearing a "0 ready" badge that reads as failure rather than as
+   "not yet". This says which are asleep and what wakes them.               */
+/* Two kinds of asleep, and the difference matters. `hard` means the mode has
+   literally nothing to draw — starting it can only produce an error, so the
+   card does not open. Anything else works exactly as it always did and is
+   merely not telling you much yet; those stay clickable, because dimming a
+   thing is a warning and disabling it is a removal, and nothing here should
+   remove a mode somebody could already run.                                */
+function modeLock(mode, ctx) {
+  const hard = (text) => ({ text, hard: true });
+  const soft = (text) => ({ text, hard: false });
+  if (mode === 'spaced' && !ctx.due)
+    return hard('Nothing is due yet. Every answer you give schedules its question to come back, so this fills up on its own.');
+  if (mode === 'redo' && !ctx.redo)
+    return hard('Nothing missed, guessed or flagged yet. This is where those collect.');
+  if (mode === 'lastmile' && !ctx.lastmile)
+    return hard('Nothing to repair yet. Questions arrive here once you get one wrong, flag it, or leave it below your mastery target.');
+  // These two still draw a perfectly good paper. They just cannot yet do the
+  // clever part, so they are dimmed rather than closed.
+  if (mode === 'domain' && ctx.domainsLocked)
+    return soft('Nothing is filed under a domain yet, so this draws from everything. File them and it can focus.');
+  if (mode === 'weak' && !ctx.weakReady)
+    return soft('Not enough evidence to call a topic weak yet — attempt ' + ctx.minSample + ' in one topic. It runs meanwhile, unprioritised.');
+  return null;
+}
+
 /** A switch that is off because it has nothing to run on, saying so. */
 function lockedToggle(label, lock) {
   return h('label', { class: 'check locked' }, [
@@ -4746,7 +4777,7 @@ const MODES = {
   redo:     { label: 'Incorrect & guessed', reveal: true, confidence: true, desc: 'Everything you missed, guessed or flagged.' },
   // Its sibling, for the last week rather than the long middle: the same
   // material, but worst-first and capped instead of shuffled and complete.
-  lastmile: { label: 'Last-mile revision', reveal: true, confidence: true, desc: 'The shortlist for the final days — wrong and not since fixed, flagged, or never mastered, hardest first. Never anything you have not already attempted.' },
+  lastmile: { label: 'Last-mile revision', reveal: true, confidence: true, desc: 'The shortlist for the final days, hardest first.' },
   mixed:    { label: 'Mixed revision', reveal: true, confidence: true, desc: 'Across the whole bank, optionally exam-weighted.' },
   mock:     { label: 'Timed mock exam', reveal: false, confidence: false, desc: 'Full length, timed, no confidence asked, nothing revealed until you submit.' },
   spaced:   { label: 'Spaced repetition', reveal: true, confidence: true, desc: 'Whatever has fallen due today, from every mode you have practised.' },
@@ -6097,6 +6128,17 @@ ROUTES.practice = async (root, preselect) => {
     return;
   }
 
+  // Worked out once for the whole grid rather than per card.
+  const lockCtx = {
+    due: due.length,
+    redo: applyFilters(pool, { incorrect: true }).length + applyFilters(pool, { guessed: true }).length,
+    lastmile: lastMilePick(pool, 0, Settings.get('masteryTarget')).available,
+    domainsLocked: !!featureLock('domains', pool),
+    minSample: Settings.get('weakMinSample'),
+    weakReady: groupStats(pool, q => q.topic || State.domainName(q.domainId))
+      .some(g => g.attempted >= Settings.get('weakMinSample'))
+  };
+
   const grid = h('div', { class: 'grid g3 stretch' });
   Object.keys(MODES).forEach(m => {
     const info = MODES[m];
@@ -6109,15 +6151,24 @@ ROUTES.practice = async (root, preselect) => {
     if (m === 'redo') count = applyFilters(pool, { incorrect: true }).length + applyFilters(pool, { guessed: true }).length;
     if (m === 'lastmile') count = lastMilePick(pool, 0, Settings.get('masteryTarget')).available;
     if (info.caseBank) count = casePool.length;
+    const lock = modeLock(m, lockCtx);
+    const asleep = !!lock;
     grid.appendChild(h('button', {
-      class: 'card clickable', style: 'text-align:left;border:1px solid var(--rule);padding:0' + (resumable ? ';opacity:.5' : ''),
-      disabled: !!resumable,
-      title: resumable ? 'Resume or discard your unfinished session first' : '',
+      class: 'card clickable' + (asleep ? ' asleep' : ''),
+      style: 'text-align:left;border:1px solid var(--rule);padding:0' + (resumable ? ';opacity:.5' : ''),
+      // Only a mode with nothing at all to draw is closed. The rest still open.
+      disabled: !!resumable || (asleep && lock.hard),
+      title: resumable ? 'Resume or discard your unfinished session first' : (lock ? lock.text : ''),
       onclick: () => configureMode(m)
     }, [
       h('div', { class: 'card-b' }, [
-        h('div', { class: 'row' }, [h('h3', { style: 'font-size:15.5px', text: info.label }), h('div', { class: 'spacer' }), count != null ? h('span', { class: 'badge ' + (count ? 'b-review' : 'b-draft'), text: count + ' ready' }) : null]),
-        h('p', { class: 'card-desc', style: 'margin:6px 0 0', text: info.desc })
+        h('div', { class: 'row' }, [h('h3', { style: 'font-size:15.5px', text: info.label }), h('div', { class: 'spacer' }),
+          // No "0 ready" badge on a sleeping card: the sentence below says it
+          // better, and a zero in a badge reads as something having gone wrong.
+          (!asleep && count != null) ? h('span', { class: 'badge b-review', text: count + ' ready' }) : null]),
+        // One sentence, not two: a card you cannot use should be the shortest
+        // thing on the screen, not the longest.
+        h('p', { class: 'card-desc', style: 'margin:6px 0 0', text: asleep ? lock.text : info.desc })
       ])
     ]));
   });
@@ -6305,17 +6356,32 @@ async function configureMode(mode) {
   const allCaseQs = all.filter(isCaseQuestion);
   const body = h('div', { class: 'stack' });
   const f = { domains: [], topics: [], sources: [], modules: [], difficulty: [], batches: [], caseStudies: [] };
+
+  /* A mock opens at the length you said your real paper is — unless the bank
+     cannot fill that yet, in which case it opens at what the bank has and
+     scales the clock to match. Nobody's first mock should open already warning
+     that it cannot be built; that is the app telling somebody their bank is
+     wrong when it is merely new. The stored setting is untouched: that is what
+     you intend the real paper to be, this is only where the field starts. */
+  const mockOpening = (() => {
+    const want = Math.max(1, Settings.get('mockCount') || 1);
+    const mins = Math.max(5, Settings.get('mockMinutes') || 60);
+    const have = pool.length + casePool.length;
+    if (!have || have >= want) return { count: want, minutes: mins, clamped: false };
+    return { count: have, minutes: Math.max(5, Math.round(mins * have / want)), clamped: true, want };
+  })();
   const cfg = {
     filters: f,
     // A last-mile session defaults to forty rather than twenty: it is the one
     // people sit as a single long sweep of everything still broken, and it is
     // capped by what actually qualifies so the field never opens on a number
     // the bank cannot fill.
-    count: mode === 'mock' ? Settings.get('mockCount')
+    count: mode === 'mock' ? mockOpening.count
       : isCaseMode ? Math.min(10, pool.length)
         : mode === 'lastmile' ? Math.max(1, Math.min(40, lastMilePick(pool, 0, Settings.get('masteryTarget')).available))
           : 20,
-    weighted: mode === 'mixed' || mode === 'mock', minutes: Settings.get('mockMinutes'),
+    weighted: mode === 'mixed' || mode === 'mock',
+    minutes: mode === 'mock' ? mockOpening.minutes : Settings.get('mockMinutes'),
     caseCount: mode === 'mock' ? clamp(Settings.get('mockCaseCount') || 0, 0, casePool.length) : 0,
     caseFilters: { caseStudies: [] }
   };
@@ -6367,6 +6433,24 @@ async function configureMode(mode) {
     return h('div', { class: 'field' }, [h('label', { text: label }), box]);
   };
 
+  /* How many and how long come FIRST. They are the only two decisions every
+     paper needs; the filters below are refinements, and putting them above the
+     question count made an optional thing look like the first step. */
+  const countInput = h('input', { type: 'number', min: '1', max: '250', value: String(cfg.count), onchange: (e) => { cfg.count = clamp(parseInt(e.target.value, 10) || 1, 1, 250); recount(); } });
+  const row = h('div', { class: 'grid g2' }, [h('div', { class: 'field' }, [h('label', { text: 'Number of questions' }), countInput])]);
+  if (mode === 'mock') {
+    row.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Time limit (minutes)' }), h('input', {
+      type: 'number', min: '5', max: '600', value: String(cfg.minutes),
+      onchange: (e) => { cfg.minutes = clamp(parseInt(e.target.value, 10) || 60, 5, 600); if (drawCaseNoteRef) drawCaseNoteRef(); }
+    })]));
+  }
+  body.appendChild(row);
+  if (mockOpening.clamped && mode === 'mock') {
+    body.appendChild(h('div', { class: 'tiny dim', style: 'margin-top:-4px' },
+      'Your usual mock is ' + mockOpening.want + ' questions over ' + Settings.get('mockMinutes') +
+      ' minutes. Your bank has ' + mockOpening.count + ' ready, so this opens there — change either freely.'));
+  }
+
   if (mode !== 'spaced' && !isCaseMode) {
     body.appendChild(chipRow('Domains — leave empty for all', State.course.blueprint.map(d => ({ v: d.id, label: d.id + ' · ' + d.name.split(' ').slice(0, 4).join(' ') })).concat([{ v: null, label: 'Unmapped' }]), f.domains));
   }
@@ -6412,15 +6496,6 @@ async function configureMode(mode) {
   }
   if (mode === 'redo') { f.incorrect = false; }
 
-  const countInput = h('input', { type: 'number', min: '1', max: '250', value: String(cfg.count), onchange: (e) => { cfg.count = clamp(parseInt(e.target.value, 10) || 1, 1, 250); recount(); } });
-  const row = h('div', { class: 'grid g2' }, [h('div', { class: 'field' }, [h('label', { text: 'Number of questions' }), countInput])]);
-  if (mode === 'mock') {
-    row.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Time limit (minutes)' }), h('input', {
-      type: 'number', min: '5', max: '600', value: String(cfg.minutes),
-      onchange: (e) => { cfg.minutes = clamp(parseInt(e.target.value, 10) || 60, 5, 600); if (drawCaseNoteRef) drawCaseNoteRef(); }
-    })]));
-  }
-  body.appendChild(row);
 
   /* What the shortlist is actually made of, before you sit it — so the number
      in the box above is a decision rather than a guess. */
@@ -7458,6 +7533,23 @@ function askMistake() {
 function marksLabel(n) {
   const v = Math.round(Number(n) * 100) / 100;
   return fmtMarks(v) + ' mark' + (Math.abs(v) === 1 ? '' : 's');
+}
+
+/** The marking scheme in one line, for the fold on the Settings card. */
+function markingSummary(courseId) {
+  const perQ = Number(Settings.get('marksPerQuestion', courseId)) || 1;
+  const perC = Number(Settings.get('marksPerCaseQuestion', courseId)) || 1;
+  const pass = Settings.get('passPct', courseId) || 60;
+  const neg = Number(Settings.get('negativeFraction', courseId)) || 0;
+  const scaled = Settings.get('scaledScore', courseId);
+  const parts = [marksLabel(perQ) + ' a question'];
+  if (perC !== perQ) parts.push(marksLabel(perC) + ' a case-study question');
+  parts.push('pass at ' + pass + '%');
+  parts.push(neg ? Math.round(neg * 100) + '% off for a wrong answer' : 'no negative marking');
+  if (scaled && scaled.min != null && scaled.max != null && scaled.pass != null) {
+    parts.push('reported ' + scaled.min + '–' + scaled.max + ', ' + scaled.pass + ' to pass');
+  }
+  return parts.join(' · ');
 }
 
 /** Marks read as marks: 12 rather than 12.00, but 12.5 rather than 13. */
@@ -9440,10 +9532,10 @@ ROUTES.import = async (root) => {
     ]));
   }
 
-  const steps = h('div', { class: 'steps' });
-  IMPORT_STEPS.forEach(([k, label], i) => steps.appendChild(h('div', { class: 'step', dataset: { on: i === 0 ? '1' : '0' } }, [h('b', { text: 'Step ' + (i + 1) }), h('span', { text: label })])));
-  root.appendChild(steps);
-
+  // No six-step map before a file has been chosen. Announcing six steps of
+  // work to somebody who has not started any of them makes dropping one file
+  // look like a commitment; the same stepper appears at Extract & preview,
+  // which is the first point it actually orients anybody.
   const drop = h('div', { class: 'drop', tabindex: '0', role: 'button' }, [
     h('div', { style: 'font-size:26px;line-height:1;margin-bottom:8px', text: '↧' }),
     h('h3', { text: 'Drop files here, or click to choose' }),
@@ -13043,7 +13135,16 @@ ROUTES.settings = async (root) => {
   grid.appendChild(h('div', { class: 'card' }, [
     h('div', { class: 'card-h' }, [h('h3', { text: 'How this exam is marked' }), h('div', { class: 'spacer' }),
       h('span', { class: 'badge b-active', text: State.course.code + ' only' })]),
-    h('div', { class: 'card-b stack' }, [
+    h('div', { class: 'card-b' }, [
+      // Seven fields whose own introduction says "leave all of this alone"
+      // should not be the second thing on the Settings page. Folded, with the
+      // scheme currently in force written on the fold, so the one thing most
+      // people want from this card — what am I actually being marked out of —
+      // is readable without opening it.
+      h('div', { class: 'small muted', style: 'margin-bottom:8px' }, markingSummary()),
+      h('details', {}, [
+      h('summary', { class: 'small', style: 'cursor:pointer;margin-bottom:10px', text: 'Change how this exam is marked' }),
+      h('div', { class: 'stack' }, [
       scopeNote('Leave all of this alone and every question is worth one mark, nothing is deducted, and your results read exactly as they always have. Set it to match your real paper and every mock tells you whether you would have passed.'),
       h('div', { class: 'grid g2' }, [
         decField('Marks per question', 'marksPerQuestion', 0.25, 100, 0.25),
@@ -13056,6 +13157,8 @@ ROUTES.settings = async (root) => {
         h('label', { text: 'Scaled score (optional)' }),
         h('div', { class: 'grid g3' }, [scaleField('Lowest', 'min'), scaleField('Pass', 'pass'), scaleField('Highest', 'max')]),
         h('div', { class: 'tiny dim', text: 'Some boards report a scaled figure rather than a percentage — CISA is 200 to 800 with 450 to pass. Fill in all three and your results show that number too. Leave them blank for an exam that simply reports a percentage.' })
+      ])
+      ])
       ])
     ])
   ]));
