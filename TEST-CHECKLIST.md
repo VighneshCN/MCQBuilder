@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 179 passed, 0 failed, of 179.**
+**Current result: 181 passed, 0 failed, of 181.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -174,6 +174,8 @@ nine different requested counts.
 116. A mock opens at something the bank can actually build
 117. The marking scheme reads as a sentence before you open the card
 118. Nothing is a blocker that the composer will not also let you save
+119. A bank nobody has filed still fills a mock, and is told so once
+120. The storage bar asks where the bank lives, not whether a token is live
 
 ### Everything else (4)
 29. Practice settings are per course, app preferences are shared

@@ -4458,6 +4458,20 @@ function weightedPick(pool, blueprint, count, rng) {
   blueprint.forEach(d => byDom.set(d.id, []));
   byDom.set(null, []);
   pool.forEach(q => { const k = byDom.has(q.domainId) ? q.domainId : null; byDom.get(k).push(q); });
+  /* A bank nobody has filed under a domain cannot be weighted by one. Since
+     unfiled questions became practisable, this is an ordinary state to be in
+     on somebody's first week — and reporting it as one shortfall per domain
+     ("Standards on Auditing — 0 of the 6 asked for", four times) told them
+     their paper had failed four ways when it had been filled completely. Said
+     once, as the thing to do about it. */
+  const mapped = pool.filter(q => q.domainId != null && byDom.has(q.domainId));
+  if (!mapped.length) {
+    return {
+      questions: shuffle(pool, rng).slice(0, count),
+      shortfalls: [],
+      notes: ['No question is filed under a domain yet, so this paper could not be weighted to your exam blueprint — it is drawn evenly from the whole bank instead. File them and mocks follow your weights automatically.']
+    };
+  }
   const totalW = blueprint.reduce((s, d) => s + (d.weight || 0), 0) || 1;
   const raw = blueprint.map(d => ({ id: d.id, want: count * (d.weight || 0) / totalW }));
   const alloc = raw.map(r => ({ id: r.id, n: Math.floor(r.want), frac: r.want - Math.floor(r.want) }));
@@ -21721,6 +21735,55 @@ test('Nothing is a blocker that the composer will not also let you save', () => 
   eq(blockers.length, 0, 'this one is ready');
   assert(unlocks.length > 0, 'and still has things it would like');
   blockers.forEach(b => assert(unlocks.indexOf(b) < 0, 'nothing may be in both lists'));
+});
+
+
+test('A bank nobody has filed still fills a mock, and is told so once', () => {
+  // Unfiled questions became practisable, so a weighted mock over a bank with
+  // no domains at all is now an ordinary first-week thing to do. It must fill
+  // the paper, and must not report one shortfall per domain on a paper that
+  // came out complete.
+  const bp = [{ id: 'C1', name: 'One', weight: 30 }, { id: 'C2', name: 'Two', weight: 25 },
+              { id: 'C3', name: 'Three', weight: 25 }, { id: 'C4', name: 'Four', weight: 20 }];
+  const pool = [];
+  for (let i = 0; i < 30; i++) { const q = gateQ({ domainId: null }); q.uuid = 'u' + i; pool.push(q); }
+  const r = weightedPick(pool, bp, 20, mulberry32(7));
+  eq(r.questions.length, 20, 'the paper is filled');
+  eq(new Set(r.questions.map(q => q.uuid)).size, 20, 'with no question twice');
+  eq(r.shortfalls.length, 0, 'a complete paper has not fallen short of anything');
+  eq(r.notes.length, 1);
+  assert(String(r.notes[0]).indexOf('not be weighted') > 0, 'and it says why, once: ' + r.notes[0]);
+  // A bank that IS filed still gets the real per-domain accounting.
+  const filed = pool.map((q, i) => Object.assign({}, q, { domainId: bp[i % 4].id }));
+  const r2 = weightedPick(filed, bp, 20, mulberry32(7));
+  eq(r2.questions.length, 20);
+  assert(r2.notes.length === 4 && r2.notes[0].domainId, 'per-domain notes are unchanged for a filed bank');
+});
+
+test('The storage bar asks where the bank lives, not whether a token is live', () => {
+  // A token is absent for the first moment of every reload and forever
+  // offline. Reading that as "no backend" told somebody whose bank is on
+  // Drive that it was not being saved anywhere.
+  const D = DriveSync;
+  const saved = { c: D.connected, g: D.configured, e: D.setupError, p: D.problem, n: D._pendingChange };
+  try {
+    D.setupError = null; D.problem = null; D._pendingChange = false;
+    D.connected = false; D.configured = false;
+    eq(D.status(), null, 'Drive says nothing at all when it is not the backend');
+    D.configured = true;
+    const waiting = D.status();
+    assert(waiting && waiting.label.length, 'configured but token-less is still Drive');
+    assert(waiting.label.indexOf('Local only') < 0, 'and never claims the bank is unsaved');
+    assert(/reconnect|offline/i.test(waiting.label), 'saying which of the two it is: ' + waiting.label);
+    D.connected = true;
+    assert(/Drive/.test(D.status().label), 'a live connection is Drive too');
+    // A real setup failure still wins over the waiting state.
+    D.connected = false; D.setupError = 'sign-in was cancelled';
+    assert(/cancelled/.test(D.status().label), 'and a real failure is never hidden by it');
+  } finally {
+    D.connected = saved.c; D.configured = saved.g; D.setupError = saved.e;
+    D.problem = saved.p; D._pendingChange = saved.n;
+  }
 });
 
 /* ============================================================================
