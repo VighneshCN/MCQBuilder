@@ -1663,7 +1663,10 @@ const DB = {
    Some settings describe the app (theme, OCR); those stay global.
    Others describe how a *qualification* is practised — a CISA mock is not
    a DISA mock — and those are stored per course, keyed 'name@courseId'.  */
-const COURSE_SETTINGS = ['mockCount', 'mockMinutes', 'mockAllowPause', 'srIntervals', 'weakMinSample', 'masteryTarget', 'mockCaseCount'];
+const COURSE_SETTINGS = ['mockCount', 'mockMinutes', 'mockAllowPause', 'srIntervals', 'weakMinSample', 'masteryTarget', 'mockCaseCount',
+  // How this course's exam is actually marked. Per course because a CISA
+  // paper and a CA paper are marked nothing like each other.
+  'marksPerQuestion', 'marksPerCaseQuestion', 'passPct', 'negativeFraction', 'scaledScore'];
 function isCourseSetting(k) { return COURSE_SETTINGS.indexOf(k) >= 0; }
 function courseKey(k, courseId) { return k + '@' + courseId; }
 
@@ -1691,6 +1694,20 @@ const Settings = {
     // How many case-study questions a mock should carry. Zero, so a mock is
     // exactly the paper it has always been until someone asks otherwise.
     mockCaseCount: 0,
+    /* Marking. Every default here is chosen so that a course nobody has
+       configured scores exactly as it always did: one mark a question, no
+       deduction, and a pass line that is only ever reported alongside the
+       percentage it was already showing. */
+    marksPerQuestion: 1,
+    marksPerCaseQuestion: 1,
+    passPct: 60,
+    // A fraction of the question's OWN marks, deducted per wrong answer.
+    // 0.25 and 1/3 are the usual values. Never applied to an unanswered
+    // question, which is the whole basis of deciding whether to guess.
+    negativeFraction: 0,
+    // { min, max, pass } — CISA reports 200..800 with 450 to pass. Null for
+    // every exam that simply reports a percentage.
+    scaledScore: null,
     shuffleOptions: true,
     confirmLeaveMock: true,
     ocrEnabled: false,
@@ -1873,7 +1890,8 @@ const DISA_BLUEPRINT = [
 const COURSE_TEMPLATES = [
   {
     code: 'CISA', name: 'Certified Information Systems Auditor', blueprint: CISA_BLUEPRINT,
-    opts: { hints: CISA_HINTS, defaults: { mockCount: 150, mockMinutes: 240 } } // the real exam is 150 questions in 4 hours
+    // 150 questions in 4 hours, reported on ISACA's 200-800 scale with 450 to pass
+    opts: { hints: CISA_HINTS, defaults: { mockCount: 150, mockMinutes: 240, passPct: 60, scaledScore: { min: 200, max: 800, pass: 450 } } }
   },
   {
     code: 'DISA', name: 'DISA AT (Diploma in Information System Audit)', blueprint: DISA_BLUEPRINT,
@@ -1967,6 +1985,9 @@ function blankQuestion(courseId) {
     caseStudyId: null, caseSeq: 0,
     srcModule: '', srcChapter: '', srcSection: '',
     difficulty: 'medium', qtype: 'single', tags: [],
+    // What this question is worth. null means "whatever the course says",
+    // which is what every record written before marking existed means too.
+    marks: null,
     sourceId: null, sourceRefs: [], batchId: null, importedAt: null,
     originalNumber: '', externalId: '', locator: '',
     // difficulty carries a usable default from the moment a question exists,
@@ -3505,6 +3526,9 @@ const IMPORT_FIELDS = [
   { f: 'section',         label: 'Source section', cols: ['section', 'source section'], json: ['section'] },
   { f: 'difficulty',      label: 'Difficulty', note: 'easy, medium or hard.', cols: ['difficulty', 'level'], json: ['difficulty'] },
   { f: 'tags',            label: 'Tags',       cols: ['tags', 'keywords'], json: ['tags'] },
+  { f: 'marks',           label: 'Marks',
+    note: 'What this one question is worth. Leave the column out entirely and every question takes the course\u2019s own rate.',
+    cols: ['marks', 'mark', 'weight', 'points', 'score'], json: ['marks', 'mark', 'points'] },
   { f: 'originalNumber',  label: 'Number in the source',
     cols: ['no', 'no.', 'q no', 'qno', 'sr no', 'sl no', 'number', 'question number', 'srno'],
     json: ['originalNumber', 'number'] },
@@ -3630,7 +3654,7 @@ function rowsToCandidates(rows, opts) {
       explanation: get('explanation'), learningPoint: get('learningPoint'),
       domainRaw: get('domain'), topic: get('topic'), subtopic: get('subtopic'),
       srcModule: get('module'), srcChapter: get('chapter'), srcSection: get('section'),
-      difficulty: (get('difficulty') || '').toLowerCase(), tags: get('tags'),
+      difficulty: (get('difficulty') || '').toLowerCase(), tags: get('tags'), marks: get('marks'),
       lockOptionOrder: /^(1|y|yes|true)$/i.test(get('lockOptionOrder')),
       caseRef: caseRef || '', caseSeq: caseRef ? caseByRef.get(caseRef).seq : 0,
       conf: { stem: 1, options: opts.length >= 2 ? 1 : 0.2, answer: letter ? 1 : (ansRaw ? 0.5 : 0), explanation: get('explanation') ? 1 : 0 }
@@ -3682,7 +3706,7 @@ function jsonToCandidates(json) {
       explanation: pick('explanation'), learningPoint: pick('learningPoint'),
       domainRaw: pick('domain'), topic: pick('topic'), subtopic: pick('subtopic'),
       srcModule: pick('module'), srcChapter: pick('chapter'), srcSection: pick('section'),
-      difficulty: pick('difficulty').toLowerCase(),
+      difficulty: pick('difficulty').toLowerCase(), marks: pick('marks'),
       tags: Array.isArray(tagsRaw) ? tagsRaw.join(',') : (tagsRaw == null ? '' : String(tagsRaw)),
       lockOptionOrder: !!jsonPick(o, 'lockOptionOrder'),
       caseRef: caseRef || '', caseSeq: caseSeq || 0,
@@ -3754,6 +3778,10 @@ function candidateToQuestion(c, ctx) {
   q.srcChapter = c.srcChapter || ctx.srcChapter || '';
   q.srcSection = c.srcSection || '';
   q.tags = (c.tags ? String(c.tags).split(/[,;]/).map(s => s.trim()).filter(Boolean) : []);
+  // A marks column the file did not carry leaves this null, which reads as
+  // "whatever the course says" — not as zero.
+  const mk = parseFloat(c.marks);
+  q.marks = isFinite(mk) && mk > 0 ? mk : null;
   q.sourceId = ctx.sourceId;
   q.batchId = ctx.batchId;
   q.importedAt = nowISO();
@@ -4495,6 +4523,19 @@ const Session = {
         cases: caseBlock.cases.map(c => ({ caseStudyId: c.caseStudyId, from: chosen.length + c.from, to: chosen.length + c.to, count: c.count }))
       } : null,
       optionOrders, responses: {}, flags: {}, cursor: 0,
+      // What each question is worth, fixed at the moment the paper is made.
+      // Without this, changing the course's marks after sitting a paper would
+      // re-price its unanswered questions — the total would move under a
+      // result that was already reported.
+      marks: ordered.reduce((m, q) => { m[q.uuid] = marksOf(q, State.course.id); return m; }, {}),
+      // And the scheme those marks are read under, for the same reason:
+      // discovering next month that your exam deducts for wrong answers must
+      // not silently re-mark every paper you have already sat.
+      marking: {
+        passPct: clamp(Number(Settings.get('passPct')) || 60, 1, 99),
+        negativeFraction: Math.max(0, Number(Settings.get('negativeFraction')) || 0),
+        scaledScore: Settings.get('scaledScore') || null
+      },
       startedAt: nowISO(), endedAt: null, status: 'active',
       timeLimitMs: mode === 'mock' ? (config.minutes || Settings.get('mockMinutes')) * 60000 : null,
       elapsedMs: 0, lastTickAt: Date.now(),
@@ -4517,7 +4558,11 @@ const Session = {
     const rec = {
       selectedOptionId, correct, ms: meta.ms || 0,
       confidence: meta.confidence || null, mistake: meta.mistake || null,
-      note: meta.note || '', at: nowISO(), qVersion: q.version
+      note: meta.note || '', at: nowISO(), qVersion: q.version,
+      // Stamped at the moment of answering, for the same reason qVersion is:
+      // changing what a question is worth must not silently re-mark a paper
+      // that was already sat.
+      marks: marksOf(q, s.courseId)
     };
     s.responses[q.uuid] = rec;
     await this.save(s);
@@ -4549,7 +4594,14 @@ const Session = {
       correct: rec.correct, confidence: rec.confidence, ms: rec.ms,
       displayedOrder: (s.optionOrders[q.uuid] || []).slice(),
       mistake: rec.mistake || null, flagged: !!s.flags[q.uuid], note: rec.note || '',
-      questionVersion: q.version
+      questionVersion: q.version,
+      // What it was worth, and what it actually earned once any deduction
+      // for a wrong answer is applied — so an attempt log read years later
+      // still adds up to the score that was reported at the time.
+      marks: rec.marks != null ? rec.marks : marksOf(q, s.courseId),
+      awarded: rec.correct
+        ? (rec.marks != null ? rec.marks : marksOf(q, s.courseId))
+        : -round2((rec.marks != null ? rec.marks : marksOf(q, s.courseId)) * (Number(Settings.get('negativeFraction', s.courseId)) || 0))
     };
     await DB.put('attempts', att);
     const fresh = await Questions.get(q.uuid);
@@ -4583,6 +4635,95 @@ const Session = {
   async abandon(s) { s.status = 'abandoned'; s.endedAt = nowISO(); await this.save(s); }
 };
 
+const round2 = (n) => Math.round(n * 100) / 100;
+
+/* ---------- marking ----------
+   The app has always scored by counting questions, and for a paper where every
+   question is worth one mark that is the same thing. It is not the same thing
+   for a paper that gives two marks to a case-study question, or deducts for a
+   wrong answer, and it is never the thing a candidate actually wants to know,
+   which is whether they would have passed.
+
+   Accuracy stays exactly what it was: a proportion of questions, and the
+   measure mastery, weak topics and the review ladder all run on. Marks are the
+   separate, exam-facing number. At the defaults the two agree to the digit. */
+
+/** What one question is worth. A value on the question itself always wins; a
+    case-study question otherwise takes the course's case-study rate, which is
+    usually higher because it is answered against two pages of reading. */
+function marksOf(q, courseId) {
+  const own = q && q.marks;
+  if (own != null && isFinite(own) && own > 0) return Number(own);
+  const key = isCaseQuestion(q) ? 'marksPerCaseQuestion' : 'marksPerQuestion';
+  const v = Settings.get(key, courseId || (q && q.courseId));
+  return v != null && isFinite(v) && v > 0 ? Number(v) : 1;
+}
+
+/** ISACA and several others report a scaled score rather than a percentage,
+    and candidates think entirely in that number — a CISA sitting is "did I get
+    450", never "did I get 60%". Mapped piecewise about the pass mark so that
+    the pass percentage lands exactly on the pass score, which is the only
+    property of the mapping anybody relies on. */
+function toScaledScore(pct, passPct, scale) {
+  if (!scale || scale.min == null || scale.max == null || scale.pass == null) return null;
+  const p = clamp(pct, 0, 100), cut = clamp(passPct, 1, 99);
+  const v = p <= cut
+    ? scale.min + (scale.pass - scale.min) * (p / cut)
+    : scale.pass + (scale.max - scale.pass) * ((p - cut) / (100 - cut));
+  return Math.round(clamp(v, Math.min(scale.min, scale.max), Math.max(scale.min, scale.max)));
+}
+
+/**
+ * Mark a finished (or part-finished) session.
+ *
+ * `earned` is what the correct answers were worth. `negative` is what the
+ * wrong ones cost, and only the wrong ones: leaving a question blank is never
+ * penalised, which is exactly what makes "is it worth guessing?" a real
+ * decision rather than a rhetorical one.
+ */
+function markSession(s, byId) {
+  const courseId = s.courseId;
+  // The scheme the paper was sat under, falling back to the course's current
+  // one for any session written before papers carried their own.
+  const rule = s.marking || {};
+  const negFrac = rule.negativeFraction != null
+    ? Math.max(0, Number(rule.negativeFraction) || 0)
+    : Math.max(0, Number(Settings.get('negativeFraction', courseId)) || 0);
+  const passPct = clamp(Number(rule.passPct != null ? rule.passPct : Settings.get('passPct', courseId)) || 60, 1, 99);
+  const scale = rule.scaledScore !== undefined ? rule.scaledScore : Settings.get('scaledScore', courseId);
+  let total = 0, earned = 0, negative = 0, wrong = 0, blank = 0;
+  s.questionUuids.forEach(u => {
+    const q = byId.get(u);
+    if (!q) return;
+    const rec = s.responses[u];
+    /* What the question was worth on THIS paper. In order: the value fixed
+       when the paper was made, then the one stamped on the answer, then the
+       course's current rate for a session that predates any of this. Nothing
+       about re-marking a question afterwards can move a paper already sat. */
+    const worth = (s.marks && s.marks[u] != null) ? Number(s.marks[u])
+      : (rec && rec.marks != null) ? Number(rec.marks)
+        : marksOf(q, courseId);
+    total += worth;
+    if (!rec) { blank++; return; }
+    if (rec.correct) earned += worth;
+    else { wrong++; negative += worth * negFrac; }
+  });
+  const net = Math.max(0, earned - negative);
+  const pctScore = total ? (net / total) * 100 : 0;
+  return {
+    total: round2(total), earned: round2(earned), negative: round2(negative), net: round2(net),
+    wrong, blank, negFrac, passPct,
+    pct: pctScore,
+    passed: total > 0 && pctScore >= passPct,
+    margin: round2(net - (total * passPct / 100)),
+    scaled: toScaledScore(pctScore, passPct, scale),
+    scale: scale || null,
+    // True when nobody has configured anything: every question one mark, no
+    // deduction. The UI stays quiet about marking in that case, because there
+    // is nothing to say that the existing score does not already say.
+    plain: negFrac === 0 && total === s.questionUuids.filter(u => byId.get(u)).length
+  };
+}
 function sessionScore(s, byId) {
   const answered = s.questionUuids.filter(u => s.responses[u]);
   const correct = answered.filter(u => s.responses[u].correct);
@@ -4600,7 +4741,10 @@ function sessionScore(s, byId) {
     accuracy: answered.length ? correct.length / answered.length : 0,
     byDomain, avgMs: times.length ? times.reduce((a, b) => a + b, 0) / times.length : 0,
     guessedCorrect: answered.filter(u => s.responses[u].correct && s.responses[u].confidence === 'guessed').length,
-    flagged: Object.keys(s.flags || {}).filter(k => s.flags[k]).length
+    flagged: Object.keys(s.flags || {}).filter(k => s.flags[k]).length,
+    // Added, never substituted: every existing field above keeps its meaning
+    // and its value, so nothing that already reads this changes behaviour.
+    marks: markSession(s, byId)
   };
 }
 
@@ -4985,6 +5129,9 @@ ROUTES.dashboard = async (root) => {
     .filter(s => s.status === 'complete').sort((a, b) => new Date(b.endedAt) - new Date(a.endedAt)).slice(0, 6);
   if (sessions.length) {
     const byId = new Map(all.map(q => [q.uuid, q]));
+    // A Marks column earns its space only on a course where marks and the
+    // question count are not the same number.
+    const anyMarked = sessions.some(x => !sessionScore(x, byId).marks.plain);
     const card = h('div', { class: 'card', style: 'margin-top:16px' }, [h('div', { class: 'card-h' }, h('h3', { text: 'Recent sessions' }))]);
     const tb = h('tbody');
     sessions.forEach(s => {
@@ -4994,16 +5141,68 @@ ROUTES.dashboard = async (root) => {
         h('td', {}, h('span', { class: 'badge b-info', text: MODES[s.mode].label })),
         h('td', { class: 'num', text: sc.correct + ' / ' + sc.total }),
         h('td', { class: 'num', text: Math.round(sc.accuracy * 100) + '%' }),
+        anyMarked ? h('td', { class: 'num', text: fmtMarks(sc.marks.net) + ' / ' + fmtMarks(sc.marks.total) }) : null,
+        h('td', {}, sc.marks.total > 0
+          ? h('span', { class: 'badge ' + (sc.marks.passed ? 'b-active' : 'b-conflict'), text: sc.marks.passed ? 'Pass' : 'Below' })
+          : h('span', { class: 'tiny dim', text: '—' })),
         h('td', {}, h('button', { class: 'btn sm', onclick: () => showResults(s), text: 'Review' }))
-      ]));
+      ].filter(Boolean)));
     });
     card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [
-      h('thead', {}, h('tr', {}, ['Finished', 'Mode', 'Score', 'Accuracy', ''].map(t => h('th', { text: t })))), tb
+      h('thead', {}, h('tr', {}, ['Finished', 'Mode', 'Score', 'Accuracy', anyMarked ? 'Marks' : null, 'Verdict', ''].filter(x => x !== null).map(t => h('th', { text: t })))), tb
     ])));
     root.appendChild(card);
+
+    // Mocks only, oldest first: a trend of revision sets of assorted lengths
+    // would be a line through unrelated numbers.
+    const mocks = (await DB.byIndex('sessions', 'courseId', State.course.id))
+      .filter(x => x.status === 'complete' && x.mode === 'mock')
+      .sort((a, b) => new Date(a.endedAt) - new Date(b.endedAt)).slice(-8);
+    const trend = mockTrendCard(mocks, byId);
+    if (trend) root.appendChild(trend);
   }
 };
 
+
+/* ---------- the shape of your mocks ----------
+   One mock tells you almost nothing; five in a row tell you whether you are
+   improving, and whether you are above the line. Drawn as a plain inline SVG
+   because the app already builds SVG this way and a chart library for one
+   sparkline would be absurd. */
+function mockTrendCard(mocks, byId) {
+  if (mocks.length < 2) return null;
+  const pts = mocks.map(m => ({ s: m, pct: markSession(m, byId).pct, when: m.endedAt || m.startedAt }));
+  const passPct = clamp(Number(Settings.get('passPct')) || 60, 1, 99);
+  const W = 620, H = 150, PADL = 34, PADB = 22, PADT = 12;
+  const x = (i) => PADL + (pts.length === 1 ? (W - PADL - 8) / 2 : i * (W - PADL - 8) / (pts.length - 1));
+  const y = (p) => PADT + (100 - clamp(p, 0, 100)) * (H - PADT - PADB) / 100;
+  const line = pts.map((p, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(p.pct).toFixed(1)).join(' ');
+  const svg =
+    '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Your last ' + pts.length + ' mock exams as a percentage, against the pass mark" style="width:100%;height:auto">' +
+    [0, 50, 100].map(g =>
+      '<line x1="' + PADL + '" y1="' + y(g).toFixed(1) + '" x2="' + (W - 8) + '" y2="' + y(g).toFixed(1) + '" stroke="currentColor" stroke-opacity=".12"/>' +
+      '<text x="' + (PADL - 6) + '" y="' + (y(g) + 3.5).toFixed(1) + '" text-anchor="end" font-size="9" fill="currentColor" fill-opacity=".5">' + g + '%</text>').join('') +
+    '<line x1="' + PADL + '" y1="' + y(passPct).toFixed(1) + '" x2="' + (W - 8) + '" y2="' + y(passPct).toFixed(1) + '" stroke="var(--green)" stroke-dasharray="4 3" stroke-width="1.5"/>' +
+    '<text x="' + (W - 10) + '" y="' + (y(passPct) - 4).toFixed(1) + '" text-anchor="end" font-size="9.5" fill="var(--green)">pass ' + passPct + '%</text>' +
+    '<path d="' + line + '" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linejoin="round"/>' +
+    pts.map((p, i) => '<circle cx="' + x(i).toFixed(1) + '" cy="' + y(p.pct).toFixed(1) + '" r="3.5" fill="' + (p.pct >= passPct ? 'var(--green)' : 'var(--pencil)') + '"><title>' +
+      esc(fmtDate(p.when)) + ' — ' + Math.round(p.pct) + '%</title></circle>').join('') +
+    '</svg>';
+  const last = pts[pts.length - 1].pct, first = pts[0].pct;
+  const move = Math.round(last - first);
+  const passing = pts.filter(p => p.pct >= passPct).length;
+  return h('div', { class: 'card', style: 'margin-top:16px' }, [
+    h('div', { class: 'card-h' }, [h('h3', { text: 'Mock trend' }), h('div', { class: 'spacer' }),
+      h('span', { class: 'tiny dim', text: passing + ' of ' + pts.length + ' above the line' })]),
+    h('div', { class: 'card-b stack' }, [
+      h('div', { html: svg, style: 'color:var(--txt-2)' }),
+      h('div', { class: 'small muted', style: 'margin:0' },
+        move === 0 ? 'Flat across these ' + pts.length + ' mocks, at ' + Math.round(last) + '%.'
+          : move > 0 ? 'Up ' + move + ' points across these ' + pts.length + ' mocks, now ' + Math.round(last) + '%.'
+            : 'Down ' + Math.abs(move) + ' points across these ' + pts.length + ' mocks, now ' + Math.round(last) + '%.')
+    ])
+  ]);
+}
 
 /* ============================================================================
    09 · Practice — mode setup, runner, mock palette, results
@@ -5293,6 +5492,9 @@ async function configureMode(mode) {
 
   const countLabel = h('span', { class: 'docnum' });
   let compositionPanel = null;
+  // Assigned below, once the marks line exists; recount() runs before that on
+  // the first pass, so it is checked rather than assumed.
+  let drawMarksRef = null;
   const recount = () => {
     let p = applyFilters(pool, f);
     if (mode === 'spaced') p = p.filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date());
@@ -5307,6 +5509,7 @@ async function configureMode(mode) {
     // here, so this is the one place that can keep the feasibility verdict
     // honest as the request changes underneath it.
     if (compositionPanel && compositionPanel.refresh) compositionPanel.refresh();
+    if (typeof drawMarksRef === 'function') drawMarksRef();
   };
   const warn = h('div', { class: 'notice warn hidden' });
 
@@ -5427,6 +5630,19 @@ async function configureMode(mode) {
     body.appendChild(compositionPanel);
   }
   body.appendChild(h('div', { class: 'row' }, [h('span', { class: 'eyebrow', text: 'Matching pool' }), countLabel]));
+  // What the paper is worth, on a course where that is not simply the number
+  // of questions. Kept out of the way otherwise.
+  const perQ = Number(Settings.get('marksPerQuestion')) || 1;
+  const perCase = Number(Settings.get('marksPerCaseQuestion')) || 1;
+  const marksLine = h('div', { class: 'row' }, [h('span', { class: 'eyebrow', text: 'Paper is worth' }), h('span', { class: 'docnum' })]);
+  const drawMarks = () => {
+    const caseN = mode === 'mock' ? (cfg.caseCount || 0) : (isCaseMode ? cfg.count : 0);
+    const stdN = Math.max(0, cfg.count - caseN);
+    const total = stdN * perQ + caseN * perCase;
+    marksLine.querySelector('.docnum').textContent =
+      fmtMarks(total) + ' marks · pass at ' + (Settings.get('passPct') || 60) + '% = ' + fmtMarks(total * (Settings.get('passPct') || 60) / 100);
+  };
+  if (perQ !== 1 || perCase !== 1) { drawMarksRef = drawMarks; drawMarks(); body.appendChild(marksLine); }
   body.appendChild(warn);
   recount();
 
@@ -5456,8 +5672,15 @@ async function configureMode(mode) {
       const s = await Session.create(mode, Object.assign({}, cfg, { filters: { ...f } }));
       s.questionUuids = shuffle(keep.map(q => q.uuid), mulberry32(s.seed)).slice(0, cfg.count);
       s.optionOrders = {};
+      // This mode replaces the paper Session.create built, so it re-stamps
+      // the marks too rather than leaving the ones from a paper it discarded.
+      s.marks = {};
+      // s.marking is whatever Session.create already fixed; only the paper changed.
       const rng2 = mulberry32(s.seed ^ 0x9e3779b9);
-      keep.forEach(q => { s.optionOrders[q.uuid] = (Settings.get('shuffleOptions') && !q.lockOptionOrder) ? shuffle(q.options.map(o => o.id), rng2) : q.options.map(o => o.id); });
+      keep.forEach(q => {
+        s.optionOrders[q.uuid] = (Settings.get('shuffleOptions') && !q.lockOptionOrder) ? shuffle(q.options.map(o => o.id), rng2) : q.options.map(o => o.id);
+        s.marks[q.uuid] = marksOf(q, State.course.id);
+      });
       await Session.save(s);
       runSession(s);
       return;
@@ -6074,7 +6297,9 @@ async function runSession(s) {
       const all2 = await State.questions();
       byId.clear(); all2.forEach(x => byId.set(x.uuid, x));
     } else {
-      s.responses[q.uuid] = { selectedOptionId: optId, correct: optId === q.correctOptionId, ms, confidence: null, mistake: null, at: nowISO(), qVersion: q.version };
+      // A mock records the response here rather than through Session.answer,
+      // which does not run until submission — so it stamps the marks itself.
+      s.responses[q.uuid] = { selectedOptionId: optId, correct: optId === q.correctOptionId, ms, confidence: null, mistake: null, at: nowISO(), qVersion: q.version, marks: marksOf(q, s.courseId) };
       await Session.save(s);
     }
     render();
@@ -6186,6 +6411,46 @@ function askMistake() {
 }
 
 /* ---------- results ---------- */
+/** Marks read as marks: 12 rather than 12.00, but 12.5 rather than 13. */
+function fmtMarks(n) {
+  const v = Math.round(Number(n) * 100) / 100;
+  return String(Number.isInteger(v) ? v : v.toFixed(2).replace(/0$/, ''));
+}
+
+/** The pass verdict for one paper. */
+function passVerdict(s, mk) {
+  const full = s.questionUuids.length === Object.keys(s.responses || {}).length;
+  const cls = mk.passed ? 'ok' : 'bad';
+  const head = mk.passed
+    ? 'You would have passed' + (mk.margin > 0 ? ', by ' + fmtMarks(mk.margin) + ' mark' + (mk.margin === 1 ? '' : 's') : ' — exactly on the line')
+    : 'That is ' + fmtMarks(Math.abs(mk.margin)) + ' mark' + (Math.abs(mk.margin) === 1 ? '' : 's') + ' short of a pass';
+  const bits = [
+    fmtMarks(mk.net) + ' of ' + fmtMarks(mk.total) + ' marks',
+    Math.round(mk.pct) + '%',
+    'pass mark ' + mk.passPct + '%'
+  ];
+  if (mk.scaled != null) bits.push('scaled ' + mk.scaled + ' of ' + mk.scale.max + ', pass ' + mk.scale.pass);
+  const lines = [
+    h('div', { class: 'row', style: 'gap:10px;align-items:baseline' }, [
+      h('b', { style: 'font-size:15px', text: head }),
+      h('span', { class: 'small', text: bits.join('  ·  ') })
+    ])
+  ];
+  // Negative marking changes what a guess is worth, so when it is on the paper
+  // says what guessing actually cost — the arithmetic nobody does in their head.
+  if (mk.negFrac > 0 && mk.wrong) {
+    lines.push(h('div', { class: 'small', style: 'margin-top:5px' },
+      mk.wrong + ' wrong answer' + (mk.wrong === 1 ? '' : 's') + ' cost you ' + fmtMarks(mk.negative) +
+      ' mark' + (mk.negative === 1 ? '' : 's') + ' — ' + Math.round(mk.negFrac * 100) + '% of what each was worth' +
+      (mk.blank ? '. The ' + mk.blank + ' you left blank cost nothing.' : '.')));
+  }
+  if (!full) {
+    lines.push(h('div', { class: 'tiny dim', style: 'margin-top:5px' },
+      'Unanswered questions score zero, so this is the mark you would have been given for the paper as you left it.'));
+  }
+  return h('div', { class: 'notice ' + cls, style: 'margin-bottom:16px' }, lines);
+}
+
 async function showResults(s) {
   const all = await State.questions();
   const byId = new Map(all.map(q => [q.uuid, q]));
@@ -6193,10 +6458,19 @@ async function showResults(s) {
   State.view = 'results';
   const target = $('#view');
   target.textContent = '';
+  const mk = sc.marks;
   await band('Session results', MODES[s.mode].label + ' · ' + fmtDate(s.endedAt || s.startedAt, true), [
     { k: 'Score', v: sc.correct + '/' + sc.total },
+    // Only worth its own tile once marks say something the count does not.
+    mk.plain ? null : { k: 'Marks', v: fmtMarks(mk.net) + '/' + fmtMarks(mk.total) },
     { k: 'Accuracy', v: Math.round(sc.accuracy * 100) + '%', color: sc.accuracy >= 0.75 ? 'var(--green)' : sc.accuracy >= 0.6 ? 'var(--amber)' : 'var(--pencil)' }
-  ], [h('button', { class: 'btn', onclick: () => go('practice'), text: 'Back to practice' })]);
+  ].filter(Boolean), [h('button', { class: 'btn', onclick: () => go('practice'), text: 'Back to practice' })]);
+
+  // The one number a candidate actually came for. Shown on any session with
+  // questions in it, because "would that have been a pass" is as fair a
+  // question of a 20-question revision set as of a full paper — it just
+  // says which it is measuring.
+  if (mk.total > 0) target.appendChild(passVerdict(s, mk));
 
   const tiles = h('div', { class: 'grid g4', style: 'margin-bottom:16px' });
   const t = (k, v, sub, cls) => tiles.appendChild(h('div', { class: 'tile ' + (cls || '') }, [h('span', { class: 'eyebrow', text: k }), h('b', { text: v }), sub ? h('div', { class: 'sub', text: sub }) : null]));
@@ -6690,7 +6964,7 @@ async function openQuestion(uuidStr) {
   body.appendChild(tabs);
   body.appendChild(pane);
 
-  const edit = { stem: q.stem, options: q.options.map(o => ({ id: o.id, text: o.text })), correctOptionId: q.correctOptionId, explanation: q.explanation, learningPoint: q.learningPoint, domainId: q.domainId, topic: q.topic, subtopic: q.subtopic, srcModule: q.srcModule, srcChapter: q.srcChapter, srcSection: q.srcSection, difficulty: difficultyUngraded(q) ? 'ungraded' : q.difficulty, tags: (q.tags || []).join(', '), lockOptionOrder: q.lockOptionOrder, status: q.status, answerVerified: q.answerVerified };
+  const edit = { stem: q.stem, options: q.options.map(o => ({ id: o.id, text: o.text })), correctOptionId: q.correctOptionId, explanation: q.explanation, learningPoint: q.learningPoint, domainId: q.domainId, topic: q.topic, subtopic: q.subtopic, srcModule: q.srcModule, srcChapter: q.srcChapter, srcSection: q.srcSection, difficulty: difficultyUngraded(q) ? 'ungraded' : q.difficulty, tags: (q.tags || []).join(', '), marks: q.marks == null ? '' : String(q.marks), lockOptionOrder: q.lockOptionOrder, status: q.status, answerVerified: q.answerVerified };
 
   /** `sticky` on the modal below stops a backdrop click from discarding an
       edit in progress, but Escape and the ✕ button both bypass that — the
@@ -6704,6 +6978,7 @@ async function openQuestion(uuidStr) {
     // storing a default, and that is not an edit anyone made.
     if (edit.difficulty !== (difficultyUngraded(q) ? 'ungraded' : q.difficulty)) return true;
     if (edit.tags !== (q.tags || []).join(', ')) return true;
+    if (edit.marks !== (q.marks == null ? '' : String(q.marks))) return true;
     if (edit.options.length !== q.options.length) return true;
     return edit.options.some((o, i) => o.text !== ((q.options[i] || {}).text || ''));
   }
@@ -6752,6 +7027,9 @@ async function openQuestion(uuidStr) {
       g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Source chapter' }), h('input', { type: 'text', value: edit.srcChapter, oninput: e => edit.srcChapter = e.target.value })]));
       g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Source section' }), h('input', { type: 'text', value: edit.srcSection, oninput: e => edit.srcSection = e.target.value })]));
       g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Tags (comma separated)' }), h('input', { type: 'text', value: edit.tags, oninput: e => edit.tags = e.target.value })]));
+      g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Marks' }),
+        h('input', { type: 'number', min: '0.25', step: '0.25', placeholder: String(marksOf(Object.assign({}, q, { marks: null }))), value: edit.marks, oninput: e => edit.marks = e.target.value }),
+        h('div', { class: 'tiny dim', text: 'Blank means this course\u2019s own rate — currently ' + fmtMarks(marksOf(Object.assign({}, q, { marks: null }))) + '.' })]));
       pane.appendChild(g);
       // Only the end states a student can meaningfully choose by hand.
       // The rest (Parsing incomplete, Needs answer, Possible duplicate,
@@ -6897,6 +7175,8 @@ async function openQuestion(uuidStr) {
     if (edit.difficulty === 'ungraded') fresh.difficultyVerified = 'unverified';
     else { fresh.difficulty = edit.difficulty; fresh.difficultyVerified = 'verified'; }
     fresh.tags = edit.tags.split(',').map(s => s.trim()).filter(Boolean);
+    const mkVal = parseFloat(edit.marks);
+    fresh.marks = isFinite(mkVal) && mkVal > 0 ? mkVal : null;
     fresh.lockOptionOrder = edit.lockOptionOrder;
     fresh.answerVerified = edit.answerVerified;
     if (edit.answerVerified === 'verified' && !fresh.verifiedAt) fresh.verifiedAt = nowISO();
@@ -7018,7 +7298,7 @@ async function questionComposer(opts) {
   const draft = Object.assign({
     stem: '', explanation: '', learningPoint: '',
     domainId: null, topic: '', subtopic: '', srcModule: '',
-    difficulty: 'medium', tags: '', answerChecked: true, lockOptionOrder: false
+    difficulty: 'medium', tags: '', marks: '', answerChecked: true, lockOptionOrder: false
   }, opts.defaults || {});
   draft.options = Array.from({ length: wantOptions }, () => makeOption(''));
   draft.correctOptionId = null;
@@ -7098,6 +7378,13 @@ async function questionComposer(opts) {
     h('input', { type: 'text', placeholder: 'Optional', value: draft.srcModule, oninput: e => draft.srcModule = e.target.value })]));
   grid.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Tags (comma separated)' }),
     h('input', { type: 'text', placeholder: 'Optional', value: draft.tags, oninput: e => draft.tags = e.target.value })]));
+  grid.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Marks' }),
+    h('input', {
+      type: 'number', min: '0.25', step: '0.25',
+      placeholder: String(marksOf({ courseId: course.id, caseStudyId: cs ? cs.id : null }, course.id)),
+      value: draft.marks, oninput: e => draft.marks = e.target.value
+    }),
+    h('div', { class: 'tiny dim', text: 'Leave blank to use this course\u2019s rate.' })]));
   body.appendChild(grid);
 
   const expl = autoGrow(h('textarea', {
@@ -7131,6 +7418,8 @@ async function questionComposer(opts) {
     // in-practice prompt never asks again.
     q.difficultyVerified = 'verified';
     q.tags = String(draft.tags || '').split(',').map(x => x.trim()).filter(Boolean);
+    const mk = parseFloat(draft.marks);
+    q.marks = isFinite(mk) && mk > 0 ? mk : null;
     q.answerVerified = draft.answerChecked && q.correctOptionId ? 'verified' : 'unverified';
     if (q.answerVerified === 'verified') { q.verifiedAt = nowISO(); q.verifyNote = 'Entered and checked by hand'; }
     q.lockOptionOrder = !!draft.lockOptionOrder;
@@ -7245,7 +7534,7 @@ async function newQuestion(opts) {
 async function exportBank(list) {
   // The case study columns go on the END so an existing importer, script or
   // spreadsheet reading this file by position is not shifted by one.
-  const rows = [['Question ID', 'Status', 'Stem', 'A', 'B', 'C', 'D', 'E', 'Correct answer', 'Explanation', 'Domain', 'Topic', 'Subtopic', 'Source module', 'Source', 'Source locator', 'Answer verification', 'Attempts', 'Accuracy', 'Mastery', 'Case ref', 'Case title', 'Case question no.']];
+  const rows = [['Question ID', 'Status', 'Stem', 'A', 'B', 'C', 'D', 'E', 'Correct answer', 'Explanation', 'Domain', 'Topic', 'Subtopic', 'Source module', 'Source', 'Source locator', 'Answer verification', 'Attempts', 'Accuracy', 'Mastery', 'Marks', 'Case ref', 'Case title', 'Case question no.']];
   const sources = await DB.byIndex('sources', 'courseId', State.course.id);
   const srcName = (id) => { const s = sources.find(x => x.id === id); return s ? s.title : ''; };
   const caseRecs = new Map((await CaseStudies.byCourse(State.course.id)).map(c => [c.id, c]));
@@ -7257,6 +7546,7 @@ async function exportBank(list) {
       ci >= 0 ? letterOf(ci) : '', q.explanation, q.domainId ? State.domainName(q.domainId) : 'Unmapped', q.topic, q.subtopic,
       q.srcModule, srcName(q.sourceId), q.locator, q.answerVerified, q.stats.attempts,
       q.stats.attempts ? Math.round(q.stats.correct / q.stats.attempts * 100) + '%' : '', q.stats.mastery || 0,
+      fmtMarks(marksOf(q)),
       cs ? (cs.csid || '') : '', cs ? (cs.title || '') : '', cs ? (q.caseSeq || '') : '']);
   });
   download(State.course.code + '-question-bank-' + todayKey() + '.csv', new Blob(['\uFEFF' + toCSV(rows)], { type: 'text/csv;charset=utf-8' }));
@@ -10895,6 +11185,18 @@ ROUTES.settings = async (root) => {
     h('input', { type: 'number', min: String(min), max: String(max), value: String(Settings.get(key)), onchange: async e => { await Settings.set(key, clamp(parseInt(e.target.value, 10) || min, min, max)); toast('Saved'); } }),
     note ? h('div', { class: 'tiny dim', text: note }) : null
   ]);
+  const decField = (label, key, min, max, step, note) => h('div', { class: 'field' }, [
+    h('label', { text: label }),
+    h('input', {
+      type: 'number', min: String(min), max: String(max), step: String(step),
+      value: String(Settings.get(key)),
+      onchange: async e => {
+        const v = clamp(parseFloat(e.target.value), min, max);
+        await Settings.set(key, isFinite(v) ? v : min); toast('Saved');
+      }
+    }),
+    note ? h('div', { class: 'tiny dim', text: note }) : null
+  ]);
   const checkField = (label, key, note) => h('label', { class: 'check' }, [
     h('input', { type: 'checkbox', checked: !!Settings.get(key), onchange: async e => { await Settings.set(key, e.target.checked); toast('Saved'); } }),
     h('span', {}, [label, note ? h('div', { class: 'tiny dim', text: note }) : null])
@@ -10913,6 +11215,47 @@ ROUTES.settings = async (root) => {
       checkField('Exam centre simulation before a timed mock', 'mockSimulation', 'Registration, hall ticket and invigilator, so the pressure is familiar before it counts. Skippable from its first frame with Esc.'),
       numField('Mastery target', 'masteryTarget', 40, 100, 'A question counts as mastered at or above this score.'),
       numField('Minimum sample before calling a topic weak or strong', 'weakMinSample', 1, 50)
+    ])
+  ]));
+
+  /* ---- how this exam is marked ---- */
+  const scaled = Settings.get('scaledScore');
+  const scaleField = (label, key) => h('div', { class: 'field' }, [
+    h('label', { text: label }),
+    h('input', {
+      type: 'number', value: scaled && scaled[key] != null ? String(scaled[key]) : '',
+      placeholder: '—',
+      onchange: async e => {
+        const cur = Settings.get('scaledScore') || {};
+        const raw = e.target.value.trim();
+        const next = Object.assign({}, cur);
+        if (raw === '') delete next[key]; else next[key] = parseInt(raw, 10) || 0;
+        // A partial mapping is not a mapping. It only takes effect once all
+        // three are set; clearing any one of them turns it off.
+        const complete = next.min != null && next.max != null && next.pass != null;
+        await Settings.set('scaledScore', complete ? next : (Object.keys(next).length ? next : null));
+        toast(complete ? 'Saved' : 'Saved — a scaled score needs all three to show');
+        go('settings');
+      }
+    })
+  ]);
+  grid.appendChild(h('div', { class: 'card' }, [
+    h('div', { class: 'card-h' }, [h('h3', { text: 'How this exam is marked' }), h('div', { class: 'spacer' }),
+      h('span', { class: 'badge b-active', text: State.course.code + ' only' })]),
+    h('div', { class: 'card-b stack' }, [
+      scopeNote('Leave all of this alone and every question is worth one mark, nothing is deducted, and your results read exactly as they always have. Set it to match your real paper and every mock tells you whether you would have passed.'),
+      h('div', { class: 'grid g2' }, [
+        decField('Marks per question', 'marksPerQuestion', 0.25, 100, 0.25),
+        decField('Marks per case-study question', 'marksPerCaseQuestion', 0.25, 100, 0.25, 'Often higher: it is answered against a page or two of reading.')
+      ]),
+      numField('Pass mark (%)', 'passPct', 1, 99, 'Of the marks available in the paper you sit, so a 30-question revision set is judged on the same line as a full mock.'),
+      decField('Negative marking', 'negativeFraction', 0, 1, 0.05,
+        'A fraction of each wrong answer’s own marks, deducted. 0 for no negative marking, which is the default and is right for CA and CISA. 0.25 means a quarter of the marks off. Unanswered questions are never penalised.'),
+      h('div', { class: 'field' }, [
+        h('label', { text: 'Scaled score (optional)' }),
+        h('div', { class: 'grid g3' }, [scaleField('Lowest', 'min'), scaleField('Pass', 'pass'), scaleField('Highest', 'max')]),
+        h('div', { class: 'tiny dim', text: 'Some boards report a scaled figure rather than a percentage — CISA is 200 to 800 with 450 to pass. Fill in all three and your results show that number too. Leave them blank for an exam that simply reports a percentage.' })
+      ])
     ])
   ]));
 
