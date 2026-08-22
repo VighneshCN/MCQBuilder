@@ -1246,6 +1246,10 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 }
 .opt:hover:not(:disabled){border-color:var(--blue);background:var(--blue-tint)}
 .opt:disabled{cursor:default}
+/* A control that is off because the bank cannot feed it yet, rather than off
+   because you turned it off. */
+.check.locked{opacity:.6;cursor:default}
+.check.locked input{cursor:default}
 .opt .lt{
   font-family:var(--mono);font-weight:700;font-size:13px;width:24px;height:24px;flex:none;
   border:1px solid var(--rule);border-radius:5px;display:grid;place-items:center;margin-top:1px;color:var(--txt-2)
@@ -1874,9 +1878,16 @@ const confirmBox = (title, msg, danger, confirmLabel) => modal({
 const STATUS = {
   draft:            { label: 'Draft',              badge: 'b-draft',    mark: '·', practice: false },
   parsing:          { label: 'Parsing incomplete', badge: 'b-draft',    mark: '·', practice: false },
-  needs_content:    { label: 'Needs content review', badge: 'b-review', mark: '~', practice: false },
+  // These two say something is MISSING, not that something is wrong. A
+  // question nobody has filed under a domain is still a perfectly good
+  // question; one the parser read with middling confidence is worth a look but
+  // is not dangerous. Holding them out of practice cost a candidate their
+  // whole bank whenever their course had no keyword hints to guess from —
+  // which is every course somebody sets up themselves. They practise; what
+  // they lack disables the feature that needs it, and nothing else.
+  needs_content:    { label: 'Wording unchecked',   badge: 'b-draft',    mark: '·', practice: true  },
   needs_answer:     { label: 'Needs answer verification', badge: 'b-review', mark: '?', practice: false },
-  needs_class:      { label: 'Needs classification', badge: 'b-review', mark: '~', practice: false },
+  needs_class:      { label: 'Unclassified',        badge: 'b-draft',    mark: '·', practice: true  },
   possible_dup:     { label: 'Possible duplicate',  badge: 'b-dup',     mark: '=', practice: false },
   answer_conflict:  { label: 'Answer conflict',     badge: 'b-conflict', mark: '✕', practice: false },
   active:           { label: 'Active',              badge: 'b-active',  mark: '✓', practice: true  },
@@ -1884,7 +1895,13 @@ const STATUS = {
   merged:           { label: 'Merged duplicate',    badge: 'b-dup',     mark: '⇢', practice: false },
   rejected:         { label: 'Rejected',            badge: 'b-arch',    mark: '✕', practice: false }
 };
+/* Everything the review queue lists. */
 const REVIEW_STATUSES = ['needs_content', 'needs_answer', 'needs_class', 'possible_dup', 'answer_conflict', 'parsing', 'draft'];
+/* The subset that actually holds a question OUT of practice, and so the only
+   subset worth a red badge or a "you must deal with this" prompt. Derived from
+   the same table the gate reads, so the two can never drift. */
+const BLOCKING_STATUSES = REVIEW_STATUSES.filter(k => !(STATUS[k] && STATUS[k].practice));
+function isBlocked(q) { return BLOCKING_STATUSES.indexOf(q.status) >= 0; }
 const VERIF = { unverified: 'Unverified', verified: 'Verified', doubtful: 'Doubtful' };
 const DIFFICULTY = ['easy', 'medium', 'hard'];
 const CONFIDENCE = [
@@ -2107,7 +2124,10 @@ function isCaseQuestion(q) { return !!(q && (q.caseStudyId || q.caseRef)); }
 
 /** A question may only enter a test session if it is Active and answer-verified. */
 function isPracticeEligible(q) {
-  return q.status === 'active' && q.answerVerified === 'verified' && !q.conflict &&
+  // Read from the status table rather than naming one status, so whether a
+  // status blocks practice is stated once, where the status is defined.
+  const st = STATUS[q.status];
+  return !!(st && st.practice) && q.answerVerified === 'verified' && !q.conflict &&
     !!q.correctOptionId && q.options.length >= 2 &&
     q.options.some(o => o.id === q.correctOptionId) &&
     optionCountOk(q);
@@ -4188,6 +4208,51 @@ function drawableCasePool(all, caseRecords) {
   return caseEligiblePool(all).filter(q => ok.has(q.caseStudyId));
 }
 
+/* ---------- locked, not blocked ----------
+   Some features cannot do anything until the bank carries the information they
+   run on. The old behaviour was to offer them anyway and explain afterwards:
+   ticking "set the difficulty mix" on an ungraded bank produced a warning, then
+   a table of red shortfalls, and then — because "refuse to start unless the mix
+   can be filled" is on by default — a refusal at the moment you pressed Start.
+   Everything it said was true and it was still a wall.
+
+   So the control is offered disabled, saying what it runs on and how to give it
+   that, and it comes to life by itself the moment the bank can feed it. Nothing
+   here is ever a reason a question cannot be practised; that is the whole
+   point of separating the two.
+
+   Returns null when the feature is available, or the reason it is not.        */
+function featureLock(key, pool) {
+  const P = pool || [];
+  if (key === 'domains') {
+    if (P.some(q => q.domainId)) return null;
+    return {
+      why: 'No question in this course is filed under a domain yet.',
+      action: 'File them from the Question Bank, or set one domain for a whole file as you bring it in.',
+      view: 'bank'
+    };
+  }
+  if (key === 'difficulty') {
+    if (P.some(q => q.difficultyVerified === 'verified')) return null;
+    return {
+      why: 'No question has had its difficulty graded yet.',
+      action: 'Grade them as you practise — the prompt appears after each answer.',
+      view: null
+    };
+  }
+  return null;
+}
+/** A switch that is off because it has nothing to run on, saying so. */
+function lockedToggle(label, lock) {
+  return h('label', { class: 'check locked' }, [
+    h('input', { type: 'checkbox', disabled: true, checked: false }),
+    h('span', {}, [
+      label,
+      h('div', { class: 'tiny dim', style: 'margin-top:2px' }, lock.why + ' ' + lock.action)
+    ])
+  ]);
+}
+
 function applyFilters(pool, f) {
   const now = new Date();
   return pool.filter(q => {
@@ -5616,7 +5681,9 @@ async function go(view, arg) {
 async function refreshBadges() {
   if (!State.course) return;
   const all = await State.questions();
-  setBadge('import', all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0).length);
+  // Only what is actually held back. A badge reading 400 for questions the
+  // candidate can already practise is the same noise in a different place.
+  setBadge('import', all.filter(isBlocked).length);
   // Counted over the standalone bank only: this badge means "Spaced
   // repetition has something for you", and Spaced repetition cannot draw a
   // case-study question. Counting them made the badge promise work that the
@@ -5658,7 +5725,7 @@ ROUTES.dashboard = async (root) => {
   const guessRate = (() => { const c = attempts.filter(a => a.correct); return c.length ? c.filter(a => a.confidence === 'guessed').length / c.length : 0; })();
   const due = active.filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date());
   const never = active.filter(q => q.stats.attempts === 0);
-  const inReview = all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0);
+  const inReview = all.filter(isBlocked);
   const conflicts = all.filter(q => q.conflict || q.status === 'answer_conflict');
   const mastered = active.filter(q => (q.stats.mastery || 0) >= Settings.get('masteryTarget'));
 
@@ -6088,7 +6155,9 @@ function compositionEditor(cfg, pool, filters) {
     ]);
 
     /* ---- domain mix ---- */
-    body.appendChild(toggle('Set the domain mix myself',
+    const domLock = featureLock('domains', pool);
+    if (domLock) { spec.domainMix = null; body.appendChild(lockedToggle('Set the domain mix myself', domLock)); }
+    else body.appendChild(toggle('Set the domain mix myself',
       !!spec.domainMix,
       () => { spec.domainMix = bp.map(d => ({ id: d.id, pct: d.weight || 0 })); },
       () => { spec.domainMix = null; }));
@@ -6110,7 +6179,9 @@ function compositionEditor(cfg, pool, filters) {
     }
 
     /* ---- difficulty mix ---- */
-    body.appendChild(toggle('Set the difficulty mix myself',
+    const diffLock = featureLock('difficulty', pool);
+    if (diffLock) { spec.difficultyMix = null; body.appendChild(lockedToggle('Set the difficulty mix myself', diffLock)); }
+    else body.appendChild(toggle('Set the difficulty mix myself',
       !!spec.difficultyMix,
       () => { spec.difficultyMix = DIFFICULTY_KEYS.map(k => ({ key: k, pct: k === 'medium' ? 50 : 25 })); },
       () => { spec.difficultyMix = null; }));
@@ -8547,7 +8618,20 @@ function entryBlockers(q, course) {
   if (course && course.enforceOptionCount && filled.length && filled.length !== course.optionCount) {
     out.push(course.code + ' expects exactly ' + course.optionCount + ' options — this has ' + filled.length);
   }
-  if (!q.domainId) out.push('file it under a domain');
+  // A domain is deliberately NOT here. It decides which domain drill and
+  // which slice of a weighted mock a question can appear in; it decides
+  // nothing about whether the question can be answered. See entryUnlocks().
+  return out;
+}
+/** Not blockers — things that are simply not filled in yet, each naming the
+    feature it would switch on. The whole difference between "you cannot
+    practise this" and "this works, and would do more if you told me one more
+    thing". */
+function entryUnlocks(q) {
+  const out = [];
+  if (!q.domainId) out.push('a domain — for domain drills, weighted mocks and accuracy by domain');
+  if (!q.difficulty) out.push('a difficulty — for papers built to a difficulty mix');
+  if (!String(q.explanation || '').trim()) out.push('an explanation — shown to you when the answer is revealed');
   return out;
 }
 
@@ -8737,9 +8821,13 @@ async function questionComposer(opts) {
     const blockers = entryBlockers(q, course);
     readiness.textContent = '';
     if (!blockers.length) {
+      const unlocks = entryUnlocks(q);
       readiness.appendChild(h('div', { class: 'notice ok small' }, [
         h('b', { text: '✓ Ready to practise. ' }),
-        'Saving admits it as Active, so it can appear in your very next session.'
+        'Saving admits it, so it can appear in your very next session.',
+        // Said once, quietly, and never as a reason you cannot save.
+        unlocks.length ? h('div', { class: 'tiny dim', style: 'margin-top:5px' },
+          'Still open, none of it required: ' + unlocks.join('; ') + '.') : null
       ]));
     } else {
       readiness.appendChild(h('div', { class: 'notice warn small' }, [
@@ -8793,8 +8881,12 @@ async function questionComposer(opts) {
     saved++;
     if (opts.onSaved) await opts.onSaved(q);
 
-    const label = q.qid + (q.status === 'active' ? ' saved and ready to practise' : ' saved — ' + (STATUS[q.status] || {}).label);
-    toast(label, q.status === 'active' ? 'ok' : 'warn', 4200);
+    // Asks the practice gate itself rather than naming one status: a question
+    // filed under no domain is saved as Unclassified and is practisable, and
+    // telling somebody it is merely "saved" would be wrong.
+    const ready = isPracticeEligible(q);
+    const label = q.qid + (ready ? ' saved and ready to practise' : ' saved — ' + (STATUS[q.status] || {}).label);
+    toast(label, ready ? 'ok' : 'warn', 4200);
     if (!andAnother) return true;
 
     // Keep everything that describes WHERE the question came from; clear only
@@ -9290,7 +9382,10 @@ ROUTES.import = async (root) => {
   const batches = (await DB.byIndex('batches', 'courseId', State.course.id)).sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt));
   const sources = await DB.byIndex('sources', 'courseId', State.course.id);
   const all = await State.questions();
-  const waiting = all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0).length;
+  // Only what is genuinely stuck. Questions that are merely unfiled or whose
+  // wording nobody has double-checked are already in practice.
+  const waiting = all.filter(isBlocked).length;
+  const tidy = all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0).length - waiting;
 
   await band('Add Questions', 'Bring questions in, then confirm the ones the app could not be sure about', [
     { k: 'Sources', v: String(sources.length) },
@@ -9335,6 +9430,13 @@ ROUTES.import = async (root) => {
     root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:14px' }, [
       String(waiting) + ' question(s) from earlier imports are waiting on you and cannot be practised until confirmed. ',
       h('a', { href: '#', onclick: (e) => { e.preventDefault(); State.importStep = 'check'; go('import'); }, text: 'Review them now →' })
+    ]));
+  }
+  // Never phrased as a hold-up: these are already being practised.
+  if (!waiting && tidy) {
+    root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:14px' }, [
+      'Nothing is held up. ' + tidy + ' question(s) are in practice but not fully filled in — filing them under a domain turns on domain drills and weighted mocks. ',
+      h('a', { href: '#', onclick: (e) => { e.preventDefault(); State.importStep = 'check'; go('import'); }, text: 'Tidy them up →' })
     ]));
   }
 
@@ -10176,15 +10278,20 @@ function renderStaging(root) {
     // The per-row warnings are easy to page past on a batch of two hundred;
     // what matters at the moment of admission is how many there are.
     const importing = st.items.filter(it => it.decision === 'import');
-    const willBeActive = (q) => !!q.correctOptionId && !!q.domainId && q.answerVerified === 'verified' && optionCountOk(q);
+    // No domain here: an unfiled question practises perfectly well, and
+    // counting it as held back was the summary telling somebody their import
+    // had half failed when it had entirely succeeded.
+    const willBeActive = (q) => !!q.correctOptionId && q.answerVerified === 'verified' && optionCountOk(q);
     const readyNow = importing.filter(it => willBeActive(it.q)).length;
     const heldBack = importing.length - readyNow;
     const gaps = [
       importing.filter(it => !it.q.correctOptionId).length ? importing.filter(it => !it.q.correctOptionId).length + ' with no correct answer found' : null,
       importing.filter(it => it.q.correctOptionId && it.q.answerVerified !== 'verified').length ? importing.filter(it => it.q.correctOptionId && it.q.answerVerified !== 'verified').length + ' whose answer you have not confirmed' : null,
-      importing.filter(it => !it.q.domainId).length ? importing.filter(it => !it.q.domainId).length + ' filed under no domain' : null,
       importing.filter(it => !optionCountOk(it.q)).length ? importing.filter(it => !optionCountOk(it.q)).length + ' without the option count this course expects' : null
     ].filter(Boolean);
+    // Said separately, as an offer rather than a debt.
+    const unfiled = importing.filter(it => !it.q.domainId).length;
+    const ungraded = importing.filter(it => !it.q.difficulty).length;
     const ok = await confirmBox('Admit this batch?',
       admitted + ' question(s) will be admitted and issued permanent Question IDs — ' +
       readyNow + ' entering practice immediately' +
@@ -10192,7 +10299,9 @@ function renderStaging(root) {
       (c.review + c.conflict ? ', ' + (c.review + c.conflict) + ' staying in the review queue until you confirm them' : '') + '. ' +
       (c.merge ? c.merge + ' will be merged into existing records. ' : '') +
       (c.reject ? c.reject + ' will be rejected. ' : '') +
-      'Question IDs, once issued, are permanent, including for review-queue items.');
+      'Question IDs, once issued, are permanent, including for review-queue items.' +
+      (unfiled ? ' ' + unfiled + ' are filed under no domain — they practise as they are; giving them one later turns on domain drills and weighted mocks.' : '') +
+      (ungraded && !unfiled ? ' ' + ungraded + ' have no difficulty yet — grade them as you practise and difficulty-based papers switch on.' : ''));
     if (!ok) return;
     try {
       await admitBatch();
@@ -11029,7 +11138,7 @@ const REVIEW_FILTER_TABS = [
   ['answer_conflict', 'Answer conflicts'],
   ['possible_dup', 'Possible duplicates'],
   ['needs_answer', 'Needs answer verification'],
-  ['needs_class', 'Needs classification'],
+  ['needs_class', 'Unclassified'],
   ['other', 'Other']
 ];
 // Persists across renders (like BankState) so switching tabs, or a resolve
@@ -11401,7 +11510,7 @@ async function renderReviewQueue(root) {
         h('span', { class: 'small', style: 'flex:1;text-align:left', text: o.text })
       ])))));
 
-    if (show('needs_class')) section(sectionsBox, 'Needs classification', noClass, 'Unmapped questions never guess a domain', q => quickRow(q,
+    if (show('needs_class')) section(sectionsBox, 'Unclassified — already in practice', noClass, 'A domain turns on domain drills and weighted mocks', q => quickRow(q,
       h('div', { class: 'row wrap', style: 'gap:6px' }, State.course.blueprint.map(d => h('button', {
         class: 'btn sm', onclick: async () => {
           const fresh = await Questions.get(q.uuid);
@@ -20460,23 +20569,36 @@ test('A hand-written question earns exactly the status its content deserves', ()
     eq(deriveEntryStatus(ready), 'active');
     ready.status = 'active';
     assert(isPracticeEligible(ready), 'what deriveEntryStatus calls active must actually be practisable');
-    [noAnswer, unchecked, noDomain, oneOption].forEach(q => {
+    // Missing an answer, an unconfirmed answer and a question with one option
+    // are all still held: without them there is nothing to mark.
+    [noAnswer, unchecked, oneOption].forEach(q => {
       q.status = deriveEntryStatus(q);
-      assert(!isPracticeEligible(q), 'and what it holds back must actually be held back');
+      assert(!isPracticeEligible(q), 'what cannot be marked must still be held back');
     });
+    // But an unfiled question is a perfectly good question. It practises, and
+    // it says what it is missing rather than disappearing.
+    noDomain.status = deriveEntryStatus(noDomain);
+    eq(noDomain.status, 'needs_class');
+    assert(isPracticeEligible(noDomain), 'no domain must not cost somebody their whole bank');
+    assert(entryBlockers(noDomain, null).indexOf('file it under a domain') < 0, 'and it is not called a blocker');
+    assert(entryUnlocks(noDomain).some(x => x.indexOf('a domain') === 0), 'it is named as something it would unlock');
   } finally { State.courses = State.courses.filter(c => c.id !== 'test-course'); }
 });
 
 test('Blockers name what is left to do, and go quiet when nothing is', () => {
   const q = blankQuestion('test-course');
   q.options = [makeOption(''), makeOption('')];
-  eq(entryBlockers(q, null).length, 4, 'an empty form has four things outstanding: ' + JSON.stringify(entryBlockers(q, null)));
+  // Three, not four: filing it under a domain is no longer something that
+  // stops you, so it is not something the form asks you for.
+  eq(entryBlockers(q, null).length, 3, 'an empty form has three things outstanding: ' + JSON.stringify(entryBlockers(q, null)));
   q.stem = 'A question?';
   q.options = [makeOption('one'), makeOption('two')];
   q.correctOptionId = q.options[0].id;
   q.answerVerified = 'verified';
+  eq(entryBlockers(q, null).length, 0, 'a complete one has none, domain or no domain');
+  eq(entryUnlocks(q).length, 2, 'though it would still like a domain and a difficulty');
   q.domainId = 'D1';
-  eq(entryBlockers(q, null).length, 0, 'a complete one has none');
+  eq(entryBlockers(q, null).length, 0);
   const strict = { code: 'TST', optionCount: 4, enforceOptionCount: true };
   eq(entryBlockers(q, strict).length, 1, 'until the course insists on four options');
   assert(entryBlockers(q, strict)[0].indexOf('exactly 4') >= 0, 'and it should say so plainly');
