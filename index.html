@@ -1368,7 +1368,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.2.0', schema: 3 };
+const APP = { name: 'MCQ Mastery', version: '1.3.0', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1509,7 +1509,7 @@ function shuffle(arr, rng) {
    ========================================================================== */
 const STORES = {
   courses:         { keyPath: 'id', idx: [] },
-  questions:       { keyPath: 'uuid', idx: ['courseId', 'qid', 'status', 'fingerprint', 'batchId', 'sourceId', 'nextReviewAt', 'domainId', 'canonicalUuid'] },
+  questions:       { keyPath: 'uuid', idx: ['courseId', 'qid', 'status', 'fingerprint', 'batchId', 'sourceId', 'nextReviewAt', 'domainId', 'canonicalUuid', 'caseStudyId'] },
   questionVersions:{ keyPath: 'id', auto: true, idx: ['questionUuid'] },
   sources:         { keyPath: 'id', idx: ['courseId', 'fileHash'] },
   batches:         { keyPath: 'id', idx: ['courseId'] },
@@ -1522,6 +1522,10 @@ const STORES = {
   tombstones:      { keyPath: 'qid' },
   presets:         { keyPath: 'id', idx: ['courseId'] },
   notes:           { keyPath: 'id', idx: ['courseId', 'domainId'] },
+  /** Case study passages. Their QUESTIONS live in `questions` above, carrying
+      a caseStudyId — one register, partitioned at eligiblePool(), rather than
+      a second copy of every mechanism questions already have. */
+  caseStudies:     { keyPath: 'id', idx: ['courseId'] },
   /** Holds the file/folder handle only. Never exported, never synced. */
   fsmeta:          { keyPath: 'k' }
 };
@@ -1865,6 +1869,31 @@ const IdRegister = {
       return ids;
     });
   },
+  /** Case study IDs come from their own sequence in the same register record,
+      so they never collide with question IDs and inherit the same
+      never-reused, serialised-through-one-queue guarantee. */
+  nextCase(courseId, count, meta) {
+    return this._serialize(async () => {
+      let reg = await DB.get('idRegister', courseId);
+      if (!reg) reg = { courseId, lastSeq: 0, allocations: [] };
+      if (!reg.lastCaseSeq) reg.lastCaseSeq = 0;
+      const course = await DB.get('courses', courseId);
+      const prefix = (course && course.qidPrefix) || 'Q';
+      const ids = [];
+      for (let i = 0; i < count; i++) ids.push(prefix + '-CS-' + pad(++reg.lastCaseSeq, 4));
+      reg.allocations.push({ ts: nowISO(), from: ids[0], to: ids[ids.length - 1], count, note: (meta && meta.note) || 'case study' });
+      if (reg.allocations.length > 500) reg.allocations = reg.allocations.slice(-500);
+      await DB.put('idRegister', reg);
+      return ids;
+    });
+  },
+  /** The case-study mirror of reserveUpTo(), for the same reason. */
+  reserveCaseUpTo(courseId, seq) {
+    return this._serialize(async () => {
+      let reg = await DB.get('idRegister', courseId) || { courseId, lastSeq: 0, allocations: [] };
+      if (seq > (reg.lastCaseSeq || 0)) { reg.lastCaseSeq = seq; await DB.put('idRegister', reg); }
+    });
+  },
   /** Raise the watermark so a restore can never re-issue an existing ID. */
   reserveUpTo(courseId, seq) {
     return this._serialize(async () => {
@@ -1872,7 +1901,8 @@ const IdRegister = {
       if (seq > reg.lastSeq) { reg.lastSeq = seq; reg.allocations.push({ ts: nowISO(), from: '', to: '', count: 0, note: 'Watermark raised to ' + seq + ' by restore' }); await DB.put('idRegister', reg); }
     });
   },
-  seqOf(qid) { const m = /-Q-(\d+)$/.exec(qid || ''); return m ? parseInt(m[1], 10) : 0; }
+  seqOf(qid) { const m = /-Q-(\d+)$/.exec(qid || ''); return m ? parseInt(m[1], 10) : 0; },
+  caseSeqOf(csid) { const m = /-CS-(\d+)$/.exec(csid || ''); return m ? parseInt(m[1], 10) : 0; }
 };
 
 /* ---------- question factory ---------- */
@@ -1883,6 +1913,12 @@ function blankQuestion(courseId) {
     stem: '', options: [], correctOptionId: null, explanation: '', learningPoint: '',
     imageId: null, lockOptionOrder: false, lang: 'en',
     domainId: null, topic: '', subtopic: '',
+    // Which bank this record belongs to. null/absent means the ordinary
+    // standalone bank, so every record written before case studies existed
+    // reads correctly without being touched. A case-study question is only
+    // ever reachable from the mock exam and Case study practice — see
+    // eligiblePool() / caseEligiblePool() in module 06.
+    caseStudyId: null, caseSeq: 0,
     srcModule: '', srcChapter: '', srcSection: '',
     difficulty: 'medium', qtype: 'single', tags: [],
     sourceId: null, sourceRefs: [], batchId: null, importedAt: null,
@@ -1924,6 +1960,13 @@ function optionCountOk(q) {
   const expected = course && course.enforceOptionCount ? course.optionCount : null;
   return !expected || (q.options || []).length === expected;
 }
+/** Which of the two banks a record belongs to. The whole separation rests on
+    this one predicate: a case-study question is only comprehensible next to
+    its scenario, so it is never drawn by anything that cannot show the
+    scenario alongside it. Written as a function rather than read inline so
+    there is exactly one definition of "is this a case-study question". */
+function isCaseQuestion(q) { return !!(q && q.caseStudyId); }
+
 /** A question may only enter a test session if it is Active and answer-verified. */
 function isPracticeEligible(q) {
   return q.status === 'active' && q.answerVerified === 'verified' && !q.conflict &&
@@ -1999,6 +2042,67 @@ function materiallyDifferent(a, b) {
   if ((a.explanation || '') !== (b.explanation || '')) return true;
   return false;
 }
+
+/* ---------- case study factory and repository ----------
+   A case study is a scenario — often one to two printed pages — plus the
+   questions that only make sense against it. The passage lives here; its
+   questions live in `questions` like any other, carrying caseStudyId. That
+   way versioning, duplicate detection, attempt history, mastery, the backup
+   package, folder/Drive sync and the merge engine all keep working on them
+   with no parallel implementation, while eligiblePool() keeps them out of
+   every mode and every game that cannot show the passage.                   */
+function blankCaseStudy(courseId) {
+  return {
+    id: uuid(), csid: null, courseId, ref: '',
+    title: '', text: '',
+    domainId: null, topic: '', tags: [],
+    sourceId: null, sourceRefs: [], batchId: null, importedAt: null,
+    createdAt: nowISO(), updatedAt: nowISO(), version: 1, archived: false
+  };
+}
+/** Words in a passage — shown wherever its depth matters (the list, the
+    editor, the import preview), because "1,400 words" says more about
+    whether a scenario is complete than a character count does. */
+function passageWords(text) {
+  const t = String(text || '').trim();
+  return t ? t.split(/\s+/).length : 0;
+}
+
+const CaseStudies = {
+  get: (id) => DB.get('caseStudies', id),
+  async byCourse(courseId) {
+    const rows = await DB.byIndex('caseStudies', 'courseId', courseId);
+    return rows.sort((a, b) => String(a.csid || '').localeCompare(String(b.csid || '')));
+  },
+  /** Allocates the permanent case study ID on first save, never before —
+      abandoning a half-typed scenario must not retire an ID. */
+  async save(cs, reason) {
+    const prev = cs.id ? await DB.get('caseStudies', cs.id) : null;
+    if (!cs.csid) {
+      const ids = await IdRegister.nextCase(cs.courseId, 1, { note: reason || 'case study' });
+      cs.csid = ids[0];
+    }
+    if (prev) cs.version = (prev.version || 1) + 1;
+    cs.updatedAt = nowISO();
+    await DB.put('caseStudies', cs);
+    await audit(prev ? 'edit' : 'create', 'caseStudy', cs.csid || cs.id, prev ? { title: prev.title, words: passageWords(prev.text) } : null,
+      { title: cs.title, words: passageWords(cs.text) }, reason || '');
+    return cs;
+  },
+  async putRaw(cs) { await DB.put('caseStudies', cs); return cs; },
+  /** Every question filed under this case study, in the order it was printed. */
+  async questionsOf(caseStudyId) {
+    const rows = await DB.byIndex('questions', 'caseStudyId', caseStudyId);
+    return rows.sort((a, b) => (a.caseSeq || 0) - (b.caseSeq || 0) || String(a.qid || '').localeCompare(String(b.qid || '')));
+  },
+  /** Removing the scenario would strand its questions, so this is only ever
+      reached once they have been dealt with — the caller decides whether that
+      means deleting them too, and passes them in. */
+  async remove(cs) {
+    await DB.del('caseStudies', cs.id);
+    await audit('delete', 'caseStudy', cs.csid || cs.id, { title: cs.title }, null, '');
+  }
+};
 
 /* ---------- courses in memory ---------- */
 const State = {
@@ -2228,6 +2332,18 @@ function candidatesFor(q, index, excludeUuid) {
  * Compare a set of candidate questions against the existing bank and against
  * each other. Returns per-candidate verdicts; nothing is merged here.
  */
+/** Two records are only ever compared for duplication within the same bank.
+
+    A standalone question and a case-study question can legitimately share
+    wording — the same control, the same ratio, asked once in the abstract and
+    once about a specific scenario — and they are not the same question, because
+    one carries two pages of context the other does not. Pairing them would put
+    an unresolvable row in the review queue: neither side can be merged into the
+    other, and neither is wrong. Two case-study questions ARE compared, including
+    across different case studies, because that is a real duplicate worth
+    catching. */
+function comparablePair(a, b) { return isCaseQuestion(a) === isCaseQuestion(b); }
+
 function detectDuplicates(candidates, bank) {
   const index = buildIndex(bank);
   const results = new Map();
@@ -2239,6 +2355,7 @@ function detectDuplicates(candidates, bank) {
     for (const other of pool) {
       if (other.uuid === q.uuid) continue;
       if (other.status === 'merged' || other.status === 'rejected') continue;
+      if (!comparablePair(q, other)) continue;
       const sim = similarity(q, other);
       const cls = classifyPair(q, other, sim);
       if (cls === 'distinct') continue;
@@ -2327,7 +2444,11 @@ async function recheckQuestion(q, opts) {
     return { changed: false, newConflicts: [], newDups: [], touchedOthers: [] };
   }
   const bank = opts.bank || (await Questions.byCourse(q.courseId)).filter(x => x.uuid !== q.uuid);
-  const live = bank.filter(x => x.status !== 'merged' && x.status !== 'rejected');
+  // Filtered on the partition as well as on liveness, so an index built here
+  // only ever holds the bank q actually belongs to. A caller-supplied index
+  // (a bulk rescan sweeping both banks in one pass) is covered by the guard
+  // inside the candidate loop below instead.
+  const live = bank.filter(x => x.status !== 'merged' && x.status !== 'rejected' && comparablePair(q, x));
   const index = opts.index || buildIndex(live);
   const byUuid = opts.byUuid || new Map(live.map(x => [x.uuid, x]));
   const dismissed = new Set(q.dismissedPairs || []);
@@ -2336,6 +2457,7 @@ async function recheckQuestion(q, opts) {
   for (const other of candidatesFor(q, index, q.uuid)) {
     if (other.uuid === q.uuid) continue;
     if (dismissed.has(other.uuid) || (other.dismissedPairs || []).indexOf(q.uuid) >= 0) continue;
+    if (!comparablePair(q, other)) continue;
     const sim = similarity(q, other);
     const cls = classifyPair(q, other, sim);
     if (cls === 'distinct') continue;
@@ -3603,7 +3725,21 @@ function weaknessScore(g, minSample) {
 }
 
 /* ---------- selection ---------- */
-function eligiblePool(all) { return all.filter(isPracticeEligible); }
+/* The single seam that keeps the two banks apart.
+
+   Every practice mode, every game and both readiness counters draw from
+   eligiblePool() and nothing else, so excluding case-study questions HERE
+   excludes them from Learning, Domain drill, Weak topics, Incorrect &
+   guessed, Mixed revision, Spaced repetition, Custom practice and every
+   registered game at once — with no per-mode rule to keep in step, and none
+   to forget when a mode or a game is added later.
+
+   Only two callers ever want the other side: a timed mock, when the
+   candidate has asked for a case-study section, and Case study practice
+   itself. Both reach for caseEligiblePool() explicitly, because drawing a
+   question away from its scenario is a decision, never a default.          */
+function eligiblePool(all) { return all.filter(q => isPracticeEligible(q) && !isCaseQuestion(q)); }
+function caseEligiblePool(all) { return all.filter(q => isPracticeEligible(q) && isCaseQuestion(q)); }
 
 function applyFilters(pool, f) {
   const now = new Date();
@@ -8306,7 +8442,7 @@ ROUTES.analytics = async (root) => {
    read your data — that is the migration path, not a promise.
    ========================================================================== */
 
-const BACKUP_STORES = ['courses', 'questions', 'questionVersions', 'sources', 'batches', 'attempts', 'sessions', 'settings', 'audit', 'images', 'idRegister', 'tombstones', 'presets', 'notes'];
+const BACKUP_STORES = ['courses', 'questions', 'questionVersions', 'sources', 'batches', 'attempts', 'sessions', 'settings', 'audit', 'images', 'idRegister', 'tombstones', 'presets', 'notes', 'caseStudies'];
 
 /**
  * A backup that must succeed before anything is destroyed.
@@ -8858,6 +8994,7 @@ async function exportPrintable() {
 async function integrityChecks() {
   const all = await DB.all('questions');
   const sources = await DB.all('sources');
+  const cases = await DB.all('caseStudies');
   const images = await DB.all('images');
   const attempts = await DB.all('attempts');
   const srcIds = new Set(sources.map(s => s.id));
@@ -8883,6 +9020,12 @@ async function integrityChecks() {
   (await DB.all('courses')).forEach(c => (c.blueprint || []).forEach(d => validDomains.add(c.id + '|' + d.id)));
   push('badDomain', 'Filed under a domain that no longer exists in this course', all.filter(q => q.domainId && !validDomains.has(q.courseId + '|' + q.domainId)).map(q => q.qid + ' → ' + q.domainId), 'Reopen it and pick a domain that still exists in the blueprint.');
   push('mergedNoCanon', 'Marked merged, but the record it merged into is gone', all.filter(q => q.status === 'merged' && !q.canonicalUuid).map(q => q.qid), 'Open it from Question detail and use Unmerge.');
+  // A case-study question whose scenario has gone cannot be answered honestly:
+  // the context it was written against no longer exists.
+  const caseIds = new Set(cases.map(c => c.id));
+  push('orphanCase', 'A case-study question whose case study is gone', all.filter(q => q.caseStudyId && !caseIds.has(q.caseStudyId)).map(q => q.qid || q.uuid.slice(0, 8)), 'Open it from the Question Bank and either re-link it to a case study or clear the link, which returns it to the standalone bank.');
+  const casesWithQs = new Set(all.filter(q => q.caseStudyId && q.status !== 'rejected' && q.status !== 'merged').map(q => q.caseStudyId));
+  push('emptyCase', 'A case study with no questions', cases.filter(c => !casesWithQs.has(c.id)).map(c => (c.csid || c.id.slice(0, 8)) + ' — ' + (c.title || 'untitled')), 'Harmless, but it can never be practised. Add questions to it from Case Studies, or delete it.');
   return issues;
 }
 
@@ -9588,17 +9731,18 @@ async function applyOptionCountRule(course) {
     is the reversible, one-click step; this is the deliberate second one
     past it, for a course someone genuinely wants gone rather than hidden. */
 async function deleteCourseForever(course) {
-  const [qs, srcs, batches, atts, sess, presets, notes] = await Promise.all([
+  const [qs, srcs, batches, atts, sess, presets, notes, cases] = await Promise.all([
     Questions.byCourse(course.id),
     DB.byIndex('sources', 'courseId', course.id),
     DB.byIndex('batches', 'courseId', course.id),
     DB.byIndex('attempts', 'courseId', course.id),
     DB.byIndex('sessions', 'courseId', course.id),
     DB.byIndex('presets', 'courseId', course.id),
-    NotesStore.list(course.id)
+    NotesStore.list(course.id),
+    CaseStudies.byCourse(course.id)
   ]);
   const ok = await confirmBox('Delete ' + course.code + ' permanently?',
-    'This removes the course itself and everything filed under it — ' + qs.length + ' question(s), ' + notes.length + ' note(s), ' + srcs.length + ' source file(s) — with no way back. A safety backup of everything is taken first, automatically.', true, 'Delete permanently');
+    'This removes the course itself and everything filed under it — ' + qs.length + ' question(s), ' + cases.length + ' case study/studies, ' + notes.length + ' note(s), ' + srcs.length + ' source file(s) — with no way back. A safety backup of everything is taken first, automatically.', true, 'Delete permanently');
   if (!ok) return;
   const codeInput = h('input', { type: 'text', id: 'delCourseCode', placeholder: course.code });
   const again = await modal({
@@ -9629,6 +9773,7 @@ async function deleteCourseForever(course) {
   for (const b of batches) await DB.del('batches', b.id);
   for (const p of presets) await DB.del('presets', p.id);
   for (const n of notes) await NotesStore.remove(n);
+  for (const c of cases) await DB.del('caseStudies', c.id);
   await DB.del('idRegister', course.id);
   await DB.del('courses', course.id);
   await Settings.clearCourse(course.id);
@@ -9688,8 +9833,9 @@ async function showAudit() {
 
 async function wipeCourse() {
   const all = await State.questions();
+  const cases = await CaseStudies.byCourse(State.course.id);
   const ok = await confirmBox('Delete every question in ' + State.course.code + '?',
-    all.length + ' question(s), together with their attempts and sessions, will be permanently deleted. A safety backup of everything is taken first, automatically, before anything is removed. Retired question numbers are kept on a list and never reused for a new question.', true);
+    all.length + ' question(s)' + (cases.length ? ' and ' + cases.length + ' case study/studies' : '') + ', together with their attempts and sessions, will be permanently deleted. A safety backup of everything is taken first, automatically, before anything is removed. Retired question numbers are kept on a list and never reused for a new question.', true);
   if (!ok) return;
   const codeInput = h('input', { type: 'text', id: 'wipeCode', placeholder: State.course.code });
   const again = await modal({
@@ -9719,10 +9865,13 @@ async function wipeCourse() {
   }
   for (const a of await DB.byIndex('attempts', 'courseId', State.course.id)) await DB.del('attempts', a.id);
   for (const s of await DB.byIndex('sessions', 'courseId', State.course.id)) await DB.del('sessions', s.id);
-  await audit('delete', 'course-data', State.course.id, { questions: all.length }, null, 'Course questions deleted after a safety backup; IDs tombstoned');
+  // A scenario with every one of its questions gone is not a case study any
+  // more, just an orphan passage the integrity check would flag forever.
+  for (const c of cases) await DB.del('caseStudies', c.id);
+  await audit('delete', 'course-data', State.course.id, { questions: all.length, caseStudies: cases.length }, null, 'Course questions deleted after a safety backup; IDs tombstoned');
   State.invalidate();
   if (FileStore.connected) await FileStore.flushNow('snapshot');
-  toast('Deleted ' + all.length + ' question(s). Your safety backup is saved.', 'ok');
+  toast('Deleted ' + all.length + ' question(s)' + (cases.length ? ' and ' + cases.length + ' case study/studies' : '') + '. Your safety backup is saved.', 'ok');
   go('dashboard');
 }
 
@@ -11391,7 +11540,7 @@ async function reconnectFlow() {
    escape hatch.
 
    Strategy per store:
-   - questions, courses, sources, batches, presets, notes: keyed rows —
+   - questions, courses, sources, batches, presets, notes, caseStudies: keyed rows —
      newest `updatedAt` (falling back to `createdAt`) wins per key, with
      every key unique to one side carried over untouched. questions are
      then re-checked (rescanCourseForPairs) against the merged bank, so a
@@ -11522,7 +11671,7 @@ async function mergeBankPayloads(localPayload, remotePayload) {
   report.stores.tombstones = { added: tr.added };
   const retiredUuids = new Set(tr.rows.map(t => t.uuid).filter(Boolean));
 
-  ['courses', 'sources', 'batches', 'presets', 'notes', 'sessions'].forEach(s => {
+  ['courses', 'sources', 'batches', 'presets', 'notes', 'sessions', 'caseStudies'].forEach(s => {
     const r = mergeKeyedRows(localPayload.stores[s] || [], remotePayload.stores[s] || [], 'id');
     merged.stores[s] = r.rows;
     report.stores[s] = { added: r.added, updated: r.updated };
@@ -15843,7 +15992,7 @@ test('mergeBankPayloads merges questions and reports the before/after counts, wi
     stores: {
       questions: [{ uuid: 'q1', updatedAt: '2026-01-01T00:00:00Z', stem: 'local q1' }],
       courses: [], sources: [], batches: [], attempts: [], sessions: [], settings: [{ k: 'theme', v: 'dark' }],
-      audit: [], images: [], idRegister: [], tombstones: [], presets: [], notes: [], questionVersions: []
+      audit: [], images: [], idRegister: [], tombstones: [], presets: [], notes: [], caseStudies: [], questionVersions: []
     }
   };
   const remote = {
@@ -15851,7 +16000,7 @@ test('mergeBankPayloads merges questions and reports the before/after counts, wi
     stores: {
       questions: [{ uuid: 'q2', updatedAt: '2026-01-01T00:00:00Z', stem: 'remote q2' }],
       courses: [], sources: [], batches: [], attempts: [], sessions: [], settings: [{ k: 'theme', v: 'light' }],
-      audit: [], images: [], idRegister: [], tombstones: [], presets: [], notes: [], questionVersions: []
+      audit: [], images: [], idRegister: [], tombstones: [], presets: [], notes: [], caseStudies: [], questionVersions: []
     }
   };
   return mergeBankPayloads(local, remote).then(({ merged, report }) => {
