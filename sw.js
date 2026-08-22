@@ -29,11 +29,23 @@
 
 const CACHE = 'mcq-mastery-shell-v1';
 
-self.addEventListener('install', () => {
-  // Take over as soon as possible rather than waiting for every tab to close:
-  // there is only ever one document here, and a worker stuck "waiting" is a
-  // confusing state to explain to somebody on a train.
-  self.skipWaiting();
+self.addEventListener('install', (e) => {
+  e.waitUntil((async () => {
+    // Warm the cache on the very first visit. Without this the app only
+    // survives going offline after it has been loaded a second time, because
+    // the first load happens before this worker controls anything — which is
+    // exactly the visit where somebody is most likely to shut the laptop and
+    // get on a train. A failure here must not fail the installation: the
+    // fetch handler fills the same cache on its own.
+    try {
+      const cache = await caches.open(CACHE);
+      await cache.addAll(['./index.html', './manifest.webmanifest']);
+    } catch (err) { /* offline at install, or a file that isn't there */ }
+    // Take over as soon as possible rather than waiting for every tab to
+    // close: there is only ever one document here, and a worker stuck
+    // "waiting" is a confusing state to explain to somebody on a train.
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', (e) => {

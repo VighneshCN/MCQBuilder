@@ -1,0 +1,25 @@
+{
+ "name": "MCQ Mastery",
+ "short_name": "MCQ Mastery",
+ "description": "A controlled question bank and exam practice tool. Your questions and your progress stay on your own machine.",
+ "start_url": "./index.html",
+ "scope": "./",
+ "display": "standalone",
+ "background_color": "#EDF1F4",
+ "theme_color": "#16202B",
+ "lang": "en",
+ "icons": [
+  {
+   "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIj48cmVjdCB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgcng9IjExMiIgZmlsbD0iIzE2MjAyQiIvPjxyZWN0IHg9IjEzNiIgeT0iMTM2IiB3aWR0aD0iMjQwIiBoZWlnaHQ9IjI0MCIgcng9IjM0IiBmaWxsPSJub25lIiBzdHJva2U9IiNFOThENzYiIHN0cm9rZS13aWR0aD0iMjYiLz48cGF0aCBkPSJNMTk2IDI1OGw0NCA0NiA4NC0xMDAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0U5OEQ3NiIgc3Ryb2tlLXdpZHRoPSIzMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PC9zdmc+",
+   "sizes": "any",
+   "type": "image/svg+xml",
+   "purpose": "any"
+  },
+  {
+   "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIj48cmVjdCB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgcng9IjExMiIgZmlsbD0iIzE2MjAyQiIvPjxyZWN0IHg9IjEzNiIgeT0iMTM2IiB3aWR0aD0iMjQwIiBoZWlnaHQ9IjI0MCIgcng9IjM0IiBmaWxsPSJub25lIiBzdHJva2U9IiNFOThENzYiIHN0cm9rZS13aWR0aD0iMjYiLz48cGF0aCBkPSJNMTk2IDI1OGw0NCA0NiA4NC0xMDAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0U5OEQ3NiIgc3Ryb2tlLXdpZHRoPSIzMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PC9zdmc+",
+   "sizes": "512x512",
+   "type": "image/svg+xml",
+   "purpose": "maskable"
+  }
+ ]
+}

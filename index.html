@@ -27,7 +27,13 @@
 <meta name="color-scheme" content="light">
 <meta name="referrer" content="no-referrer">
 <title>MCQ Mastery — Controlled Question Bank</title>
-<link rel="manifest" href="data:application/manifest+json,%7B%22name%22%3A%22MCQ%20Mastery%22%2C%22short_name%22%3A%22MCQ%22%2C%22start_url%22%3A%22.%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%23EDF1F4%22%2C%22theme_color%22%3A%22%2316202B%22%7D">
+<!-- A real file, not a data: URI. A data: manifest has no base for
+     start_url to resolve against, so Chrome discards it and the app is
+     not installable — checked with Page.getInstallabilityErrors. -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#16202B">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="MCQ Mastery">
 <style>
 @font-face{
   font-family:'Sora Var';font-style:normal;font-weight:400 800;font-display:swap;
@@ -14558,7 +14564,13 @@ function translateGoogleAuthError(code) {
 }
 
 const DriveSync = {
-  connected: false, fileId: null, accessToken: null, tokenExpiresAt: 0,
+  // `connected` means "there is a live token right now". `configured` means
+  // "this browser's bank lives on Drive" — which is true across a refresh, and
+  // true on a train. Conflating the two told somebody whose bank is on Drive
+  // that they were "Local only — not saving to a file", with a Connect button,
+  // every time they reloaded without a network. Nothing was wrong with their
+  // data; the app simply had not been asked the right question.
+  connected: false, configured: false, fileId: null, accessToken: null, tokenExpiresAt: 0,
   lastPushedAt: null, lastSyncedModifiedTime: null, problem: null, setupError: null,
   _tokenClient: null, _tokenClientId: null, _pushTimer: null, _debounceTimer: null,
   _pushing: false, _pendingChange: false, _firstUnpushedChangeAt: null,
@@ -14594,12 +14606,16 @@ const DriveSync = {
     const fileId = await FileStore.meta('driveFileId');
     const wasConnected = await FileStore.meta('driveConnected');
     if (!clientId || !fileId || !wasConnected) return;
+    // Set before anything that can fail. Whether a token is obtainable in the
+    // next second has no bearing on where this bank lives.
+    this.configured = true;
     if (FileStore.connected) {
       // Only one backend is ever active. Both being recorded as connected
       // means a local folder was connected before this version started
       // enforcing that — the folder wins, and Drive is left disconnected
       // (its file is untouched; only this app's link to it is dropped).
       await FileStore.delMeta('driveConnected');
+      this.configured = false;
       setTimeout(() => toast('A local folder and Google Drive were both connected — only one is used at a time, so Drive was disconnected here. Reconnect it from Settings if you meant to switch.', 'info', 10000), 1500);
       return;
     }
@@ -14754,6 +14770,7 @@ const DriveSync = {
 
       await FileStore.setMeta('driveFileId', fileId);
       await FileStore.setMeta('driveConnected', true);
+      this.configured = true;
       this._startTimer();
       await this._recordSyncedStamp();
       updateStorageBar();
@@ -14839,7 +14856,7 @@ const DriveSync = {
     }
     clearTimeout(this._debounceTimer);
     if (this._pushTimer) { clearInterval(this._pushTimer); this._pushTimer = null; }
-    this.connected = false; this.accessToken = null; this.fileId = null; this.problem = null; this.setupError = null;
+    this.connected = false; this.configured = false; this.accessToken = null; this.fileId = null; this.problem = null; this.setupError = null;
     this._pendingChange = false; this._firstUnpushedChangeAt = null; this.lastSyncedModifiedTime = null;
     this._remoteQuestionCount = 0; this._driveShrinkOk = null;
     await FileStore.delMeta('driveFileId');
@@ -15120,7 +15137,20 @@ const DriveSync = {
   },
 
   status() {
-    if (!this.connected) return this.setupError ? { tone: 'bad', label: 'Drive: ' + this.setupError } : null;
+    if (!this.connected) {
+      if (this.setupError) return { tone: 'bad', label: 'Drive: ' + this.setupError };
+      // Configured but without a token yet — which is the ordinary state for
+      // the first second after a reload, and the permanent state offline.
+      // Either way the bank is on Drive and is safe here meanwhile: init()
+      // keeps a driveDirtySince marker and pushes whatever never landed on the
+      // next successful connection.
+      if (this.configured) {
+        return (typeof navigator !== 'undefined' && navigator.onLine === false)
+          ? { tone: 'warn', label: 'Drive: offline — saved here, syncs when you reconnect' }
+          : { tone: 'warn', label: 'Drive: reconnecting…' };
+      }
+      return null;
+    }
     if (this.problem) return { tone: 'bad', label: this.problem };
     if (this._pendingChange) return { tone: 'ok', label: 'Drive: syncing…' };
     return { tone: 'ok', label: this.lastPushedAt ? 'Drive synced ' + fmtDate(this.lastPushedAt, true) : 'Drive connected — syncing…' };
@@ -15275,8 +15305,15 @@ function updateStorageBar() {
   if (!bar) return;
   // Whichever backend is actually active carries the main indicator — only
   // one ever is, so there is nothing useful left to show about the other.
+  // Drive owns this bar whenever Drive is the backend — not only while a token
+  // happens to be live. Falling through to FileStore.status() on a token-less
+  // reload produced "Local only — not saving to a file" for somebody whose
+  // entire bank is on Drive, which is the most alarming wrong thing the app
+  // could say and was never true.
+  const driveOwns = typeof DriveSync !== 'undefined' && (DriveSync.connected || DriveSync.configured);
+  const dst = driveOwns ? DriveSync.status() : null;
   const driveActive = typeof DriveSync !== 'undefined' && DriveSync.connected;
-  const st = driveActive ? { key: 'drive', tone: DriveSync.status().tone, label: DriveSync.status().label } : FileStore.status();
+  const st = dst ? { key: driveActive ? 'drive' : 'drive-waiting', tone: dst.tone, label: dst.label } : FileStore.status();
   bar.dataset.tone = st.tone;
   bar.textContent = '';
 
@@ -15284,11 +15321,11 @@ function updateStorageBar() {
   const label = h('span', { class: 'sb-label', text: st.label });
   bar.appendChild(dot); bar.appendChild(label);
 
-  if (driveActive) {
-    bar.appendChild(h('span', {
-      class: 'sb-sub tiny',
-      text: DriveSync._pendingChange ? 'unsaved changes…' : (DriveSync.lastPushedAt ? 'synced ' + fmtDate(DriveSync.lastPushedAt, true) : '')
-    }));
+  // Only the part the label does not already carry: status() spells out
+  // "Drive synced <when>" itself, and printing the same timestamp twice made
+  // the bar look like it was reporting two different things.
+  if (driveActive && DriveSync._pendingChange) {
+    bar.appendChild(h('span', { class: 'sb-sub tiny', text: 'unsaved changes…' }));
   } else if (FileStore.connected) {
     bar.appendChild(h('span', {
       class: 'sb-sub tiny',
