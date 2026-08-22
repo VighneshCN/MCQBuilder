@@ -4754,9 +4754,13 @@ function calibrationVerdict(cal) {
   if (!cal.knew || cal.knew.n < 5) return null;
   const acc = Math.round(cal.knew.acc * 100);
   const gap = cal.knew.gap;
+  /* Banded against a claim of certainty, which nobody meets exactly: 95% on
+     answers you said you knew is a good record, not a warning. Below 92%
+     there is something you believe that is not so; below 85% it is a habit
+     rather than a slip, and it is costing marks on the topics you are least
+     likely to go back to. */
   if (gap <= -0.15) return { tone: 'bad', text: 'You are overconfident. When you said you knew it, you were right ' + acc + '% of the time — the topics you feel safest on are the ones to check.' };
-  if (gap <= -0.05) return { tone: 'warn', text: 'Slightly overconfident: when you said you knew it, you were right ' + acc + '% of the time.' };
-  if (gap >= 0.03) return { tone: 'ok', text: 'If anything you are underselling yourself — you were right ' + acc + '% of the time on answers you only claimed to know.' };
+  if (gap <= -0.08) return { tone: 'warn', text: 'Slightly overconfident: when you said you knew it, you were right ' + acc + '% of the time.' };
   return { tone: 'ok', text: 'Well calibrated: when you said you knew it, you were right ' + acc + '% of the time.' };
 }
 
@@ -19347,6 +19351,188 @@ test('A paper says what it was actually made of', () => {
     eq(pickCaseBlock(pool, 12, mulberry32(seed)).taken, off.taken,
       'the count must not depend on the seed, or the preview would be a lie at seed ' + seed);
   }
+});
+
+
+/* ---- marking ---- */
+
+/** A paper of `n` questions of which the first `right` are correct and the
+    last `blank` unanswered, every question stamped at `worth` marks. */
+const mkPaper = (n, right, blank, worth, rule) => {
+  const s = { id: 'mk', courseId: 'test-course', mode: 'mock', questionUuids: [], responses: {}, flags: {}, marks: {} };
+  const byId = new Map();
+  for (let i = 0; i < n; i++) {
+    const q = mkQ('Marking question ' + i + '?', ['a', 'b'], 0);
+    s.questionUuids.push(q.uuid);
+    byId.set(q.uuid, q);
+    s.marks[q.uuid] = Array.isArray(worth) ? worth[i] : worth;
+    if (i < n - blank) s.responses[q.uuid] = { correct: i < right, ms: 1000, at: nowISO() };
+  }
+  if (rule) s.marking = rule;
+  return { s, byId };
+};
+
+test('At the defaults, marks and the question count are the same number', () => {
+  const { s, byId } = mkPaper(20, 13, 0, 1, { passPct: 60, negativeFraction: 0, scaledScore: null });
+  const m = markSession(s, byId);
+  const sc = sessionScore(s, byId);
+  eq(m.total, sc.total, 'total marks must equal the question count');
+  eq(m.net, sc.correct, 'marks earned must equal questions correct');
+  eq(Math.round(m.pct), Math.round(sc.accuracy * 100), 'and the percentage must equal accuracy');
+  assert(m.plain, 'and it must know that it has nothing extra to say');
+});
+
+test('A question’s own marks beat the course rate, and a case question takes the case rate', () => {
+  State.courses = (State.courses || []).concat([{ id: 'test-course', code: 'TST' }]);
+  try {
+    // No saved settings for this scratch course, so it falls back to the app
+    // defaults — one mark each.
+    const plain = mkQ('An ordinary question?', ['a', 'b'], 0);
+    eq(marksOf(plain, 'test-course'), 1, 'the default is one mark');
+    eq(marksOf(Object.assign({}, plain, { marks: 3 }), 'test-course'), 3, 'an override wins');
+    eq(marksOf(Object.assign({}, plain, { marks: null }), 'test-course'), 1, 'null means the course rate');
+    eq(marksOf(Object.assign({}, plain, { marks: 0 }), 'test-course'), 1, 'and so does a nonsense value');
+    eq(marksOf(Object.assign({}, plain, { marks: -2 }), 'test-course'), 1, 'including a negative one');
+  } finally { State.courses = State.courses.filter(c => c.id !== 'test-course'); }
+});
+
+test('Negative marking takes a share of each wrong answer, and nothing from a blank', () => {
+  // 10 questions worth 2 each: 6 right, 2 wrong, 2 left blank, quarter off.
+  const { s, byId } = mkPaper(10, 6, 2, 2, { passPct: 60, negativeFraction: 0.25, scaledScore: null });
+  const m = markSession(s, byId);
+  eq(m.total, 20, 'every question counts towards the total, answered or not');
+  eq(m.earned, 12, 'six right at two marks');
+  eq(m.wrong, 2); eq(m.blank, 2);
+  eq(m.negative, 1, 'two wrong at a quarter of two marks each');
+  eq(m.net, 11);
+  // The same paper with the deduction off must lose nothing. Built in one
+  // call: two calls make two papers whose questions have nothing to do with
+  // each other, and every lookup would silently miss.
+  const plain = mkPaper(10, 6, 2, 2, { passPct: 60, negativeFraction: 0, scaledScore: null });
+  const off = markSession(plain.s, plain.byId);
+  eq(off.negative, 0);
+  eq(off.net, 12, 'and keep every mark it earned');
+});
+
+test('Negative marking can never take a score below zero', () => {
+  const { s, byId } = mkPaper(10, 0, 0, 1, { passPct: 60, negativeFraction: 1, scaledScore: null });
+  const m = markSession(s, byId);
+  eq(m.earned, 0); eq(m.negative, 10);
+  eq(m.net, 0, 'a paper cannot be worth less than nothing');
+  eq(Math.round(m.pct), 0);
+});
+
+test('The pass verdict is right either side of the line, and on it', () => {
+  const rule = (p) => ({ passPct: p, negativeFraction: 0, scaledScore: null });
+  const at = (right, passPct) => { const p = mkPaper(10, right, 0, 1, rule(passPct)); return markSession(p.s, p.byId); };
+  eq(at(6, 60).passed, true, 'exactly on the line is a pass');
+  eq(at(6, 60).margin, 0, 'and the margin says so');
+  eq(at(6, 61).passed, false, 'one point under is not');
+  eq(at(7, 60).passed, true);
+  eq(at(5, 60).passed, false);
+  eq(at(5, 60).margin, -1, 'and reports how far short, in marks');
+});
+
+test('A scaled score puts the pass percentage exactly on the pass score', () => {
+  const scale = { min: 200, max: 800, pass: 450 };
+  eq(toScaledScore(60, 60, scale), 450, 'the pass mark maps to the pass score');
+  eq(toScaledScore(0, 60, scale), 200);
+  eq(toScaledScore(100, 60, scale), 800);
+  assert(toScaledScore(30, 60, scale) > 200 && toScaledScore(30, 60, scale) < 450, 'half way to the pass sits between');
+  assert(toScaledScore(80, 60, scale) > 450, 'and above it, above');
+  eq(toScaledScore(60, 60, null), null, 'no mapping, no scaled score');
+  eq(toScaledScore(60, 60, { min: 200, pass: 450 }), null, 'nor an incomplete one');
+  // Out of range in either direction is clamped rather than extrapolated.
+  eq(toScaledScore(140, 60, scale), 800);
+  eq(toScaledScore(-20, 60, scale), 200);
+});
+
+test('A paper keeps the marks and the scheme it was sat under', () => {
+  // Stamped at one mark each under a 60% line...
+  const { s, byId } = mkPaper(10, 6, 0, 1, { passPct: 60, negativeFraction: 0, scaledScore: null });
+  const before = markSession(s, byId);
+  eq(before.net, 6); eq(before.passed, true);
+  // ...and re-marking the questions afterwards, or changing the scheme, cannot
+  // reach back into it. Both are recorded on the session itself.
+  byId.forEach(q => { q.marks = 99; });
+  const after = markSession(s, byId);
+  eq(after.total, before.total, 'the total is fixed to the paper');
+  eq(after.net, before.net, 'and so is what it scored');
+  eq(after.passPct, 60, 'and the line it was judged against');
+});
+
+/* ---- time ---- */
+
+test('The time split cuts on the median and files every answer exactly once', () => {
+  const items = [
+    { uuid: 'a', ms: 10000, correct: true }, { uuid: 'b', ms: 12000, correct: false },
+    { uuid: 'c', ms: 90000, correct: true }, { uuid: 'd', ms: 120000, correct: false }
+  ];
+  const sp = timeSplit(items);
+  eq(sp.cut, 51000, 'the median of four is the mean of the middle two');
+  eq(sp.timed, 4);
+  eq(sp.cells.fastRight.length, 1); eq(sp.cells.fastWrong.length, 1);
+  eq(sp.cells.slowRight.length, 1); eq(sp.cells.slowWrong.length, 1);
+  const filed = Object.keys(sp.cells).reduce((n, k) => n + sp.cells[k].length, 0);
+  eq(filed, sp.timed, 'every timed answer lands in exactly one cell');
+});
+
+test('A paper with no variation in time is not split down the middle arbitrarily', () => {
+  const items = Array.from({ length: 6 }, (_, i) => ({ uuid: 'q' + i, ms: 30000, correct: i % 2 === 0 }));
+  const sp = timeSplit(items);
+  eq(sp.cut, 30000);
+  eq(sp.cells.slowRight.length + sp.cells.slowWrong.length, 0, 'nothing is slow when nothing is slower');
+  eq(sp.cells.fastRight.length, 3); eq(sp.cells.fastWrong.length, 3);
+});
+
+test('Answers with no recorded time are excluded, not treated as instant', () => {
+  const sp = timeSplit([{ uuid: 'a', ms: 0, correct: true }, { uuid: 'b', ms: 40000, correct: false }]);
+  eq(sp.timed, 1); eq(sp.untimed, 1);
+  eq(sp.cells.fastRight.length, 0, 'the untimed one is nowhere');
+  eq(timeSplit([]).timed, 0, 'and nothing at all does not divide by zero');
+  eq(timeSplit([]).cut, 0);
+  eq(median([]), 0);
+  eq(median([5]), 5);
+  eq(median([1, 2, 3]), 2);
+});
+
+/* ---- calibration ---- */
+
+test('Calibration counts each level and signs the gap the right way round', () => {
+  const att = (confidence, correct) => ({ confidence, correct });
+  const attempts = []
+    .concat(Array.from({ length: 20 }, (_, i) => att('knew', i < 13)))       // claims 100, gets 65
+    .concat(Array.from({ length: 10 }, (_, i) => att('guessed', i < 5)))     // claims 25, gets 50
+    .concat(Array.from({ length: 15 }, () => att(null, true)));              // a mock: asked nothing
+  const cal = calibration(attempts);
+  eq(cal.asked, 30, 'only the answers that were actually asked');
+  const knew = cal.rows.find(r => r.k === 'knew');
+  eq(knew.n, 20); eq(knew.correct, 13);
+  eq(Math.round(knew.acc * 100), 65);
+  assert(knew.gap < 0, 'falling short of the claim is a negative gap');
+  eq(Math.round(knew.gap * 100), -35);
+  const guessed = cal.rows.find(r => r.k === 'guessed');
+  assert(guessed.gap > 0, 'beating the claim is a positive one');
+  eq(CONFIDENCE_CLAIM.guessed, 0.25, 'a guess claims no less than luck on four options');
+  const v = calibrationVerdict(cal);
+  assert(v && v.tone === 'bad', 'and 65% against a claim of certainty reads as overconfident');
+  assert(v.text.indexOf('65%') >= 0, 'in the terms someone thinks in: ' + v.text);
+});
+
+test('Calibration says nothing rather than dividing by zero', () => {
+  const empty = calibration([]);
+  eq(empty.asked, 0);
+  eq(calibrationVerdict(empty), null, 'no verdict without evidence');
+  empty.rows.forEach(r => { eq(r.acc, null); eq(r.gap, null); });
+  // A timed mock records no confidence at all, so it must produce nothing.
+  const mockOnly = calibration(Array.from({ length: 40 }, () => ({ confidence: null, correct: true })));
+  eq(mockOnly.asked, 0);
+  eq(calibrationVerdict(mockOnly), null);
+  // And a handful is not yet a verdict either.
+  const few = calibration(Array.from({ length: 4 }, () => ({ confidence: 'knew', correct: false })));
+  eq(calibrationVerdict(few), null, 'four answers is not a finding');
+  const enough = calibration(Array.from({ length: 20 }, (_, i) => ({ confidence: 'knew', correct: i < 19 })));
+  assert(calibrationVerdict(enough).tone === 'ok', '95% on answers you knew is well calibrated');
 });
 
 /* ============================================================================

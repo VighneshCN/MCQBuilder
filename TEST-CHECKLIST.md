@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 135 passed, 0 failed, of 135.**
+**Current result: 147 passed, 0 failed, of 147.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -118,6 +118,23 @@ nine different requested counts.
 73. A scenario already in the bank is reused, not written a second time
 74. A paper says what it was actually made of
 
+### Marking (7)
+75. At the defaults, marks and the question count are the same number
+76. A question’s own marks beat the course rate, and a case question takes the
+    case rate
+77. Negative marking takes a share of each wrong answer, and nothing from a blank
+78. Negative marking can never take a score below zero
+79. The pass verdict is right either side of the line, and on it
+80. A scaled score puts the pass percentage exactly on the pass score
+81. A paper keeps the marks and the scheme it was sat under
+
+### Time and confidence (5)
+82. The time split cuts on the median and files every answer exactly once
+83. A paper with no variation in time is not split down the middle arbitrarily
+84. Answers with no recorded time are excluded, not treated as instant
+85. Calibration counts each level and signs the gap the right way round
+86. Calibration says nothing rather than dividing by zero
+
 ### Everything else (4)
 29. Practice settings are per course, app preferences are shared
 34. Appearance resolves Light, Dark and Auto correctly
@@ -224,6 +241,25 @@ Automated tests cannot verify rendering or real browser storage.
 - [ ] Archive a case study: its questions leave practice with it, and Restore
       brings both back
 - [ ] Export a backup ZIP; it contains `data/caseStudies.json`
+
+### Marking, time and confidence
+
+- [ ] On a course where nothing about marking has been set, sit a mock: no
+      Marks tile, no Marks column, and the score and accuracy read exactly as
+      before
+- [ ] Set 2 marks for case-study questions, a 60% pass and 0.25 negative
+      marking; check the verdict, the margin, the scaled score and the
+      deduction line against a hand-worked paper
+- [ ] Change the marks after sitting that paper — its total and verdict must
+      not move
+- [ ] The dashboard mock trend draws the pass line and the last eight mocks
+- [ ] A finished paper shows the pace line and four cells whose counts sum to
+      the number of timed answers; each cell opens
+- [ ] Answer a Learning session with a deliberate mix of confidences; the
+      calibration table matches a hand count, and a timed mock produces no
+      calibration card at all
+- [ ] Analytics → Time and → Confidence both render on an empty bank without
+      dividing by zero
 - [ ] Import the same case-study file twice — the second time adds no new
       scenarios and flags every question as a duplicate
 - [ ] Blank a scenario's text: its questions leave the practice count, Practice

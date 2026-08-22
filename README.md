@@ -234,6 +234,58 @@ than treated as knowing it.
 Mock exams draw questions weighted to the course blueprint, and can carry a
 case-study section — see section 5.
 
+### Would that have been a pass?
+
+Counting questions is not how any exam is marked. Settings → **How this exam is
+marked** takes the four things that decide it: marks a question, marks a
+case-study question (usually more — it is answered against two pages of
+reading), the pass percentage, and a deduction for wrong answers if your paper
+has one. Leave every one of them alone and each question is worth one mark,
+nothing is deducted, and your results read exactly as they always have.
+
+Some boards report a scaled figure instead of a percentage. Fill in the lowest,
+pass and highest — CISA is 200, 450, 800, and arrives already filled in — and
+every result shows that number too, because a CISA candidate thinks in it and
+nothing else.
+
+Every finished paper then says where it landed: *"You would have passed, by 1.75
+marks — 13.75 of 20 marks · 69% · pass mark 60% · scaled 527 of 800."* Where
+your paper deducts, it says what the wrong answers cost and that the ones you
+left blank cost nothing, which is the arithmetic behind deciding whether to
+guess. The dashboard keeps a trend of your last eight mocks against the pass
+line.
+
+Any single question can be worth something different from the rest — set it in
+the composer, the question editor, or a **Marks** column in an import file.
+
+### Where the time went
+
+Every answer has always been timed. A finished paper now shows the pace you
+actually kept against the pace you needed, and splits the paper four ways on
+the median question time:
+
+- **Fast and wrong** — read too quickly. The marks you are giving away to the
+  qualifier you skimmed.
+- **Slow and wrong** — you did not know it, and paid twice. This is what to
+  revise.
+- **Slow but right** — you know it but are not fluent. Nothing is wrong with
+  the mark; this is what makes you run out of time.
+- **Fast and right** — solid.
+
+Each opens to the questions in it. Analytics → **Time** shows the same split
+across everything you have answered, and which domains the slow ones sit in.
+
+### Did you know what you thought you knew?
+
+Every mode but a timed mock asks how you got to your answer. Analytics →
+**Confidence** finally tells you whether the claim held: *"You are
+overconfident. When you said you knew it, you were right 65% of the time — the
+topics you feel safest on are the ones to check."*
+
+Underneath, the same figure by domain, worst first. The headline says whether
+you have the problem; that table says which part of the syllabus to distrust,
+which is the part you can do something about before the date.
+
 **Practice settings are per course.** Mock length, time limit, mastery target
 and all spaced-repetition intervals are set separately for CISA and DISA, since
 they are different exams. Settings shows a badge telling you which you are

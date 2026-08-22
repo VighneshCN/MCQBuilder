@@ -217,6 +217,56 @@ that is a real duplicate.
 **Spaced repetition never surfaces one**, by construction rather than by rule:
 it filters `eligiblePool()`. Anything due surfaces inside Case study practice.
 
+## Marking, and the two things frozen with a paper
+
+Accuracy — a proportion of questions — is the *learning* metric, and mastery,
+weak topics and the spaced-repetition ladder all still run on it untouched, so
+a two-mark question is not treated as twice as worth revising. Marks are the
+separate *exam* metric.
+
+`marksOf(q)` resolves a question's own value, else the course's case-study or
+standard rate. `markSession(s, byId)` returns the earned, deducted and net
+marks, the percentage, the verdict, the margin and the scaled score.
+`sessionScore()` gained these as extra fields rather than being replaced, so
+every existing caller is unchanged. At the defaults — one mark a question, no
+deduction — marks and the question count are the same number and `plain` is
+true, which is what keeps the marks column, the marks tile and the deduction
+line off screen for anyone who has not configured anything.
+
+Two things are fixed on the session at the moment the paper is made:
+`session.marks` (what each question was worth) and `session.marking` (the pass
+percentage, deduction and scaled mapping it is read under). Re-pricing a
+question, or discovering next month that your exam deducts a quarter for a
+wrong answer, must not silently re-mark papers already sat — the same reason
+an attempt has always recorded the `questionVersion` it was answered against.
+Attempts additionally carry `marks` and `awarded`, so an attempt log read years
+later still adds up to the score reported at the time.
+
+`toScaledScore()` maps piecewise about the pass mark, so the pass percentage
+lands exactly on the pass score. That is the only property of the mapping
+anything relies on; a board's real equating is undisclosed and this does not
+pretend otherwise.
+
+## Reading time and confidence back
+
+Both were recorded from the beginning and reported as a single average and not
+at all respectively.
+
+`timeSplit()` divides answers four ways on correctness and the **median**
+question time. Median, not mean: one question someone walked away from drags a
+mean far enough to file genuinely slow answers on the fast side. Strictly
+greater counts as slow, so a paper with no variation lands entirely on the fast
+side rather than being cut arbitrarily in half. Answers with no recorded time
+are excluded and counted separately rather than treated as instant.
+
+`calibration()` groups attempts by what the person claimed. What each level
+claims is derived from the `CONFIDENCE` weights the scheduler already uses, so
+there is one definition rather than two that can drift, floored at 0.25 because
+guessing between four options is right that often by luck. Attempts with no
+confidence — every answer in a timed mock, which deliberately asks nothing —
+are excluded rather than bucketed as unknown, and `calibrationVerdict()`
+returns null below five answers rather than calling a habit off a handful.
+
 ## Question identity
 
 Human-readable IDs (`CISA-Q-000042`) are allocated from a per-course register at
