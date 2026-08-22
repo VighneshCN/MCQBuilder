@@ -3408,29 +3408,83 @@ function tableRowToCandidate(cells, lineNo) {
   };
 }
 
+/* ---------- what the parser accepts ----------
+   IMPORT_FIELDS is the one description of every field a question file can
+   carry: what it is called on screen, whether the import is useless without
+   it, and which spelling of it the parser will recognise. The Add Questions
+   screen renders its reference panel FROM this table rather than from prose
+   written alongside it, so the app can never advertise a column it does not
+   actually read.
+
+   `cols` are spreadsheet headers (matched case-insensitively, with dashes and
+   underscores treated as spaces); `json` are the object keys, tried in the
+   order given.                                                              */
+const IMPORT_FIELDS = [
+  { f: 'stem',            label: 'The question',            need: 'required',
+    cols: ['question', 'stem', 'question text', 'questiontext', 'q', 'prompt'],
+    json: ['stem', 'question', 'text'] },
+  { f: 'a',               label: 'Option A',                need: 'required',
+    cols: ['a', 'option a', 'optiona', 'opt a', 'choice a'], json: [] },
+  { f: 'b',               label: 'Option B',                need: 'required',
+    cols: ['b', 'option b', 'optionb', 'opt b', 'choice b'], json: [] },
+  { f: 'c',               label: 'Option C',
+    cols: ['c', 'option c', 'optionc', 'opt c', 'choice c'], json: [] },
+  { f: 'd',               label: 'Option D',
+    cols: ['d', 'option d', 'optiond', 'opt d', 'choice d'], json: [] },
+  { f: 'e',               label: 'Option E',
+    cols: ['e', 'option e', 'optione', 'choice e'], json: [] },
+  { f: 'answer',          label: 'Correct answer',          need: 'strongly advised',
+    note: 'A letter (B), or the full text of the right option. Without it the question is admitted needing answer verification and cannot be practised until you set it.',
+    cols: ['answer', 'correct', 'correct answer', 'correctanswer', 'key', 'ans', 'correct option'],
+    json: ['answer', 'correct'] },
+  { f: 'explanation',     label: 'Explanation',
+    cols: ['explanation', 'rationale', 'reason', 'solution', 'justification'],
+    json: ['explanation', 'rationale'] },
+  { f: 'domain',          label: 'Domain',
+    note: 'A blueprint code (D3), a number (3), or the domain name. Unrecognised values are left unmapped rather than guessed.',
+    cols: ['domain', 'official domain', 'cisa domain', 'area'], json: ['domain', 'domainId'] },
+  { f: 'topic',           label: 'Topic',      cols: ['topic', 'subject'], json: ['topic'] },
+  { f: 'subtopic',        label: 'Subtopic',   cols: ['subtopic', 'sub topic', 'sub-topic'], json: ['subtopic'] },
+  { f: 'module',          label: 'Source module',  cols: ['module', 'source module'], json: ['module', 'srcModule'] },
+  { f: 'chapter',         label: 'Source chapter', cols: ['chapter', 'source chapter'], json: ['chapter', 'srcChapter'] },
+  { f: 'section',         label: 'Source section', cols: ['section', 'source section'], json: ['section'] },
+  { f: 'difficulty',      label: 'Difficulty', note: 'easy, medium or hard.', cols: ['difficulty', 'level'], json: ['difficulty'] },
+  { f: 'tags',            label: 'Tags',       cols: ['tags', 'keywords'], json: ['tags'] },
+  { f: 'originalNumber',  label: 'Number in the source',
+    cols: ['no', 'no.', 'q no', 'qno', 'sr no', 'sl no', 'number', 'question number', 'srno'],
+    json: ['originalNumber', 'number'] },
+  { f: 'externalId',      label: 'Source reference',
+    cols: ['id', 'external id', 'source id', 'ref', 'reference'], json: ['externalId', 'id'] },
+  { f: 'learningPoint',   label: 'Learning point',
+    cols: ['learning point', 'my learning point', 'note', 'personal note'], json: ['learningPoint'] },
+  { f: 'lockOptionOrder', label: 'Never shuffle these options',
+    note: 'yes / true / 1. Set automatically anyway for "All of the above" and anything naming a position.',
+    cols: ['lock option order', 'lock', 'fixed order'], json: ['lockOptionOrder'] }
+];
+/** Fields whose value in a JSON file is read by name. Options and the answer
+    are handled structurally in jsonToCandidates (an array, an object, a bare
+    string, or correctIndex all mean something different), so they are not
+    driven from here. */
+const JSON_ALIASES = (() => {
+  const m = {};
+  IMPORT_FIELDS.forEach(x => { if (x.json && x.json.length) m[x.f] = x.json; });
+  m.options = ['options', 'choices'];
+  return m;
+})();
+/** First named key that actually carries something. Deliberately treats an
+    empty string as absent, the way the `a || b || c` chain it replaces did. */
+function jsonPick(o, field) {
+  const keys = JSON_ALIASES[field] || [];
+  for (const k of keys) { const v = o[k]; if (v != null && v !== '') return v; }
+  return undefined;
+}
+
 /* ---------- structured rows (CSV / XLSX) ---------- */
-const COLUMN_ALIASES = {
-  stem: ['question', 'stem', 'question text', 'questiontext', 'q', 'prompt'],
-  a: ['a', 'option a', 'optiona', 'opt a', 'choice a'],
-  b: ['b', 'option b', 'optionb', 'opt b', 'choice b'],
-  c: ['c', 'option c', 'optionc', 'opt c', 'choice c'],
-  d: ['d', 'option d', 'optiond', 'opt d', 'choice d'],
-  e: ['e', 'option e', 'optione', 'choice e'],
-  answer: ['answer', 'correct', 'correct answer', 'correctanswer', 'key', 'ans', 'correct option'],
-  explanation: ['explanation', 'rationale', 'reason', 'solution', 'justification'],
-  domain: ['domain', 'official domain', 'cisa domain', 'area'],
-  topic: ['topic', 'subject'],
-  subtopic: ['subtopic', 'sub topic', 'sub-topic'],
-  module: ['module', 'source module'],
-  chapter: ['chapter', 'source chapter'],
-  section: ['section', 'source section'],
-  difficulty: ['difficulty', 'level'],
-  tags: ['tags', 'keywords'],
-  originalNumber: ['no', 'no.', 'q no', 'qno', 'sr no', 'sl no', 'number', 'question number', 'srno'],
-  externalId: ['id', 'external id', 'source id', 'ref', 'reference'],
-  learningPoint: ['learning point', 'my learning point', 'note', 'personal note'],
-  lockOptionOrder: ['lock option order', 'lock', 'fixed order']
-};
+const COLUMN_ALIASES = (() => {
+  const m = {};
+  IMPORT_FIELDS.forEach(x => { m[x.f] = x.cols; });
+  return m;
+})();
 function mapHeader(headerRow) {
   const map = {};
   headerRow.forEach((raw, i) => {
@@ -3441,11 +3495,20 @@ function mapHeader(headerRow) {
   });
   return map;
 }
-function rowsToCandidates(rows) {
+/**
+ * Spreadsheet rows to candidates.
+ *   opts.map        — a column→field mapping the person supplied by hand,
+ *                     used instead of guessing from the header row.
+ *   opts.headerless — read every row positionally, header row included.
+ * Called with neither (the ordinary recognised-header case, and every
+ * existing caller) it behaves exactly as it always has.
+ */
+function rowsToCandidates(rows, opts) {
+  opts = opts || {};
   if (!rows.length) return { candidates: [], unresolved: [], keyMap: {} };
-  const map = mapHeader(rows[0]);
+  const map = opts.map || mapHeader(rows[0]);
   const candidates = [], unresolved = [];
-  if (map.stem === undefined) {
+  if (opts.headerless || map.stem === undefined) {
     // headerless: treat as tab-style table
     rows.forEach((r, i) => { const c = tableRowToCandidate(r.map(String), i + 1); if (c) candidates.push(c); else unresolved.push({ line: i + 1, text: r.join(' | ').slice(0, 160) }); });
     return { candidates, unresolved, keyMap: {} };
@@ -3483,25 +3546,31 @@ function jsonToCandidates(json) {
   if (!arr) throw new Error('JSON must be an array of questions, or an object with a "questions" array.');
   const candidates = [], unresolved = [];
   arr.forEach((o, i) => {
-    const stem = o.stem || o.question || o.text || '';
-    let opts = o.options || o.choices || [];
+    const stem = jsonPick(o, 'stem') || '';
+    let opts = jsonPick(o, 'options') || [];
     if (!Array.isArray(opts)) opts = Object.keys(opts).map((k, ix) => ({ letter: k.toUpperCase() || letterOf(ix), text: opts[k] }));
     opts = opts.map((x, ix) => typeof x === 'string' ? { letter: letterOf(ix), text: x } : { letter: (x.letter || letterOf(ix)).toString().toUpperCase(), text: x.text || x.value || '', id: x.id });
     if (!stem || opts.length < 2) { unresolved.push({ line: i + 1, text: JSON.stringify(o).slice(0, 160) }); return; }
     let letter = '';
-    const ansRaw = o.answer != null ? String(o.answer) : (o.correct != null ? String(o.correct) : '');
+    const ansRaw = jsonPick(o, 'answer') != null ? String(jsonPick(o, 'answer')) : '';
     if (/^[a-hA-H]$/.test(ansRaw)) letter = ansRaw.toUpperCase();
     else if (o.correctIndex != null) letter = letterOf(+o.correctIndex);
     else if (ansRaw) { const hit = opts.findIndex(x => normText(x.text) === normText(ansRaw)); if (hit >= 0) letter = opts[hit].letter; }
+    // Every plain field is read through JSON_ALIASES, which is the same
+    // IMPORT_FIELDS table the Add Questions reference panel is rendered from —
+    // so a key the panel advertises is by construction a key read here.
+    const pick = (fld) => { const v = jsonPick(o, fld); return v == null ? '' : String(v); };
+    const tagsRaw = jsonPick(o, 'tags');
     candidates.push({
-      line: i + 1, originalNumber: o.originalNumber || o.number || '', externalId: o.externalId || o.id || '',
+      line: i + 1, originalNumber: pick('originalNumber'), externalId: pick('externalId'),
       stem, options: opts, answerRaw: ansRaw, answerLetter: letter,
-      explanation: o.explanation || o.rationale || '', learningPoint: o.learningPoint || '',
-      domainRaw: o.domain || o.domainId || '', topic: o.topic || '', subtopic: o.subtopic || '',
-      srcModule: o.module || o.srcModule || '', srcChapter: o.chapter || o.srcChapter || '', srcSection: o.section || '',
-      difficulty: (o.difficulty || '').toLowerCase(), tags: Array.isArray(o.tags) ? o.tags.join(',') : (o.tags || ''),
-      lockOptionOrder: !!o.lockOptionOrder,
-      conf: { stem: 1, options: 1, answer: letter ? 1 : (ansRaw ? 0.5 : 0), explanation: o.explanation ? 1 : 0 }
+      explanation: pick('explanation'), learningPoint: pick('learningPoint'),
+      domainRaw: pick('domain'), topic: pick('topic'), subtopic: pick('subtopic'),
+      srcModule: pick('module'), srcChapter: pick('chapter'), srcSection: pick('section'),
+      difficulty: pick('difficulty').toLowerCase(),
+      tags: Array.isArray(tagsRaw) ? tagsRaw.join(',') : (tagsRaw == null ? '' : String(tagsRaw)),
+      lockOptionOrder: !!jsonPick(o, 'lockOptionOrder'),
+      conf: { stem: 1, options: 1, answer: letter ? 1 : (ansRaw ? 0.5 : 0), explanation: pick('explanation') ? 1 : 0 }
     });
   });
   return { candidates, unresolved, keyMap: {} };
@@ -6799,6 +6868,12 @@ ROUTES.notes = async (root) => {
    Nothing reaches the practice pool without passing through this screen.
    ========================================================================== */
 
+/** What "Start from a template" offers. The case study bank appends to this. */
+const IMPORT_TEMPLATES = [
+  { id: 'csv', ico: '▦', label: 'Question spreadsheet (.csv)', desc: 'One question per row, with its options in their own columns. Opens in Excel, Numbers or Sheets.', run: () => downloadQuestionTemplateCSV() },
+  { id: 'json', ico: '{ }', label: 'Question file (.json)', desc: 'The same fields as structured data, for anything generating questions programmatically.', run: () => downloadQuestionTemplateJSON() }
+];
+
 const IMPORT_STEPS = [
   ['files', 'Select files'], ['source', 'Source details'], ['parse', 'Extract & preview'],
   ['dupes', 'Duplicates & conflicts'], ['confirm', 'Confirm'], ['report', 'Reconciliation']
@@ -6910,9 +6985,9 @@ ROUTES.import = async (root) => {
   const IMPORT_METHODS = [
     { ico: '✎', title: 'Write a question by hand', desc: 'One question at a time — the stem, the options, which one is right. It tells you as you type whether it will reach practice, and warns you if the bank already has it.', action: () => newQuestion({ onSaved: () => { } }).then(n => { if (n) go('import'); }) },
     { ico: '▣', title: 'Add from image or camera', desc: 'Photograph or screenshot a page, crop and straighten it, then transcribe it — by hand or with OCR.', action: () => imageWorkflow(null) },
-    { ico: '¶', title: 'Paste raw text', desc: 'Already have the questions as text somewhere? Paste them in and see exactly what gets found before anything is kept.', action: () => pasteTextWorkflow() },
-    { ico: '⇩', title: 'Download CSV / JSON templates', desc: 'A blank spreadsheet or JSON file in the exact shape the parser expects — fill it in and drop it back in above.', action: () => downloadTemplates() }
+    { ico: '¶', title: 'Paste raw text', desc: 'Already have the questions as text somewhere? Paste them in and see exactly what gets found before anything is kept.', action: () => pasteTextWorkflow() }
   ];
+  root.appendChild(templateCard());
   root.appendChild(h('div', { class: 'grid g2', style: 'margin-top:16px' }, [
     h('div', { class: 'card' }, [
       h('div', { class: 'card-h' }, h('h3', { text: 'Other ways in' })),
@@ -7072,6 +7147,8 @@ async function intake(files) {
 }
 
 async function sourceDialog(files) {
+  // Per-file column mappings settled here rather than mid-parse.
+  const columnMaps = {};
   const title = h('input', { type: 'text', value: files.length === 1 ? files[0].filename.replace(/\.[^.]+$/, '') : (files.length + ' files · ' + todayKey()) });
   const author = h('input', { type: 'text', placeholder: 'Optional' });
   const type = h('select', {}, ['Question bank', 'Textbook', 'Practice paper', 'Class notes', 'Screenshot set', 'Other'].map(t => h('option', { value: t }, t)));
@@ -7099,7 +7176,24 @@ async function sourceDialog(files) {
       ]),
       h('div', { class: 'field' }, [h('label', { text: 'Notes' }), notes]),
       h('label', { class: 'check' }, [trust, h('span', {}, ['Treat an answer printed in the source as verified ', h('span', { class: 'dim tiny', text: '— leave off if you want to check each answer yourself' })])]),
-      h('div', { class: 'card' }, [h('div', { class: 'card-b tight small muted' }, files.map(f => h('div', { class: 'row' }, [h('span', { class: 'docnum', text: f.ext }), h('span', { style: 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', title: f.filename, text: f.filename }), h('span', { class: 'tiny dim', text: bytes(f.size) })])))])
+      h('div', { class: 'card' }, [h('div', { class: 'card-b tight small muted' }, files.map(f => h('div', { class: 'row' }, [
+        h('span', { class: 'docnum', text: f.ext }),
+        h('span', { style: 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', title: f.filename, text: f.filename }),
+        h('span', { class: 'tiny dim', text: bytes(f.size) }),
+        // A header the parser reads only PART of is the quiet failure: four
+        // recognised columns and one it silently drops. Nothing forces this
+        // open, but it is here for anyone who wants to look before importing.
+        f.kind === 'rows' ? h('button', {
+          class: 'btn sm ghost', title: 'Check how this file\u2019s columns will be read',
+          onclick: async (e) => {
+            const chosenMap = await columnMapDialog(f.rows, mapHeader(f.rows[0] || []), f.filename);
+            if (!chosenMap) return;
+            columnMaps[f.filename] = chosenMap;
+            e.currentTarget.textContent = 'Columns set \u2713';
+            toast('Column mapping saved for ' + f.filename, 'ok');
+          }, text: 'Columns'
+        }) : null
+      ].filter(Boolean))))])
     ]),
     actions: [{ label: 'Cancel', value: false }, { label: 'Extract questions', value: true, kind: 'primary' }]
   });
@@ -7107,8 +7201,131 @@ async function sourceDialog(files) {
   await runParse(files, {
     title: title.value.trim() || 'Untitled source', author: author.value.trim(), type: type.value,
     srcModule: mod.value.trim(), srcChapter: chap.value.trim(), defaultDomainId: dom.value || null,
-    template: tmpl.value, trustSourceAnswers: trust.checked, notes: notes.value.trim()
+    template: tmpl.value, trustSourceAnswers: trust.checked, notes: notes.value.trim(),
+    columnMaps
   });
+}
+
+/* ---------- telling the app what your columns mean ----------
+   A spreadsheet whose headers the parser recognises needs none of this. One
+   whose headers it does not used to fall silently through to positional
+   guessing — first cell is the question, next four are the options — which
+   either produced nonsense or produced nothing, with no dialog, no warning,
+   and no way to say "column 3 is the question". This is that way.          */
+
+/** The header cell, or a positional name when there isn't one. */
+function columnLabel(headerRow, i) {
+  const raw = String((headerRow || [])[i] == null ? '' : headerRow[i]).trim();
+  return raw || 'Column ' + (i + 1);
+}
+
+/**
+ * Ask which column is which.
+ * Resolves to null (cancelled), { headerless: true }, or { map } where map is
+ * the { field: columnIndex } shape mapHeader() produces.
+ */
+async function columnMapDialog(rows, autoMap, filename) {
+  const header = rows[0] || [];
+  const width = rows.reduce((m, r) => Math.max(m, r.length), 0);
+  // Whatever the header row DID match is the starting point — a file with
+  // three recognised columns and two odd ones should only need the two.
+  const chosen = {};
+  for (let i = 0; i < width; i++) chosen[i] = '';
+  Object.keys(autoMap || {}).forEach(f => { chosen[autoMap[f]] = f; });
+
+  let headerless = false;
+  const body = h('div', { class: 'stack' });
+  const verdict = h('div', {});
+  const table = h('div', { class: 'tbl-wrap' });
+
+  body.appendChild(h('div', { class: 'notice small' }, [
+    h('b', { text: 'This file’s column headings aren’t ones the app recognises.' }),
+    ' Rather than guess at them, tell it which column is which. Nothing is read until you continue.'
+  ]));
+  if (filename) body.appendChild(h('div', { class: 'srcline', text: filename }));
+
+  const options = () => [h('option', { value: '' }, '— not imported —')]
+    .concat(IMPORT_FIELDS.map(x => h('option', { value: x.f }, x.label)));
+
+  function draw() {
+    table.textContent = '';
+    const tb = h('tbody');
+    for (let i = 0; i < width; i++) {
+      const samples = rows.slice(1, 4).map(r => String(r[i] == null ? '' : r[i]).trim()).filter(Boolean);
+      const sel = h('select', {
+        disabled: headerless,
+        onchange: (e) => {
+          const v = e.target.value;
+          // One field, one column: claiming a field takes it off whichever
+          // column had it, rather than silently letting the lower index win
+          // the way mapHeader's first-match-wins rule would.
+          if (v) for (const k in chosen) if (chosen[k] === v && String(k) !== String(i)) chosen[k] = '';
+          chosen[i] = v;
+          draw(); check();
+        }
+      }, options());
+      Array.from(sel.options).forEach(o => { if (o.value === chosen[i]) o.selected = true; });
+      tb.appendChild(h('tr', {}, [
+        h('td', {}, [h('b', { class: 'small', text: columnLabel(header, i) }),
+          h('div', { class: 'tiny dim', text: samples.length ? samples.map(x => x.slice(0, 60)).join(' · ') : '(empty in the first few rows)' })]),
+        h('td', { style: 'min-width:190px' }, sel)
+      ]));
+    }
+    table.appendChild(h('table', {}, [h('thead', {}, h('tr', {}, ['Column in your file', 'Means'].map(t => h('th', { text: t })))), tb]));
+  }
+
+  function assigned() {
+    const m = {};
+    for (const k in chosen) if (chosen[k]) m[chosen[k]] = Number(k);
+    return m;
+  }
+  function problems() {
+    if (headerless) return [];
+    const m = assigned();
+    const out = [];
+    if (m.stem === undefined) out.push('Say which column holds the question itself.');
+    const opts = ['a', 'b', 'c', 'd', 'e'].filter(k => m[k] !== undefined).length;
+    if (opts < 2) out.push('Say which columns hold at least two answer options.');
+    return out;
+  }
+  function check() {
+    verdict.textContent = '';
+    const p = problems();
+    if (p.length) {
+      verdict.appendChild(h('div', { class: 'notice warn small' }, p.map(x => h('div', { text: x }))));
+    } else if (headerless) {
+      verdict.appendChild(h('div', { class: 'notice small' }, 'Every row will be read positionally: question first, then the options, with a single-letter cell taken as the answer. This is the app’s old behaviour for files it cannot read a header from.'));
+    } else {
+      const m = assigned();
+      verdict.appendChild(h('div', { class: 'notice ok small' },
+        'Ready. ' + (rows.length - 1) + ' row(s) will be read, starting below the header row' +
+        (m.answer === undefined ? ' — with no answer column, so every question will be admitted needing answer verification.' : '.')));
+    }
+  }
+
+  draw(); check();
+  body.appendChild(table);
+  body.appendChild(h('label', { class: 'check', style: 'margin-top:10px' }, [
+    h('input', {
+      type: 'checkbox', onchange: (e) => { headerless = e.target.checked; draw(); check(); }
+    }),
+    h('span', {}, ['This file has no header row at all ',
+      h('span', { class: 'dim tiny', text: '— read every row as data, positionally' })])
+  ]));
+  body.appendChild(verdict);
+
+  const res = await modal({
+    title: 'Which column is which?', body, wide: true, sticky: true,
+    actions: [
+      { label: 'Cancel', value: null },
+      {
+        label: 'Continue', value: 'go', kind: 'primary',
+        before: () => { if (problems().length) { toast('Tell it which column is the question, and at least two options', 'bad'); return false; } return true; }
+      }
+    ]
+  });
+  if (!res) return null;
+  return headerless ? { headerless: true } : { map: assigned() };
 }
 
 async function runParse(files, meta) {
@@ -7125,7 +7342,23 @@ async function runParse(files, meta) {
     };
     let out;
     try {
-      if (f.kind === 'rows') out = rowsToCandidates(f.rows);
+      if (f.kind === 'rows') {
+        // A mapping settled on the Source details screen wins; otherwise the
+        // header is read, and only if THAT fails is the question asked. A file
+        // whose columns are recognised never sees a dialog.
+        let mapping = (meta.columnMaps || {})[f.filename];
+        if (!mapping) {
+          const auto = mapHeader(f.rows[0] || []);
+          if (auto.stem === undefined) {
+            mapping = await columnMapDialog(f.rows, auto, f.filename);
+            if (!mapping) {
+              staging.unresolved.push({ file: f.filename, line: 0, text: 'Column mapping cancelled — nothing was read from this file.' });
+              continue;
+            }
+          }
+        }
+        out = rowsToCandidates(f.rows, mapping || undefined);
+      }
       else if (f.kind === 'json') out = jsonToCandidates(f.json);
       else out = parseText(f.text, { template: meta.template });
     } catch (e) {
@@ -7465,9 +7698,26 @@ function renderStaging(root) {
   async function commitBatch() {
     const c = counts();
     const admitted = c.import + c.review + c.conflict;
+    // "Entering practice immediately" has to mean it. A candidate marked
+    // Import still lands in the review queue if it has no answer, no domain,
+    // or the wrong number of options — so the number said out loud here is the
+    // one admitBatch will actually make Active, and the shortfall is named.
+    // The per-row warnings are easy to page past on a batch of two hundred;
+    // what matters at the moment of admission is how many there are.
+    const importing = st.items.filter(it => it.decision === 'import');
+    const willBeActive = (q) => !!q.correctOptionId && !!q.domainId && q.answerVerified === 'verified' && optionCountOk(q);
+    const readyNow = importing.filter(it => willBeActive(it.q)).length;
+    const heldBack = importing.length - readyNow;
+    const gaps = [
+      importing.filter(it => !it.q.correctOptionId).length ? importing.filter(it => !it.q.correctOptionId).length + ' with no correct answer found' : null,
+      importing.filter(it => it.q.correctOptionId && it.q.answerVerified !== 'verified').length ? importing.filter(it => it.q.correctOptionId && it.q.answerVerified !== 'verified').length + ' whose answer you have not confirmed' : null,
+      importing.filter(it => !it.q.domainId).length ? importing.filter(it => !it.q.domainId).length + ' filed under no domain' : null,
+      importing.filter(it => !optionCountOk(it.q)).length ? importing.filter(it => !optionCountOk(it.q)).length + ' without the option count this course expects' : null
+    ].filter(Boolean);
     const ok = await confirmBox('Admit this batch?',
       admitted + ' question(s) will be admitted and issued permanent Question IDs — ' +
-      c.import + ' entering practice immediately' +
+      readyNow + ' entering practice immediately' +
+      (heldBack ? ', ' + heldBack + ' waiting on you (' + gaps.join(', ') + ')' : '') +
       (c.review + c.conflict ? ', ' + (c.review + c.conflict) + ' staying in the review queue until you confirm them' : '') + '. ' +
       (c.merge ? c.merge + ' will be merged into existing records. ' : '') +
       (c.reject ? c.reject + ' will be rejected. ' : '') +
@@ -7752,12 +8002,21 @@ async function pasteTextWorkflow() {
   await sourceDialog([parsedF]);
 }
 
-function downloadTemplates() {
+/* ---------- the shape the app expects ----------
+   Every template below is written from IMPORT_FIELDS, the same table the
+   parser reads and the reference panel renders — so a template can never
+   hand you a column the app then ignores.                                  */
+
+function downloadQuestionTemplateCSV() {
   const csv = toCSV([
     ['Question', 'A', 'B', 'C', 'D', 'Answer', 'Explanation', 'Domain', 'Topic', 'Module', 'Difficulty', 'Tags'],
     ['An IS auditor finds a control weakness during fieldwork. What should the auditor do FIRST?', 'Report it to the audit committee', 'Corroborate the finding with additional evidence', 'Recommend a corrective control', 'Widen the scope of the audit', 'B', 'Findings are corroborated before they are reported; conclusions rest on sufficient evidence.', 'D1', 'Audit evidence', 'Module 1', 'medium', 'evidence,fieldwork']
   ]);
-  download('question-import-template.csv', new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' }));
+  download('question-import-template.csv', new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
+  toast('Template downloaded', 'ok');
+}
+
+function downloadQuestionTemplateJSON() {
   const json = JSON.stringify({
     schema: 'mcq-mastery-import/1', questions: [{
       stem: 'Which control BEST reduces the risk of unauthorised changes reaching production?',
@@ -7767,7 +8026,59 @@ function downloadTemplates() {
     }]
   }, null, 2);
   download('question-import-template.json', new Blob([json], { type: 'application/json' }));
-  toast('Templates downloaded', 'ok');
+  toast('Template downloaded', 'ok');
+}
+
+/** Kept for anything still asking for both at once. */
+function downloadTemplates() { downloadQuestionTemplateCSV(); downloadQuestionTemplateJSON(); }
+
+/** Every column heading and JSON key the parser actually reads, rendered from
+    the table it reads them with. Nothing here is written twice. */
+function showImportReference() {
+  const tb = h('tbody');
+  IMPORT_FIELDS.forEach(x => {
+    tb.appendChild(h('tr', {}, [
+      h('td', {}, [
+        h('b', { class: 'small', text: x.label }),
+        x.need ? h('span', { class: 'badge ' + (x.need === 'required' ? 'b-conflict' : 'b-review'), style: 'margin-left:6px', text: x.need }) : null,
+        x.note ? h('div', { class: 'tiny dim', text: x.note }) : null
+      ].filter(Boolean)),
+      h('td', { class: 'srcline', text: x.cols.join('  ·  ') }),
+      h('td', { class: 'srcline', text: x.json && x.json.length ? x.json.join('  ·  ') : '—' })
+    ]));
+  });
+  modal({
+    title: 'Every column and key the app reads', wide: true,
+    body: h('div', { class: 'stack' }, [
+      h('p', { class: 'small muted', style: 'margin:0' },
+        'Spreadsheet headings are matched without regard to case, and dashes and underscores count as spaces — so “Question_Text”, “question text” and “QUESTION TEXT” are the same heading. A column the app does not recognise is never silently guessed at: it asks you which column is which instead.'),
+      h('div', { class: 'notice small' },
+        'Options can also arrive as a JSON array under “options” or “choices” — plain strings, or objects with text and optionally letter. The answer may be a letter, the full text of the right option, or a zero-based “correctIndex”.'),
+      h('div', { class: 'tbl-wrap' }, h('table', {}, [
+        h('thead', {}, h('tr', {}, ['Field', 'Spreadsheet heading', 'JSON key'].map(t => h('th', { text: t })))), tb
+      ]))
+    ])
+  });
+}
+
+/** The card that offers the templates. Built as a function because the case
+    study bank adds its own pair to it. */
+function templateCard() {
+  const rows = h('div', { class: 'card-b stack' });
+  rows.appendChild(h('p', { class: 'small muted', style: 'margin:0' },
+    'A file already in the shape the parser expects — fill it in and drop it back in above. A .csv opened and re-saved as .xlsx imports identically; the app reads both.'));
+  IMPORT_TEMPLATES.forEach(t => {
+    rows.appendChild(h('button', { class: 'method-row', onclick: t.run }, [
+      h('span', { class: 'method-ico', text: t.ico }),
+      h('div', {}, [h('div', { class: 'method-title', text: t.label }), h('div', { class: 'card-desc', text: t.desc })])
+    ]));
+  });
+  rows.appendChild(h('div', { class: 'row', style: 'margin-top:2px' },
+    h('button', { class: 'btn sm ghost', onclick: () => showImportReference(), text: 'See every column and key the app reads →' })));
+  return h('div', { class: 'card', style: 'margin-top:16px' }, [
+    h('div', { class: 'card-h' }, h('h3', { text: 'Start from a template' })),
+    rows
+  ]);
 }
 
 
