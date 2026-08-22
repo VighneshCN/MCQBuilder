@@ -267,6 +267,27 @@ confidence — every answer in a timed mock, which deliberately asks nothing —
 are excluded rather than bucketed as unknown, and `calibrationVerdict()`
 returns null below five answers rather than calling a habit off a handful.
 
+## The distractors
+
+An option is `{ id, text }` and optionally `rationale` — why *that* option is
+right or wrong. `makeOption()` omits the key entirely when there is nothing to
+say, so it never appears as an empty string on every option of every record. It
+counts in `materiallyDifferent()`, so editing one earns a version like editing
+the explanation does.
+
+`distractorProfile(attempts, q)` reads back the `selectedOptionId` every attempt
+has always carried. It counts by option **id** and reports by option **text**,
+because letters move with the shuffle and "you keep choosing C" is meaningless
+across attempts where C was a different sentence each time. An option a later
+edit removed is counted as `unmatched` rather than dropped, so the totals still
+add up to the attempts that happened.
+
+`dominant` requires at least two picks *and* more than every other wrong option
+put together — strictly more, not equal. One miss is not a pattern and a tie is
+someone guessing; claiming either is a belief would be putting words in their
+mouth. `repeatMissLine()` returns null rather than a weak sentence whenever
+there is nothing solid to say.
+
 ## Question identity
 
 Human-readable IDs (`CISA-Q-000042`) are allocated from a per-course register at

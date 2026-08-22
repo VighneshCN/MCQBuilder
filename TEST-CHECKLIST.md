@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 147 passed, 0 failed, of 147.**
+**Current result: 154 passed, 0 failed, of 154.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -135,6 +135,15 @@ nine different requested counts.
 85. Calibration counts each level and signs the gap the right way round
 86. Calibration says nothing rather than dividing by zero
 
+### Per-option reasoning and distractors (7)
+87. An option carries its own reasoning, or carries no field at all
+88. Editing the reasoning is a material change, like editing the explanation
+89. Reasoning survives both import shapes
+90. The distractor profile counts by option and reports by text
+91. One miss is not a pattern, and an even split is not a belief
+92. An option a later edit removed is counted apart, not silently dropped
+93. The line said at reveal is right, or is not said at all
+
 ### Everything else (4)
 29. Practice settings are per course, app preferences are shared
 34. Appearance resolves Light, Dark and Auto correctly
@@ -260,6 +269,21 @@ Automated tests cannot verify rendering or real browser storage.
       calibration card at all
 - [ ] Analytics → Time and → Confidence both render on an empty bank without
       dividing by zero
+
+### Per-option reasoning and distractors
+
+- [ ] Import a file with Why A / Why B columns; answer one of those questions
+      wrongly — the reveal names why *your* option was wrong before why the
+      right one was right
+- [ ] The composer and the editor both open a reasoning box from the **Why?**
+      button, and it stays open on a question that already has one
+- [ ] Export the bank: the Why columns are there and round-trip
+- [ ] Miss the same question three times choosing the same option — the reveal
+      says so and names the option by its text
+- [ ] Miss one three times choosing three different options — it says no single
+      option dominates rather than inventing one
+- [ ] Analytics → Mistake lists the repeat offenders; Question Bank filters to
+      them
 - [ ] Import the same case-study file twice — the second time adds no new
       scenarios and flags every question as a duplicate
 - [ ] Blank a scenario's text: its questions leave the practice count, Practice

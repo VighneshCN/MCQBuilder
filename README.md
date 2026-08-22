@@ -275,6 +275,40 @@ the median question time:
 Each opens to the questions in it. Analytics → **Time** shows the same split
 across everything you have answered, and which domains the slow ones sit in.
 
+### Why the option you picked was wrong
+
+An MCQ's wrong answers are the syllabus. Each one is a specific misconception
+somebody thought worth writing down, and the one you pick says more about your
+understanding than the fact that you got it wrong.
+
+So every option can carry its own reasoning — optional, and absent from most
+questions. When it is there, the reveal answers **you**: *"Why C is wrong. C is
+the detective control; the question asked which is preventive."* The correct
+option's reasoning follows, and the rest are one click away.
+
+Add it in the composer or the question editor (the **Why?** button beside each
+option), or bring it in: a `Why A` / `Why B` column in a spreadsheet, or a
+`rationale` on a JSON option. The export and the printable sheet carry it back
+out.
+
+### What keeps catching you
+
+Every answer you have ever given recorded which option you picked. The moment
+an answer is revealed, the app now says so:
+
+> That is the fourth time you have missed this. You have chosen "A documented
+> capacity planning standard" every time.
+
+Options are named by their text, not their letter — letters move, because the
+options shuffle. Getting it right after missing it says that too.
+
+The question's own detail shows the full breakdown of what you have chosen and
+how often. **Analytics → Mistake** lists the questions that keep catching you
+and what each one catches you with, and the Question Bank has a **missed more
+than once** filter. Where no single wrong option dominates it says so rather
+than inventing a pattern — one miss is not a habit, and an even split is not a
+belief.
+
 ### Did you know what you thought you knew?
 
 Every mode but a timed mock asks how you got to your answer. Analytics →

@@ -4859,16 +4859,18 @@ function distractorProfile(attempts, q) {
     if (row) row.n++; else unmatched++;
   });
   const wrong = Array.from(byId.values()).filter(r => !r.correct && r.n > 0).sort((a, b) => b.n - a.n);
-  // "Dominant" means it genuinely stands out: picked at least twice, and at
-  // least as often as every other wrong option put together. One miss is not
-  // a pattern, and two evenly split wrong answers are not a belief.
+  // "Dominant" means it genuinely stands out: picked at least twice, and MORE
+  // often than every other wrong option put together. One miss is not a
+  // pattern, and a tie is not a belief — two misses on one option against two
+  // spread over others is someone guessing, and saying "you keep choosing X"
+  // about it would be putting words in their mouth.
   const others = wrong.slice(1).reduce((t, r) => t + r.n, 0);
   const top = wrong[0] || null;
   return {
     answered, misses, unmatched,
     rows: Array.from(byId.values()),
     wrong,
-    dominant: top && top.n >= 2 && top.n >= others ? top : null
+    dominant: top && top.n >= 2 && top.n > others ? top : null
   };
 }
 
@@ -19807,6 +19809,133 @@ test('Calibration says nothing rather than dividing by zero', () => {
   eq(calibrationVerdict(few), null, 'four answers is not a finding');
   const enough = calibration(Array.from({ length: 20 }, (_, i) => ({ confidence: 'knew', correct: i < 19 })));
   assert(calibrationVerdict(enough).tone === 'ok', '95% on answers you knew is well calibrated');
+});
+
+
+/* ---- per-option reasoning ---- */
+
+test('An option carries its own reasoning, or carries no field at all', () => {
+  const bare = makeOption('Log review');
+  assert(!('rationale' in bare), 'no reasoning means no key, not an empty string in every record');
+  const withWhy = makeOption('Log review', null, '  Detective, not preventive.  ');
+  eq(withWhy.rationale, 'Detective, not preventive.', 'and it is trimmed');
+  eq(makeOption('x', null, '   ').rationale, undefined, 'whitespace is not reasoning');
+  eq(makeOption('x', 'keep-me').id, 'keep-me', 'an existing id still survives');
+});
+
+test('Editing the reasoning is a material change, like editing the explanation', async () => {
+  const a = mkQ('Which control is preventive?', ['Log review', 'Segregation of duties'], 1);
+  const b = JSON.parse(JSON.stringify(a));
+  assert(!materiallyDifferent(a, b), 'an identical copy is not a change');
+  b.options[0].rationale = 'Detective: it finds out afterwards.';
+  assert(materiallyDifferent(a, b), 'adding reasoning to an option is');
+  const c = JSON.parse(JSON.stringify(b));
+  c.options[0].rationale = 'Something else entirely.';
+  assert(materiallyDifferent(b, c), 'and so is changing it');
+});
+
+test('Reasoning survives both import shapes', () => {
+  const rows = rowsToCandidates([
+    ['Question', 'A', 'B', 'Answer', 'Why A', 'Why B'],
+    ['Which is detective?', 'Firewall', 'Log review', 'B', 'It blocks, it does not observe.', 'Reviewing is how you find out.']
+  ]);
+  eq(rows.candidates.length, 1);
+  eq(rows.candidates[0].options[0].rationale, 'It blocks, it does not observe.');
+  eq(rows.candidates[0].options[1].rationale, 'Reviewing is how you find out.');
+
+  const json = jsonToCandidates({
+    questions: [{
+      stem: 'Which is detective?',
+      options: [
+        { letter: 'A', text: 'Firewall', rationale: 'Blocks, does not observe.' },
+        { letter: 'B', text: 'Log review', why: 'Alternate key name.' }
+      ],
+      answer: 'B'
+    }]
+  });
+  eq(json.candidates[0].options[0].rationale, 'Blocks, does not observe.');
+  eq(json.candidates[0].options[1].rationale, 'Alternate key name.', 'why/reason/explanation are read too');
+
+  // and onto the record itself
+  const q = candidateToQuestion(rows.candidates[0], { courseId: 'test-course', course: { blueprint: [] } });
+  eq(q.options[0].rationale, 'It blocks, it does not observe.');
+  eq(q.options[1].rationale, 'Reviewing is how you find out.');
+  // a file with no such columns leaves the field off entirely
+  const plain = rowsToCandidates([['Question', 'A', 'B', 'Answer'], ['Q?', 'x', 'y', 'A']]);
+  const pq = candidateToQuestion(plain.candidates[0], { courseId: 'test-course', course: { blueprint: [] } });
+  assert(!('rationale' in pq.options[0]), 'and adds nothing where there was nothing');
+});
+
+/* ---- which wrong answer keeps working ---- */
+
+const mkAtt = (q, optId, correct) => ({ selectedOptionId: optId, correct });
+
+test('The distractor profile counts by option and reports by text', () => {
+  const q = mkQ('Which control is preventive?', ['Log review', 'Segregation of duties', 'Reconciliation', 'Audit trail'], 1);
+  const [logs, segn, recon] = q.options;
+  const prof = distractorProfile([
+    mkAtt(q, logs.id, false), mkAtt(q, logs.id, false), mkAtt(q, logs.id, false),
+    mkAtt(q, recon.id, false), mkAtt(q, segn.id, true)
+  ], q);
+  eq(prof.answered, 5);
+  eq(prof.misses, 4);
+  eq(prof.rows.find(r => r.id === logs.id).n, 3);
+  eq(prof.rows.find(r => r.id === segn.id).correct, true, 'the correct option is marked as such');
+  assert(prof.dominant, 'three of four misses on one option is a pattern');
+  eq(prof.dominant.text, 'Log review', 'named by its text, because letters move between presentations');
+});
+
+test('One miss is not a pattern, and an even split is not a belief', () => {
+  const q = mkQ('Which control is preventive?', ['Log review', 'Segregation of duties', 'Reconciliation', 'Audit trail'], 1);
+  const [logs, , recon, trail] = q.options;
+  eq(distractorProfile([mkAtt(q, logs.id, false)], q).dominant, null, 'a single miss claims nothing');
+  const even = distractorProfile([
+    mkAtt(q, logs.id, false), mkAtt(q, logs.id, false),
+    mkAtt(q, recon.id, false), mkAtt(q, trail.id, false)
+  ], q);
+  eq(even.misses, 4);
+  eq(even.dominant, null, 'two against two others is not one belief');
+  const clear = distractorProfile([
+    mkAtt(q, logs.id, false), mkAtt(q, logs.id, false), mkAtt(q, recon.id, false)
+  ], q);
+  assert(clear.dominant && clear.dominant.text === 'Log review', 'two against one is');
+});
+
+test('An option a later edit removed is counted apart, not silently dropped', () => {
+  const q = mkQ('Which control is preventive?', ['Log review', 'Segregation of duties'], 1);
+  const prof = distractorProfile([
+    mkAtt(q, 'an-option-that-no-longer-exists', false),
+    mkAtt(q, q.options[0].id, false)
+  ], q);
+  eq(prof.answered, 2, 'both attempts happened');
+  eq(prof.unmatched, 1, 'and one of them cannot be attributed to anything still here');
+  eq(prof.rows.reduce((t, r) => t + r.n, 0), 1, 'so only one is counted against a live option');
+});
+
+test('The line said at reveal is right, or is not said at all', () => {
+  const q = mkQ('Which control is preventive?', ['Log review', 'Segregation of duties', 'Reconciliation'], 1);
+  const [logs, segn, recon] = q.options;
+  eq(repeatMissLine([], q, false), null, 'the first time you miss something is not a story');
+  eq(repeatMissLine([mkAtt(q, segn.id, true)], q, false), null, 'nor is missing it after getting it right');
+
+  const twice = repeatMissLine([mkAtt(q, logs.id, false)], q, false);
+  eq(twice.text.indexOf('second time') >= 0, true, 'one prior miss makes this the second: ' + twice.text);
+  eq(twice.tone, 'warn');
+
+  const thrice = repeatMissLine([mkAtt(q, logs.id, false), mkAtt(q, logs.id, false)], q, false);
+  assert(thrice.text.indexOf('third time') >= 0, thrice.text);
+  assert(thrice.text.indexOf('Log review') >= 0, 'and names what keeps catching them');
+  assert(thrice.text.indexOf('every time') >= 0, 'and that it is every time');
+  eq(thrice.tone, 'bad', 'three is a habit, not a slip');
+
+  const mixed = repeatMissLine([mkAtt(q, logs.id, false), mkAtt(q, logs.id, false), mkAtt(q, recon.id, false)], q, false);
+  assert(mixed.text.indexOf('2 of those times') >= 0, 'and counts honestly when it is not every time: ' + mixed.text);
+
+  const fixed = repeatMissLine([mkAtt(q, logs.id, false), mkAtt(q, logs.id, false)], q, true);
+  eq(fixed.tone, 'ok');
+  assert(fixed.text.indexOf('twice') >= 0, 'twice, not "2 times": ' + fixed.text);
+  const once = repeatMissLine([mkAtt(q, logs.id, false)], q, true);
+  assert(once.text.indexOf('once') >= 0, once.text);
 });
 
 /* ============================================================================
