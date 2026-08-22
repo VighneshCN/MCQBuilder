@@ -4692,6 +4692,101 @@ function timeSplit(items) {
   return { cut, timed: timed.length, untimed: (items || []).length - timed.length, cells };
 }
 
+/* ---------- calibration ----------
+   After every answer outside a mock the app asks how you got there — knew it,
+   reasoned it out, unsure between two, guessed — and has always used that to
+   decide when the question comes back. It has never once told you whether the
+   claim was true.
+
+   It is the most sobering number in exam preparation. Being wrong is ordinary
+   and fixable. Being wrong about a question you were certain of is what makes
+   someone stop revising a topic that is about to cost them the paper, and no
+   amount of accuracy reporting surfaces it, because those questions are a
+   small minority of a large denominator.
+
+   What each level CLAIMS is derived from the weights the scheduler already
+   runs on, so there is one definition of what "knew it" is worth rather than
+   two that can drift. */
+const CONFIDENCE_CLAIM = CONFIDENCE.reduce((m, c) => {
+  // The weight is how much credit the answer earns; read as a claim it is how
+  // often you are asserting you would be right. Guessing on four options is
+  // right a quarter of the time by luck alone, so nothing claims less.
+  m[c.k] = Math.max(0.25, c.weight);
+  return m;
+}, {});
+
+/**
+ * Group attempts by what the person said they knew.
+ * Attempts with no confidence recorded — every answer in a timed mock — are
+ * excluded rather than bucketed as "unknown", because a mock never asked.
+ */
+function calibration(attempts) {
+  const rows = CONFIDENCE.map(c => ({ k: c.k, label: c.label, claim: CONFIDENCE_CLAIM[c.k], n: 0, correct: 0 }));
+  const byKey = new Map(rows.map(r => [r.k, r]));
+  let asked = 0;
+  (attempts || []).forEach(a => {
+    const r = byKey.get(a.confidence);
+    if (!r) return;
+    asked++; r.n++; if (a.correct) r.correct++;
+  });
+  rows.forEach(r => {
+    r.acc = r.n ? r.correct / r.n : null;
+    // Positive means you did better than you claimed; negative means the claim
+    // was overstated, which is the direction that costs marks.
+    r.gap = r.acc == null ? null : r.acc - r.claim;
+  });
+  const known = rows.filter(r => r.n);
+  const confident = rows.filter(r => (r.k === 'knew' || r.k === 'reasoned') && r.n);
+  const confidentN = confident.reduce((t, r) => t + r.n, 0);
+  const confidentC = confident.reduce((t, r) => t + r.correct, 0);
+  const knew = byKey.get('knew');
+  return {
+    rows, asked, known,
+    // The headline is about the answers you were sure of, because that is the
+    // half of the distribution a candidate acts on.
+    confident: confidentN ? { n: confidentN, correct: confidentC, acc: confidentC / confidentN } : null,
+    knew: knew && knew.n ? knew : null
+  };
+}
+
+/** The one sentence worth reading, in the terms someone actually thinks in. */
+function calibrationVerdict(cal) {
+  if (!cal.knew || cal.knew.n < 5) return null;
+  const acc = Math.round(cal.knew.acc * 100);
+  const gap = cal.knew.gap;
+  if (gap <= -0.15) return { tone: 'bad', text: 'You are overconfident. When you said you knew it, you were right ' + acc + '% of the time — the topics you feel safest on are the ones to check.' };
+  if (gap <= -0.05) return { tone: 'warn', text: 'Slightly overconfident: when you said you knew it, you were right ' + acc + '% of the time.' };
+  if (gap >= 0.03) return { tone: 'ok', text: 'If anything you are underselling yourself — you were right ' + acc + '% of the time on answers you only claimed to know.' };
+  return { tone: 'ok', text: 'Well calibrated: when you said you knew it, you were right ' + acc + '% of the time.' };
+}
+
+/** The calibration table, shared by Analytics and the results screen. */
+function calibrationTable(cal) {
+  const tb = h('tbody');
+  cal.rows.forEach(r => {
+    const short = r.gap != null && r.gap < 0;
+    tb.appendChild(h('tr', {}, [
+      h('td', {}, [h('b', { class: 'small', text: r.label }),
+        h('div', { class: 'tiny dim', text: 'claims about ' + Math.round(r.claim * 100) + '%' })]),
+      h('td', { class: 'num', text: String(r.n) }),
+      h('td', { class: 'num', text: r.n ? String(r.correct) : '—' }),
+      h('td', {}, h('div', { class: 'bar' }, h('i', {
+        class: r.acc == null ? '' : r.acc >= r.claim - 0.05 ? 'g' : r.acc >= r.claim - 0.15 ? 'a' : 'r',
+        style: 'width:' + Math.round((r.acc || 0) * 100) + '%'
+      }))),
+      h('td', { class: 'num right', text: r.acc == null ? '—' : Math.round(r.acc * 100) + '%' }),
+      h('td', {
+        class: 'num right',
+        style: r.gap == null ? '' : short ? 'color:var(--pencil)' : 'color:var(--green)',
+        text: r.gap == null ? '—' : (r.gap > 0 ? '+' : '') + Math.round(r.gap * 100)
+      })
+    ]));
+  });
+  return h('div', { class: 'tbl-wrap' }, h('table', {}, [
+    h('thead', {}, h('tr', {}, ['You said', 'Answers', 'Right', '', 'Actually right', 'Gap'].map(x => h('th', { text: x })))), tb
+  ]));
+}
+
 const round2 = (n) => Math.round(n * 100) / 100;
 
 /* ---------- marking ----------
@@ -6696,6 +6791,23 @@ async function showResults(s) {
   };
   const tCard = timeCard(s, byId);
   if (tCard) target.appendChild(tCard);
+
+  /* Calibration for this session alone. A mock asks for no confidence at
+     all, so this renders nothing there rather than a table of dashes. */
+  const sesCal = calibration(s.questionUuids.map(u => s.responses[u]).filter(Boolean));
+  if (sesCal.asked >= 3) {
+    const v = calibrationVerdict(sesCal);
+    const cc = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
+      h('div', { class: 'card-h' }, [h('h3', { text: 'What you thought you knew' }), h('div', { class: 'spacer' }),
+        h('span', { class: 'tiny dim', text: sesCal.asked + ' of ' + sc.answered + ' answers' })])
+    ]);
+    const cb = h('div', { class: 'card-b stack' });
+    if (v) cb.appendChild(h('div', { class: 'notice ' + v.tone, style: 'margin:0' }, v.text));
+    cb.appendChild(calibrationTable(sesCal));
+    cb.appendChild(h('div', { class: 'tiny dim', text: 'One session is a small sample — Analytics → Confidence is the same table over everything you have answered.' }));
+    cc.appendChild(cb);
+    target.appendChild(cc);
+  }
 
   const noteLines = (s.selectionNotes || []).map(noteLine).filter(Boolean);
   if (noteLines.length) {
@@ -10419,7 +10531,7 @@ ROUTES.analytics = async (root) => {
     'Coverage is separate from accuracy: you have seen ' + seen + ' of ' + active.length + ' active questions (' + pct(seen, active.length) + '). Repeating the same questions raises accuracy but not coverage.'));
 
   const tabs = h('div', { class: 'btn-group', style: 'margin-bottom:14px' });
-  [['domain', 'Domain'], ['topic', 'Topic'], ['module', 'Source module'], ['source', 'Source'], ['difficulty', 'Difficulty'], ['mistake', 'Mistake'], ['mode', 'Mode'], ['time', 'Time']]
+  [['domain', 'Domain'], ['topic', 'Topic'], ['module', 'Source module'], ['source', 'Source'], ['difficulty', 'Difficulty'], ['mistake', 'Mistake'], ['mode', 'Mode'], ['time', 'Time'], ['confidence', 'Confidence']]
     .forEach(([k, label]) => tabs.appendChild(h('button', { 'aria-pressed': String(AnaState.by === k), onclick: () => { AnaState.by = k; go('analytics'); }, text: label })));
   root.appendChild(tabs);
 
@@ -10456,6 +10568,63 @@ ROUTES.analytics = async (root) => {
       h('td', { class: 'num right', text: fmtDur(g.ms / g.n) })
     ])));
     card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, ['Mode', 'Attempts', 'Correct', '', 'Accuracy', 'Avg time'].map(x => h('th', { text: x })))), tb])));
+    root.appendChild(card);
+    return;
+  }
+
+  if (AnaState.by === 'confidence') {
+    const cal = calibration(attempts);
+    card.appendChild(h('div', { class: 'card-h' }, [
+      h('h3', { text: 'How well you know what you know' }), h('div', { class: 'spacer' }),
+      h('span', { class: 'tiny dim', text: cal.asked ? cal.asked + ' answer(s) where you were asked' : '' })
+    ]));
+    const b = h('div', { class: 'card-b stack' });
+    if (!cal.asked) {
+      b.appendChild(h('div', { class: 'empty' }, [
+        h('h3', { text: 'Nothing to calibrate yet' }),
+        h('p', { class: 'muted', text: 'Every mode but a timed mock asks how you got to your answer. Practise a few and this fills in — a mock deliberately asks nothing, so mock attempts are not counted here.' })
+      ]));
+    } else {
+      const v = calibrationVerdict(cal);
+      if (v) b.appendChild(h('div', { class: 'notice ' + v.tone, style: 'margin:0' }, v.text));
+      else b.appendChild(h('div', { class: 'notice small', style: 'margin:0' },
+        'Not enough answers you claimed to know yet — at least five before this is worth reading.'));
+      b.appendChild(calibrationTable(cal));
+      b.appendChild(h('div', { class: 'tiny dim' },
+        'Gap is how far your accuracy sat from what that answer claimed. Negative is overconfidence, which is the direction that costs marks: it is what stops you revising a topic you are about to be tested on.'));
+
+      /* Where the overconfidence lives. The headline says whether you have it;
+         this says which part of the syllabus to distrust, which is the part
+         you can act on. */
+      const byDomain = new Map();
+      attempts.forEach(a => {
+        if (a.confidence !== 'knew' && a.confidence !== 'reasoned') return;
+        const q = byUuid.get(a.questionUuid); if (!q) return;
+        const k = q.domainId || '—';
+        if (!byDomain.has(k)) byDomain.set(k, { n: 0, c: 0 });
+        const g = byDomain.get(k); g.n++; if (a.correct) g.c++;
+      });
+      const rows = Array.from(byDomain.entries())
+        .map(([k, g]) => ({ k, n: g.n, c: g.c, acc: g.c / g.n }))
+        .filter(r => r.n >= 3)
+        .sort((x, y) => x.acc - y.acc);
+      if (rows.length) {
+        const tb2 = h('tbody');
+        rows.forEach(r => tb2.appendChild(h('tr', {}, [
+          h('td', { text: r.k === '—' ? 'Unmapped' : State.domainName(r.k) }),
+          h('td', { class: 'num', text: String(r.n) }),
+          h('td', { class: 'num', text: String(r.c) }),
+          h('td', {}, h('div', { class: 'bar' }, h('i', { class: r.acc >= 0.85 ? 'g' : r.acc >= 0.7 ? 'a' : 'r', style: 'width:' + Math.round(r.acc * 100) + '%' }))),
+          h('td', { class: 'num right', text: Math.round(r.acc * 100) + '%' })
+        ])));
+        b.appendChild(h('div', { class: 'eyebrow', style: 'margin-top:6px', text: 'Where you are sure of yourself' }));
+        b.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [
+          h('thead', {}, h('tr', {}, ['Domain', 'Answers you were sure of', 'Right', '', 'Accuracy'].map(x => h('th', { text: x })))), tb2
+        ])));
+        b.appendChild(h('div', { class: 'tiny dim', text: 'Only answers you called “knew it” or “reasoned it out”, and only domains with at least three of them. Worst first — that is the one to check before the exam.' }));
+      }
+    }
+    card.appendChild(b);
     root.appendChild(card);
     return;
   }
