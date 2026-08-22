@@ -1469,10 +1469,15 @@ function fmtDate(iso, withTime) {
 }
 function fmtDur(ms) {
   if (ms == null) return '—';
-  const s = Math.round(ms / 1000);
-  if (s < 60) return s + 's';
+  const s = Math.round(Math.abs(ms) / 1000);
+  const sign = ms < 0 ? '−' : '';
+  if (s < 60) return sign + s + 's';
   const m = Math.floor(s / 60);
-  return m + 'm ' + pad(s % 60, 2) + 's';
+  // Past an hour the seconds are noise and "260m 00s" is not a duration
+  // anybody reads. This matters now that whole papers and section budgets
+  // are measured with the same function as one question's answer.
+  if (m < 60) return sign + m + 'm ' + pad(s % 60, 2) + 's';
+  return sign + Math.floor(m / 60) + 'h ' + pad(m % 60, 2) + 'm';
 }
 function clock(ms) {
   const t = Math.max(0, Math.floor(ms / 1000));
@@ -4154,6 +4159,26 @@ function pickCaseBlock(pool, want, rng) {
   return { cases: ranges, questions, asked: want, taken: questions.length, available: pool.length };
 }
 
+/** The sections a paper has, or null. Only a timed mock with a case-study
+    block is sectioned; everything else is one run and says so by having none. */
+function sectionsFor(mode, standalone, caseQuestions, config, ordered) {
+  if (mode !== 'mock' || !caseQuestions.length || !standalone.length) return null;
+  const worth = (list) => list.reduce((t, q) => t + marksOf(q, State.course.id), 0);
+  const secs = [
+    { key: 'main', label: 'Standalone questions', from: 0, to: standalone.length - 1, count: standalone.length, marks: worth(standalone) },
+    { key: 'case', label: 'Case studies', from: standalone.length, to: ordered.length - 1, count: caseQuestions.length, marks: worth(caseQuestions) }
+  ];
+  const totalMs = (config.minutes || Settings.get('mockMinutes')) * 60000;
+  const auto = defaultSectionBudgets(secs, totalMs);
+  // An explicit budget for the case block is the one a candidate actually
+  // plans with ("I'll give the scenarios an hour"); the rest of the clock is
+  // then whatever is left, so the two always sum to the paper's time limit.
+  const caseMs = config.caseMinutes ? Math.min(config.caseMinutes * 60000, totalMs) : auto[1];
+  secs[0].budgetMs = totalMs - caseMs;
+  secs[1].budgetMs = caseMs;
+  return secs;
+}
+
 /** What the case-study section came to, said plainly, because it is almost
     never exactly the number that was typed. */
 function describeCaseBlock(block) {
@@ -4572,6 +4597,10 @@ const Session = {
         startIndex: chosen.length, asked: caseBlock.asked, taken: caseBlock.taken,
         cases: caseBlock.cases.map(c => ({ caseStudyId: c.caseStudyId, from: chosen.length + c.from, to: chosen.length + c.to, count: c.count }))
       } : null,
+      // A sectioned paper: the standalone run and the case-study block, each
+      // with its own share of the clock. Absent on every paper that is one
+      // undifferentiated run, which is all of them but this.
+      sections: sectionsFor(mode, chosen, caseQuestions, config, ordered),
       optionOrders, responses: {}, flags: {}, cursor: 0,
       // What each question is worth, fixed at the moment the paper is made.
       // Without this, changing the course's marks after sitting a paper would
@@ -4614,7 +4643,9 @@ const Session = {
       // that was already sat.
       marks: marksOf(q, s.courseId)
     };
-    s.responses[q.uuid] = rec;
+    // Reveal modes disable the options once answered, so this rarely fires —
+    // but the record belongs to the response, not to one mode's UI.
+    s.responses[q.uuid] = carryAnswerChanges(already, rec);
     await this.save(s);
     // A difficulty judged mid-session belongs to the question, not the
     // attempt — written straight through so it is graded once and never
@@ -4895,6 +4926,120 @@ function repeatMissLine(prior, q, gotItRightNow) {
 }
 
 const round2 = (n) => Math.round(n * 100) / 100;
+
+/* ---------- sections ----------
+   A two-page case study and a one-line recall question are not the same unit
+   of work, and averaging them into one figure hides the only thing worth
+   knowing about a sectioned paper: whether the section that eats the clock ate
+   more of it than you meant to give it.
+
+   Sections only exist on a mock that has a case-study block. Every other
+   paper is one undifferentiated run, exactly as it always was, and
+   `session.sections` is simply absent. */
+
+/** Split the minutes across sections in proportion to the MARKS they carry,
+    which is the fairest default when the sections are weighted differently —
+    and identical to splitting by question count when they are not. */
+function defaultSectionBudgets(sections, totalMs) {
+  const marks = sections.reduce((t, x) => t + (x.marks || 0), 0);
+  if (!marks) {
+    const each = Math.round(totalMs / Math.max(1, sections.length));
+    return sections.map(() => each);
+  }
+  return sections.map(x => Math.round(totalMs * (x.marks || 0) / marks));
+}
+
+/** How a section actually went: what was asked, what it scored, and what it
+    cost in minutes against what it was given. */
+function sectionReport(s, byId) {
+  if (!s.sections || !s.sections.length) return null;
+  return s.sections.map(sec => {
+    const uuids = s.questionUuids.slice(sec.from, sec.to + 1);
+    let answered = 0, correct = 0, ms = 0, marksTotal = 0, marksEarned = 0;
+    uuids.forEach(u => {
+      const q = byId.get(u); if (!q) return;
+      const rec = s.responses[u];
+      const worth = (s.marks && s.marks[u] != null) ? Number(s.marks[u]) : marksOf(q, s.courseId);
+      marksTotal += worth;
+      if (!rec) return;
+      answered++; ms += rec.ms || 0;
+      if (rec.correct) { correct++; marksEarned += worth; }
+    });
+    const budget = sec.budgetMs || 0;
+    return {
+      key: sec.key, label: sec.label, from: sec.from, to: sec.to,
+      count: uuids.length, answered, correct, ms, budget,
+      marksTotal: round2(marksTotal), marksEarned: round2(marksEarned),
+      accuracy: answered ? correct / answered : null,
+      over: budget ? ms - budget : 0,
+      perQuestion: answered ? ms / answered : 0
+    };
+  });
+}
+
+/** Which section question `i` is in, if the paper has any. */
+function sectionAt(s, i) {
+  if (!s.sections) return null;
+  return s.sections.find(sec => i >= sec.from && i <= sec.to) || null;
+}
+
+
+/* ---------- changing your mind ----------
+   Almost every candidate believes their second thought is better than their
+   first. In a timed mock the runner simply overwrote the previous response, so
+   the app could not have said otherwise even if it were true.
+
+   It is recorded rather than argued about. The comparison that matters is the
+   FIRST answer against the one finally submitted — not each hop in between,
+   which nobody remembers and which says nothing about instinct. */
+
+/** Carry the change history from the response being replaced onto its
+    successor. Returns `rec` so it can be used inline. */
+function carryAnswerChanges(prev, rec) {
+  if (!prev) {
+    rec.firstOptionId = rec.selectedOptionId;
+    return rec;
+  }
+  // The first answer is the first one ever given to this question in this
+  // session, however many times it has been revisited since.
+  rec.firstOptionId = prev.firstOptionId || prev.selectedOptionId;
+  const log = (prev.changes || []).slice();
+  if (prev.selectedOptionId !== rec.selectedOptionId) {
+    log.push({ from: prev.selectedOptionId, to: rec.selectedOptionId, at: rec.at });
+  }
+  if (log.length) rec.changes = log;
+  return rec;
+}
+
+/**
+ * What changing your mind actually did to this paper.
+ * Classified on first answer versus final, and priced in the marks the paper
+ * was sat under, because "three answers changed" is a fact and "that cost you
+ * four marks" is a reason to behave differently next time.
+ */
+function answerChangeReport(s, byId) {
+  const out = { changed: 0, rightToWrong: [], wrongToRight: [], wrongToWrong: [], marksLost: 0, marksGained: 0 };
+  s.questionUuids.forEach(u => {
+    const rec = s.responses[u], q = byId.get(u);
+    if (!rec || !q || !rec.changes || !rec.changes.length) return;
+    out.changed++;
+    const worth = (s.marks && s.marks[u] != null) ? Number(s.marks[u])
+      : (rec.marks != null ? Number(rec.marks) : marksOf(q, s.courseId));
+    const firstCorrect = rec.firstOptionId === q.correctOptionId;
+    const finalCorrect = !!rec.correct;
+    const row = { uuid: u, q, rec, worth };
+    if (firstCorrect && !finalCorrect) { out.rightToWrong.push(row); out.marksLost += worth; }
+    else if (!firstCorrect && finalCorrect) { out.wrongToRight.push(row); out.marksGained += worth; }
+    else if (!firstCorrect && !finalCorrect) { out.wrongToWrong.push(row); }
+    // right → right is a change of mind that landed back where it started;
+    // it costs nothing and is not worth a line.
+  });
+  out.net = round2(out.marksGained - out.marksLost);
+  out.marksLost = round2(out.marksLost);
+  out.marksGained = round2(out.marksGained);
+  return out;
+}
+
 
 /* ---------- marking ----------
    The app has always scored by counting questions, and for a paper where every
@@ -5754,6 +5899,9 @@ async function configureMode(mode) {
   // Assigned below, once the marks line exists; recount() runs before that on
   // the first pass, so it is checked rather than assumed.
   let drawMarksRef = null;
+  // Assigned once the section note exists; the time-limit field can change
+  // before that, so it is checked rather than assumed.
+  let drawCaseNoteRef = null;
   const recount = () => {
     let p = applyFilters(pool, f);
     if (mode === 'spaced') p = p.filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date());
@@ -5769,6 +5917,7 @@ async function configureMode(mode) {
     // honest as the request changes underneath it.
     if (compositionPanel && compositionPanel.refresh) compositionPanel.refresh();
     if (typeof drawMarksRef === 'function') drawMarksRef();
+    if (typeof drawCaseNoteRef === 'function') drawCaseNoteRef();
   };
   const warn = h('div', { class: 'notice warn hidden' });
 
@@ -5837,7 +5986,10 @@ async function configureMode(mode) {
   const countInput = h('input', { type: 'number', min: '1', max: '250', value: String(cfg.count), onchange: (e) => { cfg.count = clamp(parseInt(e.target.value, 10) || 1, 1, 250); recount(); } });
   const row = h('div', { class: 'grid g2' }, [h('div', { class: 'field' }, [h('label', { text: 'Number of questions' }), countInput])]);
   if (mode === 'mock') {
-    row.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Time limit (minutes)' }), h('input', { type: 'number', min: '5', max: '600', value: String(cfg.minutes), onchange: (e) => cfg.minutes = clamp(parseInt(e.target.value, 10) || 60, 5, 600) })]));
+    row.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Time limit (minutes)' }), h('input', {
+      type: 'number', min: '5', max: '600', value: String(cfg.minutes),
+      onchange: (e) => { cfg.minutes = clamp(parseInt(e.target.value, 10) || 60, 5, 600); if (drawCaseNoteRef) drawCaseNoteRef(); }
+    })]));
   }
   body.appendChild(row);
 
@@ -5851,7 +6003,7 @@ async function configureMode(mode) {
         cfg.caseCount = clamp(parseInt(e.target.value, 10) || 0, 0, casePool.length);
         e.target.value = String(cfg.caseCount);
         await Settings.set('mockCaseCount', cfg.caseCount);
-        drawCaseNote(); recount();
+        drawCaseNote(); if (drawCaseNoteRef) drawCaseNoteRef(); recount();
       }
     });
     const readyCases = caseRecords.filter(c => caseCounts.get(c.id));
@@ -5880,6 +6032,47 @@ async function configureMode(mode) {
       h('label', { text: 'Of those, how many should be case-study questions?' }),
       caseCountInput, caseNote
     ]));
+
+    /* And how much of the clock that section gets. A real sectioned paper is
+       planned this way — "an hour for the scenarios" — and it is the number
+       that decides whether you run out of time on the part that takes
+       longest to read. */
+    const sectionNote = h('div', { class: 'tiny dim' });
+    const caseMinutesInput = h('input', {
+      type: 'number', min: '0', max: '600', value: '',
+      placeholder: 'auto',
+      onchange: (e) => {
+        const v = parseInt(e.target.value, 10);
+        cfg.caseMinutes = isFinite(v) && v > 0 ? clamp(v, 1, cfg.minutes) : null;
+        e.target.value = cfg.caseMinutes == null ? '' : String(cfg.caseMinutes);
+        drawSectionNote();
+      }
+    });
+    const drawSectionNote = () => {
+      if (!cfg.caseCount) { sectionNote.textContent = ''; caseMinutesInput.disabled = true; return; }
+      caseMinutesInput.disabled = false;
+      const preview = pickCaseBlock(casePool, cfg.caseCount, mulberry32(1));
+      const stdN = Math.max(0, cfg.count - preview.taken);
+      const stdMarks = stdN * perQ, caseMarks = preview.taken * perCase;
+      const totalMs = cfg.minutes * 60000;
+      const autoCase = defaultSectionBudgets(
+        [{ marks: stdMarks }, { marks: caseMarks }], totalMs)[1];
+      const caseMs = cfg.caseMinutes ? cfg.caseMinutes * 60000 : autoCase;
+      sectionNote.textContent =
+        'Leave it blank and the clock is split by marks: ' + Math.round((totalMs - autoCase) / 60000) +
+        ' minutes for the ' + stdN + ' standalone questions, ' + Math.round(autoCase / 60000) +
+        ' for the ' + preview.taken + ' case-study ones. ' +
+        (cfg.caseMinutes ? 'You have given the scenarios ' + cfg.caseMinutes + ', leaving ' +
+          Math.round((totalMs - caseMs) / 60000) + ' for the rest — ' : 'That is ') +
+        'about ' + fmtDur(caseMs / Math.max(1, preview.taken)) + ' a case-study question against ' +
+        fmtDur((totalMs - caseMs) / Math.max(1, stdN)) + ' a standalone one.';
+    };
+    drawSectionNote();
+    body.appendChild(h('div', { class: 'field' }, [
+      h('label', { text: 'Minutes for the case-study section' }),
+      caseMinutesInput, sectionNote
+    ]));
+    drawCaseNoteRef = () => { drawCaseNote(); drawSectionNote(); };
   }
   if (mode === 'mixed') {
     body.appendChild(h('label', { class: 'check' }, [h('input', { type: 'checkbox', checked: true, onchange: (e) => cfg.weighted = e.target.checked }), h('span', { text: 'Distribute by official exam weights (' + State.course.blueprint.map(d => d.weight + '%').join(' / ') + ')' })]));
@@ -6381,6 +6574,33 @@ async function runSession(s) {
   };
   State.runnerStop = leaveGuarded;
 
+  /** Which section this question is in, and how the section is going against
+      the minutes it was given. Null on any paper with no sections. */
+  function sectionBadge() {
+    const sec = sectionAt(s, idx);
+    if (!sec) return null;
+    let used = 0, answered = 0;
+    for (let i = sec.from; i <= sec.to; i++) {
+      const rec = s.responses[s.questionUuids[i]];
+      if (rec) { used += rec.ms || 0; answered++; }
+    }
+    const left = sec.to - sec.from + 1 - answered;
+    const budget = sec.budgetMs || 0;
+    // Projected on the pace kept inside THIS section, not the paper's — the
+    // whole point of a section budget is that its questions are a different
+    // size of job.
+    const projected = answered ? used + (used / answered) * left : 0;
+    const over = budget && projected > budget * 1.05;
+    const title = budget
+      ? fmtDur(used) + ' used of the ' + fmtDur(budget) + ' given to this section' +
+        (answered ? '; at this rate it will take ' + fmtDur(projected) : '')
+      : '';
+    return h('span', {
+      class: 'badge ' + (over ? 'b-conflict' : 'b-draft'), title,
+      text: sec.label + (budget ? ' · ' + fmtDur(Math.max(0, budget - used)) + ' left' : '')
+    });
+  }
+
   /** Where question `i` sits among the paper's scenarios. Derived from the
       paper itself rather than from anything stored on the session, so it is
       right for a session created before case studies existed just as much as
@@ -6445,6 +6665,10 @@ async function runSession(s) {
     const head = h('div', { class: 'row wrap', style: 'margin-bottom:14px' }, [
       h('span', { class: 'docnum', text: (idx + 1) + ' / ' + s.questionUuids.length }),
       h('span', { class: 'badge b-info', text: MODES[s.mode].label }),
+      // On a sectioned paper, which section you are in and whether it is
+      // running to the time you gave it — computed from the answers already
+      // in it, so it costs nothing and needs nothing stored.
+      sectionBadge(),
       !isMock ? h('span', { class: 'badge b-draft', text: State.domainShort(q.domainId) }) : null,
       h('div', { class: 'spacer' }),
       isMock && Settings.get('mockShowQuestionTimer')
@@ -6614,8 +6838,13 @@ async function runSession(s) {
       byId.clear(); all2.forEach(x => byId.set(x.uuid, x));
     } else {
       // A mock records the response here rather than through Session.answer,
-      // which does not run until submission — so it stamps the marks itself.
-      s.responses[q.uuid] = { selectedOptionId: optId, correct: optId === q.correctOptionId, ms, confidence: null, mistake: null, at: nowISO(), qVersion: q.version, marks: marksOf(q, s.courseId) };
+      // which does not run until submission — so it stamps the marks itself,
+      // and carries forward the record of having changed its mind.
+      s.responses[q.uuid] = carryAnswerChanges(s.responses[q.uuid], {
+        selectedOptionId: optId, correct: optId === q.correctOptionId, ms,
+        confidence: null, mistake: null, at: nowISO(), qVersion: q.version,
+        marks: marksOf(q, s.courseId)
+      });
       await Session.save(s);
     }
     render();
@@ -6727,6 +6956,14 @@ function askMistake() {
 }
 
 /* ---------- results ---------- */
+/** "1 mark", "2 marks", "1.5 marks" — said out loud rather than assembled at
+    each call site, because every one of them was getting the plural wrong on
+    exactly the number people notice. */
+function marksLabel(n) {
+  const v = Math.round(Number(n) * 100) / 100;
+  return fmtMarks(v) + ' mark' + (Math.abs(v) === 1 ? '' : 's');
+}
+
 /** Marks read as marks: 12 rather than 12.00, but 12.5 rather than 13. */
 function fmtMarks(n) {
   const v = Math.round(Number(n) * 100) / 100;
@@ -6738,8 +6975,8 @@ function passVerdict(s, mk) {
   const full = s.questionUuids.length === Object.keys(s.responses || {}).length;
   const cls = mk.passed ? 'ok' : 'bad';
   const head = mk.passed
-    ? 'You would have passed' + (mk.margin > 0 ? ', by ' + fmtMarks(mk.margin) + ' mark' + (mk.margin === 1 ? '' : 's') : ' — exactly on the line')
-    : 'That is ' + fmtMarks(Math.abs(mk.margin)) + ' mark' + (Math.abs(mk.margin) === 1 ? '' : 's') + ' short of a pass';
+    ? 'You would have passed' + (mk.margin > 0 ? ', by ' + marksLabel(mk.margin) : ' — exactly on the line')
+    : 'That is ' + marksLabel(Math.abs(mk.margin)) + ' short of a pass';
   const bits = [
     fmtMarks(mk.net) + ' of ' + fmtMarks(mk.total) + ' marks',
     Math.round(mk.pct) + '%',
@@ -6756,8 +6993,8 @@ function passVerdict(s, mk) {
   // says what guessing actually cost — the arithmetic nobody does in their head.
   if (mk.negFrac > 0 && mk.wrong) {
     lines.push(h('div', { class: 'small', style: 'margin-top:5px' },
-      mk.wrong + ' wrong answer' + (mk.wrong === 1 ? '' : 's') + ' cost you ' + fmtMarks(mk.negative) +
-      ' mark' + (mk.negative === 1 ? '' : 's') + ' — ' + Math.round(mk.negFrac * 100) + '% of what each was worth' +
+      mk.wrong + ' wrong answer' + (mk.wrong === 1 ? '' : 's') + ' cost you ' + marksLabel(mk.negative) +
+      ' — ' + Math.round(mk.negFrac * 100) + '% of what each was worth' +
       (mk.blank ? '. The ' + mk.blank + ' you left blank cost nothing.' : '.')));
   }
   if (!full) {
@@ -6876,6 +7113,124 @@ function timeCard(s, byId) {
   return card;
 }
 
+/** "You changed eleven answers" — and what that was worth. */
+function changeCard(s, byId) {
+  const r = answerChangeReport(s, byId);
+  if (!r.changed) return null;
+  const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
+    h('div', { class: 'card-h' }, [h('h3', { text: 'When you changed your mind' }), h('div', { class: 'spacer' }),
+      h('span', { class: 'tiny dim', text: r.changed + ' of ' + s.questionUuids.length + ' answers' })])
+  ]);
+  const b = h('div', { class: 'card-b stack' });
+
+  /* The verdict is stated in marks and only when the paper is decisive about
+     it. Telling somebody their instinct is better on a sample of two would be
+     worse than saying nothing: they would carry it into the real exam. */
+  const decisive = r.rightToWrong.length + r.wrongToRight.length;
+  let tone = 'info', line;
+  if (!decisive) {
+    line = 'None of them turned a right answer wrong or a wrong one right.';
+  } else if (decisive < 4) {
+    line = r.wrongToRight.length + ' change' + (r.wrongToRight.length === 1 ? '' : 's') + ' rescued a wrong answer, ' +
+      r.rightToWrong.length + ' undid a right one. Too few either way to read anything into yet.';
+  } else if (r.net < 0) {
+    tone = 'bad';
+    line = 'Changing your mind cost you ' + marksLabel(-r.net) +
+      ' on this paper. Your first answer was right ' + r.rightToWrong.length + ' of the ' + decisive + ' times it mattered.';
+  } else if (r.net > 0) {
+    tone = 'ok';
+    line = 'Changing your mind won you ' + marksLabel(r.net) +
+      ' on this paper — ' + r.wrongToRight.length + ' of the ' + decisive + ' second thoughts were the better one.';
+  } else {
+    line = 'It came out exactly even: ' + r.wrongToRight.length + ' rescued, ' + r.rightToWrong.length + ' undone.';
+  }
+  b.appendChild(h('div', { class: 'notice ' + tone, style: 'margin:0' }, line));
+
+  const tiles = h('div', { class: 'grid g3' });
+  const tile = (k, v, sub, cls) => tiles.appendChild(h('div', { class: 'tile ' + (cls || '') }, [
+    h('span', { class: 'eyebrow', text: k }), h('b', { text: v }), h('div', { class: 'sub', text: sub })
+  ]));
+  tile('Right → wrong', String(r.rightToWrong.length), r.marksLost ? marksLabel(r.marksLost) + ' given up' : 'no marks lost', r.rightToWrong.length ? 'hot' : '');
+  tile('Wrong → right', String(r.wrongToRight.length), r.marksGained ? marksLabel(r.marksGained) + ' rescued' : 'no marks won', r.wrongToRight.length ? 'good' : '');
+  tile('Wrong → wrong', String(r.wrongToWrong.length), 'changed, still wrong');
+  b.appendChild(tiles);
+
+  // The ones that actually cost marks, named — they are the whole lesson.
+  if (r.rightToWrong.length) {
+    const list = h('div', { class: 'stack' });
+    r.rightToWrong.forEach(({ q, rec }) => {
+      const first = q.options.find(o => o.id === rec.firstOptionId);
+      const final = q.options.find(o => o.id === rec.selectedOptionId);
+      list.appendChild(h('div', { style: 'border-left:3px solid var(--pencil);padding-left:12px' }, [
+        h('div', { class: 'row wrap', style: 'gap:8px' }, [
+          h('span', { class: 'docnum dim', text: q.qid || '—' }),
+          h('span', { class: 'tiny dim', text: State.domainShort(q.domainId) }),
+          h('div', { class: 'spacer' }),
+          h('button', { class: 'btn sm', onclick: () => openQuestion(q.uuid), text: 'Open' })
+        ]),
+        h('div', { class: 'small', style: 'margin:4px 0', text: (q.stem || '').slice(0, 150) }),
+        h('div', { class: 'tiny' }, [
+          'You first chose ', h('b', { text: first ? '“' + first.text.slice(0, 60) + '”' : '(an option since removed)' }),
+          ', which was right, and settled on ',
+          h('b', { text: final ? '“' + final.text.slice(0, 60) + '”' : '(an option since removed)' }), '.'
+        ])
+      ]));
+    });
+    b.appendChild(h('div', { class: 'eyebrow', style: 'margin-top:4px', text: 'The ones it cost you' }));
+    b.appendChild(list);
+  }
+  card.appendChild(b);
+  return card;
+}
+
+/** "By section" — the card a sectioned paper earns. */
+function sectionCard(s, byId) {
+  const rows = sectionReport(s, byId);
+  if (!rows || rows.length < 2) return null;
+  const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
+    h('div', { class: 'card-h' }, h('h3', { text: 'By section' }))
+  ]);
+  const tb = h('tbody');
+  rows.forEach(r => {
+    const overran = r.budget && r.ms > r.budget;
+    tb.appendChild(h('tr', {}, [
+      h('td', {}, [h('b', { class: 'small', text: r.label }),
+        h('div', { class: 'tiny dim', text: 'questions ' + (r.from + 1) + '–' + (r.to + 1) })]),
+      h('td', { class: 'num', text: r.answered + ' / ' + r.count }),
+      h('td', { class: 'num', text: fmtMarks(r.marksEarned) + ' / ' + fmtMarks(r.marksTotal) }),
+      h('td', {}, h('div', { class: 'bar' }, h('i', {
+        class: r.accuracy == null ? '' : r.accuracy >= 0.75 ? 'g' : r.accuracy >= 0.6 ? 'a' : 'r',
+        style: 'width:' + Math.round((r.accuracy || 0) * 100) + '%'
+      }))),
+      h('td', { class: 'num right', text: r.accuracy == null ? '—' : Math.round(r.accuracy * 100) + '%' }),
+      h('td', { class: 'num right', text: fmtDur(r.ms) }),
+      h('td', {
+        class: 'num right', style: overran ? 'color:var(--pencil)' : '',
+        text: r.budget ? (overran ? '+' + fmtDur(r.over) : fmtDur(r.over)) : '—'
+      }),
+      h('td', { class: 'num right', text: r.answered ? fmtDur(r.perQuestion) : '—' })
+    ]));
+  });
+  card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [
+    h('thead', {}, h('tr', {}, ['Section', 'Answered', 'Marks', '', 'Accuracy', 'Time', 'vs budget', 'Per question'].map(x => h('th', { text: x })))), tb
+  ])));
+  /* The sentence, because a table of two rows is not an insight. Only said
+     where a section genuinely overran the time it was given. */
+  const worst = rows.slice().filter(r => r.budget && r.over > 0).sort((a, b) => b.over - a.over)[0];
+  const body = h('div', { class: 'card-b' });
+  if (worst) {
+    body.appendChild(h('div', { class: 'notice warn small', style: 'margin:0' },
+      worst.label + ' took ' + fmtDur(worst.ms) + ' against the ' + fmtDur(worst.budget) +
+      ' you gave it — ' + fmtDur(worst.over) + ' that came out of the rest of the paper, at ' +
+      fmtDur(worst.perQuestion) + ' a question.'));
+  } else {
+    body.appendChild(h('div', { class: 'notice ok small', style: 'margin:0' },
+      'Every section came in inside the time it was given.'));
+  }
+  card.appendChild(body);
+  return card;
+}
+
 async function showResults(s) {
   const all = await State.questions();
   const byId = new Map(all.map(q => [q.uuid, q]));
@@ -6943,8 +7298,14 @@ async function showResults(s) {
     }
     return '';
   };
+  const secCard = sectionCard(s, byId);
+  if (secCard) target.appendChild(secCard);
+
   const tCard = timeCard(s, byId);
   if (tCard) target.appendChild(tCard);
+
+  const chCard = changeCard(s, byId);
+  if (chCard) target.appendChild(chCard);
 
   /* Calibration for this session alone. A mock asks for no confidence at
      all, so this renders nothing there rather than a table of dashes. */
