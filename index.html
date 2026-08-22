@@ -1276,6 +1276,11 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 /* The per-question clock sits quietly beside the paper clock: same shape,
    deliberately lower contrast, so a glance separates them without effort. */
 .timer.qtimer{font-size:.82em;opacity:.6;font-weight:500}
+/* The reasoning for the option you chose and the one that was right are
+   answers to two different questions, so they are not one grey block. */
+.exp.why-chosen,.exp.why-correct{border-left-width:3px}
+.exp.why-chosen{border-left-color:var(--pencil)}
+.exp.why-correct{border-left-color:var(--green)}
 .timer.qtimer.over{opacity:1;color:var(--pencil)}
 .timer{font-family:var(--mono);font-size:19px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:.02em}
 .timer.low{color:var(--pencil)}
@@ -2018,7 +2023,17 @@ function blankQuestion(courseId) {
     nextReviewAt: null, srStage: 0, flagged: false
   };
 }
-function makeOption(text, id) { return { id: id || ('o' + uuid().slice(0, 8)), text: String(text || '').trim() }; }
+/* An option is its text and a stable id. `rationale` is optional and usually
+   absent: it is why THIS option is right or wrong, which is the part of an
+   MCQ that actually teaches. A single explanation of the correct answer
+   tells you nothing about the one you picked, and the one you picked is the
+   misconception worth naming. */
+function makeOption(text, id, rationale) {
+  const o = { id: id || ('o' + uuid().slice(0, 8)), text: String(text || '').trim() };
+  const r = String(rationale == null ? '' : rationale).trim();
+  if (r) o.rationale = r;
+  return o;
+}
 const LETTERS = 'ABCDEFGH';
 const letterOf = (i) => LETTERS[i] || String(i + 1);
 
@@ -2121,6 +2136,9 @@ function materiallyDifferent(a, b) {
   if ((a.options || []).length !== (b.options || []).length) return true;
   for (let i = 0; i < (a.options || []).length; i++) {
     if (a.options[i].id !== b.options[i].id || a.options[i].text !== b.options[i].text) return true;
+    // A rationale is teaching material, like the explanation below — editing
+    // one is a real change to the record and earns a version.
+    if ((a.options[i].rationale || '') !== (b.options[i].rationale || '')) return true;
   }
   if ((a.explanation || '') !== (b.explanation || '')) return true;
   return false;
@@ -3533,6 +3551,20 @@ const IMPORT_FIELDS = [
   { f: 'section',         label: 'Source section', cols: ['section', 'source section'], json: ['section'] },
   { f: 'difficulty',      label: 'Difficulty', note: 'easy, medium or hard.', cols: ['difficulty', 'level'], json: ['difficulty'] },
   { f: 'tags',            label: 'Tags',       cols: ['tags', 'keywords'], json: ['tags'] },
+  /* One rationale per option — why THAT option is right or wrong. Recognised
+     as "Why A", "Rationale A", "Reason A" and so on; absent from most files,
+     and worth more than the single explanation when present, because the
+     distractor someone actually picked is the misconception to name. */
+  { f: 'whyA',           label: 'Why A is right or wrong', optionRationale: 'a',
+    cols: ['why a', 'rationale a', 'reason a', 'explanation a', 'a rationale', 'a reason'], json: [] },
+  { f: 'whyB',           label: 'Why B is right or wrong', optionRationale: 'b',
+    cols: ['why b', 'rationale b', 'reason b', 'explanation b', 'b rationale', 'b reason'], json: [] },
+  { f: 'whyC',           label: 'Why C is right or wrong', optionRationale: 'c',
+    cols: ['why c', 'rationale c', 'reason c', 'explanation c', 'c rationale', 'c reason'], json: [] },
+  { f: 'whyD',           label: 'Why D is right or wrong', optionRationale: 'd',
+    cols: ['why d', 'rationale d', 'reason d', 'explanation d', 'd rationale', 'd reason'], json: [] },
+  { f: 'whyE',           label: 'Why E is right or wrong', optionRationale: 'e',
+    cols: ['why e', 'rationale e', 'reason e', 'explanation e', 'e rationale', 'e reason'], json: [] },
   { f: 'marks',           label: 'Marks',
     note: 'What this one question is worth. Leave the column out entirely and every question takes the course\u2019s own rate.',
     cols: ['marks', 'mark', 'weight', 'points', 'score'], json: ['marks', 'mark', 'points'] },
@@ -3632,7 +3664,10 @@ function rowsToCandidates(rows, opts) {
     const stem = get('stem');
     if (!stem) { if (r.some(v => String(v).trim())) unresolved.push({ line: i + 1, text: r.join(' | ').slice(0, 160) }); continue; }
     const opts = [];
-    ['a', 'b', 'c', 'd', 'e'].forEach((k, ix) => { const v = get(k); if (v) opts.push({ letter: letterOf(ix), text: v }); });
+    ['a', 'b', 'c', 'd', 'e'].forEach((k, ix) => {
+      const v = get(k);
+      if (v) opts.push({ letter: letterOf(ix), text: v, rationale: get('why' + k.toUpperCase()) });
+    });
     const ansRaw = get('answer');
     let letter = '';
     const lm = /^[\(\[]?\s*([a-hA-H])\s*[\)\].:]?\s*$/.exec(ansRaw);
@@ -3695,7 +3730,15 @@ function jsonToCandidates(json) {
     const stem = jsonPick(o, 'stem') || '';
     let opts = jsonPick(o, 'options') || [];
     if (!Array.isArray(opts)) opts = Object.keys(opts).map((k, ix) => ({ letter: k.toUpperCase() || letterOf(ix), text: opts[k] }));
-    opts = opts.map((x, ix) => typeof x === 'string' ? { letter: letterOf(ix), text: x } : { letter: (x.letter || letterOf(ix)).toString().toUpperCase(), text: x.text || x.value || '', id: x.id });
+    // An option may be a bare string, or an object that can additionally
+    // carry its own rationale under any of the names the panel advertises.
+    opts = opts.map((x, ix) => typeof x === 'string'
+      ? { letter: letterOf(ix), text: x }
+      : {
+        letter: (x.letter || letterOf(ix)).toString().toUpperCase(),
+        text: x.text || x.value || '', id: x.id,
+        rationale: x.rationale || x.why || x.reason || x.explanation || ''
+      });
     if (!stem || opts.length < 2) { unresolved.push({ line: i + 1, text: JSON.stringify(o).slice(0, 160) }); return; }
     let letter = '';
     const ansRaw = jsonPick(o, 'answer') != null ? String(jsonPick(o, 'answer')) : '';
@@ -3773,7 +3816,7 @@ function resolveDomain(course, raw) {
 function candidateToQuestion(c, ctx) {
   const q = blankQuestion(ctx.courseId);
   q.stem = String(c.stem || '').trim();
-  q.options = (c.options || []).map(o => makeOption(o.text));
+  q.options = (c.options || []).map(o => makeOption(o.text, null, o.rationale));
   q.explanation = (c.explanation || '').trim();
   q.learningPoint = (c.learningPoint || '').trim();
   q.originalNumber = c.originalNumber || '';
@@ -4789,6 +4832,64 @@ function calibrationTable(cal) {
   return h('div', { class: 'tbl-wrap' }, h('table', {}, [
     h('thead', {}, h('tr', {}, ['You said', 'Answers', 'Right', '', 'Actually right', 'Gap'].map(x => h('th', { text: x })))), tb
   ]));
+}
+
+/* ---------- which wrong answer keeps working on you ----------
+   Every attempt has always recorded the option that was picked, and nothing
+   has ever read it back. It is the most specific thing the app knows about a
+   person's understanding: not that they got a question wrong, but that they
+   chose the SAME wrong option three times running, which names the belief
+   rather than the gap.
+
+   Counted by option id and reported by option TEXT. The letter is whatever
+   the shuffle put it at on the day — "you keep choosing C" is meaningless
+   across attempts where C was a different sentence each time. */
+
+function distractorProfile(attempts, q) {
+  const opts = (q && q.options) || [];
+  const byId = new Map(opts.map(o => [o.id, { id: o.id, text: o.text, n: 0, correct: o.id === q.correctOptionId }]));
+  let answered = 0, misses = 0, unmatched = 0;
+  (attempts || []).forEach(a => {
+    if (!a || !a.selectedOptionId) return;
+    answered++;
+    if (!a.correct) misses++;
+    const row = byId.get(a.selectedOptionId);
+    // An option removed or replaced by a later edit cannot be attributed to
+    // anything that still exists, so it is counted apart rather than dropped.
+    if (row) row.n++; else unmatched++;
+  });
+  const wrong = Array.from(byId.values()).filter(r => !r.correct && r.n > 0).sort((a, b) => b.n - a.n);
+  // "Dominant" means it genuinely stands out: picked at least twice, and at
+  // least as often as every other wrong option put together. One miss is not
+  // a pattern, and two evenly split wrong answers are not a belief.
+  const others = wrong.slice(1).reduce((t, r) => t + r.n, 0);
+  const top = wrong[0] || null;
+  return {
+    answered, misses, unmatched,
+    rows: Array.from(byId.values()),
+    wrong,
+    dominant: top && top.n >= 2 && top.n >= others ? top : null
+  };
+}
+
+/** The sentence to put in front of someone the moment the answer is revealed,
+    or null when there is nothing worth saying. `attempts` excludes the one
+    just made. */
+function repeatMissLine(prior, q, gotItRightNow) {
+  const p = distractorProfile(prior, q);
+  if (!p.misses) return null;
+  const nth = (n) => ['', 'first', 'second', 'third', 'fourth', 'fifth'][n] || (n + 'th');
+  const howOften = (n) => n === 1 ? 'once' : n === 2 ? 'twice' : n + ' times';
+  if (gotItRightNow) {
+    return { tone: 'ok', text: 'You had missed this ' + howOften(p.misses) + ' before. Right this time.' };
+  }
+  const n = p.misses + 1;
+  let text = 'That is the ' + nth(n) + ' time you have missed this.';
+  if (p.dominant) {
+    text += ' You have chosen “' + p.dominant.text + '” ' +
+      (p.dominant.n === n - 1 ? 'every time' : p.dominant.n + ' of those times') + '.';
+  }
+  return { tone: n >= 3 ? 'bad' : 'warn', text };
 }
 
 const round2 = (n) => Math.round(n * 100) / 100;
@@ -6396,13 +6497,60 @@ async function runSession(s) {
 
     if (revealed) {
       const rev = h('div', { class: 'reveal stack' });
+      /* Filled in from the attempt history a moment later. Rendering waits on
+         nothing: an indexed read for one question is quick, but the answer is
+         already on screen and should not be held up for it. */
+      const recall = h('div', {});
+      rev.appendChild(recall);
+      (async () => {
+        const prior = (await DB.byIndex('attempts', 'questionUuid', q.uuid))
+          .filter(a => a.sessionId !== s.id);
+        const line = repeatMissLine(prior, q, !!rec.correct);
+        if (line) recall.appendChild(h('div', { class: 'notice ' + line.tone + ' small', style: 'margin:0 0 4px' }, line.text));
+      })();
       rev.appendChild(h('div', { class: 'row' }, [
         h('span', { class: 'badge ' + (rec.correct ? 'b-active' : 'b-conflict'), text: rec.correct ? '✓ Correct' : '✕ Incorrect' }),
         h('span', { class: 'small muted', text: 'Answer: ' + letterOf(order.indexOf(q.correctOptionId)) + ' · ' + fmtDur(rec.ms) }),
         q.srReason ? h('span', { class: 'small dim', text: '· ' + q.srReason }) : null
       ]));
+      /* The rationale for the option they actually picked comes first, because
+         it is the one addressed to them. Getting it wrong for a reason you can
+         name is what turns a wrong answer into something learned; "the answer
+         was B" is not. The correct option's rationale follows when it is a
+         different one. */
+      const chosenOpt = q.options.find(o => o.id === rec.selectedOptionId);
+      const correctOpt = q.options.find(o => o.id === q.correctOptionId);
+      if (chosenOpt && chosenOpt.rationale && !rec.correct) {
+        rev.appendChild(h('div', { class: 'exp why-chosen' }, [
+          h('b', { text: 'Why ' + letterOf(order.indexOf(chosenOpt.id)) + ' is wrong. ' }),
+          chosenOpt.rationale
+        ]));
+      }
+      if (correctOpt && correctOpt.rationale) {
+        rev.appendChild(h('div', { class: 'exp why-correct' }, [
+          h('b', { text: 'Why ' + letterOf(order.indexOf(correctOpt.id)) + ' is right. ' }),
+          correctOpt.rationale
+        ]));
+      }
+      // Every other option's reasoning, on request — useful on a question where
+      // two distractors were both tempting, noise on one where they were not.
+      const others = q.options.filter(o => o.rationale && o.id !== q.correctOptionId && o.id !== rec.selectedOptionId);
+      if (others.length) {
+        const box = h('div', { class: 'stack', style: 'display:none' }, others.map(o =>
+          h('div', { class: 'exp small' }, [
+            h('b', { text: letterOf(order.indexOf(o.id)) + '. ' }), o.rationale
+          ])));
+        rev.appendChild(h('button', {
+          class: 'btn sm ghost', onclick: (e) => {
+            const on = box.style.display === 'none';
+            box.style.display = on ? 'flex' : 'none';
+            e.currentTarget.textContent = on ? 'Hide the other options' : 'Why the other options are wrong';
+          }, text: 'Why the other options are wrong'
+        }));
+        rev.appendChild(box);
+      }
       if (q.explanation) rev.appendChild(h('div', { class: 'exp', text: q.explanation }));
-      else rev.appendChild(h('div', { class: 'notice warn' }, 'No explanation was captured for this question. Add one from the Question Bank so future revisions are useful.'));
+      else if (!q.options.some(o => o.rationale)) rev.appendChild(h('div', { class: 'notice warn' }, 'No explanation was captured for this question. Add one from the Question Bank so future revisions are useful.'));
       rev.appendChild(learningPointBox(q));
       shell.appendChild(rev);
     }
@@ -6947,7 +7095,7 @@ ROUTES.bank = async (root) => {
   line1.appendChild(mkSel('Domain', 'domain', [{ v: '', label: 'Any domain' }].concat(State.course.blueprint.map(d => ({ v: d.id, label: d.id + ' · ' + d.name.split(' ').slice(0, 3).join(' ') }))).concat([{ v: 'none', label: 'Unmapped' }])));
   line1.appendChild(mkSel('Learning state', 'learn', [
     { v: '', label: 'Any' }, { v: 'never', label: 'Never attempted' }, { v: 'attempted', label: 'Attempted' },
-    { v: 'incorrect', label: 'Answered incorrectly' }, { v: 'guessed', label: 'Guessed correct' },
+    { v: 'incorrect', label: 'Answered incorrectly' }, { v: 'repeat', label: 'Missed more than once' }, { v: 'guessed', label: 'Guessed correct' },
     { v: 'mastered', label: 'Mastered' }, { v: 'due', label: 'Due for review' }, { v: 'flagged', label: 'Flagged' }
   ]));
   fb.appendChild(line1);
@@ -6999,6 +7147,7 @@ ROUTES.bank = async (root) => {
       if (L === 'never' && q.stats.attempts) return false;
       if (L === 'attempted' && !q.stats.attempts) return false;
       if (L === 'incorrect' && !q.stats.incorrect) return false;
+      if (L === 'repeat' && !(q.stats.incorrect > 1)) return false;
       if (L === 'guessed' && !q.stats.guessedCorrect) return false;
       if (L === 'mastered' && (q.stats.mastery || 0) < Settings.get('masteryTarget')) return false;
       if (L === 'due' && !(q.nextReviewAt && new Date(q.nextReviewAt) <= now)) return false;
@@ -7259,7 +7408,7 @@ async function openQuestion(uuidStr) {
   body.appendChild(tabs);
   body.appendChild(pane);
 
-  const edit = { stem: q.stem, options: q.options.map(o => ({ id: o.id, text: o.text })), correctOptionId: q.correctOptionId, explanation: q.explanation, learningPoint: q.learningPoint, domainId: q.domainId, topic: q.topic, subtopic: q.subtopic, srcModule: q.srcModule, srcChapter: q.srcChapter, srcSection: q.srcSection, difficulty: difficultyUngraded(q) ? 'ungraded' : q.difficulty, tags: (q.tags || []).join(', '), marks: q.marks == null ? '' : String(q.marks), lockOptionOrder: q.lockOptionOrder, status: q.status, answerVerified: q.answerVerified };
+  const edit = { stem: q.stem, options: q.options.map(o => ({ id: o.id, text: o.text, rationale: o.rationale || '' })), correctOptionId: q.correctOptionId, explanation: q.explanation, learningPoint: q.learningPoint, domainId: q.domainId, topic: q.topic, subtopic: q.subtopic, srcModule: q.srcModule, srcChapter: q.srcChapter, srcSection: q.srcSection, difficulty: difficultyUngraded(q) ? 'ungraded' : q.difficulty, tags: (q.tags || []).join(', '), marks: q.marks == null ? '' : String(q.marks), lockOptionOrder: q.lockOptionOrder, status: q.status, answerVerified: q.answerVerified };
 
   /** `sticky` on the modal below stops a backdrop click from discarding an
       edit in progress, but Escape and the ✕ button both bypass that — the
@@ -7275,7 +7424,9 @@ async function openQuestion(uuidStr) {
     if (edit.tags !== (q.tags || []).join(', ')) return true;
     if (edit.marks !== (q.marks == null ? '' : String(q.marks))) return true;
     if (edit.options.length !== q.options.length) return true;
-    return edit.options.some((o, i) => o.text !== ((q.options[i] || {}).text || ''));
+    return edit.options.some((o, i) =>
+      o.text !== ((q.options[i] || {}).text || '') ||
+      (o.rationale || '') !== ((q.options[i] || {}).rationale || ''));
   }
 
   function drawPane() {
@@ -7287,13 +7438,32 @@ async function openQuestion(uuidStr) {
       const drawOpts = () => {
         optWrap.textContent = '';
         edit.options.forEach((o, i) => {
-          optWrap.appendChild(h('div', { class: 'row', style: 'gap:8px;align-items:flex-start' }, [
-            h('label', { class: 'check', style: 'margin-top:8px' }, [
-              h('input', { type: 'radio', name: 'correct', checked: edit.correctOptionId === o.id, onchange: () => edit.correctOptionId = o.id }),
-              h('span', { class: 'docnum', text: letterOf(i) })
+          const why = h('textarea', {
+            style: 'min-height:38px', value: o.rationale,
+            placeholder: 'Why ' + letterOf(i) + ' is right or wrong',
+            oninput: e => o.rationale = e.target.value
+          });
+          const whyRow = h('div', { style: 'margin:4px 0 2px 34px' + (o.rationale ? '' : ';display:none') }, why);
+          optWrap.appendChild(h('div', {}, [
+            h('div', { class: 'row', style: 'gap:8px;align-items:flex-start' }, [
+              h('label', { class: 'check', style: 'margin-top:8px' }, [
+                h('input', { type: 'radio', name: 'correct', checked: edit.correctOptionId === o.id, onchange: () => edit.correctOptionId = o.id }),
+                h('span', { class: 'docnum', text: letterOf(i) })
+              ]),
+              h('textarea', { style: 'min-height:40px', value: o.text, oninput: e => o.text = e.target.value }),
+              h('button', {
+                class: 'btn sm ghost', style: 'margin-top:8px', title: 'Say why this option is right or wrong',
+                'aria-pressed': String(!!o.rationale),
+                onclick: (e) => {
+                  const on = whyRow.style.display === 'none';
+                  whyRow.style.display = on ? 'block' : 'none';
+                  e.currentTarget.setAttribute('aria-pressed', String(on));
+                  if (on) why.focus();
+                }, text: 'Why?'
+              }),
+              h('button', { class: 'btn sm ghost', style: 'margin-top:8px', title: 'Remove option', onclick: () => { edit.options.splice(i, 1); drawOpts(); }, text: '✕' })
             ]),
-            h('textarea', { style: 'min-height:40px', value: o.text, oninput: e => o.text = e.target.value }),
-            h('button', { class: 'btn sm ghost', style: 'margin-top:8px', title: 'Remove option', onclick: () => { edit.options.splice(i, 1); drawOpts(); }, text: '✕' })
+            whyRow
           ]));
         });
         optWrap.appendChild(h('button', { class: 'btn sm', onclick: () => { edit.options.push(makeOption('')); drawOpts(); }, text: '+ Add option' }));
@@ -7396,6 +7566,34 @@ async function openQuestion(uuidStr) {
     if (tab === 'history') {
       if (!attempts.length) pane.appendChild(h('div', { class: 'empty' }, [h('h3', { text: 'Never attempted' }), h('p', { class: 'muted', text: 'This question has no attempt history yet.' })]));
       else {
+        /* Which option was chosen, and how often. The attempt log has always
+           carried this and nothing has ever shown it; on a question missed
+           more than once it is the whole diagnosis. */
+        const prof = distractorProfile(attempts, q);
+        if (prof.answered) {
+          const dt = h('tbody');
+          prof.rows.forEach((r, i) => dt.appendChild(h('tr', {}, [
+            h('td', {}, [
+              h('span', { class: 'docnum', text: letterOf(i) + ' ' }),
+              h('span', { class: 'small', text: r.text.slice(0, 90) }),
+              r.correct ? h('span', { class: 'badge b-active', style: 'margin-left:6px', text: 'correct' }) : null
+            ].filter(Boolean)),
+            h('td', { class: 'num', text: String(r.n) }),
+            h('td', {}, h('div', { class: 'bar' }, h('i', { class: r.correct ? 'g' : 'r', style: 'width:' + Math.round((r.n / Math.max(1, prof.answered)) * 100) + '%' }))),
+            h('td', { class: 'num right', text: pct(r.n, prof.answered) })
+          ])));
+          pane.appendChild(h('div', { class: 'eyebrow', style: 'margin-bottom:6px', text: 'What you have chosen' }));
+          pane.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [
+            h('thead', {}, h('tr', {}, ['Option', 'Times', '', 'Share'].map(x => h('th', { text: x })))), dt
+          ])));
+          if (prof.dominant) {
+            pane.appendChild(h('div', { class: 'notice warn small' },
+              'One wrong option accounts for most of your misses here: “' + prof.dominant.text + '”. Whatever makes that look right is the thing to correct.'));
+          }
+          if (prof.unmatched) {
+            pane.appendChild(h('div', { class: 'tiny dim', text: prof.unmatched + ' earlier attempt(s) chose an option this question no longer has, after an edit.' }));
+          }
+        }
         const tb = h('tbody');
         attempts.forEach(a => {
           const shown = (a.displayedOrder || []).indexOf(a.selectedOptionId);
@@ -7460,7 +7658,7 @@ async function openQuestion(uuidStr) {
   if (res === 'save' || res === 'save-resolve') {
     const fresh = await Questions.get(uuidStr);
     fresh.stem = edit.stem.trim();
-    fresh.options = edit.options.filter(o => o.text.trim()).map(o => ({ id: o.id, text: o.text.trim() }));
+    fresh.options = edit.options.filter(o => o.text.trim()).map(o => makeOption(o.text, o.id, o.rationale));
     fresh.correctOptionId = fresh.options.some(o => o.id === edit.correctOptionId) ? edit.correctOptionId : null;
     fresh.explanation = edit.explanation; fresh.learningPoint = edit.learningPoint;
     fresh.domainId = edit.domainId; fresh.topic = edit.topic.trim(); fresh.subtopic = edit.subtopic.trim();
@@ -7624,24 +7822,45 @@ async function questionComposer(opts) {
         style: 'min-height:42px', value: o.text, placeholder: 'Option ' + letterOf(i),
         oninput: (e) => { o.text = e.target.value; refresh(); }
       }), 42);
-      optWrap.appendChild(h('div', { class: 'row', style: 'gap:8px;align-items:flex-start' }, [
-        h('label', { class: 'check', style: 'margin-top:8px' }, [
-          h('input', {
-            type: 'radio', name: 'composerCorrect', checked: draft.correctOptionId === o.id,
-            onchange: () => { draft.correctOptionId = o.id; refresh(); }
+      /* Why this option is right or wrong. Optional, and hidden until asked
+         for — most questions are typed without one, and a form that opens with
+         four extra empty boxes is a form nobody finishes. */
+      const why = autoGrow(h('textarea', {
+        style: 'min-height:38px', value: o.rationale || '',
+        placeholder: 'Why ' + letterOf(i) + ' is right or wrong — shown to you when you pick it',
+        oninput: (e) => { o.rationale = e.target.value; }
+      }), 38);
+      const whyRow = h('div', { style: 'margin:4px 0 2px 34px' + (o.rationale ? '' : ';display:none') }, why);
+      optWrap.appendChild(h('div', {}, [
+        h('div', { class: 'row', style: 'gap:8px;align-items:flex-start' }, [
+          h('label', { class: 'check', style: 'margin-top:8px' }, [
+            h('input', {
+              type: 'radio', name: 'composerCorrect', checked: draft.correctOptionId === o.id,
+              onchange: () => { draft.correctOptionId = o.id; refresh(); }
+            }),
+            h('span', { class: 'docnum', text: letterOf(i) })
+          ]),
+          ta,
+          h('button', {
+            class: 'btn sm ghost', style: 'margin-top:8px', title: 'Say why this option is right or wrong',
+            onclick: (e) => {
+              const on = whyRow.style.display === 'none';
+              whyRow.style.display = on ? 'block' : 'none';
+              e.currentTarget.setAttribute('aria-pressed', String(on));
+              if (on) why.focus();
+            }, 'aria-pressed': String(!!o.rationale), text: 'Why?'
           }),
-          h('span', { class: 'docnum', text: letterOf(i) })
+          h('button', {
+            class: 'btn sm ghost', style: 'margin-top:8px', title: 'Remove this option',
+            disabled: draft.options.length <= 2,
+            onclick: () => {
+              if (draft.options.length <= 2) return;
+              if (draft.options[i].id === draft.correctOptionId) draft.correctOptionId = null;
+              draft.options.splice(i, 1); drawOptions(); refresh();
+            }, text: '✕'
+          })
         ]),
-        ta,
-        h('button', {
-          class: 'btn sm ghost', style: 'margin-top:8px', title: 'Remove this option',
-          disabled: draft.options.length <= 2,
-          onclick: () => {
-            if (draft.options.length <= 2) return;
-            if (draft.options[i].id === draft.correctOptionId) draft.correctOptionId = null;
-            draft.options.splice(i, 1); drawOptions(); refresh();
-          }, text: '✕'
-        })
+        whyRow
       ]));
     });
     optWrap.appendChild(h('div', { class: 'row', style: 'gap:8px' }, [
@@ -7701,7 +7920,7 @@ async function questionComposer(opts) {
   function build() {
     const q = blankQuestion(course.id);
     q.stem = String(draft.stem || '').trim();
-    q.options = draft.options.filter(o => String(o.text || '').trim()).map(o => ({ id: o.id, text: o.text.trim() }));
+    q.options = draft.options.filter(o => String(o.text || '').trim()).map(o => makeOption(o.text, o.id, o.rationale));
     q.correctOptionId = q.options.some(o => o.id === draft.correctOptionId) ? draft.correctOptionId : null;
     q.explanation = String(draft.explanation || '').trim();
     q.domainId = draft.domainId || null;
@@ -7829,7 +8048,7 @@ async function newQuestion(opts) {
 async function exportBank(list) {
   // The case study columns go on the END so an existing importer, script or
   // spreadsheet reading this file by position is not shifted by one.
-  const rows = [['Question ID', 'Status', 'Stem', 'A', 'B', 'C', 'D', 'E', 'Correct answer', 'Explanation', 'Domain', 'Topic', 'Subtopic', 'Source module', 'Source', 'Source locator', 'Answer verification', 'Attempts', 'Accuracy', 'Mastery', 'Marks', 'Case ref', 'Case title', 'Case question no.']];
+  const rows = [['Question ID', 'Status', 'Stem', 'A', 'B', 'C', 'D', 'E', 'Correct answer', 'Explanation', 'Domain', 'Topic', 'Subtopic', 'Source module', 'Source', 'Source locator', 'Answer verification', 'Attempts', 'Accuracy', 'Mastery', 'Marks', 'Why A', 'Why B', 'Why C', 'Why D', 'Why E', 'Case ref', 'Case title', 'Case question no.']];
   const sources = await DB.byIndex('sources', 'courseId', State.course.id);
   const srcName = (id) => { const s = sources.find(x => x.id === id); return s ? s.title : ''; };
   const caseRecs = new Map((await CaseStudies.byCourse(State.course.id)).map(c => [c.id, c]));
@@ -7842,6 +8061,8 @@ async function exportBank(list) {
       q.srcModule, srcName(q.sourceId), q.locator, q.answerVerified, q.stats.attempts,
       q.stats.attempts ? Math.round(q.stats.correct / q.stats.attempts * 100) + '%' : '', q.stats.mastery || 0,
       fmtMarks(marksOf(q)),
+      (q.options[0] || {}).rationale || '', (q.options[1] || {}).rationale || '', (q.options[2] || {}).rationale || '',
+      (q.options[3] || {}).rationale || '', (q.options[4] || {}).rationale || '',
       cs ? (cs.csid || '') : '', cs ? (cs.title || '') : '', cs ? (q.caseSeq || '') : '']);
   });
   download(State.course.code + '-question-bank-' + todayKey() + '.csv', new Blob(['\uFEFF' + toCSV(rows)], { type: 'text/csv;charset=utf-8' }));
@@ -9514,8 +9735,10 @@ async function pasteTextWorkflow() {
 
 function downloadQuestionTemplateCSV() {
   const csv = toCSV([
-    ['Question', 'A', 'B', 'C', 'D', 'Answer', 'Explanation', 'Domain', 'Topic', 'Module', 'Difficulty', 'Tags'],
-    ['An IS auditor finds a control weakness during fieldwork. What should the auditor do FIRST?', 'Report it to the audit committee', 'Corroborate the finding with additional evidence', 'Recommend a corrective control', 'Widen the scope of the audit', 'B', 'Findings are corroborated before they are reported; conclusions rest on sufficient evidence.', 'D1', 'Audit evidence', 'Module 1', 'medium', 'evidence,fieldwork']
+    ['Question', 'A', 'B', 'C', 'D', 'Answer', 'Explanation', 'Why A', 'Why B', 'Why C', 'Why D', 'Domain', 'Topic', 'Module', 'Difficulty', 'Tags'],
+    ['An IS auditor finds a control weakness during fieldwork. What should the auditor do FIRST?', 'Report it to the audit committee', 'Corroborate the finding with additional evidence', 'Recommend a corrective control', 'Widen the scope of the audit', 'B', 'Findings are corroborated before they are reported; conclusions rest on sufficient evidence.',
+      'Reporting before corroborating risks a finding that does not survive scrutiny.', 'Corroboration is what makes the finding defensible, and it comes first.', 'Recommending a control presumes the weakness is established, which it is not yet.', 'Scope is set in planning; widening it here is a reaction, not a first step.',
+      'D1', 'Audit evidence', 'Module 1', 'medium', 'evidence,fieldwork']
   ]);
   download('question-import-template.csv', new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
   toast('Template downloaded', 'ok');
@@ -9525,7 +9748,12 @@ function downloadQuestionTemplateJSON() {
   const json = JSON.stringify({
     schema: 'mcq-mastery-import/1', questions: [{
       stem: 'Which control BEST reduces the risk of unauthorised changes reaching production?',
-      options: [{ letter: 'A', text: 'Post-implementation review' }, { letter: 'B', text: 'Segregation of development and production access' }, { letter: 'C', text: 'Annual user access recertification' }, { letter: 'D', text: 'Change advisory board minutes' }],
+      options: [
+        { letter: 'A', text: 'Post-implementation review', rationale: 'Detective, and after the fact — the change has already reached production.' },
+        { letter: 'B', text: 'Segregation of development and production access', rationale: 'Preventive: the change cannot reach production in the first place.' },
+        { letter: 'C', text: 'Annual user access recertification', rationale: 'Right control, wrong frequency — a year is a long time for an unauthorised change to sit.' },
+        { letter: 'D', text: 'Change advisory board minutes', rationale: 'Evidence that a decision was taken, not a control that enforces it.' }
+      ],
       answer: 'B', explanation: 'Preventive segregation stops the change reaching production; the others detect after the event.',
       domain: 'D3', topic: 'Change control', module: 'Module 3', difficulty: 'medium', tags: ['change management']
     }]
@@ -10558,6 +10786,48 @@ ROUTES.analytics = async (root) => {
     ])));
     card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, ['Mistake category', 'Count', '', 'Share'].map(x => h('th', { text: x })))), tb])));
     root.appendChild(card);
+
+    /* The questions that keep catching you, and what they catch you with.
+       A mistake category says what kind of error it was; this says which
+       specific belief is producing it, which is the part you can go and
+       fix. */
+    const byQ = new Map();
+    attempts.forEach(a => {
+      if (!byQ.has(a.questionUuid)) byQ.set(a.questionUuid, []);
+      byQ.get(a.questionUuid).push(a);
+    });
+    const repeat = [];
+    byQ.forEach((list, uuid) => {
+      const q = byUuid.get(uuid);
+      if (!q) return;
+      const prof = distractorProfile(list, q);
+      if (prof.misses >= 2) repeat.push({ q, prof });
+    });
+    repeat.sort((a, b) => b.prof.misses - a.prof.misses);
+    if (repeat.length) {
+      const rc = h('div', { class: 'card' }, [h('div', { class: 'card-h' }, [
+        h('h3', { text: 'Questions that keep catching you' }), h('div', { class: 'spacer' }),
+        h('span', { class: 'tiny dim', text: repeat.length + ' missed more than once' })])]);
+      const rb = h('div', { class: 'card-b stack' });
+      repeat.slice(0, 12).forEach(({ q, prof }) => {
+        rb.appendChild(h('div', { style: 'border-left:3px solid var(--rule);padding-left:12px' }, [
+          h('div', { class: 'row wrap', style: 'gap:8px' }, [
+            h('span', { class: 'docnum dim', text: q.qid || '—' }),
+            h('span', { class: 'badge b-conflict', text: prof.misses + ' misses' }),
+            h('span', { class: 'tiny dim', text: State.domainShort(q.domainId) }),
+            h('div', { class: 'spacer' }),
+            h('button', { class: 'btn sm', onclick: () => openQuestion(q.uuid), text: 'Open' })
+          ]),
+          h('div', { class: 'small', style: 'margin:4px 0', text: (q.stem || '').slice(0, 170) }),
+          prof.dominant
+            ? h('div', { class: 'tiny', style: 'color:var(--pencil)' }, 'You keep choosing “' + prof.dominant.text.slice(0, 90) + '”.')
+            : h('div', { class: 'tiny dim', text: 'No single wrong option dominates — this one is not one belief.' })
+        ]));
+      });
+      if (repeat.length > 12) rb.appendChild(h('div', { class: 'tiny dim', text: 'Showing the 12 most missed of ' + repeat.length + '.' }));
+      rc.appendChild(rb);
+      root.appendChild(rc);
+    }
     return;
   }
   if (AnaState.by === 'mode') {
@@ -11279,7 +11549,10 @@ async function exportPrintable() {
     const ci = q.options.findIndex(o => o.id === q.correctOptionId);
     return '<article><h3>' + esc2(q.qid) + ' <small>' + esc2(State.domainName(q.domainId)) + (q.topic ? ' · ' + esc2(q.topic) : '') + '</small></h3>' +
       '<p class="stem">' + esc2(q.stem) + '</p><ol type="A">' +
-      q.options.map((o, i) => '<li' + (i === ci ? ' class="c"' : '') + '>' + esc2(o.text) + '</li>').join('') +
+      // On paper the reasoning has to sit with its option; there is nothing to
+      // click and nothing to reveal.
+      q.options.map((o, i) => '<li' + (i === ci ? ' class="c"' : '') + '>' + esc2(o.text) +
+        (o.rationale ? '<div class="why">' + esc2(o.rationale) + '</div>' : '') + '</li>').join('') +
       '</ol>' + (q.explanation ? '<p class="ex"><b>Explanation.</b> ' + esc2(q.explanation) + '</p>' : '') +
       (q.learningPoint ? '<p class="lp"><b>My learning point.</b> ' + esc2(q.learningPoint) + '</p>' : '') +
       '<p class="src">' + esc2((q.sourceRefs || []).map(r => (r.sourceTitle || '') + (r.locator ? ' (' + r.locator + ')' : '')).join(' · ')) + '</p></article>';
@@ -11304,6 +11577,7 @@ async function exportPrintable() {
     'h3 small{color:#71828F;font-weight:400}.stem{margin:0 0 8px}ol{margin:0 0 8px 22px}li.c{font-weight:700}' +
     'li.c::after{content:" ✓";color:#12654C}.ex,.lp{font-size:14px;background:#F3F6F8;padding:8px 10px;border-left:3px solid #C3D0DA;margin:6px 0}' +
     '.src{font-family:ui-monospace,monospace;font-size:10.5px;color:#71828F;margin:4px 0 0}article{page-break-inside:avoid}' +
+    'li .why{font-size:12.5px;color:#4A5A68;margin:2px 0 6px;font-weight:400}' +
     'h1.sect{margin-top:38px;border-top:2px solid #C3D0DA;padding-top:14px}' +
     'section.case{margin-top:28px;page-break-before:auto}section.case h2{font-size:16px;color:#1F4E79;margin:0 0 8px}' +
     '.passage{white-space:pre-wrap;background:#F3F6F8;border-left:3px solid #1F4E79;padding:12px 14px;margin:0 0 14px}' +
