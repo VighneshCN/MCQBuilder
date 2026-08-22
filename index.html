@@ -1461,6 +1461,30 @@ const todayKey = (d) => {
   return t.getFullYear() + '-' + pad(t.getMonth() + 1, 2) + '-' + pad(t.getDate(), 2);
 };
 const addDays = (n, from) => { const d = from ? new Date(from) : new Date(); d.setDate(d.getDate() + n); return d.toISOString(); };
+/** A YYYY-MM-DD key back to a Date at LOCAL midnight.
+
+    new Date('2026-11-15') is parsed as UTC midnight, which in India is 05:30
+    on the 15th and in Los Angeles is 16:00 on the 14th — so an exam date typed
+    into a date field would count down wrong by a day for half the world. The
+    parts are read out and handed to the local constructor instead. */
+function dateKeyToLocal(key) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(key == null ? '' : key).trim());
+  if (!m) return null;
+  const d = new Date(+m[1], +m[2] - 1, +m[3]);
+  return isNaN(d) ? null : d;
+}
+/** Whole days from one date key to another; negative if the second is earlier.
+    Rounded, because a clocks-change day is 23 or 25 hours long and would
+    otherwise land a day out twice a year. */
+function daysBetweenKeys(fromKey, toKey) {
+  const a = dateKeyToLocal(fromKey), b = dateKeyToLocal(toKey);
+  if (!a || !b) return null;
+  return Math.round((b - a) / 86400000);
+}
+/** "1 question" / "12 questions" / "1 day" — said out loud in one place, for
+    the same reason marksLabel() exists: every call site was getting the plural
+    wrong on exactly the number people notice. */
+const qtyLabel = (n, word) => n + ' ' + word + (Math.abs(n) === 1 ? '' : 's');
 function fmtDate(iso, withTime) {
   if (!iso) return '—';
   const d = new Date(iso); if (isNaN(d)) return '—';
@@ -1680,7 +1704,10 @@ const DB = {
 const COURSE_SETTINGS = ['mockCount', 'mockMinutes', 'mockAllowPause', 'srIntervals', 'weakMinSample', 'masteryTarget', 'mockCaseCount',
   // How this course's exam is actually marked. Per course because a CISA
   // paper and a CA paper are marked nothing like each other.
-  'marksPerQuestion', 'marksPerCaseQuestion', 'passPct', 'negativeFraction', 'scaledScore'];
+  'marksPerQuestion', 'marksPerCaseQuestion', 'passPct', 'negativeFraction', 'scaledScore',
+  // When this course's exam actually is. Per course because a candidate
+  // sitting two qualifications is counting down to two different mornings.
+  'examDate'];
 function isCourseSetting(k) { return COURSE_SETTINGS.indexOf(k) >= 0; }
 function courseKey(k, courseId) { return k + '@' + courseId; }
 
@@ -1722,6 +1749,9 @@ const Settings = {
     // { min, max, pass } — CISA reports 200..800 with 450 to pass. Null for
     // every exam that simply reports a percentage.
     scaledScore: null,
+    // A YYYY-MM-DD local date, or null for "no date set", which is the default
+    // and which keeps every countdown, target and prompt off the screen.
+    examDate: null,
     shuffleOptions: true,
     confirmLeaveMock: true,
     // A second clock on screen is a distraction unless you have asked for
@@ -4011,6 +4041,111 @@ function weaknessScore(g, minSample) {
   return { score: Math.round(s), why };
 }
 
+/* ---------- what is left, and by when ----------
+   Every measure in this app so far answers "how am I doing". A candidate in
+   the last month is asking something else: what has to happen between now and
+   the date, and did I do my share of it today.
+
+   The whole of it is arithmetic over facts the bank already holds, so it is
+   one pure function taking everything it needs — no reads of State, no reads
+   of Settings — and returning the card's entire content, sentence included.
+
+   The one rule that makes the numbers trustworthy: each question falls in
+   EXACTLY ONE bucket. A question that is both below the mastery target and
+   due for review is one job, not two; counting it twice would inflate the
+   backlog, inflate the daily target, and quietly tell somebody they are
+   further behind than they are.                                             */
+function studyPlan(opts) {
+  const o = opts || {};
+  const today = o.today || todayKey();
+  const gap = o.examDate ? daysBetweenKeys(today, o.examDate) : null;
+  if (gap == null) return { set: false };
+
+  const target = o.masteryTarget != null ? o.masteryTarget : 75;
+  const pool = (o.pool || []).concat(o.casePool || []);
+  // The last moment of the exam day, so a review falling due ON the day still
+  // counts as work inside the window.
+  const examEnd = dateKeyToLocal(o.examDate);
+  examEnd.setDate(examEnd.getDate() + 1);
+
+  let unseen = 0, weak = 0, dueBefore = 0, settled = 0;
+  pool.forEach(q => {
+    const st = (q && q.stats) || {};
+    if (!st.attempts) { unseen++; return; }
+    if ((st.mastery || 0) < target) { weak++; return; }
+    if (q.nextReviewAt && new Date(q.nextReviewAt) < examEnd) { dueBefore++; return; }
+    settled++;
+  });
+  const backlog = unseen + weak + dueBefore;
+  // Today counts: somebody who says "the exam is on Friday" on Friday has one
+  // day, not none, and dividing by none is how a target becomes Infinity.
+  const daysLeft = gap >= 0 ? gap + 1 : 0;
+  const perDay = daysLeft > 0 ? Math.ceil(backlog / daysLeft) : backlog;
+
+  const attempts = o.attempts || [];
+  // DISTINCT questions, because the backlog's unit is the question. Answering
+  // one question twenty times is worth one off the list, and a target that
+  // could be hit by hammering the same card would be worth nothing.
+  const doneToday = new Set(
+    attempts.filter(a => a && a.ts && todayKey(a.ts) === today).map(a => a.questionUuid)).size;
+
+  /* The reality check: distinct question-days over the last seven days, ending
+     yesterday. Divided by seven rather than by the days actually practised —
+     skipping four days in a week is precisely the thing this number exists to
+     show, and averaging only over the days you turned up would hide it. Today
+     is excluded because at nine in the morning it would drag the average to
+     the floor and call you behind on no evidence. */
+  const cut = dateKeyToLocal(today);
+  cut.setDate(cut.getDate() - 7);
+  const pairs = new Set();
+  attempts.forEach(a => {
+    if (!a || !a.ts) return;
+    const k = todayKey(a.ts);
+    // Date keys are fixed-width, so they compare correctly as strings.
+    if (k >= today) return;
+    const d = dateKeyToLocal(k);
+    if (!d || d < cut) return;
+    pairs.add(k + '|' + a.questionUuid);
+  });
+  const recentPerDay = pairs.size ? pairs.size / 7 : null;
+  const projected = recentPerDay == null ? null : Math.round(recentPerDay * daysLeft);
+
+  let state, verdict;
+  if (gap < 0) {
+    state = 'past';
+    verdict = 'Your exam date was ' + fmtDate(dateKeyToLocal(o.examDate).toISOString()) +
+      '. Set the next one and this works out what is left again.';
+  } else if (!backlog) {
+    state = 'clear';
+    verdict = 'Nothing outstanding: every question is seen, at your mastery target, and not due again before the day. Sit a timed mock.';
+  } else if (gap === 0) {
+    state = 'today';
+    // Phrased to sidestep verb agreement: qtyLabel gives the noun its plural,
+    // and "1 question still stands" / "4 questions still stand" would need the
+    // verb to follow it.
+    verdict = 'Today is the day, with ' + qtyLabel(backlog, 'question') + ' still open. Pick the worst of them with Last-mile revision rather than trying to clear the list.';
+  } else if (recentPerDay == null) {
+    state = 'unknown';
+    verdict = qtyLabel(backlog, 'question') + ' in ' + qtyLabel(daysLeft, 'day') + ' is ' +
+      qtyLabel(perDay, 'question') + ' a day. Practise for a few days and this will also tell you whether you are keeping up.';
+  } else if (recentPerDay + 0.5 >= perDay) {
+    state = 'ontrack';
+    verdict = 'At your recent ' + Math.round(recentPerDay) + ' a day you get through all ' +
+      backlog + ' with time in hand. Keep to ' + qtyLabel(perDay, 'question') + ' a day.';
+  } else {
+    state = 'behind';
+    verdict = 'At your recent ' + Math.round(recentPerDay) + ' a day you would reach ' + projected +
+      ' of the ' + backlog + '. Clearing the list needs ' + qtyLabel(perDay, 'question') + ' a day.';
+  }
+
+  return {
+    set: true, examDate: o.examDate, today, daysLeft, past: gap < 0,
+    unseen, weak, dueBefore, settled, backlog, perDay,
+    doneToday, remainingToday: Math.max(0, perDay - doneToday),
+    recentPerDay, projected, state, verdict
+  };
+}
+
 /* ---------- selection ---------- */
 /* The single seam that keeps the two banks apart.
 
@@ -5442,11 +5577,17 @@ ROUTES.dashboard = async (root) => {
   const conflicts = all.filter(q => q.conflict || q.status === 'answer_conflict');
   const mastered = active.filter(q => (q.stats.mastery || 0) >= Settings.get('masteryTarget'));
 
+  const plan = studyPlan({
+    examDate: Settings.get('examDate'), masteryTarget: Settings.get('masteryTarget'),
+    pool: active, casePool: caseActive, attempts
+  });
+
   await band('Dashboard', 'Position at a glance', [
     { k: 'Active', v: String(active.length) },
     caseActive.length ? { k: 'Case study', v: String(caseActive.length) } : null,
     { k: 'In review', v: String(inReview.length), color: inReview.length ? 'var(--amber)' : null },
-    { k: 'Due today', v: String(due.length), color: due.length ? 'var(--pencil)' : null }
+    { k: 'Due today', v: String(due.length), color: due.length ? 'var(--pencil)' : null },
+    plan.set && !plan.past ? { k: 'Exam in', v: qtyLabel(plan.daysLeft, 'day'), color: plan.daysLeft <= 14 ? 'var(--pencil)' : null } : null
   ].filter(Boolean), [h('button', { class: 'btn primary', onclick: () => go('practice'), text: 'Start practice' })]);
 
   // A course-level note (currently only ever set by the DISA quick-add
@@ -5480,6 +5621,18 @@ ROUTES.dashboard = async (root) => {
       h('button', { class: 'btn primary', onclick: () => go(rec.go, rec.mode), text: rec.a })
     ])
   ]));
+
+  // The countdown, or — on a bank worth planning — one quiet line offering it.
+  const planCard = studyPlanCard(plan);
+  if (planCard) root.appendChild(planCard);
+  else if (all.length >= 20) {
+    root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:16px' }, [
+      h('div', { class: 'row wrap', style: 'gap:10px;align-items:center' }, [
+        h('span', { style: 'flex:1;min-width:220px' }, 'No exam date set. Add one and this page works out how many questions a day it takes to clear what your bank still owes you.'),
+        h('button', { class: 'btn sm', onclick: () => examDateDialog(), text: 'Set the exam date' })
+      ])
+    ]));
+  }
 
   const tiles = h('div', { class: 'grid g4', style: 'margin-bottom:16px' });
   const tile = (k, v, sub, cls) => h('div', { class: 'tile ' + (cls || '') }, [h('span', { class: 'eyebrow', text: k }), h('b', { text: v }), sub ? h('div', { class: 'sub', text: sub }) : null]);
@@ -5570,6 +5723,112 @@ ROUTES.dashboard = async (root) => {
   }
 };
 
+
+/* ---------- the countdown ----------
+   Drawn only when a date has been set. Everything about this feature is
+   invisible until then: no card, no band entry, no nag beyond a single line
+   offering to set one. */
+function studyPlanCard(plan) {
+  if (!plan || !plan.set) return null;
+
+  if (plan.past) {
+    return h('div', { class: 'card', style: 'margin-bottom:16px' }, [
+      h('div', { class: 'card-b row wrap', style: 'gap:16px;align-items:center' }, [
+        h('div', { style: 'flex:1;min-width:240px' }, [
+          h('div', { class: 'eyebrow', text: 'Exam date' }),
+          h('p', { class: 'small muted', style: 'margin:6px 0 0', text: plan.verdict })
+        ]),
+        h('button', { class: 'btn', onclick: () => examDateDialog(), text: 'Set a new date' })
+      ])
+    ]);
+  }
+
+  const rows = [
+    plan.unseen ? [plan.unseen, 'never attempted'] : null,
+    plan.weak ? [plan.weak, 'attempted, still below your mastery target'] : null,
+    plan.dueBefore ? [plan.dueBefore, 'mastered, but falling due for review before the day'] : null
+  ].filter(Boolean);
+
+  const left = h('div', { style: 'flex:1;min-width:250px' }, [
+    h('div', { class: 'eyebrow', text: 'What is left' }),
+    rows.length
+      ? h('div', { class: 'stack', style: 'gap:3px;margin-top:6px' }, rows.map(([n, label]) =>
+        h('div', { class: 'row', style: 'gap:8px' }, [
+          h('span', { class: 'num small', style: 'min-width:52px;text-align:right', text: String(n) }),
+          h('span', { class: 'small muted', style: 'flex:1', text: label })
+        ])))
+      : h('p', { class: 'small muted', style: 'margin:6px 0 0', text: 'Nothing outstanding.' }),
+    rows.length > 1 ? h('div', { class: 'row', style: 'gap:8px;margin-top:5px;border-top:1px solid var(--rule-soft);padding-top:5px' }, [
+      h('b', { class: 'num small', style: 'min-width:52px;text-align:right', text: String(plan.backlog) }),
+      h('span', { class: 'small', style: 'flex:1', text: 'questions to get through' })
+    ]) : null
+  ]);
+
+  // The bar is today against today's share, not the whole backlog against the
+  // whole run-in: the only number anybody can act on before bedtime.
+  const pctToday = plan.perDay ? clamp(plan.doneToday / plan.perDay, 0, 1) : (plan.doneToday ? 1 : 0);
+  const met = plan.perDay > 0 && plan.doneToday >= plan.perDay;
+  const right = h('div', { style: 'flex:1;min-width:250px' }, [
+    h('div', { class: 'eyebrow', text: 'Today' }),
+    h('div', { class: 'row', style: 'gap:8px;align-items:baseline;margin-top:4px' }, [
+      h('b', { style: 'font-size:26px', text: String(plan.doneToday) }),
+      h('span', { class: 'small muted', text: plan.perDay ? 'of ' + qtyLabel(plan.perDay, 'question') + ' a day' : 'questions today' })
+    ]),
+    h('div', { class: 'bar', style: 'margin-top:6px' }, [
+      h('i', { class: met ? 'g' : 'a', style: 'width:' + Math.round(pctToday * 100) + '%' })
+    ]),
+    h('div', { class: 'tiny dim', style: 'margin-top:4px', text: met
+      ? 'Today’s share is done.'
+      : plan.remainingToday + ' more to keep to the plan.' })
+  ]);
+
+  return h('div', { class: 'card', style: 'margin-bottom:16px' }, [
+    h('div', { class: 'card-h' }, [
+      h('h3', { text: qtyLabel(plan.daysLeft, 'day') + ' to go' }),
+      h('div', { class: 'spacer' }),
+      h('button', {
+        class: 'btn sm ghost', onclick: () => examDateDialog(),
+        text: fmtDate(dateKeyToLocal(plan.examDate).toISOString())
+      })
+    ]),
+    h('div', { class: 'card-b stack' }, [
+      h('div', { class: 'row wrap', style: 'gap:20px;align-items:flex-start' }, [left, right]),
+      h('div', {
+        class: 'notice small ' + (plan.state === 'behind' ? 'warn' : plan.state === 'clear' || plan.state === 'ontrack' ? 'ok' : ''),
+        style: 'margin:0'
+      }, plan.verdict)
+    ])
+  ]);
+}
+
+/** One date, set from either the dashboard or Settings. */
+async function examDateDialog() {
+  const cur = Settings.get('examDate') || '';
+  const input = h('input', { type: 'date', value: cur });
+  const res = await modal({
+    title: 'When is the exam?',
+    body: h('div', { class: 'stack' }, [
+      h('div', { class: 'field' }, [h('label', { text: 'Exam date for ' + State.course.code }), input]),
+      h('p', { class: 'small muted', style: 'margin:0' },
+        'The dashboard then works backwards from what your bank still owes you — questions never attempted, questions below your mastery target, and reviews falling due before the day — to how many you need to get through daily.')
+    ]),
+    actions: [
+      { label: 'Cancel', value: null },
+      cur ? { label: 'Clear the date', value: 'clear' } : null,
+      { label: 'Save', value: 'save', kind: 'primary' }
+    ].filter(Boolean)
+  });
+  if (!res) return;
+  if (res === 'clear') { await Settings.set('examDate', null); toast('Exam date cleared'); }
+  else {
+    const v = input.value.trim();
+    // An unparseable value is the browser's own empty state, not a typo worth
+    // an error: treat it as clearing the date.
+    await Settings.set('examDate', dateKeyToLocal(v) ? v : null);
+    toast(dateKeyToLocal(v) ? 'Exam date saved' : 'Exam date cleared', 'ok');
+  }
+  if (State.view === 'settings') go('settings'); else go('dashboard');
+}
 
 /* ---------- the shape of your mocks ----------
    One mock tells you almost nothing; five in a row tell you whether you are
@@ -12263,6 +12522,19 @@ ROUTES.settings = async (root) => {
       numField('Default mock time limit (minutes)', 'mockMinutes', 5, 600),
       checkField('Allow pausing a mock exam', 'mockAllowPause', 'Off by default, because the real exam does not pause.'),
       checkField('Exam centre simulation before a timed mock', 'mockSimulation', 'Registration, hall ticket and invigilator, so the pressure is familiar before it counts. Skippable from its first frame with Esc.'),
+      h('div', { class: 'field' }, [
+        h('label', { text: 'Exam date' }),
+        h('input', {
+          type: 'date', value: Settings.get('examDate') || '',
+          onchange: async e => {
+            const v = e.target.value.trim();
+            await Settings.set('examDate', dateKeyToLocal(v) ? v : null);
+            toast(dateKeyToLocal(v) ? 'Saved' : 'Exam date cleared');
+            go('settings');
+          }
+        }),
+        h('div', { class: 'tiny dim', text: 'Optional. Set it and the dashboard counts down, and works out a questions-a-day target from what is still unseen, still below your mastery target, and falling due for review before the day.' })
+      ]),
       numField('Mastery target', 'masteryTarget', 40, 100, 'A question counts as mastered at or above this score.'),
       numField('Minimum sample before calling a topic weak or strong', 'weakMinSample', 1, 50)
     ])
