@@ -510,10 +510,19 @@ correct, whoever sent it.
 `starterManifest()` caches one same-origin fetch of `data/starter-index.json`
 and swallows every failure, so a deployment without one behaves as if the
 feature does not exist. It carries three things: `files` (banks on offer),
-`notices` (anything worth saying to a student), and `studyGroup` (one link
-out). `datedVisible()` applies `from`/`until` as inclusive `YYYY-MM-DD` string
+`notices` (anything worth saying to a student), and `supportGroup` (one link
+out, read from either `supportGroup` or the older `studyGroup` key so a
+manifest drafted against the earlier name does not silently render nothing).
+`datedVisible()` applies `from`/`until` as inclusive `YYYY-MM-DD` string
 comparisons — no timezone gets a say in whether somebody can see their
 material. `safeLinkOrNull()` drops anything that is not `http(s)`.
+
+The support link renders in **Settings → About and licence**, not on the
+dashboard. The distinction is what the link is *for*: a route to report a
+problem with the app is needed rarely and looked for deliberately, so it
+belongs where somebody goes when something is wrong, beside the licence and the
+shortcuts. Notices are the opposite — timely, from the course, and worth
+seeing without being sought — so they stay on the dashboard.
 
 **The mechanism could never have worked as shipped.** `.gitignore` excluded
 `data/`, so the file the app fetches was unpublishable, and git cannot

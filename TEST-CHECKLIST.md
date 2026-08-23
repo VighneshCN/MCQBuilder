@@ -480,6 +480,9 @@ Automated tests cannot verify rendering or real browser storage.
 - [ ] A case study and its questions survive the round trip together
 - [ ] Put an entry in data/starter-index.json with a past `until`: it is not
       offered. Change it to a future date: it is
+- [ ] Set `supportGroup`: the link appears in Settings → About and licence and
+      NOT on the dashboard, and says what joining a group chat exposes
+- [ ] A notice appears on the dashboard; the support link does not
 - [ ] `git check-ignore data/starter-index.json` returns nothing, and
       `git check-ignore data/my-bank.json` returns a match
 

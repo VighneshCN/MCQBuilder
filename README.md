@@ -827,9 +827,9 @@ tap to import.
       "course": "CISA", "kind": "note", "until": "2026-09-08" },
     { "text": "Read the last sentence of the stem first.", "kind": "tip" }
   ],
-  "studyGroup": {
-    "label": "WhatsApp group", "url": "https://chat.whatsapp.com/…",
-    "note": "Tips and questions from everybody sitting the same paper."
+  "supportGroup": {
+    "label": "Ask on WhatsApp", "url": "https://chat.whatsapp.com/…",
+    "note": "Something not working, or a question about the app itself? Ask here."
   }
 }
 ```
@@ -844,8 +844,14 @@ tap to import.
 - **`notices`** appear on the dashboard. `kind` is `tip` (quiet) or `note`
   (amber). This is how you send exam tips or a word of encouragement without
   needing anywhere to host them.
-- **`studyGroup`** puts one link on the dashboard. Only `http`/`https` URLs are
-  rendered; anything else is dropped.
+- **`supportGroup`** is one link for people who hit a problem with the app —
+  it appears in **Settings → About and licence**, next to the licence and the
+  shortcuts, which is where somebody looks when something is wrong. Not on the
+  dashboard: that would put a support link in front of every student every day
+  for something they need twice a year. Only `http`/`https` URLs are rendered.
+  The app also says, beside it, that joining a group chat shows your number to
+  the people in it — true of any group link, and worth saying in an app that is
+  careful about this elsewhere.
 - A listed file that is not actually there shows **nothing** rather than a
   broken button, so a typo is quiet rather than embarrassing.
 
@@ -859,11 +865,16 @@ is public — see `GITHUB-PAGES.md`.
 
 ### There is no message board, deliberately
 
-Students cannot post back through the app. A page that accepts writes from
-anyone with the link, with no account, gets spammed the moment the URL travels
-— and whatever appears on it appears under your name. The link above sends
-people somewhere built for conversation, with a moderator, which is almost
-certainly a group they are already in.
+Students cannot post back through the app, and there is no plan to let them. A
+page that accepts writes from anyone with the link, with no account, gets
+spammed the moment the URL travels — and whatever appears on it appears under
+your name.
+
+Nor does the app try to be where students talk to each other. They already have
+groups for that, set up around whichever paper and coaching class they are
+doing, and a study group bolted onto a practice app would be a worse version of
+one they are already in. `supportGroup` is a narrower thing on purpose: **the
+place to report a problem with the app itself.**
 
 ## 6. Checking what the app could not confirm
 

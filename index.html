@@ -5984,24 +5984,13 @@ ROUTES.dashboard = async (root) => {
      renders nothing at all here — which is every deployment by default. */
   const manifest = await starterManifest();
   const notices = activeNotices(manifest.notices, State.course.code);
-  if (notices.length || manifest.studyGroup) {
-    const box = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
-      h('div', { class: 'card-h' }, [h('h3', { text: notices.length ? 'From your course' : 'Your study group' })])
-    ]);
-    const body = h('div', { class: 'card-b stack' });
-    notices.forEach(n => body.appendChild(h('div', {
-      class: n.kind === 'tip' ? 'notice small' : 'notice warn small', style: 'margin:0', text: n.text
-    })));
-    if (manifest.studyGroup) {
-      body.appendChild(h('div', { class: 'row wrap', style: 'gap:8px;align-items:center' }, [
-        h('span', { class: 'small', style: 'flex:1;min-width:200px', text: manifest.studyGroup.note || 'Questions, tips, and everybody else sitting the same paper.' }),
-        // Opened in a new tab and told not to hand this app's context over
-        // with it. Nothing about your bank goes anywhere; it is a link.
-        h('a', { class: 'btn sm', href: manifest.studyGroup.url, target: '_blank', rel: 'noopener noreferrer', text: manifest.studyGroup.label })
-      ]));
-    }
-    box.appendChild(body);
-    root.appendChild(box);
+  if (notices.length) {
+    root.appendChild(h('div', { class: 'card', style: 'margin-bottom:16px' }, [
+      h('div', { class: 'card-h' }, [h('h3', { text: 'From your course' })]),
+      h('div', { class: 'card-b stack' }, notices.map(n => h('div', {
+        class: n.kind === 'tip' ? 'notice small' : 'notice warn small', style: 'margin:0', text: n.text
+      })))
+    ]));
   }
 
   // The countdown, or — on a bank worth planning — one quiet line offering it.
@@ -10065,7 +10054,7 @@ let _catalogue = null;
    without one behaves exactly as if this feature did not exist. */
 async function starterManifest() {
   if (_catalogue) return _catalogue;
-  const empty = { files: [], notices: [], studyGroup: null };
+  const empty = { files: [], notices: [], supportGroup: null };
   try {
     const res = await fetch(STARTER_INDEX, { cache: 'no-store' });
     if (!res.ok) { _catalogue = empty; return _catalogue; }
@@ -10073,7 +10062,10 @@ async function starterManifest() {
     _catalogue = {
       files: Array.isArray(j && j.files) ? j.files : [],
       notices: Array.isArray(j && j.notices) ? j.notices : [],
-      studyGroup: safeLinkOrNull(j && j.studyGroup)
+      // studyGroup was the name for about ten minutes; both are read so a
+      // manifest drafted against the earlier one does not silently show
+      // nothing at all.
+      supportGroup: safeLinkOrNull(j && (j.supportGroup || j.studyGroup))
     };
   } catch (e) { _catalogue = empty; }
   return _catalogue;
@@ -10087,7 +10079,7 @@ async function starterCatalogue() { return (await starterManifest()).files; }
 function safeLinkOrNull(o) {
   if (!o || typeof o.url !== 'string') return null;
   if (!/^https?:\/\//i.test(o.url.trim())) return null;
-  return { label: String(o.label || 'Study group'), url: o.url.trim(), note: o.note ? String(o.note) : '' };
+  return { label: String(o.label || 'Support group'), url: o.url.trim(), note: o.note ? String(o.note) : '' };
 }
 
 /** What a dated list is offering today. Dates are plain YYYY-MM-DD keys and
@@ -14271,16 +14263,31 @@ ROUTES.settings = async (root) => {
       ])
     ])
   ]));
+  /* Where somebody looks when something is wrong — which is why the support
+     link lives here rather than on the dashboard, where it would be in front
+     of every student every day for something they need twice a year. */
+  const support = (await starterManifest()).supportGroup;
   grid2.appendChild(h('div', { class: 'card' }, [
     h('div', { class: 'card-h' }, [h('h3', { text: 'About and licence' }), h('div', { class: 'spacer' }), h('span', { class: 'tiny dim', text: APP.name + ' ' + APP.version })]),
-    h('div', { class: 'card-b' }, [
-      h('div', { class: 'small', style: 'margin-bottom:10px' },
+    h('div', { class: 'card-b stack' }, [
+      h('div', { class: 'small', style: 'margin:0' },
         'Free to use for your own study. Not free to sell, or to build a paid product or service on.'),
       h('div', { class: 'row' }, [
         h('button', { class: 'btn', onclick: () => showLicence(), text: 'Terms and licence' }),
         h('button', { class: 'btn', onclick: () => showShortcuts(), text: 'Keyboard shortcuts' })
-      ])
-    ])
+      ]),
+      support ? h('div', { class: 'notice small', style: 'margin:0' }, [
+        h('div', { style: 'margin-bottom:8px' }, support.note || 'Something not working, or not making sense? There is a group for people using this app — ask there.'),
+        h('div', { class: 'row wrap', style: 'gap:8px;align-items:center' }, [
+          // A link out, and nothing more: no part of your bank goes with it.
+          // Worth saying that joining a group chat shows your number to
+          // everybody in it, because this app is careful about that elsewhere
+          // and somebody should not learn it by finding out.
+          h('a', { class: 'btn sm', href: support.url, target: '_blank', rel: 'noopener noreferrer', text: support.label }),
+          h('span', { class: 'tiny dim', style: 'flex:1;min-width:180px', text: 'Opens outside the app. Nothing from your bank goes with it — but joining a group chat does show your number to the people in it.' })
+        ])
+      ]) : null
+    ].filter(Boolean))
   ]));
   grid2.appendChild(h('div', { class: 'card' }, [
     h('div', { class: 'card-h' }, h('h3', { text: 'Maintenance' })),
@@ -23246,6 +23253,7 @@ test('Notices reach the right course, and a link out is never a script', () => {
   const ok = safeLinkOrNull({ url: ' https://chat.whatsapp.com/abc ', label: 'Group' });
   assert(ok && ok.url === 'https://chat.whatsapp.com/abc', 'a real one survives, trimmed');
   eq(ok.label, 'Group');
+  eq(safeLinkOrNull({ url: 'https://x.test/y' }).label, 'Support group', 'and it is named for what it is for');
 });
 
 test('A reconnect only skips the merge question when it is genuinely settled', () => {
