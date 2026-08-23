@@ -69,10 +69,11 @@ what you thought you knew. Which wrong option keeps catching you, and on which
 questions. What you changed your mind about, and what changing it cost.
 
 **8. Getting to the date.** Set an exam date and the dashboard works backwards
-from what your bank still owes you to a questions-a-day target. In the last
-week, Last-mile revision hands you the worst of what is still broken, and the
-error notebook prints everything you have got wrong so you can revise from
-paper.
+from what your bank still owes you to a questions-a-day target — and, using
+your exam weights, says which chapter that effort should go into. Export a
+calendar file and your own phone reminds you daily. In the last week, Last-mile
+revision hands you the worst of what is still broken, and the error notebook
+prints everything you have got wrong so you can revise from paper.
 
 **9. Where your data lives.** One home at a time — a folder on your disk **or**
 your Google Drive, never both at once. The browser database is a working copy,
@@ -364,6 +365,64 @@ skipping four days a week is exactly the thing worth seeing.
 
 None of this appears until you set a date. There is no card, no countdown and
 no nag beyond a single line offering to set one.
+
+#### It also tells you *which* questions
+
+A daily count on its own is blind to your syllabus. You could hit it for three
+weeks entirely inside one chapter and reach the exam with a chapter worth a
+quarter of the paper barely touched — being told "on track" every morning.
+
+So the plan reads your exam weights. For each domain it works out how much of
+it is **solid**, and ranks what is left by what the shortfall actually costs:
+
+> a domain worth 26% that is 40% ready is a bigger problem than one worth 12%
+> that is 20% ready
+
+The card names that domain and offers one click to practise it, with the filter
+already set. Underneath, **Readiness by domain** shows every chapter, its share
+of the paper, and how much of it is solid — folded away until you want it.
+
+If your bank has *no* questions at all for a domain, that is said separately.
+It is a gap in the bank rather than in your revision, and no amount of practice
+closes it.
+
+#### Two phases, because that is how revision actually goes
+
+While anything is unseen you are in **coverage**: the card says how much of
+today's number should be new ground, sized so the whole bank is seen once by
+about 60% of the way to the exam. That leaves a real stretch at the end rather
+than a scramble.
+
+Once everything has been seen once it switches to **consolidation** — what is
+left is the shaky ones and the reviews falling due.
+
+#### "Solid" is stricter than "I got it right"
+
+A question counts as solid only at or above your mastery target, and mastery
+docks points for a correct answer you marked as a **guess**. So a question you
+guessed right stays on the list, and the card says so rather than leaving you
+to work it out.
+
+### Reminders that reach you
+
+**Backup & Restore → Study reminders**, or *Remind me* on the countdown card.
+
+It downloads a **calendar file**. Import it once into whatever calendar you
+already use — Google, Apple, Outlook — and your own phone reminds you every day
+until the exam, at a time you choose. It also marks the day everything should
+have been seen once, one week to go, and the exam itself.
+
+Nothing leaves your machine. It is a file you download, exactly like the error
+notebook.
+
+**Why not WhatsApp, or a push notification?** Both need a server, and both
+would mean your phone number and your study record leaving this machine — the
+one thing the app is built not to do. A browser cannot schedule a notification
+for tomorrow morning on its own either. A calendar file is the one mechanism
+that works on every platform, including iOS, with no account and no backend.
+
+When you do come back after a few days away, the dashboard says so and gives
+you today's number. It stays quiet if you practised yesterday.
 
 ### The last week
 

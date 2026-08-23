@@ -349,6 +349,62 @@ Today's progress and the seven-day pace both count **distinct questions**, not
 attempts — the backlog's unit is the question, and a target reachable by
 hammering one card would measure nothing.
 
+## Ranking what is left by what it costs
+
+`domainReadiness()` is the answer to a count being blind to the blueprint. Per
+domain it splits the pool into `unseen` / `shaky` / `solid` — shaky being below
+the mastery target, which is where a correct-but-guessed answer lands, since
+`masteryOf()` docks 6 for each one — and ranks by
+
+```
+risk = share of the paper × (1 − solid ÷ total)
+```
+
+Weights are read as proportions rather than assumed to total 100, the same way
+`weightedPick()` reads them. Two rules earn their place:
+
+- **A domain with no questions has zero risk**, not maximum. `0 solid ÷ 0 total`
+  reads as 0% ready, which would make an empty domain the most urgent thing in
+  the plan and send somebody to a session that cannot be built. It is flagged
+  as `empty` instead — a hole in the bank, fixed by importing, not by practice.
+- **Ties break toward the unknown.** Two domains equally at risk are ordered by
+  `unseen`, because material never seen is a bigger unknown than material seen
+  and failed.
+
+`studyPlan()` gains `phase` (coverage while anything is unseen, then
+consolidate, then clear) and sizes the coverage window at 60% of the run-in, so
+`unseenPerDay` leaves a real stretch for fixing rather than a scramble. Its
+existing fields — the three buckets, `backlog`, `perDay` — are untouched, and a
+regression test pins them.
+
+## The calendar file
+
+WhatsApp and Web Push both need a server, and both would carry a phone number
+and a study record off the machine. Notification Triggers, which would allow a
+scheduled local notification, is not shipped by any browser — probed with
+`Page.getAppManifest`-era capability checks in Chromium. A calendar file is the
+one mechanism that works on every platform, iOS included, with no account and
+no backend.
+
+`buildStudyICS()` is kept pure and separate from the download so it can be
+checked byte by byte. An `.ics` that is almost right imports as an empty
+calendar with no error, so each rule has a test:
+
+- **CRLF everywhere**, and no line over **75 octets** — counted in UTF-8 and
+  split on code points, so an em dash in a course name is never cut in half.
+- **Escaping** of `\`, `;`, `,` and newline, verified by unfolding back to the
+  original text. (`'\;'` in a JS literal is just `;` — that bug was written
+  twice here, once in the writer and once in the test that was meant to catch
+  it.)
+- **Floating local time** for the daily event — no `Z`, no `TZID` — which is
+  what "remind me at seven" means, and needs no `VTIMEZONE` block.
+- **`COUNT`, not `UNTIL`.** `UNTIL` must match `DTSTART`'s value type and
+  UTC-ness; getting that subtly wrong is the classic way an `.ics` silently
+  imports nothing.
+- **Stable UIDs**, so re-exporting after changing the date updates the entries
+  rather than duplicating them.
+- **All-day `DTEND` is exclusive**, so a one-day marker ends the following day.
+
 ## The last mile, and the notebook
 
 `lastMilePick()` contains no rng at all, unlike every other selection in the

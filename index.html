@@ -22111,6 +22111,155 @@ test('The storage bar asks where the bank lives, not whether a token is live', (
   }
 });
 
+
+/* ---- a plan worth following ---- */
+
+const BP = [
+  { id: 'D1', name: 'Auditing', weight: 18 }, { id: 'D2', name: 'Governance', weight: 18 },
+  { id: 'D3', name: 'Acquisition', weight: 12 }, { id: 'D4', name: 'Operations', weight: 26 },
+  { id: 'D5', name: 'Protection', weight: 26 }
+];
+const drQ = (dom, st) => ({ uuid: 'u' + Math.random().toString(36).slice(2), domainId: dom,
+  stats: Object.assign({ attempts: 0, mastery: 0 }, st) });
+const drMany = (n, dom, st) => Array.from({ length: n }, () => drQ(dom, st));
+
+test('What is furthest behind is weighed by what it is worth', () => {
+  // 12% of the paper barely started against 26% half done: the lighter domain
+  // has the bigger shortfall and the heavier one is the bigger problem. A
+  // headcount cannot tell them apart; that is the entire point of this.
+  const pool = [].concat(
+    drMany(10, 'D3', { attempts: 3, mastery: 20 }),                 // 12%, 0% solid
+    drMany(5, 'D4', { attempts: 3, mastery: 90 }), drMany(5, 'D4', { attempts: 3, mastery: 20 })  // 26%, 50% solid
+  );
+  const rows = domainReadiness(pool, BP, 75);
+  const d3 = rows.find(r => r.id === 'D3'), d4 = rows.find(r => r.id === 'D4');
+  eq(Math.round(d3.risk * 1000), 120, '12% of the paper, none of it solid');
+  eq(Math.round(d4.risk * 1000), 130, '26% of the paper, half of it solid — and still worse');
+  eq(rows[0].id, 'D4', 'so the heavier one is what to do next');
+});
+
+test('Two domains equally at risk are ordered by what you know least about', () => {
+  const pool = [].concat(
+    drMany(10, 'D4', { attempts: 3, mastery: 20 }),   // 26%, seen and failing
+    drMany(10, 'D5', {})                              // 26%, never seen
+  );
+  const rows = domainReadiness(pool, BP, 75);
+  eq(Math.round(rows[0].risk * 1000), Math.round(rows[1].risk * 1000), 'the risk is identical');
+  eq(rows[0].id, 'D5', 'and material never seen is the bigger unknown');
+});
+
+test('A domain with no questions is a hole in the bank, not in the revision', () => {
+  // 0 solid of 0 total reads as 0% ready, which would make an empty domain the
+  // most urgent thing in the plan and send somebody to a session that cannot
+  // be built. No practice closes it; importing does.
+  const rows = domainReadiness(drMany(4, 'D1', { attempts: 2, mastery: 90 }), BP, 75);
+  const empty = rows.find(r => r.id === 'D5');
+  eq(empty.total, 0); eq(empty.risk, 0, 'nothing to practise is not a risk you can practise away');
+  assert(empty.empty, 'but it is flagged, because 26% of the paper is missing from the bank');
+  assert(!rows.find(r => r.id === 'D1').empty, 'a domain with questions is not flagged');
+  // Every row survives an empty bank without a NaN.
+  assert(domainReadiness([], BP, 75).every(r => Number.isFinite(r.risk) && Number.isFinite(r.ready)));
+});
+
+test('Blueprint weights are proportions, not percentages', () => {
+  // Nothing stops somebody typing five numbers that come to 96, or to 3.
+  const odd = [{ id: 'A', name: 'A', weight: 3 }, { id: 'B', name: 'B', weight: 1 }];
+  const rows = domainReadiness([drQ('A', {}), drQ('B', {})], odd, 75);
+  eq(Math.round(rows.find(r => r.id === 'A').share * 100), 75);
+  eq(Math.round(rows.find(r => r.id === 'B').share * 100), 25);
+  // No blueprint at all, or all-zero weights: no shares, no focus, no crash.
+  assert(domainReadiness([drQ(null, {})], [], 75).every(r => r.share === 0 && r.risk === 0));
+  assert(domainReadiness([drQ('A', {})], [{ id: 'A', name: 'A', weight: 0 }], 75).every(r => r.risk === 0));
+});
+
+test('A question you got right by guessing is not a question you are ready on', () => {
+  // masteryOf docks 6 for each correct-but-guessed answer, so it lands below
+  // the target and stays in the shaky column. The plan has always worked this
+  // way; this pins it, because everything else rests on it.
+  const q = mkQ('Which control is preventive?', ['a', 'b', 'c', 'd'], 1);
+  const att = (conf, correct) => ({ ts: '2026-01-0' + (1 + Math.floor(Math.random() * 8)) + 'T10:00:00Z', correct, confidence: conf });
+  const guessy = masteryOf(q, [att('guessed', true), att('guessed', true), att('guessed', true)]).score;
+  const known = masteryOf(q, [att('knew', true), att('knew', true), att('knew', true)]).score;
+  assert(guessy < known, 'guessing your way to three right answers is not knowing it');
+  assert(guessy < 75, 'and it stays below a default mastery target: ' + guessy);
+  const rows = domainReadiness([drQ('D1', { attempts: 3, mastery: guessy })], BP, 75);
+  eq(rows.find(r => r.id === 'D1').shaky, 1);
+  eq(rows.find(r => r.id === 'D1').solid, 0);
+});
+
+test('The plan moves from covering the ground to making it stick', () => {
+  const key = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return todayKey(d); };
+  const plan = (pool) => studyPlan({ examDate: key(19), masteryTarget: 75, pool, attempts: [], blueprint: BP });
+  eq(plan(drMany(20, 'D1', {})).phase, 'coverage', 'anything unseen means coverage');
+  eq(plan(drMany(20, 'D1', { attempts: 2, mastery: 40 })).phase, 'consolidate', 'all seen, work to do');
+  eq(plan(drMany(20, 'D1', { attempts: 2, mastery: 95 })).phase, 'clear');
+  eq(studyPlan({ examDate: key(-2), pool: drMany(3, 'D1', {}), attempts: [], blueprint: BP }).phase, 'past');
+
+  // The coverage window is 60% of the run-in, so there is a real stretch left
+  // to fix things in rather than a scramble.
+  const p = plan(drMany(60, 'D1', {}));
+  eq(p.daysLeft, 20); eq(p.coverageDays, 12);
+  eq(p.unseenPerDay, 5, '60 unseen over 12 days');
+  assert(p.unseenPerDay <= p.unseen, 'and never more than there are');
+  eq(plan(drMany(20, 'D1', { attempts: 2, mastery: 95 })).unseenPerDay, 0, 'nothing unseen, nothing to aim for');
+});
+
+test('A calendar file that a calendar will actually accept', () => {
+  const ics = buildStudyICS({
+    courseId: 'c1', courseCode: 'CA Final — Audit; Assurance, Ethics \\ Standards (Paper 3)',
+    today: '2026-08-22', examDate: '2026-09-11', days: 21, perDay: 69,
+    coverageBy: '2026-09-03', weekBefore: '2026-09-04', time: '19:00',
+    now: '2026-08-22T12:00:00.000Z', description: 'One; two, three'
+  });
+  const lines = ics.split('\r\n');
+  assert(ics.indexOf('\n') < 0 || ics.replace(/\r\n/g, '').indexOf('\n') < 0, 'every break is CRLF');
+  assert(ics.indexOf('BEGIN:VCALENDAR') === 0 && ics.indexOf('END:VCALENDAR') > 0);
+  ['VERSION:2.0', 'PRODID:', 'RRULE:FREQ=DAILY;COUNT=21', 'BEGIN:VALARM'].forEach(k =>
+    assert(ics.indexOf(k) > 0, 'missing ' + k));
+  eq((ics.match(/BEGIN:VEVENT/g) || []).length, 4, 'the daily one and three markers');
+  eq((ics.match(/BEGIN:VEVENT/g) || []).length, (ics.match(/END:VEVENT/g) || []).length);
+  eq((ics.match(/UID:/g) || []).length, 4, 'every event is identified, so re-importing updates rather than duplicates');
+  eq((ics.match(/DTSTAMP:/g) || []).length, 4);
+  // 75 OCTETS, not characters — an em dash is three bytes.
+  const enc = new TextEncoder();
+  lines.forEach(l => assert(enc.encode(l).length <= 75, 'line too long: ' + l));
+  // Folding must not cut a character in half.
+  lines.forEach(l => eq(l, new TextDecoder('utf-8', { fatal: false }).decode(enc.encode(l))));
+  // Escaping, and it must survive unfolding back to the original text.
+  const unfolded = ics.replace(/\r\n /g, '');
+  // String.raw, because the thing being checked for IS backslashes, and an
+  // ordinary literal quietly eats them — which is the exact bug this test
+  // exists to catch, and the one it was written with the first time.
+  assert(unfolded.indexOf(String.raw`Audit\; Assurance\, Ethics \\ Standards`) > 0,
+    'semicolon, comma and backslash escaped');
+  assert(unfolded.indexOf(String.raw`DESCRIPTION:One\; two\, three`) > 0);
+  // An all-day marker ends on the NEXT day, because DTEND is exclusive.
+  assert(unfolded.indexOf('DTSTART;VALUE=DATE:20260911') > 0 && unfolded.indexOf('DTEND;VALUE=DATE:20260912') > 0,
+    'exam day is one day long, on the right day');
+  // Floating local time: no Z, no TZID, so "19:00" means 19:00 wherever you are.
+  assert(unfolded.indexOf('DTSTART:20260822T190000') > 0, 'the daily reminder is floating local time');
+  // Nothing to remind about is not an empty calendar with a broken rule in it.
+  assert(buildStudyICS({ courseId: 'c', days: 0, today: '2026-08-22' }).indexOf('RRULE') < 0);
+});
+
+test('Adding a plan to the plan changed none of its arithmetic', () => {
+  // Regression against Phase D: the buckets, the backlog and the daily number
+  // are exactly what they were before any of this was layered on.
+  const key = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return todayKey(d); };
+  const pool = [
+    drQ('D1', {}), drQ('D1', {}),
+    drQ('D1', { attempts: 3, mastery: 40 }),
+    Object.assign(drQ('D1', { attempts: 3, mastery: 40 }), { nextReviewAt: nowISO() }),
+    Object.assign(drQ('D1', { attempts: 5, mastery: 90 }), { nextReviewAt: addDays(3) }),
+    Object.assign(drQ('D1', { attempts: 5, mastery: 90 }), { nextReviewAt: addDays(60) }),
+    drQ('D1', { attempts: 5, mastery: 90 })
+  ];
+  const p = studyPlan({ examDate: key(9), masteryTarget: 75, pool, attempts: [], blueprint: BP });
+  eq(p.unseen, 2); eq(p.weak, 2); eq(p.dueBefore, 1); eq(p.settled, 2);
+  eq(p.backlog, 5); eq(p.daysLeft, 10); eq(p.perDay, 1);
+  eq(p.unseen + p.weak + p.dueBefore + p.settled, pool.length);
+});
+
 /* ============================================================================
    Boot
    ========================================================================== */

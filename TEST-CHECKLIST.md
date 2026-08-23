@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 181 passed, 0 failed, of 181.**
+**Current result: 189 passed, 0 failed, of 189.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -176,6 +176,16 @@ nine different requested counts.
 118. Nothing is a blocker that the composer will not also let you save
 119. A bank nobody has filed still fills a mock, and is told so once
 120. The storage bar asks where the bank lives, not whether a token is live
+
+### A plan worth following (8)
+121. What is furthest behind is weighed by what it is worth
+122. Two domains equally at risk are ordered by what you know least about
+123. A domain with no questions is a hole in the bank, not in the revision
+124. Blueprint weights are proportions, not percentages
+125. A question you got right by guessing is not a question you are ready on
+126. The plan moves from covering the ground to making it stick
+127. A calendar file that a calendar will actually accept
+128. Adding a plan to the plan changed none of its arithmetic
 
 ### Everything else (4)
 29. Practice settings are per course, app preferences are shared
@@ -394,3 +404,22 @@ Automated tests cannot verify rendering or real browser storage.
       window and still works with the network cut
 - [ ] With Drive connected, reload — the bar says "reconnecting", never "Local
       only"; go offline and reload — it says offline and promises to sync
+
+### A plan worth following
+
+- [ ] Build a lopsided bank — one heavy domain untouched, a light one finished —
+      and confirm the card names the heavy one, not the emptiest one
+- [ ] Press "Practise that": Domain drill opens with that domain already ticked
+- [ ] Practise it up and watch the focus move to the next domain on its own
+- [ ] Answer several questions marking them **guessed**: they stay in the shaky
+      count, and the card says guessing is why
+- [ ] Delete every question in one domain: the card says the bank has none for
+      it, and that domain never becomes the thing to practise
+- [ ] Cover everything once — the card switches from coverage to consolidation
+- [ ] Export the reminders and **import the .ics into a real calendar**: the
+      daily entry appears at the time you chose and runs to the exam, and the
+      three markers land on the right days
+- [ ] Re-export after changing the exam date — the calendar updates rather than
+      creating a second set of entries
+- [ ] Leave it two days and reopen: the catch-up line appears. Practise, and it
+      goes
