@@ -12633,6 +12633,23 @@ ROUTES.backup = async (root) => {
     ])
   ]));
 
+  /* The same idea as everything above, applied to the app rather than the
+     data: it is yours, and you should not have to depend on anybody to keep
+     using it. */
+  root.appendChild(h('div', { class: 'card', style: 'margin-top:16px' }, [
+    h('div', { class: 'card-h' }, [h('h3', { text: 'Keep your own copy of the app' }), h('div', { class: 'spacer' }),
+      h('span', { class: 'tiny dim', text: APP.name + ' ' + APP.version })]),
+    h('div', { class: 'card-b stack' }, [
+      h('p', { class: 'small', style: 'margin:0' },
+        'Download the whole app as a zip and run it from your own machine — no network, no account, nothing installed. It stops depending on wherever you got it from, and it never changes unless you replace it.'),
+      h('div', { class: 'row' }, [
+        h('button', { class: 'btn primary', onclick: () => exportSelfContainedCopy(), text: 'Download a copy' })
+      ]),
+      h('p', { class: 'tiny dim', style: 'margin:0' },
+        'Your bank does not live inside the app, so it does not travel in the zip. Connect a folder — or take a backup — and the copy reads the same data.')
+    ])
+  ]));
+
   const tb = h('tbody');
   BACKUP_STORES.forEach(s => tb.appendChild(h('tr', {}, [h('td', { class: 'small', text: s }), h('td', { class: 'num right', text: String(counts[s]) })])));
   root.appendChild(h('div', { class: 'card', style: 'margin-top:16px' }, [
@@ -13312,6 +13329,194 @@ async function exportStudyCalendar() {
   download(State.course.code + '-study-plan-' + todayKey() + '.ics',
     new Blob([ics], { type: 'text/calendar;charset=utf-8' }));
   toast('Calendar downloaded — import it once and your phone does the rest', 'ok', 5200);
+}
+
+/* ---------- keep your own copy ----------
+   The app can hand over a working copy of itself, so somebody can stop
+   depending on wherever they got it from. Two reasons, and it is worth being
+   precise about both:
+
+   It pins the app at the version taken. A service worker that is
+   network-first — which this one is, on purpose — means anybody loading from a
+   host gets whatever that host serves next. A downloaded copy does not. That
+   is real insulation against a host being compromised LATER; it is none at all
+   against one already compromised, because the download is whatever is being
+   served right now.
+
+   And it removes the dependency entirely: no host, no account, no network.
+
+   The trap, and the reason this refuses to be casual: browser storage is
+   per-origin. A student who has practised on a published URL and then opens a
+   local copy is on a DIFFERENT ORIGIN with its own empty database, and will
+   conclude they have lost everything. Their bank only travels with them if it
+   lives in a folder or in Drive, or if they have a backup to restore. So this
+   will not proceed until one of those is true.                              */
+
+const LOCAL_BUNDLE = [
+  { url: 'index.html', name: 'index.html', required: true },
+  { url: 'sw.js', name: 'sw.js' },
+  { url: 'manifest.webmanifest', name: 'manifest.webmanifest' },
+  // The Windows launcher. Fetched rather than embedded so there is one copy of
+  // it in the world; a deployment that does not carry it simply produces a
+  // bundle without it, and START-HERE says so.
+  { url: 'serve.ps1', name: 'serve.ps1' },
+  { url: 'Start MCQ Mastery.bat', name: 'Start MCQ Mastery.bat' }
+];
+
+/** Null when the bank would survive the move; otherwise why it would not. */
+async function localCopyRisk() {
+  const questions = await DB.count('questions');
+  if (!questions) return null;                                  // nothing to lose yet
+  if (FileStore.connected) return null;                         // lives in a folder
+  if (typeof DriveSync !== 'undefined' && DriveSync.configured) return null;
+  const last = Settings.get('lastBackupAt');
+  // A backup older than a week is not cover for a bank being practised daily.
+  if (last && (Date.now() - new Date(last).getTime()) < 7 * 86400000) return null;
+  return { questions, lastBackupAt: last || null };
+}
+
+/** The note that goes in the zip. Pure, so its wording can be tested. */
+function startHereText(o) {
+  const i = o || {};
+  const missing = (i.missing || []);
+  return [
+    'MCQ MASTERY — your own copy',
+    '===========================',
+    '',
+    'Version ' + (i.version || '?') + ', taken on ' + (i.when || '?') + (i.from ? ' from ' + i.from : ''),
+    '',
+    'This copy is yours. It needs no network, no account, and nothing installed,',
+    'and it will not change unless you replace it.',
+    '',
+    '',
+    'RUNNING IT',
+    '----------',
+    'Windows:  double-click "Start MCQ Mastery.bat". A console window opens and',
+    '          your browser loads the app. Keep the console open while you work;',
+    '          closing it stops the server. Your data is not in the server.',
+    '',
+    '          Windows may warn that the file came from the internet. serve.ps1',
+    '          is plain text — open it in Notepad and read it first if you like.',
+    '          It starts a server on your own machine, bound to the loopback',
+    '          address only, so nothing is reachable from your network.',
+    '',
+    'Mac/Linux: open a terminal in this folder and run ONE of:',
+    '              python3 -m http.server 8080',
+    '              npx --yes serve .',
+    '           then open the address it prints.',
+    '',
+    'Why not just double-click index.html? Browsers block the local database for',
+    'pages opened from disk (file://), and that is where the app keeps its',
+    'working copy. It has to be served over http — which stays on your machine.',
+    '',
+    '',
+    'READ THIS BEFORE YOU PRACTISE',
+    '-----------------------------',
+    'Browser storage is separate for every address. This copy runs on a',
+    'different address from wherever you used the app before, so it starts with',
+    'an EMPTY database. Nothing has been lost — it is simply somewhere else.',
+    '',
+    'On first run, go to Settings > Where your data lives and connect the same',
+    'folder you were using, or restore a backup from Backup & Restore. Then',
+    'everything is here.',
+    '',
+    '',
+    'AN ICON YOU CAN CLICK',
+    '---------------------',
+    'Windows: right-click "Start MCQ Mastery.bat" > Send to > Desktop.',
+    'Better:  start the app, then use your browser’s Install button. You get a',
+    '         real application icon and its own window, pointing at this copy.',
+    '',
+    '',
+    'UPDATING',
+    '--------',
+    'This copy never updates itself; that is the point of having it. To move to',
+    'a newer version, open the app you took it from and download a copy again.',
+    '',
+    missing.length
+      ? 'NOTE: this bundle does not include ' + missing.join(', ') + '. Use one of the\nMac/Linux commands above, which need nothing extra.'
+      : '',
+    ''
+  ].filter(l => l !== null).join('\n');
+}
+
+async function exportSelfContainedCopy() {
+  const risk = await localCopyRisk();
+  if (risk) {
+    await modal({
+      title: 'Put your bank somewhere safe first',
+      body: h('div', { class: 'stack' }, [
+        h('div', { class: 'notice warn', style: 'margin:0' },
+          'A local copy runs at a different address, and browsers keep a separate database for every address. It would open with none of your ' +
+          risk.questions + ' question(s) in it.'),
+        h('p', { class: 'small', style: 'margin:0' },
+          'Nothing would be lost — your bank stays exactly where it is — but it would not follow you, and the new copy would look empty. Do one of these first and it travels with you:'),
+        h('ul', { class: 'small', style: 'margin:0 0 0 18px;padding:0' }, [
+          h('li', { text: 'Connect a folder (or Google Drive). Your bank lives in a file, and the copy reads the same file.' }),
+          h('li', { text: 'Or take a backup, and restore it in the copy.' })
+        ]),
+        risk.lastBackupAt
+          ? h('p', { class: 'tiny dim', style: 'margin:0', text: 'Your last backup was ' + fmtDate(risk.lastBackupAt) + ' — older than a week, so it is not cover for a bank you are practising on daily.' })
+          : h('p', { class: 'tiny dim', style: 'margin:0', text: 'You have never taken a backup.' })
+      ]),
+      actions: [
+        { label: 'Cancel', value: null },
+        { label: 'Back up now', value: 'backup' },
+        { label: 'Connect a folder', value: 'connect', kind: 'primary' }
+      ]
+    }).then(v => {
+      if (v === 'backup') go('backup');
+      else if (v === 'connect') connectFlow();
+    });
+    return;
+  }
+
+  const ok = await modal({
+    title: 'Keep your own copy',
+    body: h('div', { class: 'stack' }, [
+      h('p', { class: 'small', style: 'margin:0' },
+        'Downloads the whole app as a zip: the page itself, the offline worker, and a small launcher for Windows. Unzip it anywhere and run it — no network, no account, nothing installed.'),
+      h('div', { class: 'notice small', style: 'margin:0' },
+        'It never updates itself, which is the point: whatever happens to wherever you got this from, your copy carries on working exactly as it does today.'),
+      h('p', { class: 'tiny dim', style: 'margin:0' },
+        'The zip contains a .bat and a .ps1 — the Windows launcher. Some browsers warn about that; the note inside explains what they are and how to read them first.')
+    ]),
+    actions: [{ label: 'Cancel', value: null }, { label: 'Download', value: 'go', kind: 'primary' }]
+  });
+  if (!ok) return;
+
+  toast('Bundling your copy…');
+  const entries = [];
+  const missing = [];
+  for (const f of LOCAL_BUNDLE) {
+    try {
+      const res = await fetch(f.url, { cache: 'no-store' });
+      if (!res.ok) throw new Error(String(res.status));
+      entries.push({ name: f.name, data: new Uint8Array(await res.arrayBuffer()) });
+    } catch (e) {
+      if (f.required) {
+        await modal({
+          title: 'Could not read the app',
+          body: h('p', {}, 'The app could not fetch its own page (' + f.url + '): ' + e.message +
+            '. That usually means it is being served from somewhere that renames it. Save the page from your browser instead.')
+        });
+        return;
+      }
+      missing.push(f.name);
+    }
+  }
+  entries.push({
+    name: 'START-HERE.txt',
+    data: startHereText({
+      version: APP.version, when: fmtDate(nowISO(), true),
+      from: (typeof location !== 'undefined' ? location.origin + location.pathname.replace(/[^/]*$/, '') : ''),
+      missing
+    })
+  });
+
+  const blob = await zipFiles(entries);
+  download(APP.name.toLowerCase().replace(/\s+/g, '-') + '-' + APP.version + '-local-copy.zip', blob);
+  toast('Your copy is downloaded — unzip it and read START-HERE.txt', 'ok', 6000);
 }
 
 /* ---------- integrity ---------- */
