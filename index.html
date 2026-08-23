@@ -9724,7 +9724,10 @@ ROUTES.import = async (root) => {
 
   if (waiting) {
     root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:14px' }, [
-      String(waiting) + ' question(s) from earlier imports are waiting on you and cannot be practised until confirmed. ',
+      String(waiting) + ' question(s) from earlier imports are waiting on you and cannot be practised until confirmed. ' +
+      // Somebody looking at three figures needs to know they are not facing
+      // three hundred individual decisions.
+      (waiting >= 20 ? 'Most of a batch like this can be confirmed together rather than one at a time. ' : ''),
       h('a', { href: '#', onclick: (e) => { e.preventDefault(); State.importStep = 'check'; go('import'); }, text: 'Review them now →' })
     ]));
   }
@@ -11428,6 +11431,36 @@ ROUTES.review = async (root) => {
   return ROUTES.import(root);
 };
 
+/* Hand a whole review-queue group to the Question Bank's bulk tools.
+
+   bulkClassify(), bulkVerify() and bulkStatus() have existed all along, and a
+   student facing four hundred unverified questions could already fix them in
+   four clicks — but nothing said so, and the screen where the problem appears
+   had no route to the screen that solves it. This is signposting, not new
+   machinery: no gate moves, and bulk verify is still a person asserting the
+   answers are right.
+
+   The two banks are shown one at a time over there, so a group that spans both
+   is narrowed to the side being opened rather than quietly acting on records
+   that are not on screen. */
+function bulkFrom(list, status) {
+  const rows = (list || []);
+  if (!rows.length) return;
+  const onCase = isCaseQuestion(rows[0]);
+  const mine = rows.filter(q => isCaseQuestion(q) === onCase);
+  Object.assign(BankState, {
+    bank: onCase ? 'case' : 'standalone',
+    // Only the filter that names this group; everything else cleared, so the
+    // list you land on is the list you came from.
+    status: status || '', q: '', domain: '', source: '', batch: '',
+    verif: '', learn: '', diff: '', caseStudy: '', page: 0,
+    sel: new Set(mine.map(q => q.uuid))
+  });
+  go('bank');
+  const skipped = rows.length - mine.length;
+  if (skipped) toast(skipped + ' of these are in the other bank — open it there to do those.', 'warn', 6000);
+}
+
 /** The checking queue itself, rendered inside Add Questions. */
 const REVIEW_FILTER_TABS = [
   ['all', 'All'],
@@ -11517,8 +11550,19 @@ async function renderReviewQueue(root) {
 
   const section = (container, title, list, note, renderer) => {
     if (!list.length) return;
+    // Read off the group rather than threaded through every call site: when a
+    // group is all one status the bank can open filtered to it, and when it is
+    // mixed (the "other" pile) it opens unfiltered with the selection intact.
+    const uniform = list.every(q => q.status === list[0].status) ? list[0].status : '';
     const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
-      h('div', { class: 'card-h' }, [h('h3', { text: title }), h('span', { class: 'badge b-review', text: String(list.length) }), h('div', { class: 'spacer' }), h('span', { class: 'tiny dim', text: note })])
+      h('div', { class: 'card-h' }, [h('h3', { text: title }), h('span', { class: 'badge b-review', text: String(list.length) }), h('div', { class: 'spacer' }),
+        // Worth offering once there are enough of them that one at a time is
+        // plainly the wrong answer.
+        list.length >= 5 ? h('button', {
+          class: 'btn sm', onclick: () => bulkFrom(list, uniform),
+          text: 'Do all ' + list.length + ' at once →'
+        }) : null,
+        h('span', { class: 'tiny dim', text: note })].filter(Boolean))
     ]);
     const b = h('div', { class: 'card-b stack' });
     list.slice(0, 40).forEach(q => b.appendChild(renderer(q)));
