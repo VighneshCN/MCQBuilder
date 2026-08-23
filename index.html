@@ -5921,6 +5921,23 @@ ROUTES.dashboard = async (root) => {
     ])
   ]));
 
+  /* Somebody returning after a few days needs the number, not a scolding.
+     Silent at nought and one day: telling a person who practised yesterday
+     that they have been away is how an app gets closed. */
+  if (plan.set && !plan.past && plan.backlog) {
+    const lastAt = attempts.reduce((m, a) => (a && a.ts && (!m || a.ts > m)) ? a.ts : m, null);
+    const idle = lastAt ? daysBetweenKeys(todayKey(lastAt), plan.today) : null;
+    if (idle != null && idle >= 2) {
+      root.appendChild(h('div', { class: 'notice warn small', style: 'margin-bottom:16px' },
+        h('div', { class: 'row wrap', style: 'gap:10px;align-items:center' }, [
+          h('span', { style: 'flex:1;min-width:230px' },
+            'It is ' + qtyLabel(idle, 'day') + ' since you last practised. Today’s share is ' +
+            qtyLabel(plan.perDay, 'question') + ' — that number rises every day it is not done.'),
+          h('button', { class: 'btn sm', onclick: () => go('practice'), text: 'Start now' })
+        ])));
+    }
+  }
+
   // The countdown, or — on a bank worth planning — one quiet line offering it.
   const planCard = studyPlanCard(plan);
   if (planCard) root.appendChild(planCard);
@@ -6085,6 +6102,7 @@ function studyPlanCard(plan) {
     h('div', { class: 'card-h' }, [
       h('h3', { text: qtyLabel(plan.daysLeft, 'day') + ' to go' }),
       h('div', { class: 'spacer' }),
+      h('button', { class: 'btn sm ghost', onclick: () => exportStudyCalendar(), text: 'Remind me' }),
       h('button', {
         class: 'btn sm ghost', onclick: () => examDateDialog(),
         text: fmtDate(dateKeyToLocal(plan.examDate).toISOString())
@@ -12416,7 +12434,8 @@ ROUTES.backup = async (root) => {
         h('button', { class: 'btn', onclick: () => exportQuestionsJSON(), text: 'JSON (full structure)' }),
         h('button', { class: 'btn', onclick: async () => exportBank(await State.questions()), text: 'CSV (human review)' }),
         h('button', { class: 'btn', onclick: () => exportPrintable(), text: 'Printable HTML' }),
-        h('button', { class: 'btn', onclick: () => exportErrorNotebook(), text: 'Error notebook' })
+        h('button', { class: 'btn', onclick: () => exportErrorNotebook(), text: 'Error notebook' }),
+        h('button', { class: 'btn', onclick: () => exportStudyCalendar(), text: 'Study reminders (.ics)' })
       ]),
       h('div', { class: 'stack' }, [
         h('div', { class: 'eyebrow', text: 'Progress only' }),
@@ -12945,6 +12964,171 @@ async function turnOffOffline() {
     const names = await caches.keys();
     await Promise.all(names.filter(n => n.indexOf('mcq-mastery-') === 0).map(n => caches.delete(n)));
   } catch (e) { }
+}
+
+/* ---------- the reminder that actually arrives ----------
+   WhatsApp and Web Push both need a server, and both would mean a phone number
+   and a study record leaving the machine — the one thing this app is built not
+   to do. A scheduled local notification would need Notification Triggers, which
+   no browser ships.
+
+   What works everywhere, with nothing leaving the device, is a calendar file.
+   It is downloaded like any other export, imported once, and from then on the
+   candidate's own phone does the reminding — on iOS too, where none of the
+   other mechanisms exist at all.
+
+   The fiddly parts below are the parts that make it valid. An .ics that is
+   almost right imports as an empty calendar with no error, so each rule has a
+   test rather than a hope.                                                  */
+
+/** RFC 5545 §3.3.11: backslash, semicolon and comma are escaped, and a real
+    newline becomes a literal \n. */
+function icsEscape(t) {
+  return String(t == null ? '' : t)
+    .replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,')
+    .replace(/\r?\n/g, '\\n');
+}
+
+/** RFC 5545 §3.1: no line may exceed 75 OCTETS, and a continuation begins with
+    a space. Counted in UTF-8 bytes and split on code points, because a course
+    name with an em dash in it is not 75 characters long — and cutting one in
+    half produces a file some calendars reject and others import as mojibake. */
+function icsFold(line) {
+  const enc = new TextEncoder();
+  if (enc.encode(line).length <= 75) return line;
+  const out = [];
+  let cur = '', bytes = 0;
+  for (const ch of Array.from(line)) {
+    const n = enc.encode(ch).length;
+    if (bytes + n > 75) { out.push(cur); cur = ' '; bytes = 1; }
+    cur += ch; bytes += n;
+  }
+  out.push(cur);
+  return out.join('\r\n');
+}
+
+const icsStamp = (d) => {
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getUTCFullYear() + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) + 'T' +
+    p(d.getUTCHours()) + p(d.getUTCMinutes()) + p(d.getUTCSeconds()) + 'Z';
+};
+const icsDay = (key) => String(key).replace(/-/g, '');
+
+/**
+ * Build the calendar. Kept pure and separate from the download so it can be
+ * checked byte by byte in the test suite.
+ *
+ * The daily event is FLOATING local time — no Z, no TZID — which is exactly
+ * right for "remind me at seven in the evening" and needs no VTIMEZONE block.
+ * The recurrence uses COUNT rather than UNTIL: UNTIL has to match DTSTART's
+ * value type and UTC-ness, and getting that subtly wrong is the classic way an
+ * .ics silently imports nothing. A count of days is unambiguous everywhere.
+ */
+function buildStudyICS(opts) {
+  const o = opts || {};
+  const courseCode = o.courseCode || 'Study';
+  const stamp = icsStamp(o.now ? new Date(o.now) : new Date());
+  const time = /^\d{2}:\d{2}$/.test(o.time || '') ? o.time : '19:00';
+  const hhmm = time.replace(':', '') + '00';
+  const lines = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0',
+    'PRODID:-//MCQ Mastery//Study plan//EN',
+    'CALSCALE:GREGORIAN', 'METHOD:PUBLISH'
+  ];
+
+  const event = (uid, body) => {
+    lines.push('BEGIN:VEVENT', 'UID:' + uid, 'DTSTAMP:' + stamp);
+    body.forEach(l => lines.push(l));
+    lines.push('END:VEVENT');
+  };
+
+  if (o.days > 0) {
+    event('mcq-daily-' + o.courseId + '@mcq-mastery', [
+      'DTSTART:' + icsDay(o.today) + 'T' + hhmm,
+      'DURATION:PT30M',
+      'RRULE:FREQ=DAILY;COUNT=' + o.days,
+      'SUMMARY:' + icsEscape(courseCode + ' — ' + o.perDay + ' question' + (o.perDay === 1 ? '' : 's') + ' today'),
+      'DESCRIPTION:' + icsEscape(o.description || ''),
+      'BEGIN:VALARM', 'ACTION:DISPLAY',
+      'DESCRIPTION:' + icsEscape(courseCode + ' practice'),
+      'TRIGGER:-PT10M', 'END:VALARM'
+    ]);
+  }
+
+  // Milestones as all-day events. DTEND on an all-day event is exclusive, so a
+  // one-day event ends on the following day — off by one here and the marker
+  // lands on the wrong date in half the calendars that read it.
+  const allDay = (uid, key, summary) => {
+    const d = dateKeyToLocal(key);
+    if (!d) return;
+    const next = new Date(d); next.setDate(next.getDate() + 1);
+    event(uid, [
+      'DTSTART;VALUE=DATE:' + icsDay(key),
+      'DTEND;VALUE=DATE:' + icsDay(todayKey(next)),
+      'SUMMARY:' + icsEscape(summary),
+      'TRANSP:TRANSPARENT'
+    ]);
+  };
+  if (o.coverageBy) allDay('mcq-coverage-' + o.courseId + '@mcq-mastery', o.coverageBy,
+    courseCode + ' — everything seen once by today');
+  if (o.weekBefore) allDay('mcq-weekout-' + o.courseId + '@mcq-mastery', o.weekBefore,
+    courseCode + ' — one week to go: last-mile revision and the error notebook');
+  if (o.examDate) allDay('mcq-exam-' + o.courseId + '@mcq-mastery', o.examDate,
+    courseCode + ' — exam day');
+
+  lines.push('END:VCALENDAR');
+  // CRLF between every line, and folding applied last so a folded line's own
+  // continuation is not folded again.
+  return lines.map(icsFold).join('\r\n') + '\r\n';
+}
+
+async function exportStudyCalendar() {
+  const examDate = Settings.get('examDate');
+  if (!examDate) {
+    toast('Set an exam date first — the reminder counts down to it.', 'warn', 5000);
+    return;
+  }
+  const all = await State.questions();
+  const caseRecords = await CaseStudies.byCourse(State.course.id);
+  const attempts = await DB.byIndex('attempts', 'courseId', State.course.id);
+  const plan = studyPlan({
+    examDate, masteryTarget: Settings.get('masteryTarget'),
+    pool: eligiblePool(all), casePool: drawableCasePool(all, caseRecords),
+    attempts, blueprint: State.course.blueprint
+  });
+  if (plan.past) { toast('That exam date has passed. Set the next one first.', 'warn', 5000); return; }
+
+  const timeInput = h('input', { type: 'time', value: '19:00' });
+  const go = await modal({
+    title: 'Remind me to practise',
+    body: h('div', { class: 'stack' }, [
+      h('p', { class: 'small', style: 'margin:0' },
+        'Downloads a calendar file. Import it once into whatever calendar you already use and your own phone reminds you every day until the exam — including on iOS, where nothing else can. Nothing leaves this machine: it is a file, exactly like the error notebook.'),
+      h('div', { class: 'field' }, [h('label', { text: 'Remind me at' }), timeInput]),
+      h('div', { class: 'notice small', style: 'margin:0' },
+        'It will also mark the day everything should have been seen once (' +
+        fmtDate(dateKeyToLocal(plan.coverageBy).toISOString()) + '), one week to go, and the exam itself.'),
+      h('p', { class: 'tiny dim', style: 'margin:0' },
+        'The daily figure is fixed at today’s ' + plan.perDay + '. It is a nudge to turn up, not a contract — the app recalculates the real number every time you open it.')
+    ]),
+    actions: [{ label: 'Cancel', value: null }, { label: 'Download', value: 'go', kind: 'primary' }]
+  });
+  if (!go) return;
+
+  const week = todayKey(addDays(-7, dateKeyToLocal(examDate)));
+  const ics = buildStudyICS({
+    courseId: State.course.id, courseCode: State.course.code,
+    today: plan.today, examDate, days: plan.daysLeft, perDay: plan.perDay,
+    coverageBy: plan.coverageBy,
+    // Only if it is still ahead of us; a marker in the past is noise.
+    weekBefore: daysBetweenKeys(plan.today, week) > 0 ? week : null,
+    time: timeInput.value,
+    description: plan.backlog + ' still to get through: ' + plan.unseen + ' never attempted, ' +
+      plan.weak + ' still shaky, ' + plan.dueBefore + ' due for review. Open MCQ Mastery for today’s actual number.'
+  });
+  download(State.course.code + '-study-plan-' + todayKey() + '.ics',
+    new Blob([ics], { type: 'text/calendar;charset=utf-8' }));
+  toast('Calendar downloaded — import it once and your phone does the rest', 'ok', 5200);
 }
 
 /* ---------- integrity ---------- */
