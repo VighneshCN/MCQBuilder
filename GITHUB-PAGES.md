@@ -40,6 +40,7 @@ commit.
    index.html                 the app
    sw.js                      lets it open offline (optional, see below)
    manifest.webmanifest       lets it be installed as an app (optional)
+   .nojekyll                  stops Pages running its blog engine over the app
    .gitignore                 keeps your bank out of the repo
    README.md
    ARCHITECTURE.md
@@ -48,6 +49,10 @@ commit.
    Start MCQ Mastery.bat      for running it locally
    serve.ps1
    ```
+
+   `.nojekyll` is an empty file. Pages runs Jekyll — a blog engine — over
+   every site by default; this switches it off. Nothing here needs it, and it
+   is one less thing that can decide a file is not worth publishing.
 
    `sw.js` and `manifest.webmanifest` must sit **beside** `index.html`, not in
    a subfolder — a service worker can only control pages at or below its own

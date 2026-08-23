@@ -206,6 +206,17 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
    is unsupported the band simply stays as it was. */
 body:has(.game-root) .band-stats{display:none}
 body:has(.game-root) .view{padding-bottom:16px}
+/* A running session has the same problem for the same reason: on a phone the
+   band is 124px of an 844px screen, and every one of them is taken from the
+   question being read. The eyebrow says which course you are in, which you
+   have not forgotten mid-session. Same :has() scoping as the games rule
+   above — nothing to toggle, nothing to leak, and where :has() is unsupported
+   the band simply stays as it was. */
+@media(max-width:880px){
+  body:has(.q-shell) #band .eyebrow{display:none}
+  body:has(.q-shell) .control-band{padding-top:8px;padding-bottom:8px}
+  body:has(.q-shell) .page-title{font-size:19px}
+}
 @media(max-width:880px){
   .app{grid-template-columns:1fr}
   .rail{position:fixed;inset:0 auto 0 0;width:250px;z-index:60;transform:translateX(-100%);transition:transform .18s ease}
@@ -7641,7 +7652,12 @@ async function runSession(s) {
   }
   document.addEventListener('keydown', onKey);
   $$('.nav-item').forEach(b => b.setAttribute('aria-current', 'false'));
-  await band(MODES[s.mode].label, 'Session ' + s.id.slice(0, 8), [{ k: 'Seed', v: String(s.seed) }]);
+  // No seed and no session id here. They are diagnostics, and on a 390px phone
+  // this band is 124px of an 844px screen with the seed's row alone costing 35
+  // of them — in front of somebody who is trying to read a question. Both move
+  // to the results screen, where reproducing a paper is a thing anybody
+  // actually wants to do.
+  await band(MODES[s.mode].label, 'In progress');
   render();
 }
 
@@ -8102,6 +8118,11 @@ async function showResults(s) {
       ...noteLines.map(t => h('div', { text: t }))
     ]));
   }
+  // Where the seed lives now. Two identical seeds and an unchanged bank rebuild
+  // the same paper, which is worth being able to look up — after the fact,
+  // rather than in the corner of your eye during question nine.
+  target.appendChild(h('div', { class: 'tiny dim', style: 'margin:-6px 0 16px' },
+    'Paper seed ' + s.seed + ' · session ' + s.id.slice(0, 8)));
 
   if (s.shortfalls && s.shortfalls.length) {
     // Two selection methods produce shortfalls with different shapes:
