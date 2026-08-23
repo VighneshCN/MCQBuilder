@@ -116,6 +116,9 @@ python3 -m http.server 8080    # Python
 If you have published this repo (see `GITHUB-PAGES.md`), the app runs from its
 URL with no setup. Read section 2 first — it matters more than it looks.
 
+If you would rather not depend on that URL at all, the app will hand you a copy
+of itself to keep: see **Keeping your own copy of the app** in section 5.
+
 ### Why not just double-click index.html?
 
 Browsers block IndexedDB for pages opened from disk over `file://`, and that is
@@ -717,6 +720,45 @@ browser will not accept a service worker inlined into a page, and it discards a
 manifest supplied as a `data:` URI — both have to be real files in the same
 folder. If you only ever copy `index.html`, everything works exactly as before;
 you simply need the network to open it, and it cannot be installed.
+
+### Keeping your own copy of the app
+
+Backup & Restore → **Keep your own copy of the app** → *Download a copy* gives
+you a zip of the whole thing: `index.html`, `sw.js`, `manifest.webmanifest`, the
+Windows launcher, and a `START-HERE.txt` explaining what each file is. Unzip it
+anywhere and run it exactly as in section 1.
+
+The point is independence. Once you have that zip you are not relying on
+whoever published the app, or on that address still being there, or on nothing
+ever going wrong with it. Your copy is frozen at the version you took, and it
+carries on working exactly as it does today.
+
+That cuts both ways, and the app says so rather than hiding it: **your copy
+never updates itself.** Nothing reaches back to where you got it from — no
+version check, no download, no notification. A fix or a new feature reaches you
+only when you take a fresh copy, so it is worth doing that occasionally.
+
+**Your bank does not travel inside the zip, and this is the one thing to get
+right.** The app is the program; your questions and your history are data, and
+they live in the browser's database and in your data file. A local copy runs at
+a different address, and a browser keeps a separate database per address — so a
+copy opened without either of those set up looks completely empty. Nothing is
+lost, it simply is not there.
+
+So the app will not let you walk into that. If you have questions in the
+browser but no connected folder, no Drive, and no backup in the last week, the
+download is refused and it offers the two things that fix it: connect a folder,
+or take a backup. Either one makes the bank a file, and the copy opens the same
+file. With a folder connected there is nothing else to do — point the copy at
+it and everything is there.
+
+Two smaller things worth knowing. The zip contains a `.bat` and a `.ps1`, and
+some browsers and some workplace machines warn about those or strip them. They
+are plain text — a nine-line `.bat` and a commented PowerShell script that
+starts a local server bound to the loopback address. `START-HERE.txt` says what
+they are, and you can read both in Notepad before running anything. And if the app cannot
+fetch one of the optional files it does not fail silently — it names the file in
+`START-HERE.txt` and tells you what you are missing.
 
 ## 6. Checking what the app could not confirm
 

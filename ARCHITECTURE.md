@@ -478,6 +478,57 @@ caught and ignored, so `index.html` copied on its own behaves exactly as it did
 before this existed. Settings can unregister it and empty the cache, because a
 worker that needs devtools to undo is not one to ship.
 
+## Handing over the app itself
+
+`exportSelfContainedCopy()` fetches the app's own files over the same origin it
+is running from and zips them. It has no build step and no file list baked in
+anywhere else: `LOCAL_BUNDLE` is the single declaration of what a copy is, and
+each entry carries a `required` flag. Only `index.html` is required — every
+other file is a graceful degradation, so a deployment missing `serve.ps1`
+produces a working copy rather than an error, and the names that could not be
+fetched are recorded in the note instead of silently vanishing.
+
+It re-uses `zipFiles()`, the writer the backups already use, rather than a
+second archive path. That is why the test asserts a round trip through
+`unzip()` and not just the entry list: a name that survives the central
+directory but inflates to nothing is a file that opens to a blank window, with
+no error raised anywhere.
+
+`startHereText()` is a pure function of `{ version, when, from, missing }` — no
+DOM, no fetch — which is what lets its wording be asserted. It is deliberately
+plain text: the one file a person reads before running anything they downloaded
+should not itself need the thing they have not run yet.
+
+### Why the export can refuse
+
+The interesting part of this feature is the guard, because the failure it
+prevents is silent. A local copy runs at a different origin, and origin is what
+partitions IndexedDB — so a copy taken by somebody whose bank exists only in
+the browser opens empty. Nothing is lost and nothing errors; it simply is not
+there, and it looks exactly like a broken export.
+
+`localCopyRisk()` returns non-null only when every escape route is absent:
+
+```js
+if (!questions)                 return null;   // nothing to strand
+if (FileStore.connected)        return null;   // the bank is a file already
+if (DriveSync.configured)       return null;   // ditto, on Drive
+if (backup newer than 7 days)   return null;   // restorable into the copy
+```
+
+It reads `DriveSync.configured` rather than `DriveSync.connected` for the same
+reason `updateStorageBar()` does: a lapsed token is not a lost bank, and a
+person whose whole bank is on Drive should not be told they have no copy of it
+because they have not signed in yet today. The week is a judgement — a backup
+older than that is not cover for a bank being practised on daily — and the
+modal states the actual date so the person can disagree with it.
+
+When it fires, the export is refused and replaced by the two things that fix
+it, as actions rather than advice: *Connect a folder* runs `connectFlow()` and
+*Back up now* goes to Backup. Both make the bank a file, which is the whole
+resolution — the copy then reads the same file, and the second origin's empty
+database stops mattering.
+
 ## Sections, and changing your mind
 
 `sectionsFor()` returns sections only for a mock that has both a standalone run

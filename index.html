@@ -22713,6 +22713,82 @@ test('A paper with nothing left to mark is not a failed paper', () => {
   eq(v.level, 'ready');
 });
 
+/* ---- taking the app away with you ---- */
+
+test('A copy is refused while the bank would not travel with it', async () => {
+  // The whole point of the guard: browser storage is per-origin, so a local
+  // copy opens with an empty database unless the bank lives somewhere both
+  // can read.
+  const savedBackup = Settings.get('lastBackupAt');
+  const savedConn = FileStore.connected;
+  const savedDrive = typeof DriveSync !== 'undefined' ? DriveSync.configured : false;
+  try {
+    FileStore.connected = false;
+    if (typeof DriveSync !== 'undefined') DriveSync.configured = false;
+    await Settings.set('lastBackupAt', null);
+
+    const n = await DB.count('questions');
+    const risk = await localCopyRisk();
+    if (!n) {
+      eq(risk, null, 'an empty bank has nothing to lose, so nothing to refuse');
+    } else {
+      assert(risk && risk.questions === n, 'it refuses, and counts what is at stake');
+    }
+
+    // Any one of the three ways out clears it.
+    FileStore.connected = true;
+    eq(await localCopyRisk(), null, 'a connected folder is enough');
+    FileStore.connected = false;
+
+    await Settings.set('lastBackupAt', nowISO());
+    eq(await localCopyRisk(), null, 'so is a backup taken today');
+
+    // But a stale one is not cover for a bank being practised on daily.
+    await Settings.set('lastBackupAt', addDays(-30));
+    if (n) assert(await localCopyRisk(), 'a month-old backup is not cover');
+  } finally {
+    FileStore.connected = savedConn;
+    if (typeof DriveSync !== 'undefined') DriveSync.configured = savedDrive;
+    await Settings.set('lastBackupAt', savedBackup);
+  }
+});
+
+test('The note in the box says the things that would otherwise be a support message', () => {
+  const t = startHereText({ version: '9.9.9', when: 'Aug 23, 2026', from: 'https://example.test/app/' });
+  assert(t.indexOf('9.9.9') > 0 && t.indexOf('https://example.test/app/') > 0, 'stamped with what it is and where from');
+  // The three things somebody will otherwise get wrong.
+  assert(/EMPTY database/.test(t), 'that the copy starts empty');
+  assert(/file:\/\//.test(t), 'that double-clicking index.html cannot work');
+  assert(/loopback/.test(t), 'and that the launcher is not opening them to the network');
+  // The Windows warning, named before they meet it.
+  assert(/Windows may warn/.test(t) && /plain text/.test(t));
+  // Nothing is claimed about updating itself, because it does not.
+  assert(/never updates itself/.test(t));
+  // A bundle missing the launcher says so rather than leaving a dead reference.
+  const partial = startHereText({ version: '1', when: 'now', missing: ['serve.ps1'] });
+  assert(partial.indexOf('does not include serve.ps1') > 0, partial.slice(-200));
+});
+
+test('The bundle is a real zip that a zip reader can read back', async () => {
+  // zipFiles is shared with the backups, so this is really a check that the
+  // entry list is well formed — a name wrong here produces a file that opens
+  // to nothing, with no error anywhere.
+  const blob = await zipFiles([
+    { name: 'index.html', data: '<!doctype html><title>x</title>' },
+    { name: 'START-HERE.txt', data: startHereText({ version: '1.0.0', when: 'today' }) }
+  ]);
+  const back = await unzip(await blob.arrayBuffer());
+  const names = back.names();
+  assert(names.indexOf('index.html') >= 0 && names.indexOf('START-HERE.txt') >= 0, JSON.stringify(names));
+  // Read the note back out through the same reader a student's zip tool uses:
+  // a name that survives the directory but inflates to nothing is still broken.
+  assert((await back.text('START-HERE.txt')).indexOf('MCQ MASTERY') === 0);
+  assert((await back.text('index.html')).indexOf('<!doctype html>') === 0);
+  // And the list the exporter actually uses names the app itself as required.
+  const required = LOCAL_BUNDLE.filter(f => f.required).map(f => f.url);
+  eq(required.join(','), 'index.html', 'only the page itself is indispensable');
+});
+
 /* ============================================================================
    Boot
    ========================================================================== */

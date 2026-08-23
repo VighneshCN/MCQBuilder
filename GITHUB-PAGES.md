@@ -54,6 +54,12 @@ commit.
    every site by default; this switches it off. Nothing here needs it, and it
    is one less thing that can decide a file is not worth publishing.
 
+   `Start MCQ Mastery.bat` and `serve.ps1` earn their place twice: they let
+   somebody run the app from a folder on their disk, and they are what the
+   app puts in the zip when a student asks to keep their own copy. Leave them
+   out and the copy still works — it just arrives without a Windows launcher,
+   and the note inside it says which file is missing.
+
    `sw.js` and `manifest.webmanifest` must sit **beside** `index.html`, not in
    a subfolder — a service worker can only control pages at or below its own
    path. Leaving either out is perfectly safe: without `sw.js` the app needs a
@@ -126,6 +132,23 @@ page from the network first every time and only falls back to its copy when
 there is no connection. If you have hard-refreshed and still see the old app,
 that is Pages' own cache, not this — but Settings → Offline → **Check for an
 update** will rule it out.
+
+### People who took their own copy will not get the update
+
+Backup & Restore → **Keep your own copy of the app** hands somebody a zip of the
+app to run from their own machine, deliberately unattached to this site. A copy
+taken that way never checks back here: no version ping, no download, nothing.
+
+That is the point of it — your site going away, or being taken over, or simply
+being wrong one day, cannot reach them — but it means an update published here
+does not reach them either. If you tell people about that feature, tell them the
+other half too: a fix arrives only when they take a fresh copy. The app says so
+itself, in the download dialog and in the `START-HERE.txt` inside the zip, so
+you are reinforcing it rather than being the only one who mentions it.
+
+The same is true in the other direction, and is worth saying plainly: their
+questions and their history were never on this site to begin with. Publishing
+this repo publishes the app, not anybody's bank.
 
 ## If history contains something it should not
 

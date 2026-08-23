@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 194 passed, 0 failed, of 194.**
+**Current result: 197 passed, 0 failed, of 197.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -193,6 +193,11 @@ nine different requested counts.
 131. Ready needs every ingredient, and loses it if any one goes
 132. The verdict names its risk and shows its working, and never a percentage
 133. A paper with nothing left to mark is not a failed paper
+
+### Taking the app with you (3)
+134. A copy is refused while the bank would not travel with it
+135. The note in the box says the things that would otherwise be a support message
+136. The bundle is a real zip that a zip reader can read back
 
 ### Everything else (4)
 29. Practice settings are per course, app preferences are shared
@@ -446,3 +451,15 @@ Automated tests cannot verify rendering or real browser storage.
 - [ ] Finish that session: the seed is on the results screen instead
 - [ ] Publish to GitHub Pages from a project repo (`user.github.io/repo/`): the
       app loads, installs, and opens offline
+
+### Taking the app with you
+
+- [ ] With questions imported and no folder, no Drive and no recent backup,
+      Backup → Download a copy refuses and offers Connect a folder / Back up now
+- [ ] Connect a folder, then download: it goes through
+- [ ] Unzip it somewhere else and run it as in README section 1 — it boots, its
+      built-in tests pass inside the copy, and it installs
+- [ ] Point the copy at the same data folder: the whole bank is there
+- [ ] Cut the network entirely and reopen the copy — no change
+- [ ] Read `START-HERE.txt` first: it names the version, says the copy never
+      updates itself, and explains the `.bat` and `.ps1` before you run either
