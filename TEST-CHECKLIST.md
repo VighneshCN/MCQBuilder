@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 189 passed, 0 failed, of 189.**
+**Current result: 194 passed, 0 failed, of 194.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -186,6 +186,13 @@ nine different requested counts.
 126. The plan moves from covering the ground to making it stick
 127. A calendar file that a calendar will actually accept
 128. Adding a plan to the plan changed none of its arithmetic
+
+### Am I ready? (5)
+129. With no evidence it says nothing, and with thin evidence it says what is missing
+130. Scoring well on a fraction of the syllabus is not being ready
+131. Ready needs every ingredient, and loses it if any one goes
+132. The verdict names its risk and shows its working, and never a percentage
+133. A paper with nothing left to mark is not a failed paper
 
 ### Everything else (4)
 29. Practice settings are per course, app preferences are shared
@@ -423,3 +430,19 @@ Automated tests cannot verify rendering or real browser storage.
       creating a second set of entries
 - [ ] Leave it two days and reopen: the catch-up line appears. Practise, and it
       goes
+
+### Am I ready, and getting out of the way
+
+- [ ] A fresh bank shows no readiness card at all; a thin one says what is
+      missing; a well-covered, well-mocked one says you would pass and names the
+      risk
+- [ ] Answer a small slice of the bank very well — it still says not ready, and
+      says the syllabus coverage is why
+- [ ] Import a file with duplicates, then use "Do all N at once" from the queue:
+      the bank opens filtered and selected and the four bulk buttons act on
+      exactly that group
+- [ ] On a phone, start a session: the band is about 50px, not 120, and the
+      seed is gone from it
+- [ ] Finish that session: the seed is on the results screen instead
+- [ ] Publish to GitHub Pages from a project repo (`user.github.io/repo/`): the
+      app loads, installs, and opens offline

@@ -22443,6 +22443,71 @@ test('Adding a plan to the plan changed none of its arithmetic', () => {
   eq(p.unseen + p.weak + p.dueBefore + p.settled, pool.length);
 });
 
+
+/* ---- am I ready? ---- */
+
+const RVFOCUS = { id: 'D5', name: 'Protection', share: 0.26, ready: 0.2 };
+const rv = (o) => readinessVerdict(Object.assign({ passPct: 60, focus: RVFOCUS }, o));
+
+test('With no evidence it says nothing, and with thin evidence it says what is missing', () => {
+  eq(rv({ active: 100, seen: 0, firstN: 0, mocks: [] }), null, 'nothing attempted, nothing to say');
+  const thin = rv({ active: 100, seen: 12, firstAcc: 0.9, firstN: 12, mocks: [] });
+  eq(thin.level, 'unknown');
+  assert(thin.why.length >= 1, 'and it names what would let it speak');
+  assert(thin.why.join(' ').indexOf('30 different questions') > 0, 'in numbers: ' + JSON.stringify(thin.why));
+  // Twelve questions answered perfectly is not a verdict.
+  assert(thin.headline.indexOf('Not enough evidence') === 0);
+});
+
+test('Scoring well on a fraction of the syllabus is not being ready', () => {
+  // The failure this exists to prevent: 92% correct, on a fifth of the bank.
+  const v = rv({ active: 500, seen: 100, firstAcc: 0.92, firstN: 100, mocks: [] });
+  eq(v.level, 'notyet');
+  assert(v.headline.indexOf('too little of the syllabus') > 0, v.headline);
+  // And coverage on its own cannot buy a pass claim either.
+  const wide = rv({ active: 500, seen: 480, firstAcc: 0.35, firstN: 480, mocks: [30, 34] });
+  eq(wide.level, 'notyet', 'seen everything, passing none of it');
+});
+
+test('Ready needs every ingredient, and loses it if any one goes', () => {
+  const full = { active: 500, seen: 450, firstAcc: 0.78, firstN: 450, mocks: [68, 71, 74], calibrationTone: 'ok' };
+  eq(rv(full).level, 'ready');
+  assert(rv(full).headline.indexOf('would pass') > 0);
+  eq(rv(Object.assign({}, full, { seen: 300 })).level, 'close', 'coverage short');
+  eq(rv(Object.assign({}, full, { mocks: [] })).level, 'close', 'no mock sat under exam conditions');
+  eq(rv(Object.assign({}, full, { mocks: [55, 71, 74] })).level, 'close', 'one mock below the line');
+  eq(rv(Object.assign({}, full, { calibrationTone: 'bad' })).level, 'close', 'overconfident');
+  eq(rv(Object.assign({}, full, { firstAcc: 0.40, mocks: [40, 45, 50] })).level, 'notyet');
+});
+
+test('The verdict names its risk and shows its working, and never a percentage', () => {
+  const v = rv({ active: 500, seen: 450, firstAcc: 0.78, firstN: 450, mocks: [68, 71, 74] });
+  assert(v.risk === RVFOCUS, 'the risk is the domain the readiness table ranks first');
+  assert(v.headline.indexOf('Protection') > 0, 'and it ends somewhere actionable');
+  assert(v.why.length >= 3, 'the evidence is listed, not asserted');
+  assert(v.why.some(w => w.indexOf('Coverage') === 0) && v.why.some(w => w.indexOf('First-attempt') === 0));
+  // The one thing it must never do: put a number on the chance of passing.
+  [v.headline].concat(v.why).forEach(t =>
+    assert(!/\d+\s*%\s*(chance|likel|probab)/i.test(t), 'no likelihood may be quoted: ' + t));
+});
+
+test('A paper with nothing left to mark is not a failed paper', () => {
+  // Empty is the obvious case; the one that bites is a mock whose questions
+  // were deleted afterwards — markSession finds nothing and returns zero,
+  // which would read as a failure and hold somebody below ready forever.
+  const q = mkQ('Still here?', ['a', 'b'], 0);
+  const byId = new Map([[q.uuid, q]]);
+  const ghost = {
+    courseId: 'test-course', questionUuids: ['gone-1', 'gone-2'],
+    marks: {}, responses: {}, marking: { passPct: 60, negativeFraction: 0, scaledScore: null }
+  };
+  eq(markSession(ghost, byId).total, 0, 'nothing of it survives to be marked');
+  // Non-finite percentages must never reach the comparison either.
+  const v = rv({ active: 500, seen: 450, firstAcc: 0.78, firstN: 450, mocks: [NaN, 68, 71, 74] });
+  eq(v.mocksCounted, 3, 'the unscoreable one is dropped, not counted as a fail');
+  eq(v.level, 'ready');
+});
+
 /* ============================================================================
    Boot
    ========================================================================== */

@@ -377,6 +377,38 @@ consolidate, then clear) and sizes the coverage window at 60% of the run-in, so
 existing fields — the three buckets, `backlog`, `perDay` — are untouched, and a
 regression test pins them.
 
+## The readiness verdict
+
+`readinessVerdict()` assembles what already existed — first-attempt accuracy,
+coverage, `calibration()`, the mock trend, `domainReadiness()`'s top row — and
+is the one function in the app where being wrong confidently would do real
+harm, because somebody stops revising a week early. So its bias is silence:
+
+- `null` on no evidence at all, `level: 'unknown'` with what is still needed on
+  thin evidence — never a guess.
+- `'ready'` requires **every** ingredient at once. Coverage alone cannot produce
+  a pass claim, and neither can accuracy over a narrow slice: 92% on a fifth of
+  the bank is `notyet`, with a sentence saying exactly that.
+- `why[]` lists the evidence, in the same habit as `weaknessScore().why` and
+  `masteryOf().parts`. A verdict that cannot be interrogated is a horoscope.
+- It never emits a percentage chance of passing, and a test asserts no string it
+  produces matches one.
+
+Mocks are filtered on **marks actually available**, not on existing: a paper
+whose questions have since been deleted returns zero from `markSession()` and
+would otherwise read as a failure, holding somebody below `ready` on a record
+that no longer refers to anything.
+
+## Routing to the bulk tools
+
+`bulkClassify()`, `bulkVerify()` and `bulkStatus()` predate all of this, driven
+by `BankState.sel`. `bulkFrom(list, status)` is the route that was missing: it
+sets `BankState` and calls `go('bank')`, the same pattern
+`State.importStep = 'check'; go('import')` already used. The status to filter by
+is read off the group — uniform when it shares one, blank for the mixed pile —
+rather than threaded through four call sites. A group spanning both banks is
+narrowed to the side being opened and reports what it left behind.
+
 ## The calendar file
 
 WhatsApp and Web Push both need a server, and both would carry a phone number

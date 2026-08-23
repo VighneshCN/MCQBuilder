@@ -403,6 +403,31 @@ docks points for a correct answer you marked as a **guess**. So a question you
 guessed right stays on the list, and the card says so rather than leaving you
 to work it out.
 
+### Are you ready?
+
+One card, one sentence, and it is deliberately hard to please:
+
+> **On this evidence you would pass. The risk is Protection of Information
+> Assets.**
+
+To say that, it wants *all* of: two or more recent mocks at or above your pass
+mark, coverage past 80%, first-attempt accuracy at least the pass mark, and
+calibration not telling you that you are overconfident. Take any one away and it
+downgrades.
+
+**It will not be flattered.** 92% correct on a fifth of the syllabus reads as
+*"not ready yet — you are scoring well, but on too little of the syllabus"*.
+Coverage on its own can never buy a pass claim, and neither can a good score
+over a narrow slice.
+
+With too little evidence it says so and tells you what would let it speak —
+*"answer at least 30 different questions (you have 12)"* — rather than guessing.
+With none at all the card does not appear.
+
+**It never quotes a percentage chance of passing.** The app has not seen your
+real paper. A number would be believed, and it would be made up. Open *What that
+is based on* and every piece of evidence behind the verdict is listed.
+
 ### Reminders that reach you
 
 **Backup & Restore → Study reminders**, or *Remind me* on the countdown card.
@@ -423,6 +448,19 @@ that works on every platform, including iOS, with no account and no backend.
 
 When you do come back after a few days away, the dashboard says so and gives
 you today's number. It stays quiet if you practised yesterday.
+
+### A big import is not a long queue
+
+Anything the app could not confirm waits in the checking queue — and if that is
+three hundred questions, doing them one at a time is the wrong answer.
+
+Each group in the queue offers **"Do all 312 at once →"**. It opens the Question
+Bank filtered to exactly that group with every one of them selected, where
+**Classify**, **Verify answers**, **Activate** and **Archive** act on the lot.
+
+Those bulk tools were always there. Nothing pointed at them from the screen
+where the problem shows up, which is the only reason anybody was clicking three
+hundred times.
 
 ### The last week
 
