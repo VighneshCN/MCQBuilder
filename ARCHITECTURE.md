@@ -282,6 +282,45 @@ confidence — every answer in a timed mock, which deliberately asks nothing —
 are excluded rather than bucketed as unknown, and `calibrationVerdict()`
 returns null below five answers rather than calling a habit off a handful.
 
+Difficulty, confidence and correctness are three independent, permanently
+recorded facts, and none of the three can overwrite another. The difficulty
+self-rating `askConfidence()` optionally asks for is written straight through
+onto the *question* (`Session.answer()`), guarded on `difficultyUngraded()`
+rather than on the value, so a later attempt — right or wrong — can never
+quietly replace a grade someone already gave. Confidence is stored on the
+*attempt* untouched by whether the answer turned out correct. Getting a
+question wrong after saying "Knew it" does not erase either fact; it is
+exactly the case `calibration()` exists to catch, and it is what pulls a
+session's calibration verdict toward "overconfident."
+
+## A modal must let go of what it interrupted
+
+Reported from the runner: an option showing a blue outline with nothing
+chosen — not the browser painting a state that meant anything, just its
+default `:focus-visible` ring (`index.html:104`, the only rule that can
+produce a bare outline; a real choice also fills the background, via
+`[aria-pressed="true"]`). `.opt` had no focus style of its own to override it.
+
+Tapping an option gives it real DOM focus before `askConfidence()`'s dialog
+even opens. That dialog is `sticky: true` — a backdrop tap does nothing, only
+Escape or ✕ closes it — and on that path `choose()` returns immediately
+without ever calling `render()`, so nothing rebuilds the option list or
+touches focus. `modal()` itself only ever removed its own DOM on close; an
+element outside the modal that happened to hold focus when it opened was
+never its concern. Cancel out of a dialog instead of answering, and whatever
+opened it is left wearing a focus ring that no longer describes anything.
+
+Fixed once, at the shared function rather than at this one call site:
+`modal()` now captures `document.activeElement` as `opener` before it builds
+its DOM, and blurs it in `close()`, on every exit path — confirm, cancel, or
+Escape. This protects every dialog in the app that opens from a button, not
+only the confidence one, and it is a no-op on the confirm path here
+specifically, since `render()` already rebuilds the option list (and destroys
+the old, focused node) on that route anyway. `.opt` also gained its own
+`:focus-visible` rule — dashed, not solid — so a genuine keyboard focus (an
+external keyboard, an iPad) reads as focus rather than as a choice, on top of
+the fix that stops a stale one appearing in the first place.
+
 ## What blocks practice, and what merely locks a feature
 
 `isPracticeEligible()` reads `STATUS[q.status].practice` rather than naming a
@@ -504,6 +543,23 @@ own `courseId`, and **none** of the sender's stats, flags or review schedule.
 Verification still requires the reader to tick "treat an answer printed in the
 source as verified" — the app does not let a file assert its own answers are
 correct, whoever sent it.
+
+**`learningPoint` is deliberately absent from the allowlist**, and it was not
+always. `learningPointBox()`'s own placeholder — *"What will you remember
+next time?"* — names it as a personal, evolving reflection, not curated
+content; it can also arrive from an import (a `learning point`/`note` column),
+which makes typing over it the field doing its job, not a data-loss bug. The
+conflict was with a feature built later: `shareableQuestion()` was carrying it
+into the exported file as if it were teaching material, with the share
+dialog's privacy copy never mentioning it. A private note about one question,
+typed by a student who had imported that question from someone else's bank,
+would have travelled straight back out to strangers. One line removes it from
+the `carry` object; the dialog now names it explicitly, and the field itself
+says in the UI that it stays private. Two other write paths for the same
+field — `Session.answer()`/`Session.commit()`'s `meta.note`/`rec.note`
+plumbing — were also removed: traced and confirmed unreachable, since the
+runner's only caller never populates `meta.note`, matching the same
+genuinely-unused bar the last code audit removed three functions against.
 
 ### The manifest, and why data/ had to change
 

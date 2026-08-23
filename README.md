@@ -841,7 +841,10 @@ domains, the difficulty and the marks.
 **Your own progress is not in it, and cannot be.** The file is written in the
 ordinary import format, which has no field for a mastery score, an attempt
 count, a review date or a flag. Nothing is stripped after the fact and could be
-forgotten: only listed fields are written at all.
+forgotten: only listed fields are written at all — and that list deliberately
+leaves out **My learning point**, the note field on the reveal panel. It is
+your own reflection, not curated content, and it stays in your bank even when
+the question it is attached to gets shared.
 
 **To receive one:** drop it on Add Questions like any other file. It goes
 through the same duplicate check and the same confirmation screen, into your

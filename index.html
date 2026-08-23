@@ -1293,6 +1293,13 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
   transition:border-color .12s ease,background .12s ease;
   overflow-wrap:break-word;word-break:break-word;
 }
+/* A real keyboard focus (external keyboard, Tab) still needs to be visible for
+   accessibility, but a solid ring in this exact blue reads as "chosen" next to
+   [aria-pressed="true"] below — dashed and offset keeps it unambiguous. Fix 1
+   above (modal() blurring its opener on close) is what stops a STALE ring
+   showing up here in the first place; this is what makes a genuine one honest
+   about what it means. */
+.opt:focus-visible{outline:2px dashed var(--focus);outline-offset:3px}
 .opt:hover:not(:disabled){border-color:var(--blue);background:var(--blue-tint)}
 .opt:disabled{cursor:default}
 /* A control that is off because the bank cannot feed it yet, rather than off
@@ -1886,12 +1893,24 @@ function modal(opts) {
     // A dialog with nowhere to render must not take the app down; callers
     // already treat a falsy answer as "cancelled".
     if (!root) { resolve(null); return; }
+    // Whatever had focus when this modal opened — almost always the button
+    // that triggered it. The modal's own DOM is unrelated to that element, so
+    // removing the modal on close does nothing for it: without this, opening
+    // a modal from an option button and then cancelling left that option
+    // wearing the browser's native focus ring with no app state behind it —
+    // at a glance, indistinguishable from having actually chosen it.
+    const opener = document.activeElement;
     const bg = h('div', { class: 'modal-bg' });
     const box = h('div', { class: 'modal' + (opts.wide ? ' wide' : ''), role: 'dialog', 'aria-modal': 'true', 'aria-label': opts.title || 'Dialog' });
     const body = h('div', { class: 'modal-b' });
     if (typeof opts.body === 'string') body.appendChild(h('div', { html: opts.body })); else if (opts.body) body.appendChild(opts.body);
     const foot = h('div', { class: 'modal-f' });
-    const close = (val) => { bg.remove(); document.removeEventListener('keydown', onKey); resolve(val); };
+    const close = (val) => {
+      bg.remove();
+      document.removeEventListener('keydown', onKey);
+      if (opener && opener !== document.body && typeof opener.blur === 'function') opener.blur();
+      resolve(val);
+    };
     // Lets body content close its own dialog directly (e.g. a button that
     // both commits and dismisses in one click) via e.target.closest('.modal')
     // ._close(...), scoped to this exact instance — safer than a global
@@ -5113,7 +5132,7 @@ const Session = {
     const rec = {
       selectedOptionId, correct, ms: meta.ms || 0,
       confidence: meta.confidence || null, mistake: meta.mistake || null,
-      note: meta.note || '', at: nowISO(), qVersion: q.version,
+      at: nowISO(), qVersion: q.version,
       // Stamped at the moment of answering, for the same reason qVersion is:
       // changing what a question is worth must not silently re-mark a paper
       // that was already sat.
@@ -5150,7 +5169,7 @@ const Session = {
       ts: rec.at, selectedOptionId: rec.selectedOptionId, correctOptionId: q.correctOptionId,
       correct: rec.correct, confidence: rec.confidence, ms: rec.ms,
       displayedOrder: (s.optionOrders[q.uuid] || []).slice(),
-      mistake: rec.mistake || null, flagged: !!s.flags[q.uuid], note: rec.note || '',
+      mistake: rec.mistake || null, flagged: !!s.flags[q.uuid],
       questionVersion: q.version,
       // What it was worth, and what it actually earned once any deduction
       // for a wrong answer is applied — so an attempt log read years later
@@ -5166,7 +5185,6 @@ const Session = {
     const hist = await DB.byIndex('attempts', 'questionUuid', q.uuid);
     fresh.stats.mastery = masteryOf(fresh, hist).score;
     fresh.flagged = !!s.flags[q.uuid] || fresh.flagged;
-    if (rec.note) fresh.learningPoint = rec.note;
     await DB.put('questions', fresh);
     State.invalidate();
     return att;
@@ -7880,7 +7898,10 @@ function learningPointBox(q) {
     State.invalidate();
   }, 700);
   ta.addEventListener('input', save);
-  return h('div', { class: 'field' }, [h('label', { text: 'My learning point' }), ta]);
+  return h('div', { class: 'field' }, [
+    h('label', { text: 'My learning point' }), ta,
+    h('div', { class: 'tiny dim', style: 'margin-top:4px', text: 'Just for you — it never leaves your bank, even if you share these questions with someone else.' })
+  ]);
 }
 
 /** Whether anyone has actually judged this question's difficulty, as opposed
@@ -13061,9 +13082,11 @@ function shareableQuestion(q) {
   };
   // Editorial work, which is the whole reason to hand somebody a bank rather
   // than a list of questions. Only non-empty values, so the file stays
-  // readable by a person.
+  // readable by a person. learningPoint is deliberately NOT here: it is a
+  // personal, evolving reflection ("what will you remember NEXT time"), not
+  // curated content, and it must never travel to somebody else's app.
   const carry = {
-    explanation: q.explanation, learningPoint: q.learningPoint,
+    explanation: q.explanation,
     domain: q.domainId, topic: q.topic, subtopic: q.subtopic,
     module: q.srcModule, chapter: q.srcChapter, section: q.srcSection,
     difficulty: q.difficulty, marks: q.marks,
@@ -13121,7 +13144,7 @@ async function exportShareableBank() {
       h('p', { class: 'small', style: 'margin:0' },
         'Writes a file holding ' + all.length + ' question(s) — the wording, the answers, the domains, and the checks you have done on them.'),
       h('div', { class: 'notice small', style: 'margin:0' },
-        'Your own progress is not in it. The file is written in the ordinary import format, which has no place to put a mastery score, an attempt count, a review date or a flag.'),
+        'Your own progress is not in it. The file is written in the ordinary import format, which has no place to put a mastery score, an attempt count, a review date or a flag — and nothing typed into "My learning point" travels either, since that is your own note, not part of the question.'),
       h('p', { class: 'tiny dim', style: 'margin:0' },
         'Only questions that already reach practice are included. Whoever imports it drops it on Add Questions like any other file — and if they tick “treat an answer printed in the source as verified”, it reaches practice straight away.')
     ]),
@@ -23335,6 +23358,10 @@ test('A shared bank carries the questions and none of the practising', () => {
   q.stats = { attempts: 17, correct: 4, mastery: 23, wrongStreak: 5, lastResult: 'incorrect' };
   q.nextReviewAt = nowISO(); q.srStage = 3; q.flagged = true;
   q.dismissedPairs = ['SOMEONE-ELSE']; q.canonicalUuid = 'X'; q.fingerprint = 'FP';
+  // A private reflection, not curated content — it must never travel either,
+  // even though it lives in the allowlist of fields Questions.save() lets an
+  // editor set. See the note on the `carry` object in shareableQuestion().
+  q.learningPoint = 'REMEMBER-THE-COMMA-RULE';
 
   const out = shareableQuestion(q);
   // The answer travels as a letter, which is what the importer actually reads
@@ -23350,9 +23377,9 @@ test('A shared bank carries the questions and none of the practising', () => {
   const shared = Object.keys(out);
   ['stats', 'nextReviewAt', 'srStage', 'flagged', 'uuid', 'qid', 'batchId', 'courseId',
    'dismissedPairs', 'canonicalUuid', 'fingerprint', 'dupOf', 'conflictWith', 'status',
-   'answerVerified', 'verifiedAt'].forEach(k => assert(shared.indexOf(k) < 0, k + ' must not travel'));
+   'answerVerified', 'verifiedAt', 'learningPoint'].forEach(k => assert(shared.indexOf(k) < 0, k + ' must not travel'));
   const text = JSON.stringify(out);
-  ['MY-UUID', 'CISA-0042', 'BATCH-9', 'SOMEONE-ELSE', 'FP', '"mastery"', '"wrongStreak"'].forEach(v =>
+  ['MY-UUID', 'CISA-0042', 'BATCH-9', 'SOMEONE-ELSE', 'FP', '"mastery"', '"wrongStreak"', 'REMEMBER-THE-COMMA-RULE'].forEach(v =>
     assert(text.indexOf(v) < 0, 'shared file still contains ' + v));
   // And empty fields are left out rather than shipped as noise.
   assert(!('subtopic' in out), 'nothing empty is written');
@@ -23417,6 +23444,53 @@ test('Notices reach the right course, and a link out is never a script', () => {
   assert(ok && ok.url === 'https://chat.whatsapp.com/abc', 'a real one survives, trimmed');
   eq(ok.label, 'Group');
   eq(safeLinkOrNull({ url: 'https://x.test/y' }).label, 'Support group', 'and it is named for what it is for');
+});
+
+test('Cancelling a modal never leaves its opener wearing a focus ring', async () => {
+  // The bug this guards: tap an option, the confidence dialog opens on top of
+  // it, back out without answering — modal() used to remove only its own DOM
+  // and never touch the button that opened it, so the option kept native
+  // browser focus (and the page's global :focus-visible ring) with nothing in
+  // app state behind it. Indistinguishable, at a glance, from having chosen it.
+  const btn = h('button', { text: 'opener' });
+  document.body.appendChild(btn);
+  try {
+    btn.focus();
+    eq(document.activeElement, btn, 'the test itself must start from real focus, or this proves nothing');
+
+    // Path 1: Escape. Dispatched on a real element with bubbles:true, not on
+    // document directly — document has no .matches(), and some of the app's
+    // OWN global keydown handlers call e.target.matches(...), which a raw
+    // document-targeted event would break before it ever reached this test.
+    const p1 = modal({ title: 'Escape path', body: h('p', { text: 'x' }), actions: [{ label: 'Cancel', value: null }] });
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    const v1 = await p1;
+    eq(v1, null, 'Escape resolves as a cancel');
+    assert(document.activeElement !== btn, 'and the opener is no longer focused');
+
+    // Path 2: the ✕ button — a second, independent dismiss route.
+    btn.focus();
+    eq(document.activeElement, btn);
+    const p2 = modal({ title: 'Close-button path', body: h('p', { text: 'x' }), actions: [{ label: 'Cancel', value: null }] });
+    await new Promise(r => setTimeout(r, 50));   // let the dialog actually mount
+    const closeBtn = document.querySelector('.modal-bg [aria-label="Close"]');
+    assert(closeBtn, 'the ✕ button must exist to close via it');
+    closeBtn.click();
+    const v2 = await p2;
+    eq(v2, null);
+    assert(document.activeElement !== btn, 'same guarantee on the other dismiss path');
+
+    // Confirming (not cancelling) must not regress: still no ring left over.
+    btn.focus();
+    const p3 = modal({ title: 'Confirm path', body: h('p', { text: 'x' }), actions: [{ label: 'OK', value: true, kind: 'primary' }] });
+    await new Promise(r => setTimeout(r, 50));
+    document.querySelector('.modal-bg .modal-f button').click();
+    const v3 = await p3;
+    eq(v3, true);
+    assert(document.activeElement !== btn, 'a real confirm clears the opener too');
+  } finally {
+    btn.remove();
+  }
 });
 
 test('A first run is never a wall for somebody who already has a bank', async () => {

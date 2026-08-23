@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 212 passed, 0 failed, of 212.**
+**Current result: 213 passed, 0 failed, of 213.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -215,6 +215,9 @@ nine different requested counts.
 
 ### The rail on a phone (1)
 145. Every disconnected state offers a way out, on every browser
+
+### A cancelled dialog leaves nothing behind (1)
+146. Cancelling a modal never leaves its opener wearing a focus ring
 
 ### Keeping the browser from throwing it away (3)
 137. Nothing is said about durability until it changes the answer
@@ -494,6 +497,19 @@ Automated tests cannot verify rendering or real browser storage.
 - [ ] A notice appears on the dashboard; the support link does not
 - [ ] `git check-ignore data/starter-index.json` returns nothing, and
       `git check-ignore data/my-bank.json` returns a match
+- [ ] Write something in "My learning point" on a question, export a share
+      file, open it in a text editor: the note is not in it, and the export
+      dialog says so before you download
+
+### A cancelled dialog leaves nothing behind
+
+- [ ] In Learning mode, tap an option, then press Escape (or ✕) on the
+      confidence dialog instead of answering: no option shows a focus ring
+      afterward, and none is marked chosen
+- [ ] Answer normally straight after: the confidence dialog still opens,
+      choosing "Knew it" still records the attempt and closes the dialog
+- [ ] Tab to an option with a real keyboard: the ring is a dashed outline, not
+      the solid filled look of a chosen option
 
 ### The first run
 
