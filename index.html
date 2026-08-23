@@ -5961,6 +5961,48 @@ ROUTES.dashboard = async (root) => {
     ]));
   }
 
+  /* Readiness. Shown whether or not an exam date is set — wanting to know
+     where you stand does not depend on having named the day. */
+  const domRows = domainReadiness(active.concat(caseActive), State.course.blueprint, Settings.get('masteryTarget'));
+  /* A paper with nothing scoreable left in it is not evidence of anything.
+     Empty is the obvious case; the real one is a mock whose questions have
+     since been deleted, where markSession finds nothing to mark and returns
+     zero — which would read as a failed paper and hold somebody below "ready"
+     on the strength of a record that no longer refers to anything. Filtering
+     on the marks available covers both. */
+  const mockById = new Map(all.map(q => [q.uuid, q]));
+  const mockPcts = (await DB.byIndex('sessions', 'courseId', State.course.id))
+    .filter(x => x.status === 'complete' && x.mode === 'mock' && (x.questionUuids || []).length)
+    .sort((a, b) => new Date(a.endedAt || a.startedAt) - new Date(b.endedAt || b.startedAt))
+    .map(m => markSession(m, mockById))
+    .filter(mk => mk.total > 0)
+    .map(mk => mk.pct);
+  const rv = readinessVerdict({
+    passPct: Settings.get('passPct'),
+    active: active.length + caseActive.length,
+    seen: (active.length + caseActive.length) - (never.length + caseActive.filter(q => !q.stats.attempts).length),
+    firstAcc, firstN: firstArr.length, mocks: mockPcts,
+    calibrationTone: (calibrationVerdict(calibration(attempts)) || {}).tone,
+    focus: domRows.find(r => r.total && r.risk > 0) || null
+  });
+  if (rv) {
+    const tone = rv.level === 'ready' ? 'ok' : rv.level === 'notyet' ? 'warn' : '';
+    root.appendChild(h('div', { class: 'card', style: 'margin-bottom:16px' }, [
+      h('div', { class: 'card-h' }, [h('h3', { text: 'Are you ready?' }), h('div', { class: 'spacer' }),
+        h('span', { class: 'tiny dim', text: 'on the evidence in this bank' })]),
+      h('div', { class: 'card-b stack' }, [
+        h('div', { class: 'notice small ' + tone, style: 'margin:0' }, rv.headline),
+        // Inspectable rather than oracular — the same habit as weaknessScore().why
+        // and masteryOf().parts. A verdict you cannot interrogate is a horoscope.
+        h('details', {}, [
+          h('summary', { class: 'small', style: 'cursor:pointer', text: 'What that is based on' }),
+          h('ul', { class: 'small muted', style: 'margin:8px 0 0 18px;padding:0' },
+            rv.why.map(w => h('li', { style: 'margin-bottom:3px', text: w })))
+        ])
+      ])
+    ]));
+  }
+
   const tiles = h('div', { class: 'grid g4', style: 'margin-bottom:16px' });
   const tile = (k, v, sub, cls) => h('div', { class: 'tile ' + (cls || '') }, [h('span', { class: 'eyebrow', text: k }), h('b', { text: v }), sub ? h('div', { class: 'sub', text: sub }) : null]);
   tiles.appendChild(tile('First-attempt accuracy', firstAcc == null ? '—' : Math.round(firstAcc * 100) + '%', firstArr.length ? firstArr.length + ' question(s) seen once' : 'No questions attempted yet', firstAcc != null && firstAcc >= 0.75 ? 'good' : ''));
@@ -6050,6 +6092,82 @@ ROUTES.dashboard = async (root) => {
   }
 };
 
+
+
+/* ---------- am I ready? ----------
+   Every ingredient of this already existed and none of them were ever put in
+   one sentence: first-attempt accuracy, coverage, calibration, the mock trend,
+   and which domain carries the most risk.
+
+   This is the one place in the app where a confident wrong answer would do
+   real harm — somebody stops revising a week early — so it is deliberately
+   hard to please, and it says nothing at all rather than guessing. It never
+   reports a likelihood of passing as a number: the app has not seen the real
+   paper, and a number would be believed.
+
+   Returns null when there is no evidence whatsoever, a level of 'unknown' with
+   what is still needed when there is some but not enough, and otherwise a
+   level with the evidence behind it listed. */
+function readinessVerdict(o) {
+  const i = o || {};
+  const passPct = i.passPct != null ? i.passPct : 60;
+  const passFrac = passPct / 100;
+  const active = i.active || 0;
+  const seen = Math.min(i.seen || 0, active || (i.seen || 0));
+  const coverage = active ? seen / active : 0;
+  const firstAcc = i.firstAcc == null ? null : i.firstAcc;
+  const firstN = i.firstN || 0;
+  // Most recent three, as percentages of the marks available.
+  // Guarded rather than trusted: a percentage that is not a number cannot be
+  // compared to a pass mark, and would silently count as a failure.
+  const mocks = (i.mocks || []).filter(m => Number.isFinite(m)).slice(-3);
+  const passedMocks = mocks.filter(m => m >= passPct).length;
+  const risk = i.focus || null;
+
+  if (!seen && !mocks.length) return null;
+
+  const pc = (x) => Math.round(x * 100) + '%';
+  // Enough to be worth saying anything: a real sample of questions, and either
+  // a sat mock or a substantial run of first attempts.
+  if (seen < 30 || (!mocks.length && firstN < 100)) {
+    const need = [];
+    if (seen < 30) need.push('answer at least 30 different questions (you have ' + seen + ')');
+    if (!mocks.length && firstN < 100) need.push('sit one timed mock, or work through 100 first attempts (you have ' + firstN + ')');
+    return {
+      level: 'unknown',
+      headline: 'Not enough evidence yet to say whether you are ready.',
+      why: need.map(t => 'Still to do: ' + t),
+      risk
+    };
+  }
+
+  const calBad = i.calibrationTone === 'bad';
+  const accOk = firstAcc != null && firstAcc >= passFrac;
+  const covered = coverage >= 0.8;
+
+  let level;
+  if (mocks.length >= 2 && passedMocks === mocks.length && covered && accOk && !calBad) level = 'ready';
+  else if ((mocks.length && passedMocks >= 1) || (accOk && coverage >= 0.5)) level = 'close';
+  else level = 'notyet';
+
+  const why = [];
+  if (mocks.length) why.push(passedMocks + ' of your last ' + mocks.length + ' mock' + (mocks.length === 1 ? '' : 's') +
+    ' at or above the ' + passPct + '% pass mark (' + mocks.map(m => Math.round(m) + '%').join(', ') + ')');
+  else why.push('No timed mock sat yet — the only measure taken under exam conditions');
+  why.push('First-attempt accuracy ' + (firstAcc == null ? 'not measurable yet' : pc(firstAcc)) + ' over ' + firstN + ' question(s)');
+  why.push('Coverage ' + pc(coverage) + ' — ' + seen + ' of ' + active + ' questions seen at least once');
+  if (calBad) why.push('Calibration says you are overconfident, so your own sense of what you know is not yet reliable');
+  if (risk) why.push('Weakest for what it is worth: ' + risk.name + ', ' + pc(risk.share) + ' of the paper and ' + pc(risk.ready) + ' of it solid');
+
+  const tail = risk ? ' The risk is ' + risk.name + '.' : '';
+  const headline =
+    level === 'ready' ? 'On this evidence you would pass.' + tail
+      : level === 'close' ? 'Close, but not there yet on this evidence.' + tail
+        : !covered && accOk ? 'Not ready yet — you are scoring well, but on too little of the syllabus.' + tail
+          : 'Not ready yet on this evidence.' + tail;
+
+  return { level, headline, why, risk, coverage, passedMocks, mocksCounted: mocks.length };
+}
 
 /* ---------- the countdown ----------
    Drawn only when a date has been set. Everything about this feature is
