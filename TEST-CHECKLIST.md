@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 210 passed, 0 failed, of 210.**
+**Current result: 212 passed, 0 failed, of 212.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -194,23 +194,27 @@ nine different requested counts.
 132. The verdict names its risk and shows its working, and never a percentage
 133. A paper with nothing left to mark is not a failed paper
 
+### The first run (2)
+134. A first run is never a wall for somebody who already has a bank
+135. Data arriving from elsewhere brings its courses with it
+
 ### Drive when the token goes (3)
-134. Work done while Drive is unreachable is still marked for pushing
-135. A rejected token is thrown away rather than reused
-136. Every Drive state the bar can show is one a person can act on
+136. Work done while Drive is unreachable is still marked for pushing
+137. A rejected token is thrown away rather than reused
+138. Every Drive state the bar can show is one a person can act on
 
 ### Sharing a bank (4)
-137. A shared bank carries the questions and none of the practising
-138. A shared bank is a file the importer can actually read
-139. Dated material appears and stops appearing on the right days
-140. Notices reach the right course, and a link out is never a script
+139. A shared bank carries the questions and none of the practising
+140. A shared bank is a file the importer can actually read
+141. Dated material appears and stops appearing on the right days
+142. Notices reach the right course, and a link out is never a script
 
 ### Reconnecting to Drive (2)
-141. A reconnect only skips the merge question when it is genuinely settled
-142. Merging is the primary action wherever the two copies meet
+143. A reconnect only skips the merge question when it is genuinely settled
+144. Merging is the primary action wherever the two copies meet
 
 ### The rail on a phone (1)
-143. Every disconnected state offers a way out, on every browser
+145. Every disconnected state offers a way out, on every browser
 
 ### Keeping the browser from throwing it away (3)
 137. Nothing is said about durability until it changes the answer
@@ -490,6 +494,15 @@ Automated tests cannot verify rendering or real browser storage.
 - [ ] A notice appears on the dashboard; the support link does not
 - [ ] `git check-ignore data/starter-index.json` returns nothing, and
       `git check-ignore data/my-bank.json` returns a match
+
+### The first run
+
+- [ ] Install to the Home Screen with a bank already on Drive. The first screen
+      offers Connect Google Drive and Restore from a backup, NOT only "add a
+      course", and the sidebar shows where the data lives
+- [ ] Connect Drive from that screen: courses and questions appear and the nav
+      fills in, with no reload and no throwaway course
+- [ ] Same again via Restore from a backup
 
 ### Drive when the token goes
 

@@ -5702,8 +5702,12 @@ function renderShell() {
       }, [h('span', { class: 'nav-ico', text: v.ico }), h('span', { text: v.label }), h('span', { class: 'nav-badge hidden', dataset: { badge: v.id } })]));
     });
     rail.appendChild(nav);
-    rail.appendChild(h('div', { class: 'storagebar', id: 'storagebar' }));
   }
+  /* Outside the course gate on purpose. Where the data lives is exactly what
+     somebody with no course yet needs to see and act on — a configured Drive
+     that has lost its token says so here, with its Reconnect button, instead
+     of the sidebar being blank until a course is invented to unlock it. */
+  rail.appendChild(h('div', { class: 'storagebar', id: 'storagebar' }));
   rail.appendChild(h('div', { class: 'rail-foot' }, [
     h('button', { class: 'rail-btn', onclick: toggleTheme, id: 'themeBtn', text: 'Light' }),
     h('button', { class: 'rail-btn', onclick: showShortcuts, text: 'Keys' })
@@ -5879,6 +5883,26 @@ async function refreshBadges() {
   setBadge('practice', due);
 }
 
+/** Re-read the course list and settle on one, after data has arrived from
+    somewhere other than this browser. Boot does this once; anything that
+    replaces or merges the stores underneath a running app has to do it again,
+    or State.course goes on pointing at whatever it pointed at before — which,
+    on an install that had no course at all, means the app keeps showing "add
+    your first course" while the person's entire bank sits in the database
+    behind it. Returns true when a course is now selected. */
+async function adoptCourses() {
+  State.courses = await DB.all('courses');
+  const wanted = Settings.get('activeCourseId');
+  const live = State.courses.filter(c => !c.archived);
+  const picked = live.find(c => c.id === wanted) || live[0] || State.courses[0] || null;
+  const changed = (picked && picked.id) !== (State.course && State.course.id);
+  State.course = picked;
+  if (picked && picked.id !== wanted) await Settings.set('activeCourseId', picked.id);
+  State.invalidate();
+  if (changed) renderShell();
+  return !!picked;
+}
+
 /* ---------- onboarding (no course yet) ---------- */
 ROUTES.onboarding = async (root) => {
   await band('Welcome to MCQ Mastery', '');
@@ -5889,6 +5913,30 @@ ROUTES.onboarding = async (root) => {
       h('button', { class: 'btn primary', onclick: () => courseDialog(null), text: 'Add a course' })
     ])
   ])));
+
+  /* The rest of the app is behind a selected course, so this screen used to be
+     a wall: somebody reinstalling, or opening the installed app for the first
+     time — which on iOS gets its own empty storage — was told to add a course
+     with no way to reach Settings, Drive or a backup. They had to invent a
+     throwaway course purely to unlock the sidebar and then find their real
+     data. These two routes are the ones that matter to a person who already
+     HAS a bank, so they belong here rather than three screens away. */
+  root.appendChild(h('div', { class: 'card', style: 'margin-top:16px' }, [
+    h('div', { class: 'card-h' }, [h('h3', { text: 'Already have a bank?' })]),
+    h('div', { class: 'card-b stack' }, [
+      h('p', { class: 'small', style: 'margin:0' },
+        'If you have used this app before, do not start again — bring it back and your courses come with it. You do not need to add a course first.'),
+      h('div', { class: 'row wrap', style: 'gap:8px' }, [
+        h('button', { class: 'btn primary', onclick: () => driveConnectFlow(), text: 'Connect Google Drive' }),
+        h('button', { class: 'btn', onclick: () => pickRestore(), text: 'Restore from a backup' }),
+        FileStore.capability() !== 'manual'
+          ? h('button', { class: 'btn', onclick: () => connectFlow(), text: 'Open my data folder' })
+          : null
+      ].filter(Boolean)),
+      h('p', { class: 'tiny dim', style: 'margin:0' },
+        'Installing the app to your Home Screen gives it its own storage, separate from the browser — so a fresh install always starts empty even when the same app in the browser is full. Connecting the same Drive, folder or backup joins them up again.')
+    ])
+  ]));
 };
 
 /* ---------- dashboard ---------- */
@@ -16255,8 +16303,13 @@ const DriveSync = {
     this._remoteQuestionCount = (payload.stores.questions || []).length;
     await FileStore.setMeta('driveQuestionCount', this._remoteQuestionCount);
     await FileStore.delMeta('driveDirtySince');
+    // The stores under the app have just been replaced wholesale, so which
+    // course is selected has to be decided again — without this, a browser
+    // that had no course stays on the onboarding screen with the whole bank
+    // already loaded behind it.
+    const has = await adoptCourses();
     toast('Loaded the Drive copy.', 'ok');
-    if (typeof State !== 'undefined' && State.view) await go(State.view);
+    if (typeof State !== 'undefined') await go(has ? (State.view === 'onboarding' ? 'dashboard' : (State.view || 'dashboard')) : 'onboarding');
   },
 
   /** A manual pull, for "I answered questions on my phone, catch this
@@ -16911,7 +16964,11 @@ async function applyMergedBank(merged) {
     merged.stores.questions.forEach(q => { if (touched.has(q.uuid)) { if (!byCourse.has(q.courseId)) byCourse.set(q.courseId, []); byCourse.get(q.courseId).push(q.uuid); } });
     for (const courseId of byCourse.keys()) await rescanCourseForPairs(courseId);
   }
-  State.invalidate();
+  // A merge can bring in courses this browser has never seen — the whole point
+  // of merging with a Drive file written elsewhere. Same reasoning as
+  // _applyRemote: without re-adopting, an install with no course of its own
+  // stays on the onboarding screen holding somebody's entire bank.
+  await adoptCourses();
 }
 
 /** Shared summary dialog for every merge point below. */
@@ -23360,6 +23417,51 @@ test('Notices reach the right course, and a link out is never a script', () => {
   assert(ok && ok.url === 'https://chat.whatsapp.com/abc', 'a real one survives, trimmed');
   eq(ok.label, 'Group');
   eq(safeLinkOrNull({ url: 'https://x.test/y' }).label, 'Support group', 'and it is named for what it is for');
+});
+
+test('A first run is never a wall for somebody who already has a bank', async () => {
+  // The trap: every route redirects to onboarding without a course, and the
+  // sidebar's nav is behind the same gate — so an install with no course of
+  // its own had no way to reach Drive, a folder or a backup, and the only way
+  // out was to invent a throwaway course. These two have to be on the screen
+  // a person is actually looking at.
+  const root = h('div');
+  const savedView = State.view;
+  try {
+    await ROUTES.onboarding(root);
+    const labels = [...root.querySelectorAll('button')].map(b => b.textContent);
+    assert(labels.some(t => /add a course/i.test(t)), 'starting fresh is still offered');
+    assert(labels.some(t => /drive/i.test(t)), 'and so is the bank they already have: ' + labels.join('/'));
+    assert(labels.some(t => /backup/i.test(t)), 'and a backup: ' + labels.join('/'));
+    assert(/do not need to add a course first/i.test(root.textContent), 'said in words, not just implied by a button');
+  } finally { State.view = savedView; }
+});
+
+test('Data arriving from elsewhere brings its courses with it', async () => {
+  // _applyRemote and applyMergedBank replace the stores underneath a running
+  // app. Without re-adopting, State.course goes on pointing where it pointed
+  // before — which on an install that had none means the person keeps seeing
+  // "add your first course" with their whole bank already in the database.
+  const saved = { c: State.course, list: State.courses.slice() };
+  const savedActive = Settings.get('activeCourseId');
+  try {
+    State.course = null; State.courses = [];
+    const found = await adoptCourses();
+    // The scratch course the suite runs against is in the database, so
+    // adoption must find something and select it.
+    eq(found, !!State.course, 'it reports whether anything was selected');
+    if (found) {
+      assert(State.courses.length > 0, 'the list is re-read from the database, not trusted from memory');
+      assert(State.course, 'and one of them is now selected');
+      eq(Settings.get('activeCourseId'), State.course.id, 'and remembered for next time');
+    }
+    // An archived course is never silently adopted over a live one.
+    const live = State.courses.filter(c => !c.archived);
+    if (live.length) assert(!State.course.archived, 'an archived course is not somewhere to land');
+  } finally {
+    State.courses = saved.list; State.course = saved.c;
+    if (savedActive) await Settings.set('activeCourseId', savedActive);
+  }
 });
 
 test('Work done while Drive is unreachable is still marked for pushing', async () => {

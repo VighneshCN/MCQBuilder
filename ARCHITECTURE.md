@@ -531,6 +531,43 @@ re-include a file whose parent *directory* is excluded. It is now `data/*` with
 be published are committable, and everything else under `data/` stays local,
 which was the original intent.
 
+## The first screen cannot be a wall
+
+`go()` redirects every view to `onboarding` while `State.course` is null,
+because every route below it assumes a course. `renderShell()` had the course
+picker, the nav and the storage bar inside the same `if (State.course)` gate.
+Together those made the first run a dead end for the one person most in need
+of help: somebody who **already has a bank** and has just installed the app, or
+reinstalled it, or lost their browser storage. They were told to add a course,
+with no route to Drive, a folder or a backup — so the only way through was to
+invent a throwaway course purely to unlock the sidebar.
+
+Two changes, both small:
+
+- The **storage bar moves outside the course gate**. Where the data lives is
+  precisely what somebody with no course needs to see, and a configured Drive
+  that has lost its token now says so there, with its Reconnect button.
+- **`ROUTES.onboarding` carries the recovery routes itself** — Connect Google
+  Drive, Restore from a backup, and Open my data folder where the browser has a
+  picker. Putting them on the screen the person is already looking at beats
+  unlocking a Settings page they cannot reach.
+
+The nav stays behind the gate deliberately: those routes really do assume a
+course, and a half-working Question Bank is worse than one that is not offered
+yet.
+
+### Data arriving from elsewhere has to bring its courses
+
+`restoreFlow()` already re-read the course list after writing the stores.
+`_applyRemote()` and `applyMergedBank()` did not — they called
+`State.invalidate()`, which only marks a question cache dirty. So pulling a bank
+from Drive onto an install with no course left `State.course` null, `go()` kept
+redirecting to onboarding, and the person sat looking at "add your first
+course" with their entire bank already in the database behind it. `adoptCourses()`
+is now the shared step: re-read, prefer the remembered course, skip archived
+ones, persist the choice, and `renderShell()` when the selection actually
+changed.
+
 ## Losing the token, which on Safari is normal
 
 The access token is in memory only and is never persisted — it is a bearer
