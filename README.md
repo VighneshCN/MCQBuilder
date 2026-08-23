@@ -154,6 +154,32 @@ Requires Chrome, Edge, or another Chromium browser. Firefox and Safari have no
 folder API; there the app keeps everything in the browser database, and regular
 backups from **Backup & Restore** are your safety net.
 
+### Whether your browser has promised to keep it
+
+The browser database is the app's working copy. For anyone with a folder or
+Drive connected that is all it is — a cache in front of a file, and if the
+browser ever cleared it, the app would simply reload everything from the file
+on the next open.
+
+For anyone **without** either, it is the only copy — and by default browsers
+make no promise about it at all. They are allowed to clear it to free space,
+and on some phones they clear it after a few weeks without the app being
+opened. This is the one way to lose a bank that does not involve anybody
+deleting anything.
+
+So when you have questions and no file behind them, the app asks your browser
+to keep them — `navigator.storage.persist()`, the standard way to ask. Chrome
+and Edge answer silently on their own criteria, and **an installed app is the
+case they reliably say yes to**; Firefox asks you; some browsers cannot answer
+at all. Settings → *Where your data lives* shows which answer you got, with a
+button to ask again.
+
+It is worth knowing what that promise does and does not cover. It stops the
+browser clearing your data **to make room**. It does not survive you clearing
+your browsing data, or uninstalling the browser. Connecting a folder is still
+the thing that makes your bank genuinely yours — this is the safety net for
+before you do.
+
 ### What appears in your data folder
 
 | File | What it is |

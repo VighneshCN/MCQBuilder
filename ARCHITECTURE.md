@@ -478,6 +478,40 @@ caught and ignored, so `index.html` copied on its own behaves exactly as it did
 before this existed. Settings can unregister it and empty the cache, because a
 worker that needs devtools to undo is not one to ship.
 
+## The promise nobody asks for
+
+`Durability` wraps `navigator.storage`, and the reason it exists is that
+IndexedDB is **best-effort storage by default**. A browser may evict it under
+pressure, and Safari clears script-writable storage after seven days without a
+visit. For a bank behind a folder or Drive that is a non-event — boot calls
+`loadFromDisk()` and everything returns. For a bank that is only in the
+browser, it is total loss with nothing deleted by anybody.
+
+`persist()` is the request that changes it. Three things shape when it is
+called:
+
+- **Only when there is something to protect.** `ensureDurableStorage()` returns
+  early unless `browserIsOnlyCopy()` and `DB.count('questions')` are both true
+  of the situation. Asking is free in Chrome, which answers silently on its own
+  heuristics, but Firefox shows a permission prompt — and a prompt in front of
+  somebody with an empty bank is a prompt that teaches them to dismiss prompts.
+- **Never before the first paint.** The boot call is a 1200ms `setTimeout` after
+  `go('dashboard')`, for the same reason. It also runs at the end of
+  `admitBatch()`, because that is the moment a bank comes into existence and
+  waiting for the next visit assumes there is one.
+- **Idempotent.** It re-reads state rather than trusting a flag, and returns
+  early once granted, so it can be called from anywhere.
+
+`durabilityAdvice()` is the pure half, so the wording is assertable. It returns
+`null` in the two cases where saying anything is noise — an empty bank, and a
+bank with a file behind it — which is most people, most of the time. When it
+does speak it names fixes in order of how well they work: a folder or Drive
+first, then installing the app (dropped when already installed, and dropped
+entirely when the browser has no Storage API, where it would not help),
+then backups. The granted case is deliberately not oversold: persistence stops
+eviction to free space and nothing else, and the note says so rather than
+letting somebody read it as a backup.
+
 ## Handing over the app itself
 
 `exportSelfContainedCopy()` fetches the app's own files over the same origin it

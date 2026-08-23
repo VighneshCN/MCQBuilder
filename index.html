@@ -1598,7 +1598,6 @@ function mulberry32(seed) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-function seedFrom(str) { let hsh = 2166136261 >>> 0; for (let i = 0; i < str.length; i++) { hsh ^= str.charCodeAt(i); hsh = Math.imul(hsh, 16777619) >>> 0; } return hsh >>> 0; }
 function newSeed() { return (Math.floor(Math.random() * 0xFFFFFFFF) ^ Date.now()) >>> 0; }
 /** Seeded Fisher–Yates. Returns a new array; the input is not mutated. */
 function shuffle(arr, rng) {
@@ -10875,6 +10874,10 @@ async function admitBatch() {
   await audit('import', 'batch', st.batch.id, null, report, st.meta.title);
   State.staging = null;
   State.invalidate();
+  // A bank that did not exist a moment ago now does. If it lives only in the
+  // browser, this is the moment to ask the browser to keep it — waiting for
+  // the next visit assumes there is one.
+  ensureDurableStorage().catch(() => { });
   go('import');
   showReconciliation(st.batch);
 }
@@ -11135,7 +11138,6 @@ function downloadCaseTemplateJSON() {
 }
 
 /** Kept for anything still asking for both at once. */
-function downloadTemplates() { downloadQuestionTemplateCSV(); downloadQuestionTemplateJSON(); }
 
 /** Every column heading and JSON key the parser actually reads, rendered from
     the table it reads them with. Nothing here is written twice. */
@@ -13752,6 +13754,40 @@ ROUTES.settings = async (root) => {
       })
     ]));
   }
+  /* Whether the browser has promised to keep the working copy. Only ever
+     rendered when it changes the answer to "is my bank safe" — with a folder
+     or Drive behind it, eviction costs nothing and saying so would be noise. */
+  const dAdv = durabilityAdvice({
+    questions: State.courses.length ? await DB.count('questions') : 0,
+    fileBacked: !browserIsOnlyCopy(),
+    supported: Durability.supported,
+    granted: Durability.granted,
+    installed: Durability.installed()
+  });
+  if (dAdv) {
+    const box = h('div', { class: 'notice ' + (dAdv.tone === 'ok' ? 'small' : 'warn small'), style: 'margin-top:12px' }, [
+      h('div', {}, [h('b', { text: dAdv.headline })]),
+      h('div', { class: 'tiny dim', style: 'margin-top:4px', text: dAdv.note })
+    ]);
+    if (dAdv.fixes.length) {
+      box.appendChild(h('ul', { class: 'small', style: 'margin:8px 0 0 18px;padding:0' },
+        dAdv.fixes.map(f => h('li', { text: f }))));
+    }
+    if (dAdv.tone === 'warn' && Durability.supported) {
+      box.appendChild(h('button', {
+        class: 'btn sm', style: 'margin-top:8px', text: 'Ask my browser to keep it',
+        onclick: async () => {
+          const ok = await Durability.request();
+          toast(ok ? 'Your browser agreed to keep it.'
+                   : 'Your browser declined for now. Installing the app, or connecting a folder, is the reliable fix.',
+                ok ? 'ok' : 'warn', 7000);
+          updateStorageBar(); go('settings');
+        }
+      }));
+    }
+    db.appendChild(box);
+  }
+
   dataCard.appendChild(db);
   root.appendChild(dataCard);
 
@@ -14566,6 +14602,114 @@ const BULK_JOURNAL_LIMIT = 40;
 
 /** Everything except fsmeta, which holds the handle and must never be exported. */
 function syncStores() { return Object.keys(STORES).filter(n => n !== 'fsmeta'); }
+
+/* ---------- Durability: stopping a browser throwing the bank away ----------
+   IndexedDB is best-effort storage by default. A browser is entitled to evict
+   it under storage pressure, and Safari clears script-writable storage after
+   seven days without a visit — so for anybody whose bank lives only in the
+   browser, the working copy is also the only copy, and it carries no promise
+   at all. navigator.storage.persist() is that promise. Chrome decides it
+   silently on its own heuristics (an installed app being the reliable one),
+   Firefox asks, and where it is missing there is nothing to do but back up.
+
+   Asking costs nothing when there is nothing to protect, but it can put a
+   permission prompt in front of a Firefox user — so it is asked only once
+   there are questions and no file behind them. */
+const Durability = {
+  supported: false,
+  granted: false,
+  checked: false,
+  asked: false,
+
+  api() {
+    return (typeof navigator !== 'undefined' && navigator.storage &&
+      typeof navigator.storage.persist === 'function') ? navigator.storage : null;
+  },
+
+  /** Read the current state. Never prompts. */
+  async refresh() {
+    const s = this.api();
+    this.supported = !!s;
+    this.checked = true;
+    if (!s) { this.granted = false; return false; }
+    try { this.granted = await s.persisted(); } catch (e) { this.granted = false; }
+    return this.granted;
+  },
+
+  /** Ask for it. Only call this when there is something to protect. */
+  async request() {
+    const s = this.api();
+    this.supported = !!s;
+    this.checked = true;
+    if (!s) return false;
+    this.asked = true;
+    try { this.granted = await s.persist(); } catch (e) { this.granted = false; }
+    return this.granted;
+  },
+
+  /** Running as an installed app — the case a browser reliably grants. */
+  installed() {
+    try {
+      if (typeof navigator !== 'undefined' && navigator.standalone === true) return true;
+      return !!(typeof window !== 'undefined' && window.matchMedia &&
+        window.matchMedia('(display-mode: standalone)').matches);
+    } catch (e) { return false; }
+  }
+};
+
+/** True when losing browser storage would lose something that exists nowhere
+    else. A connected folder or Drive makes eviction a non-event: boot reloads
+    the bank from the file. */
+function browserIsOnlyCopy() {
+  if (FileStore.connected) return false;
+  if (typeof DriveSync !== 'undefined' && DriveSync.configured) return false;
+  return true;
+}
+
+/** Ask the browser to keep the bank, but only when it is worth a prompt.
+    Safe to call repeatedly: it returns early once granted. */
+async function ensureDurableStorage() {
+  if (!Durability.checked) await Durability.refresh();
+  if (Durability.granted || !Durability.supported) return Durability.granted;
+  if (!browserIsOnlyCopy()) return false;
+  let n = 0;
+  try { n = await DB.count('questions'); } catch (e) { return false; }
+  if (!n) return false;
+  const ok = await Durability.request();
+  if (ok) updateStorageBar();
+  return ok;
+}
+
+/** What to tell somebody about how safe their bank is, or null when there is
+    nothing worth saying. Pure, so the wording can be asserted. */
+function durabilityAdvice(o) {
+  const i = o || {};
+  if (!i.questions) return null;      // nothing to lose yet
+  if (i.fileBacked) return null;      // the file is the truth; eviction costs nothing
+  if (i.granted) {
+    return {
+      tone: 'ok',
+      headline: 'Your browser has agreed to keep this data, so it will not be cleared to make room.',
+      fixes: [],
+      note: 'Clearing your browsing data still removes it, and so does uninstalling the browser. A folder or a backup is still the only thing that survives that.'
+    };
+  }
+  const fixes = ['Connect a folder or Google Drive — then your bank is a file, and this browser copy stops being the only one.'];
+  if (i.supported && !i.installed) {
+    fixes.push('Or install the app, using your browser’s Install button. An installed app is the case browsers reliably grant this to.');
+  }
+  fixes.push('Either way, keep taking backups.');
+  return {
+    tone: 'warn',
+    headline: i.supported
+      ? 'Your bank is only in this browser, and the browser has not promised to keep it.'
+      : 'Your bank is only in this browser, and this browser has no way to promise to keep it.',
+    fixes,
+    note: i.supported
+      ? 'Browsers are allowed to clear storage they have made no promise about — to free space, or on some phones simply after a few weeks without opening the app.'
+      : 'Browsers are allowed to clear storage they have made no promise about, and this one offers no way to ask.'
+  };
+}
 
 const FileStore = {
   tier: 'manual',
@@ -19799,7 +19943,6 @@ const mkPoolQ = (domainId, difficulty, attempts) => {
   return q;
 };
 const BP3 = [{ id: 'D1', name: 'One', weight: 50 }, { id: 'D2', name: 'Two', weight: 50 }];
-const marginalOf = (r, label) => (r.parts.find(p => p.label === label) || {}).got;
 
 test('apportion hands out exactly the total, favouring the largest remainders', () => {
   const a = apportion([{ key: 'x', pct: 33 }, { key: 'y', pct: 33 }, { key: 'z', pct: 34 }], 10);
@@ -22769,6 +22912,44 @@ test('The note in the box says the things that would otherwise be a support mess
   assert(partial.indexOf('does not include serve.ps1') > 0, partial.slice(-200));
 });
 
+test('Nothing is said about durability until it changes the answer', () => {
+  // An empty bank has nothing to lose, and a bank behind a file loses nothing
+  // to eviction — boot reloads it from disk. Saying anything in either case
+  // is noise on the one screen people open to be reassured.
+  eq(durabilityAdvice({ questions: 0, fileBacked: false, supported: true, granted: false }), null);
+  eq(durabilityAdvice({ questions: 500, fileBacked: true, supported: true, granted: false }), null);
+  eq(durabilityAdvice(null), null, 'and it never throws on nothing');
+});
+
+test('An unprotected bank is told the truth, and told what fixes it', () => {
+  const a = durabilityAdvice({ questions: 400, fileBacked: false, supported: true, granted: false, installed: false });
+  eq(a.tone, 'warn');
+  assert(/only in this browser/.test(a.headline) && /has not promised/.test(a.headline));
+  // The two real fixes, in the order of how well they work.
+  assert(a.fixes.length >= 2);
+  assert(/folder or Google Drive/.test(a.fixes[0]), a.fixes[0]);
+  assert(a.fixes.some(f => /install/i.test(f)), 'installing is what a browser actually grants this to');
+  assert(a.fixes.some(f => /backup/i.test(f)));
+
+  // Already installed: the install advice would be nonsense, so it goes.
+  const b = durabilityAdvice({ questions: 400, fileBacked: false, supported: true, granted: false, installed: true });
+  assert(!b.fixes.some(f => /install/i.test(f)), 'never advise something already done');
+
+  // A browser with no Storage API is told the honest version, and is not
+  // offered a button that cannot do anything.
+  const c = durabilityAdvice({ questions: 400, fileBacked: false, supported: false, granted: false });
+  assert(/no way to promise/.test(c.headline), c.headline);
+  assert(!c.fixes.some(f => /install/i.test(f)), 'installing does not help where the API is missing');
+});
+
+test('A granted promise is not oversold', () => {
+  const g = durabilityAdvice({ questions: 400, fileBacked: false, supported: true, granted: true });
+  eq(g.tone, 'ok');
+  eq(g.fixes.length, 0, 'nothing left to ask of them');
+  // The thing persistence does NOT protect against, said in the same breath.
+  assert(/[Cc]learing your browsing data/.test(g.note), g.note);
+});
+
 test('The bundle is a real zip that a zip reader can read back', async () => {
   // zipFiles is shared with the backups, so this is really a check that the
   // entry list is well formed — a name wrong here produces a file that opens
@@ -22843,6 +23024,12 @@ async function boot() {
   // updates the storage bar whenever (if ever) it resolves.
   DriveSync.init();
   await go('dashboard');
+
+  // Deferred rather than awaited before the first paint: on Firefox this can
+  // put a permission doorhanger on screen, and it has no business doing that
+  // before the app has even drawn. ensureDurableStorage() asks only when the
+  // browser really is holding the only copy of something.
+  setTimeout(() => { ensureDurableStorage().catch(() => { }); }, 1200);
 
   // When appearance is set to Auto, follow the system if it changes mid-session.
   if (window.matchMedia) {

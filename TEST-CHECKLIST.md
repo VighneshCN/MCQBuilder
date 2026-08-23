@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 197 passed, 0 failed, of 197.**
+**Current result: 200 passed, 0 failed, of 200.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -194,10 +194,15 @@ nine different requested counts.
 132. The verdict names its risk and shows its working, and never a percentage
 133. A paper with nothing left to mark is not a failed paper
 
+### Keeping the browser from throwing it away (3)
+134. Nothing is said about durability until it changes the answer
+135. An unprotected bank is told the truth, and told what fixes it
+136. A granted promise is not oversold
+
 ### Taking the app with you (3)
-134. A copy is refused while the bank would not travel with it
-135. The note in the box says the things that would otherwise be a support message
-136. The bundle is a real zip that a zip reader can read back
+137. A copy is refused while the bank would not travel with it
+138. The note in the box says the things that would otherwise be a support message
+139. The bundle is a real zip that a zip reader can read back
 
 ### Everything else (4)
 29. Practice settings are per course, app preferences are shared
@@ -451,6 +456,18 @@ Automated tests cannot verify rendering or real browser storage.
 - [ ] Finish that session: the seed is on the results screen instead
 - [ ] Publish to GitHub Pages from a project repo (`user.github.io/repo/`): the
       app loads, installs, and opens offline
+
+### Keeping the browser from throwing it away
+
+- [ ] A brand-new bank says nothing about durability and asks the browser
+      nothing — check `Durability.asked` is still false
+- [ ] Import questions with no folder and no Drive: Settings → Where your data
+      lives explains it, offers folder/install/backup, and shows the button
+- [ ] Connect a folder: the whole block disappears
+- [ ] On Firefox, confirm the permission prompt arrives after the import rather
+      than on a cold load of an empty app
+- [ ] Install the app in Chrome, then reopen and check Settings reports the
+      promise as given
 
 ### Taking the app with you
 
