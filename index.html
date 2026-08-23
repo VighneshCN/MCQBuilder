@@ -134,23 +134,26 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   position:sticky; top:0; height:100dvh; border-right:1px solid var(--ink-900);
 }
 [data-theme="dark"] .rail{background:linear-gradient(180deg,#0F1922 0%,#080D13 100%)}
-.brand{padding:18px 16px 14px; border-bottom:1px solid rgba(255,255,255,.09)}
+.brand{padding:11px 16px 10px; border-bottom:1px solid rgba(255,255,255,.09)}
 .brand-mark{display:flex;align-items:center;gap:9px}
 .brand-tick{
   width:22px;height:22px;flex:none;border:1.5px solid #E98D76;border-radius:3px;
   display:grid;place-items:center;color:#E98D76;font-family:var(--mono);font-size:13px;font-weight:700;line-height:1
 }
 .brand-name{font-family:var(--mono);font-size:12.5px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:#F0F5F8}
-.brand-sub{margin-top:5px;font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#7C8FA0}
-.course-pick{padding:12px 12px 10px;border-bottom:1px solid rgba(255,255,255,.09)}
-.course-pick label{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#7C8FA0;margin-bottom:5px}
+.course-pick{padding:8px 12px;border-bottom:1px solid rgba(255,255,255,.09)}
+.course-pick label{display:block;font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#7C8FA0;margin-bottom:3px}
+/* Present for a screen reader, absent from the layout — the select beside it
+   already reads out the course, so the visible label was 14px of the rail
+   spent repeating it. */
+.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 .course-pick select{
   width:100%;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);
-  color:#E8EFF4;border-radius:var(--r);padding:7px 8px;font-size:13.5px;
+  color:#E8EFF4;border-radius:var(--r);padding:6px 8px;font-size:13px;
   text-overflow:ellipsis;overflow:hidden;white-space:nowrap;
 }
 .course-pick select option{background:#16202B;color:#E8EFF4}
-.nav{padding:10px 8px;flex:1;overflow:auto}
+.nav{padding:6px 8px;flex:1;overflow:auto}
 .nav-item{
   display:flex;align-items:center;gap:10px;width:100%;text-align:left;
   background:none;border:0;color:#B9C8D3;padding:8px 10px;border-radius:var(--r);
@@ -166,7 +169,7 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   margin-left:auto;font-family:var(--mono);font-size:10.5px;font-weight:600;
   background:#C0442B;color:#fff;border-radius:20px;padding:1px 6px;
 }
-.storagebar{margin-top:auto;padding:9px 10px;border-top:1px solid rgba(255,255,255,.09);display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12.5px;line-height:1.45}
+.storagebar{margin-top:auto;padding:8px 10px;border-top:1px solid rgba(255,255,255,.09);display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12.5px;line-height:1.45}
 .storagebar .sb-dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--amber)}
 .storagebar .sb-label{color:rgba(255,255,255,.82);flex:1;min-width:0;word-break:break-word}
 .storagebar .sb-sub{width:100%;color:rgba(255,255,255,.6)}
@@ -174,6 +177,8 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 .storagebar[data-tone="bad"] .sb-dot{background:var(--rose)}
 .storagebar[data-tone="bad"] .sb-label{color:#ffd7de}
 .storagebar .btn{width:100%;margin-top:2px}
+.storagebar .sb-actions{display:flex;gap:6px;width:100%;margin-top:3px}
+.storagebar .sb-actions .btn{width:auto;flex:1 1 0;min-width:0;margin-top:0;padding-left:4px;padding-right:4px}
 .rail-foot{padding:10px;border-top:1px solid rgba(255,255,255,.09);display:flex;gap:6px}
 .rail-btn{
   flex:1;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.13);color:#C6D4DE;
@@ -233,6 +238,25 @@ body:has(.game-root) .view{padding-bottom:16px}
   .rail-btn{min-height:40px}
   .chip{min-height:36px}
   .palette{grid-template-columns:repeat(auto-fill,minmax(44px,1fr))}
+  /* Theme, shortcuts and licence all have a home in Settings, and on a phone
+     that rail footer was the difference between Settings being on screen and
+     being below the fold. A keyboard-shortcuts dialog on a device with no
+     keyboard was never worth the space it took. */
+  .rail-foot{display:none}
+}
+/* Older and smaller phones only. Above this the rail already fits with a full
+   44px touch target on every row, and there is no reason to shrink it; below
+   it, Settings falls off the bottom unless the rows give up four pixels. */
+@media(max-width:880px) and (max-height:630px){
+  .nav-item{min-height:40px;padding:6px 10px}
+  .brand{padding:8px 16px}
+  .course-pick{padding:6px 12px}
+}
+/* Smaller still — an SE with the browser's own bars showing. The wordmark is
+   the only thing in the rail that is decoration rather than navigation, and
+   the header beside the ☰ already says which app this is. */
+@media(max-width:880px) and (max-height:580px){
+  .brand{display:none}
 }
 .btn.menu-btn{display:none}
 /* Explanation belongs one tap away, not permanently in front of the content.
@@ -5622,8 +5646,7 @@ function renderShell() {
     h('div', { class: 'brand-mark' }, [
       h('div', { class: 'brand-tick', text: '✓' }),
       h('div', {}, [h('div', { class: 'brand-name', text: 'MCQ Mastery' })])
-    ]),
-    h('div', { class: 'brand-sub', text: 'Controlled question bank' })
+    ])
   ]));
 
   if (State.course) {
@@ -5660,7 +5683,7 @@ function renderShell() {
       }
     },
       State.courses.filter(c => !c.archived).map(c => h('option', { value: c.id, selected: c.id === State.course.id, text: c.code + ' — ' + c.name })));
-    rail.appendChild(h('div', { class: 'course-pick' }, [h('label', { for: 'courseSel', text: 'Course' }), sel]));
+    rail.appendChild(h('div', { class: 'course-pick' }, [h('label', { class: 'sr-only', for: 'courseSel', text: 'Course' }), sel]));
 
     const nav = h('nav', { class: 'nav', id: 'nav' });
     VIEWS.forEach(v => {
@@ -14077,7 +14100,10 @@ ROUTES.settings = async (root) => {
     h('div', { class: 'card-b' }, [
       h('div', { class: 'small', style: 'margin-bottom:10px' },
         'Free to use for your own study. Not free to sell, or to build a paid product or service on.'),
-      h('button', { class: 'btn', onclick: () => showLicence(), text: 'Terms and licence' })
+      h('div', { class: 'row' }, [
+        h('button', { class: 'btn', onclick: () => showLicence(), text: 'Terms and licence' }),
+        h('button', { class: 'btn', onclick: () => showShortcuts(), text: 'Keyboard shortcuts' })
+      ])
     ])
   ]));
   grid2.appendChild(h('div', { class: 'card' }, [
@@ -15330,12 +15356,12 @@ const FileStore = {
   },
 
   status() {
-    if (this.tier === 'manual') return { key: 'manual', label: 'Local only', tone: 'warn' };
+    if (this.tier === 'manual') return { key: 'manual', label: 'In this browser only', tone: 'warn' };
     if (this.connected) return { key: 'connected', label: 'Saving to ' + (this.locationName || 'your file'), tone: 'ok' };
     if (this.problem === 'missing') return { key: 'missing', label: 'Read-only — your data file is gone', tone: 'bad' };
     if (this.problem === 'changed') return { key: 'changed', label: 'Read-only — file changed outside the app', tone: 'bad' };
     if (this.needsReconnect) return { key: 'reconnect', label: 'Read-only — reconnect your file', tone: 'bad' };
-    return { key: 'local', label: 'Local only — not saving to a file', tone: 'warn' };
+    return { key: 'local', label: 'In this browser only', tone: 'warn' };
   }
 };
 
@@ -16213,12 +16239,21 @@ function updateStorageBar() {
     bar.appendChild(h('button', { class: 'btn sm primary', onclick: () => reconnectFlow(), text: 'Reconnect' }));
   } else if (st.key === 'local') {
     // Both places a bank can live are equally one click away here — a local
-    // folder used to be the only option visible outside Settings, which
-    // made Google Drive easy to miss entirely. Stacked (not side by side):
-    // the rail is too narrow for two full-width-looking buttons to share a
-    // row without crowding right up against the main content next to them.
-    bar.appendChild(h('button', { class: 'btn sm', onclick: () => connectFlow(), text: 'Connect folder' }));
-    bar.appendChild(h('button', { class: 'btn sm', onclick: () => driveConnectFlow(), text: 'Connect Drive' }));
+    // folder used to be the only option visible outside Settings, which made
+    // Google Drive easy to miss entirely. Sharing one row rather than two
+    // full-width rows: on a phone those two extra lines were part of what
+    // pushed Settings off the bottom of the rail.
+    bar.appendChild(h('div', { class: 'sb-actions' }, [
+      h('button', { class: 'btn sm', onclick: () => connectFlow(), text: 'Folder' }),
+      h('button', { class: 'btn sm', onclick: () => driveConnectFlow(), text: 'Drive' })
+    ]));
+  } else if (st.key === 'manual') {
+    // No folder picker in this browser — iOS, and Firefox everywhere. Drive
+    // needs nothing but the network and works here perfectly, so showing a
+    // dead-end "Local only" with nothing to press was the least useful thing
+    // the bar could do, on precisely the devices with the least protection.
+    bar.appendChild(h('span', { class: 'sb-sub tiny', text: 'Folders need Chrome or Edge.' }));
+    bar.appendChild(h('button', { class: 'btn sm', onclick: () => driveConnectFlow(), text: 'Connect Google Drive' }));
   }
 }
 
@@ -22629,7 +22664,7 @@ test('The storage bar asks where the bank lives, not whether a token is live', (
     D.configured = true;
     const waiting = D.status();
     assert(waiting && waiting.label.length, 'configured but token-less is still Drive');
-    assert(waiting.label.indexOf('Local only') < 0, 'and never claims the bank is unsaved');
+    assert(waiting.label.indexOf('In this browser only') < 0, 'and never claims the bank is unsaved');
     assert(/reconnect|offline/i.test(waiting.label), 'saying which of the two it is: ' + waiting.label);
     D.connected = true;
     assert(/Drive/.test(D.status().label), 'a live connection is Drive too');
@@ -22910,6 +22945,46 @@ test('The note in the box says the things that would otherwise be a support mess
   // A bundle missing the launcher says so rather than leaving a dead reference.
   const partial = startHereText({ version: '1', when: 'now', missing: ['serve.ps1'] });
   assert(partial.indexOf('does not include serve.ps1') > 0, partial.slice(-200));
+});
+
+test('Every disconnected state offers a way out, on every browser', () => {
+  // The bar's whole job when nothing is connected is to be pressable. A
+  // browser with no folder picker — iOS, and Firefox everywhere — used to get
+  // a dead "Local only" with nothing to press, on exactly the devices whose
+  // bank has the least behind it.
+  const saved = { tier: FileStore.tier, conn: FileStore.connected, ever: FileStore.everConnected, prob: FileStore.problem, need: FileStore.needsReconnect };
+  const savedDrive = typeof DriveSync !== 'undefined' ? { c: DriveSync.connected, g: DriveSync.configured } : null;
+  const bar = document.querySelector('#storagebar');
+  try {
+    if (savedDrive) { DriveSync.connected = false; DriveSync.configured = false; }
+    FileStore.connected = false; FileStore.problem = null; FileStore.needsReconnect = false; FileStore.everConnected = false;
+
+    FileStore.tier = 'folder';
+    eq(FileStore.status().key, 'local');
+    if (bar) {
+      updateStorageBar();
+      const labels = [...bar.querySelectorAll('button')].map(b => b.textContent);
+      eq(labels.length, 2, 'a folder-capable browser is offered both: ' + labels.join('/'));
+      assert(labels.some(t => /folder/i.test(t)) && labels.some(t => /drive/i.test(t)), labels.join('/'));
+    }
+
+    FileStore.tier = 'manual';
+    const st = FileStore.status();
+    eq(st.key, 'manual');
+    assert(!/saving to/i.test(st.label), 'and it never claims to be saving anywhere: ' + st.label);
+    if (bar) {
+      updateStorageBar();
+      const labels = [...bar.querySelectorAll('button')].map(b => b.textContent);
+      eq(labels.length, 1, 'one route out, not a dead end: ' + labels.join('/'));
+      assert(/drive/i.test(labels[0]), 'and it is Drive, which needs nothing but the network: ' + labels[0]);
+      assert(/chrome|edge/i.test(bar.textContent), 'saying why the folder option is missing rather than hiding it');
+    }
+  } finally {
+    FileStore.tier = saved.tier; FileStore.connected = saved.conn; FileStore.everConnected = saved.ever;
+    FileStore.problem = saved.prob; FileStore.needsReconnect = saved.need;
+    if (savedDrive) { DriveSync.connected = savedDrive.c; DriveSync.configured = savedDrive.g; }
+    if (bar) updateStorageBar();
+  }
 });
 
 test('Nothing is said about durability until it changes the answer', () => {

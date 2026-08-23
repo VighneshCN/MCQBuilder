@@ -478,6 +478,48 @@ caught and ignored, so `index.html` copied on its own behaves exactly as it did
 before this existed. Settings can unregister it and empty the cache, because a
 worker that needs devtools to undo is not one to ship.
 
+## Fitting the rail on a phone
+
+The rail is one column of fixed chrome wrapped around one scrolling `.nav`, so
+anything spent above or below the nav is taken directly out of how many
+destinations a person can see. It had grown to **387px** of chrome — wordmark
+plus tagline, a labelled course picker, a storage bar stacking two full-width
+buttons, and two footer rows — which on a phone with the browser's own URL bar
+showing left the nav too short for its own contents. Settings, being last, was
+the entry that fell off.
+
+It is now **172px**, and the savings are all in things that were repeating
+themselves:
+
+- The tagline said "Controlled question bank" directly under a wordmark.
+- The course picker's "COURSE" label sat above a control already reading
+  "CISA — Certified Information…". It is still there for a screen reader, via
+  `.sr-only`, and gone from the layout.
+- The storage bar's two connect buttons share a row rather than stacking.
+- The footer — theme, shortcuts, licence — is `display:none` under 880px. All
+  three already live in Settings, and a keyboard-shortcuts dialog on a device
+  with no keyboard was never worth 111px of the one screen that had none to
+  spare. Nothing was removed from desktop.
+
+Two further tiers exist so the smallest screens are not left broken: under
+630px tall the rows drop from a 44px touch target to 40px, and under 580px the
+wordmark goes too. Above 630px nothing is compressed at all, because it does
+not need to be.
+
+## Every disconnected state has to be pressable
+
+`FileStore.status()` has two disconnected keys, and only one of them used to be
+actionable. `local` — a browser with `showDirectoryPicker` — got Connect
+folder and Connect Drive. `manual` — **iOS, and Firefox everywhere** — got the
+label "Local only" and nothing to press.
+
+That is backwards. A browser with no folder picker is a browser whose bank has
+*no file behind it at all*, so it is the one that most needs a route out, and
+Drive is available there: it needs nothing but the network. The `manual` case
+now says why the folder option is missing ("Folders need Chrome or Edge") and
+offers Connect Google Drive. Both keys' labels were changed from "Local only"
+to **"In this browser only"**, which is the fact rather than a category name.
+
 ## The promise nobody asks for
 
 `Durability` wraps `navigator.storage`, and the reason it exists is that
