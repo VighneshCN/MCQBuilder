@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 207 passed, 0 failed, of 207.**
+**Current result: 210 passed, 0 failed, of 210.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -194,18 +194,23 @@ nine different requested counts.
 132. The verdict names its risk and shows its working, and never a percentage
 133. A paper with nothing left to mark is not a failed paper
 
+### Drive when the token goes (3)
+134. Work done while Drive is unreachable is still marked for pushing
+135. A rejected token is thrown away rather than reused
+136. Every Drive state the bar can show is one a person can act on
+
 ### Sharing a bank (4)
-134. A shared bank carries the questions and none of the practising
-135. A shared bank is a file the importer can actually read
-136. Dated material appears and stops appearing on the right days
-137. Notices reach the right course, and a link out is never a script
+137. A shared bank carries the questions and none of the practising
+138. A shared bank is a file the importer can actually read
+139. Dated material appears and stops appearing on the right days
+140. Notices reach the right course, and a link out is never a script
 
 ### Reconnecting to Drive (2)
-134. A reconnect only skips the merge question when it is genuinely settled
-135. Merging is the primary action wherever the two copies meet
+141. A reconnect only skips the merge question when it is genuinely settled
+142. Merging is the primary action wherever the two copies meet
 
 ### The rail on a phone (1)
-136. Every disconnected state offers a way out, on every browser
+143. Every disconnected state offers a way out, on every browser
 
 ### Keeping the browser from throwing it away (3)
 137. Nothing is said about durability until it changes the answer
@@ -485,6 +490,16 @@ Automated tests cannot verify rendering or real browser storage.
 - [ ] A notice appears on the dashboard; the support link does not
 - [ ] `git check-ignore data/starter-index.json` returns nothing, and
       `git check-ignore data/my-bank.json` returns a match
+
+### Drive when the token goes
+
+- [ ] On an iPhone: connect Drive, practise, lock the phone for a minute, come
+      back. The sidebar offers **Reconnect** rather than a spinner
+- [ ] Practise while it says that, then reconnect: the work reaches Drive —
+      check the question count on another device
+- [ ] Revoke the app in your Google account, then edit something: the bar says
+      the sign-in is no longer valid, and does not sit claiming to sync
+- [ ] After revoking, reconnect: exactly one Drive file exists, not two
 
 ### Reconnecting to Drive
 

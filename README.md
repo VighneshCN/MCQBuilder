@@ -154,6 +154,35 @@ Requires Chrome, Edge, or another Chromium browser. Firefox and Safari have no
 folder API; there the app keeps everything in the browser database, and regular
 backups from **Backup & Restore** are your safety net.
 
+### Google Drive on an iPhone or iPad
+
+**Drive asks you to reconnect roughly once per session on Safari, and there is
+nothing the app can do about it.** Two things Apple does combine:
+
+- iOS discards a browser tab that has been in the background — lock the phone,
+  or switch apps for a minute — and reloads it when you come back. The Google
+  token lives only in memory, deliberately: it is a key to your Drive, and
+  keeping a copy of it on disk would be worse than asking again.
+- Getting a token back without asking you requires a cookie for
+  `accounts.google.com`, which Safari blocks by default as tracking protection.
+  So the silent path that works on Chrome cannot work here. This is Google's
+  own documented behaviour, not a fault in the app.
+
+**Nothing is lost in between, and this is the part worth understanding.** Your
+bank is in the browser the whole time, and everything you do while Drive is
+disconnected is recorded as still-to-send. The moment you reconnect, it goes
+up. Practise for an hour with the sidebar saying *tap to reconnect* and not one
+answer is dropped — it simply arrives on Drive when you next connect.
+
+The sidebar carries a **Reconnect** button whenever this happens, from whatever
+screen you are on. One tap, and if nothing has changed on Drive meanwhile you
+are not asked anything further.
+
+Two things reduce it, neither completely: **add the app to your Home Screen**
+(Share → *Add to Home Screen*), which makes iOS less eager to discard it, and
+keep the tab in the foreground while you practise. On Chrome, Edge and Android
+this rarely comes up at all.
+
 ### Whether your browser has promised to keep it
 
 The browser database is the app's working copy. For anyone with a folder or

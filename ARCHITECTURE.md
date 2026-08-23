@@ -531,6 +531,57 @@ re-include a file whose parent *directory* is excluded. It is now `data/*` with
 be published are committable, and everything else under `data/` stays local,
 which was the original intent.
 
+## Losing the token, which on Safari is normal
+
+The access token is in memory only and is never persisted — it is a bearer
+credential for somebody's Drive, and a copy on disk would be a worse problem
+than re-asking. On iOS Safari the page is reloaded often (the OS discards
+backgrounded tabs), and the only refresh the app can perform is
+`requestAccessToken({ prompt: '' })`, which needs a third-party cookie for
+`accounts.google.com` that Safari blocks by default. So on that browser the
+token is gone most of the time, by design at both ends. Four things follow, and
+all four were wrong.
+
+**A change made with no token still has to be remembered.** `touch()` used to
+return early on `!connected`, so an edit while the token was dead set neither
+`_pendingChange` nor the persisted `driveDirtySince` — and the next connect,
+seeing no marker, pushed nothing. A session's practice could sit in the browser
+while the bar said Drive was in sync. It now marks dirty whenever Drive is the
+**configured** backend, connected or not, and only the push itself waits for a
+connection. `configured` rather than `connected` is also what keeps a
+local-folder user from accumulating a Drive marker they will never use.
+
+**A 401 is not a network blip.** There was no 401 handling at all: the failure
+became `problem = 'Last sync failed…'`, `connected` stayed true, and the dead
+token kept its original expiry — so `_ensureToken()` went on short-circuiting on
+"not expired yet" and every later call reused it. `_handleAuthFailure()` now
+clears the token and its expiry so the next call has to ask again. It is applied
+to `push()`, `pull()`, `_fetchModifiedTime()` and `_findExisting()`.
+
+**`_findExisting()` returning `null` on a 401 was the dangerous one.** `connect()`
+reads `null` as "there is no file yet" and creates one, so an expired token
+could hand somebody a *second* Drive file and split their bank across the two.
+"Not found" and "not allowed to look" now have different answers.
+
+**A request that never answers must still end.** GIS settles `_requestToken()`
+by invoking one of two callbacks; a blocked frame can invoke neither, and the
+promise then never settled — with `push()` having already raised `_pushing`, so
+every later push returned early while the bar showed "syncing…". There is now a
+single settle gate with a 20s timeout, and `push()` takes the token *before*
+raising its guard.
+
+### And the state it leaves behind has to be actionable
+
+`status()` returned "Drive: reconnecting…" indefinitely while the real reason
+sat unread in `this.problem` — the check for it came after that branch — and
+`updateStorageBar()` had no action for `drive-waiting` at all. So the browser
+where reconnecting is the normal case got a label that never changed and
+nothing to press. It now shows the reason when there is one, and carries a
+**Reconnect** button. `retryQuietly()` also makes one silent attempt when the
+tab becomes visible — at most one at a time, at most once a minute, and silent
+on failure, because on Safari it will usually fail and a toast on every glance
+at the app would be worse than the problem.
+
 ## Not re-asking a settled question
 
 `init()`'s silent reconnect has always compared Drive's `modifiedTime` against

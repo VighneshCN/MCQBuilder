@@ -15573,7 +15573,8 @@ _writeHook = (store, op, payload, key) => {
   FileStore.touch(store, op, payload, key);
   // Only one backend is ever the active connection, so at most one of these
   // two touch() calls does anything — each bails out immediately when it is
-  // not the one currently connected.
+  // not the backend in use. DriveSync's test is "configured", not "connected":
+  // a dropped token does not stop an edit needing to reach Drive eventually.
   if (typeof DriveSync !== 'undefined') DriveSync.touch(store);
 };
 _writeVeto = (store) => store !== 'fsmeta' && FileStore.isReadOnly();
@@ -15622,6 +15623,7 @@ const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const DRIVE_PUSH_DEBOUNCE_MS = 6 * 1000;      // push shortly after the last change settles
 const DRIVE_PUSH_MAX_GAP_MS = 20 * 1000;      // never let a burst of activity go unpushed longer than this
 const DRIVE_SAFETY_TIMER_MS = 60 * 1000;      // coarse fallback if a debounced push is ever lost
+const DRIVE_TOKEN_TIMEOUT_MS = 20 * 1000;     // a sign-in request that never answers must still end
 
 /**
  * An OAuth client ID identifies this APP to Google, not any one person — it
@@ -15669,6 +15671,7 @@ const DriveSync = {
   // every time they reloaded without a network. Nothing was wrong with their
   // data; the app simply had not been asked the right question.
   connected: false, configured: false, fileId: null, accessToken: null, tokenExpiresAt: 0,
+  _retrying: false, _lastRetryAt: 0,
   lastPushedAt: null, lastSyncedModifiedTime: null, problem: null, setupError: null,
   _tokenClient: null, _tokenClientId: null, _pushTimer: null, _debounceTimer: null,
   _pushing: false, _pendingChange: false, _firstUnpushedChangeAt: null,
@@ -15817,15 +15820,76 @@ const DriveSync = {
         this._tokenClient = google.accounts.oauth2.initTokenClient({ client_id: clientId, scope: DRIVE_SCOPE, callback: () => { } });
         this._tokenClientId = clientId;
       }
+      // Google Identity settles this by invoking one of the two callbacks
+      // below. When the hidden accounts.google.com frame is blocked outright —
+      // Safari's tracking protection, most commonly — it can invoke neither,
+      // and without a timeout the promise never settles: every caller awaits
+      // it for the life of the page, and push() stays wedged behind it.
+      //
+      // One gate for all three endings so a late callback after the timeout
+      // cannot settle an already-settled promise, and the timer is always
+      // cleared whichever ending arrives first.
+      let done = false;
+      let timer = null;
+      const ok = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
+      const no = (e) => { if (done) return; done = true; clearTimeout(timer); reject(e); };
+      timer = setTimeout(() => no(new Error('Google did not answer. On Safari this usually means the sign-in frame was blocked — connect again and it will ask properly.')), DRIVE_TOKEN_TIMEOUT_MS);
+
       this._tokenClient.callback = (resp) => {
-        if (resp.error) { reject(new Error(resp.error)); return; }
+        if (resp.error) { no(new Error(resp.error)); return; }
         this.accessToken = resp.access_token;
         this.tokenExpiresAt = Date.now() + ((resp.expires_in || 3600) * 1000) - 60000;
-        resolve(resp);
+        ok(resp);
       };
-      this._tokenClient.error_callback = (err) => reject(new Error((err && err.type) || 'could not get permission'));
+      this._tokenClient.error_callback = (err) => no(new Error((err && err.type) || 'could not get permission'));
       this._tokenClient.requestAccessToken(silent ? { prompt: '' } : {});
     });
+  },
+
+  /** A 401 or 403 from Drive means the token is no longer good — revoked in
+      the Google account, or the grant withdrawn. It is NOT a network blip, and
+      treating it as one was the bug: the dead token stayed in memory with its
+      original expiry, _ensureToken() kept short-circuiting on "not expired
+      yet", and every later call reused it. Permanently stuck, with the bar
+      still claiming to be syncing. Clearing it forces the next call to ask
+      Google again. Returns true when it handled the response. */
+  _handleAuthFailure(res) {
+    if (!res || (res.status !== 401 && res.status !== 403)) return false;
+    this.accessToken = null;
+    this.tokenExpiresAt = 0;
+    this.connected = false;
+    this.problem = 'Google sign-in is no longer valid — reconnect from the sidebar.';
+    updateStorageBar();
+    return true;
+  },
+
+  /** One silent attempt to get back on Drive, at most one at a time and never
+      more than once a minute. Deliberately says nothing when it fails: the
+      status bar already carries the state, and a browser that structurally
+      cannot do silent refresh would otherwise produce a toast on every glance
+      at the app. */
+  async retryQuietly() {
+    if (this.connected || !this.configured || this._retrying) return false;
+    if (this._lastRetryAt && Date.now() - this._lastRetryAt < 60000) return false;
+    this._retrying = true;
+    this._lastRetryAt = Date.now();
+    try {
+      await this._loadGis();
+      await this._requestToken(true);
+      if (!this.accessToken) return false;
+      this.connected = true; this.problem = null;
+      this._startTimer();
+      updateStorageBar();
+      if (this._pendingChange || await FileStore.meta('driveDirtySince')) {
+        this._pendingChange = true;
+        await this.maybePush(true);
+      }
+      return true;
+    } catch (e) {
+      return false;
+    } finally {
+      this._retrying = false;
+    }
   },
 
   async _ensureToken() {
@@ -15991,12 +16055,26 @@ const DriveSync = {
       FileStore.touch() — Drive has no cheap incremental append, so this just
       schedules a debounced whole-file push rather than journalling. */
   touch(store) {
-    if (!this.connected || store === 'fsmeta') return;
+    if (store === 'fsmeta') return;
+    // Drive has to be the chosen backend for any of this to mean anything —
+    // configured, not merely connected, so a dead token still counts and a
+    // local-folder user never accumulates a Drive marker they will never use.
+    if (!this.connected && !this.configured) return;
+    // Marked dirty whether or not the connection is currently up. It used to
+    // return here when disconnected, which meant an edit made while the token
+    // was dead left no trace at all — no _pendingChange, no driveDirtySince —
+    // and so was never pushed on the next connect. On a browser that drops the
+    // token every time the tab is reloaded (Safari, constantly) that is a whole
+    // session of practice sitting in this browser while Drive quietly claims to
+    // be in sync. Nothing was lost, but "in sync" was not true.
     if (!this._firstUnpushedChangeAt) {
       this._firstUnpushedChangeAt = Date.now();
       FileStore.setMeta('driveDirtySince', nowISO());
     }
     this._pendingChange = true;
+    // Only the push itself waits for a connection. driveSyncSettled()'s fast
+    // path reads driveDirtySince on the next connect and flushes it.
+    if (!this.connected) return;
     clearTimeout(this._debounceTimer);
     const overdue = Date.now() - this._firstUnpushedChangeAt >= DRIVE_PUSH_MAX_GAP_MS;
     this._debounceTimer = setTimeout(() => this.push(), overdue ? 0 : DRIVE_PUSH_DEBOUNCE_MS);
@@ -16020,9 +16098,14 @@ const DriveSync = {
 
   async push() {
     if (!this.connected || this._pushing) return false;
+    // The token check happens BEFORE the guard is raised. It used to be after,
+    // which meant a _requestToken that never settled left _pushing stuck true
+    // for the life of the page — every later push returning false at the line
+    // above while the bar showed "syncing…" and nothing ever moved.
+    if (!(await this._ensureToken())) return false;
+    if (this._pushing) return false;
     this._pushing = true;
     try {
-      if (!(await this._ensureToken())) return false;
       const payload = await FileStore.buildPayload();
       const newCount = (payload.stores.questions || []).length;
       const refuse = this.driveLossCheck(newCount);
@@ -16037,6 +16120,7 @@ const DriveSync = {
         headers: { 'Authorization': 'Bearer ' + this.accessToken, 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
+      if (this._handleAuthFailure(res)) return false;
       if (!res.ok) throw new Error('Drive returned ' + res.status);
       const meta = await res.json().catch(() => null);
       this.lastPushedAt = nowISO();
@@ -16062,6 +16146,7 @@ const DriveSync = {
     const res = await fetch('https://www.googleapis.com/drive/v3/files/' + this.fileId + '?alt=media', {
       headers: { 'Authorization': 'Bearer ' + this.accessToken }
     });
+    if (this._handleAuthFailure(res)) throw new Error('Google sign-in is no longer valid.');
     if (!res.ok) throw new Error('Drive returned ' + res.status);
     const payload = await res.json();
     if (!payload || !payload.stores) throw new Error('That file did not look like an MCQ Mastery snapshot.');
@@ -16077,6 +16162,11 @@ const DriveSync = {
       const res = await fetch('https://www.googleapis.com/drive/v3/files/' + this.fileId + '?fields=modifiedTime', {
         headers: { 'Authorization': 'Bearer ' + this.accessToken }
       });
+      // A 401 here would otherwise read as "Drive has not changed", which is
+      // the most misleading answer available: it is the input to
+      // driveSyncSettled(), so a dead token would make a reconnect skip the
+      // merge question on the grounds that nothing had moved.
+      if (this._handleAuthFailure(res)) return null;
       if (!res.ok) return null;
       const j = await res.json();
       return j.modifiedTime || null;
@@ -16093,7 +16183,12 @@ const DriveSync = {
     const res = await fetch('https://www.googleapis.com/drive/v3/files?q=' + q + '&spaces=drive&fields=files(id)', {
       headers: { 'Authorization': 'Bearer ' + this.accessToken }
     });
-    if (!res.ok) return null;
+    // "Not found" and "not allowed to look" are opposite answers, and this
+    // used to give the same null for both. connect() reads null as "there is
+    // no file yet" and creates one — so an expired token could hand somebody a
+    // SECOND Drive file and split their bank across the two. Throw instead.
+    if (this._handleAuthFailure(res)) throw new Error('Google sign-in is no longer valid.');
+    if (!res.ok) throw new Error('Drive returned ' + res.status + ' while looking for your file.');
     const j = await res.json();
     return (j.files && j.files[0] && j.files[0].id) || null;
   },
@@ -16258,15 +16353,20 @@ const DriveSync = {
   status() {
     if (!this.connected) {
       if (this.setupError) return { tone: 'bad', label: 'Drive: ' + this.setupError };
-      // Configured but without a token yet — which is the ordinary state for
-      // the first second after a reload, and the permanent state offline.
-      // Either way the bank is on Drive and is safe here meanwhile: init()
-      // keeps a driveDirtySince marker and pushes whatever never landed on the
-      // next successful connection.
+      // Configured but without a token yet — the ordinary state for the first
+      // second after a reload, the permanent state offline, and on Safari the
+      // normal state of affairs, because a reloaded page cannot get a token
+      // back without being asked for. The bank is safe here meanwhile:
+      // touch() records driveDirtySince whether or not the connection is up,
+      // and the next successful connect pushes it.
       if (this.configured) {
-        return (typeof navigator !== 'undefined' && navigator.onLine === false)
-          ? { tone: 'warn', label: 'Drive: offline — saved here, syncs when you reconnect' }
-          : { tone: 'warn', label: 'Drive: reconnecting…' };
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+          return { tone: 'warn', label: 'Drive: offline — saved here, syncs when you reconnect' };
+        }
+        // A real reason beats a spinner that never stops. This used to say
+        // "reconnecting…" for ever while the actual explanation sat unread in
+        // this.problem, because the check for it came after this branch.
+        return { tone: 'warn', label: this.problem ? 'Drive: ' + this.problem : 'Drive: tap to reconnect' };
       }
       return null;
     }
@@ -16465,6 +16565,12 @@ function updateStorageBar() {
       h('button', { class: 'btn sm', onclick: () => connectFlow(), text: 'Folder' }),
       h('button', { class: 'btn sm', onclick: () => driveConnectFlow(), text: 'Drive' })
     ]));
+  } else if (st.key === 'drive-waiting') {
+    // Drive is the backend but there is no live token. On Safari this is where
+    // a person spends most of their session, and it used to be a dead end: a
+    // label that never changed, nothing to press, and no retry anywhere in the
+    // app. One tap, from whichever screen they are on.
+    bar.appendChild(h('button', { class: 'btn sm primary', onclick: () => driveConnectFlow(), text: 'Reconnect' }));
   } else if (st.key === 'manual') {
     // No folder picker in this browser — iOS, and Firefox everywhere. Drive
     // needs nothing but the network and works here perfectly, so showing a
@@ -23256,6 +23362,96 @@ test('Notices reach the right course, and a link out is never a script', () => {
   eq(safeLinkOrNull({ url: 'https://x.test/y' }).label, 'Support group', 'and it is named for what it is for');
 });
 
+test('Work done while Drive is unreachable is still marked for pushing', async () => {
+  const D = DriveSync;
+  const saved = { c: D.connected, g: D.configured, p: D._pendingChange, f: D._firstUnpushedChangeAt };
+  const savedMark = await FileStore.meta('driveDirtySince');
+  try {
+    await FileStore.delMeta('driveDirtySince');
+    // Drive is the chosen backend, but the token is gone — the ordinary state
+    // on a browser that reloads the page out from under you.
+    D.connected = false; D.configured = true;
+    D._pendingChange = false; D._firstUnpushedChangeAt = null;
+    D.touch('questions');
+    assert(D._pendingChange, 'an edit made while disconnected still counts as unpushed');
+    // setMeta inside touch() is deliberately not awaited; give it a turn.
+    await new Promise(r => setTimeout(r, 0));
+    assert(await FileStore.meta('driveDirtySince'), 'and leaves the marker the next connect reads');
+
+    // Somebody using a local folder must never accumulate a Drive marker.
+    await FileStore.delMeta('driveDirtySince');
+    D.connected = false; D.configured = false;
+    D._pendingChange = false; D._firstUnpushedChangeAt = null;
+    D.touch('questions');
+    assert(!D._pendingChange, 'Drive is not this person’s backend');
+    await new Promise(r => setTimeout(r, 0));
+    eq(await FileStore.meta('driveDirtySince'), undefined, 'and nothing is recorded for it');
+
+    // fsmeta is the handle bookkeeping and is never itself a change to sync.
+    D.configured = true;
+    D.touch('fsmeta');
+    assert(!D._pendingChange, 'fsmeta writes are not user data');
+  } finally {
+    D.connected = saved.c; D.configured = saved.g;
+    D._pendingChange = saved.p; D._firstUnpushedChangeAt = saved.f;
+    if (savedMark) await FileStore.setMeta('driveDirtySince', savedMark);
+    else await FileStore.delMeta('driveDirtySince');
+  }
+});
+
+test('A rejected token is thrown away rather than reused', () => {
+  const D = DriveSync;
+  const saved = { t: D.accessToken, e: D.tokenExpiresAt, c: D.connected, p: D.problem };
+  try {
+    D.accessToken = 'dead-token';
+    D.tokenExpiresAt = Date.now() + 3600000;   // not expired, just no longer accepted
+    D.connected = true; D.problem = null;
+
+    eq(D._handleAuthFailure({ status: 500 }), false, 'a server error is not an auth failure');
+    eq(D._handleAuthFailure({ status: 404 }), false);
+    eq(D._handleAuthFailure(null), false, 'and nothing at all is not either');
+    eq(D.accessToken, 'dead-token', 'none of which should have touched the token');
+
+    assert(D._handleAuthFailure({ status: 401 }), '401 is');
+    eq(D.accessToken, null, 'the token is dropped, not kept until its nominal expiry');
+    eq(D.tokenExpiresAt, 0, 'so _ensureToken cannot short-circuit on it');
+    eq(D.connected, false);
+    assert(/sign-in/i.test(D.problem), D.problem);
+
+    D.accessToken = 'dead-token'; D.tokenExpiresAt = Date.now() + 3600000;
+    assert(D._handleAuthFailure({ status: 403 }), '403 is too');
+    eq(D.accessToken, null);
+  } finally {
+    D.accessToken = saved.t; D.tokenExpiresAt = saved.e; D.connected = saved.c; D.problem = saved.p;
+  }
+});
+
+test('Every Drive state the bar can show is one a person can act on', () => {
+  const D = DriveSync;
+  const saved = { c: D.connected, g: D.configured, s: D.setupError, p: D.problem, n: D._pendingChange };
+  const bar = document.querySelector('#storagebar');
+  try {
+    D.setupError = null; D.problem = null; D._pendingChange = false;
+    D.connected = false; D.configured = true;
+    const st = D.status();
+    assert(st && st.label, 'configured without a token is still Drive');
+    assert(!/reconnecting…/.test(st.label), 'and no longer a spinner that never stops: ' + st.label);
+    if (bar) {
+      updateStorageBar();
+      const btns = [...bar.querySelectorAll('button')].map(b => b.textContent);
+      eq(btns.length, 1, 'exactly one way out: ' + btns.join('/'));
+      assert(/reconnect/i.test(btns[0]), btns[0]);
+    }
+    // A real reason replaces the generic prompt rather than hiding behind it.
+    D.problem = 'Google sign-in is no longer valid — reconnect from the sidebar.';
+    assert(/no longer valid/.test(D.status().label), D.status().label);
+  } finally {
+    D.connected = saved.c; D.configured = saved.g; D.setupError = saved.s;
+    D.problem = saved.p; D._pendingChange = saved.n;
+    if (bar) updateStorageBar();
+  }
+});
+
 test('A reconnect only skips the merge question when it is genuinely settled', () => {
   const F = 'file-abc';
   // The one case that may skip: same file, and Drive has not moved since the
@@ -23476,6 +23672,12 @@ async function boot() {
     // tab or switching apps on a phone — and the page usually survives long
     // enough afterward for the upload to actually finish.
     if (document.visibilityState === 'hidden' && typeof DriveSync !== 'undefined' && DriveSync.connected) DriveSync.maybePush(true);
+    // Coming back the other way: if Drive is the backend but the token has
+    // gone, try once, quietly. It will not help on Safari — a silent request
+    // is exactly what that browser refuses — but it costs one blocked call and
+    // it does recover the ordinary case of a network drop or a laptop lid,
+    // without anybody having to notice a status bar.
+    if (document.visibilityState === 'visible' && typeof DriveSync !== 'undefined') DriveSync.retryQuietly();
   });
   // A blocked write should read as an explanation, not as a stack trace —
   // and any other DB failure (storage full, the shared connection closed
