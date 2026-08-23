@@ -478,6 +478,50 @@ caught and ignored, so `index.html` copied on its own behaves exactly as it did
 before this existed. Settings can unregister it and empty the cache, because a
 worker that needs devtools to undo is not one to ship.
 
+## Handing a bank to somebody else
+
+`shareableBank()` writes the **import** format, not the storage format, and
+that is the whole design rather than a detail. A stored question keys its
+answer by option id and carries a dozen fields naming rows in the sender's own
+database — `canonicalUuid`, `dupOf`, `dismissedPairs`, `fingerprint`,
+`courseId`. Written out as-is it reaches the reader with an answer the parser
+cannot read and a set of dangling references, which is exactly what the first
+version did: twelve questions arrived, none of them practisable.
+
+Emitting `mcq-mastery-import/1` fixes both halves at once. The answer travels
+as a **letter**, which is what `parseStructured()` reads. And the privacy
+question becomes trivial, because the mapping is an **allowlist**: a field is
+shared only if it is named in `shareableQuestion()`, so a personal field added
+to the record later cannot leak by being forgotten in a denylist. The tests
+assert against the *values* as well as the keys.
+
+Case-study questions travel inside their scenario rather than loose, so the
+link between passage and questions cannot be lost, and a scenario with no
+questions is omitted entirely.
+
+What the reader gets: fresh uuids, Question IDs in their own numbering, their
+own `courseId`, and **none** of the sender's stats, flags or review schedule.
+Verification still requires the reader to tick "treat an answer printed in the
+source as verified" — the app does not let a file assert its own answers are
+correct, whoever sent it.
+
+### The manifest, and why data/ had to change
+
+`starterManifest()` caches one same-origin fetch of `data/starter-index.json`
+and swallows every failure, so a deployment without one behaves as if the
+feature does not exist. It carries three things: `files` (banks on offer),
+`notices` (anything worth saying to a student), and `studyGroup` (one link
+out). `datedVisible()` applies `from`/`until` as inclusive `YYYY-MM-DD` string
+comparisons — no timezone gets a say in whether somebody can see their
+material. `safeLinkOrNull()` drops anything that is not `http(s)`.
+
+**The mechanism could never have worked as shipped.** `.gitignore` excluded
+`data/`, so the file the app fetches was unpublishable, and git cannot
+re-include a file whose parent *directory* is excluded. It is now `data/*` with
+`!data/starter-index.json` and `!data/shared-*.json` — the two things meant to
+be published are committable, and everything else under `data/` stays local,
+which was the original intent.
+
 ## Not re-asking a settled question
 
 `init()`'s silent reconnect has always compared Drive's `modifiedTime` against

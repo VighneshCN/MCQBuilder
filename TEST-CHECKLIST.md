@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 203 passed, 0 failed, of 203.**
+**Current result: 207 passed, 0 failed, of 207.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -193,6 +193,12 @@ nine different requested counts.
 131. Ready needs every ingredient, and loses it if any one goes
 132. The verdict names its risk and shows its working, and never a percentage
 133. A paper with nothing left to mark is not a failed paper
+
+### Sharing a bank (4)
+134. A shared bank carries the questions and none of the practising
+135. A shared bank is a file the importer can actually read
+136. Dated material appears and stops appearing on the right days
+137. Notices reach the right course, and a link out is never a script
 
 ### Reconnecting to Drive (2)
 134. A reconnect only skips the merge question when it is genuinely settled
@@ -463,6 +469,19 @@ Automated tests cannot verify rendering or real browser storage.
 - [ ] Finish that session: the seed is on the results screen instead
 - [ ] Publish to GitHub Pages from a project repo (`user.github.io/repo/`): the
       app loads, installs, and opens offline
+
+### Sharing a bank
+
+- [ ] Export a share file, open it in a text editor: no mastery, no attempts,
+      no flags, no uuids, no Question IDs — and the answer is a letter
+- [ ] Import it into a different browser profile: questions arrive practisable
+      once "treat an answer printed in the source as verified" is ticked, with
+      that browser's own Question IDs
+- [ ] A case study and its questions survive the round trip together
+- [ ] Put an entry in data/starter-index.json with a past `until`: it is not
+      offered. Change it to a future date: it is
+- [ ] `git check-ignore data/starter-index.json` returns nothing, and
+      `git check-ignore data/my-bank.json` returns a match
 
 ### Reconnecting to Drive
 

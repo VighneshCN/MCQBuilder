@@ -786,6 +786,85 @@ they are, and you can read both in Notepad before running anything. And if the a
 fetch one of the optional files it does not fail silently — it names the file in
 `START-HERE.txt` and tells you what you are missing.
 
+## 5b. Sharing a bank with other people
+
+If you teach, or you simply want to hand a friend the bank you built, the app
+writes a file for it and reads that file back through the ordinary import.
+
+**To share:** Backup & Restore → **Share with someone else…**. It writes
+`<COURSE>-shared-bank-<date>.json` containing only questions that already reach
+practice — the wording, the options, the answers, the explanations, the
+domains, the difficulty and the marks.
+
+**Your own progress is not in it, and cannot be.** The file is written in the
+ordinary import format, which has no field for a mastery score, an attempt
+count, a review date or a flag. Nothing is stripped after the fact and could be
+forgotten: only listed fields are written at all.
+
+**To receive one:** drop it on Add Questions like any other file. It goes
+through the same duplicate check and the same confirmation screen, into your
+own bank, with your own Question IDs. Tick *"treat an answer printed in the
+source as verified"* and it reaches practice immediately — that tick is you
+saying you trust whoever sent it, which is a decision the app will not make on
+your behalf.
+
+### Putting one inside the app, for a group
+
+If you publish this app for a class, `data/starter-index.json` is the one file
+you edit to reach everybody. Students see the material on **Add Questions**, one
+tap to import.
+
+```json
+{
+  "files": [
+    { "file": "data/shared-cisa-domain5.json", "course": "CISA",
+      "label": "Domain 5 — 120 questions",
+      "note": "Sat alongside chapter 5. Do these before Sunday's mock.",
+      "questions": 120, "from": "2026-08-01", "until": "2026-09-30" }
+  ],
+  "notices": [
+    { "text": "Mock 3 is on Sunday. Sit it in one go, timed.",
+      "course": "CISA", "kind": "note", "until": "2026-09-08" },
+    { "text": "Read the last sentence of the stem first.", "kind": "tip" }
+  ],
+  "studyGroup": {
+    "label": "WhatsApp group", "url": "https://chat.whatsapp.com/…",
+    "note": "Tips and questions from everybody sitting the same paper."
+  }
+}
+```
+
+- **`from` / `until`** are `YYYY-MM-DD`, both ends inclusive — *until 30
+  September* means all of the 30th. Outside that window the entry is not
+  offered. **This is tidying, not a control**: the file stays in your
+  repository until you delete it, and anyone with the direct URL can still
+  fetch it.
+- **`course`** matches the course code. Omit it on a notice to show it to
+  everyone.
+- **`notices`** appear on the dashboard. `kind` is `tip` (quiet) or `note`
+  (amber). This is how you send exam tips or a word of encouragement without
+  needing anywhere to host them.
+- **`studyGroup`** puts one link on the dashboard. Only `http`/`https` URLs are
+  rendered; anything else is dropped.
+- A listed file that is not actually there shows **nothing** rather than a
+  broken button, so a typo is quiet rather than embarrassing.
+
+`.gitignore` is set up for exactly this: `data/starter-index.json` and
+`data/shared-*.json` are committable, and everything else under `data/` stays
+on your disk. Rename an export to `shared-something.json` before committing it.
+
+**Only publish what you have the right to publish.** A bank you wrote is yours.
+A bank extracted from a publisher's material is theirs, and a GitHub Pages site
+is public — see `GITHUB-PAGES.md`.
+
+### There is no message board, deliberately
+
+Students cannot post back through the app. A page that accepts writes from
+anyone with the link, with no account, gets spammed the moment the URL travels
+— and whatever appears on it appears under your name. The link above sends
+people somewhere built for conversation, with a moderator, which is almost
+certainly a group they are already in.
+
 ## 6. Checking what the app could not confirm
 
 Adding questions is two steps, both on the **Add Questions** screen.

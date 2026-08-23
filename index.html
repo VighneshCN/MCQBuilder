@@ -5979,6 +5979,31 @@ ROUTES.dashboard = async (root) => {
     }
   }
 
+  /* Anything the person who published this app wanted to say. It is one file
+     in their repository, fetched same-origin, and a deployment without one
+     renders nothing at all here — which is every deployment by default. */
+  const manifest = await starterManifest();
+  const notices = activeNotices(manifest.notices, State.course.code);
+  if (notices.length || manifest.studyGroup) {
+    const box = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
+      h('div', { class: 'card-h' }, [h('h3', { text: notices.length ? 'From your course' : 'Your study group' })])
+    ]);
+    const body = h('div', { class: 'card-b stack' });
+    notices.forEach(n => body.appendChild(h('div', {
+      class: n.kind === 'tip' ? 'notice small' : 'notice warn small', style: 'margin:0', text: n.text
+    })));
+    if (manifest.studyGroup) {
+      body.appendChild(h('div', { class: 'row wrap', style: 'gap:8px;align-items:center' }, [
+        h('span', { class: 'small', style: 'flex:1;min-width:200px', text: manifest.studyGroup.note || 'Questions, tips, and everybody else sitting the same paper.' }),
+        // Opened in a new tab and told not to hand this app's context over
+        // with it. Nothing about your bank goes anywhere; it is a link.
+        h('a', { class: 'btn sm', href: manifest.studyGroup.url, target: '_blank', rel: 'noopener noreferrer', text: manifest.studyGroup.label })
+      ]));
+    }
+    box.appendChild(body);
+    root.appendChild(box);
+  }
+
   // The countdown, or — on a bank worth planning — one quiet line offering it.
   const planCard = studyPlanCard(plan);
   if (planCard) root.appendChild(planCard);
@@ -9907,7 +9932,7 @@ ROUTES.import = async (root) => {
   root.appendChild(input);
 
   const catalogue = await starterCatalogue();
-  const mine = catalogue.filter(e => e && e.file && String(e.course || '').toUpperCase() === String(State.course.code).toUpperCase());
+  const mine = datedVisible(catalogue).filter(e => e && e.file && String(e.course || '').toUpperCase() === String(State.course.code).toUpperCase());
   for (const entry of mine) {
     const probe = await probeStarterFile(entry);
     if (!probe.ok) continue;   // listed but not actually present: say nothing
@@ -10034,15 +10059,61 @@ async function renderRegisters(root, sources, batches) {
 const STARTER_INDEX = 'data/starter-index.json';
 let _catalogue = null;
 
-async function starterCatalogue() {
+/* The one file a teacher edits to reach everybody: which banks are on offer,
+   any notices worth putting in front of a student, and where the study group
+   is. Fetched same-origin and swallowed on any failure, so a deployment
+   without one behaves exactly as if this feature did not exist. */
+async function starterManifest() {
   if (_catalogue) return _catalogue;
+  const empty = { files: [], notices: [], studyGroup: null };
   try {
     const res = await fetch(STARTER_INDEX, { cache: 'no-store' });
-    if (!res.ok) { _catalogue = []; return _catalogue; }
+    if (!res.ok) { _catalogue = empty; return _catalogue; }
     const j = await res.json();
-    _catalogue = Array.isArray(j && j.files) ? j.files : [];
-  } catch (e) { _catalogue = []; }
+    _catalogue = {
+      files: Array.isArray(j && j.files) ? j.files : [],
+      notices: Array.isArray(j && j.notices) ? j.notices : [],
+      studyGroup: safeLinkOrNull(j && j.studyGroup)
+    };
+  } catch (e) { _catalogue = empty; }
   return _catalogue;
+}
+
+async function starterCatalogue() { return (await starterManifest()).files; }
+
+/** A link out of the app is only ever http(s). Anything else — a javascript:
+    URL above all — is dropped rather than rendered, even though this file
+    comes from the same origin as the app itself. */
+function safeLinkOrNull(o) {
+  if (!o || typeof o.url !== 'string') return null;
+  if (!/^https?:\/\//i.test(o.url.trim())) return null;
+  return { label: String(o.label || 'Study group'), url: o.url.trim(), note: o.note ? String(o.note) : '' };
+}
+
+/** What a dated list is offering today. Dates are plain YYYY-MM-DD keys and
+    both ends are inclusive, because "until 30 September" means the whole of
+    the 30th to everybody who is not a computer. Compared as strings, so no
+    timezone gets a say in whether a student can see their material.
+
+    Expiry here means "no longer offered in the app". The file itself stays
+    wherever it was published until somebody deletes it — this is tidying,
+    not a control. */
+function datedVisible(list, today) {
+  const t = today || todayKey();
+  return (list || []).filter(e => {
+    if (!e) return false;
+    if (e.from && String(e.from) > t) return false;
+    if (e.until && String(e.until) < t) return false;
+    return true;
+  });
+}
+
+/** Notices for whoever is looking: dated, and optionally aimed at one course. */
+function activeNotices(list, courseCode, today) {
+  const code = String(courseCode || '').toUpperCase();
+  return datedVisible(list, today)
+    .filter(n => n && n.text && (!n.course || String(n.course).toUpperCase() === code))
+    .map(n => ({ text: String(n.text), kind: n.kind === 'tip' ? 'tip' : 'note' }));
 }
 
 /** Confirm a listed file is really there, and report its size. */
@@ -12648,6 +12719,7 @@ ROUTES.backup = async (root) => {
       h('div', { class: 'stack' }, [
         h('div', { class: 'eyebrow', text: 'Question bank' }),
         h('button', { class: 'btn', onclick: () => exportQuestionsJSON(), text: 'JSON (full structure)' }),
+        h('button', { class: 'btn', onclick: () => exportShareableBank(), text: 'Share with someone else…' }),
         h('button', { class: 'btn', onclick: async () => exportBank(await State.questions()), text: 'CSV (human review)' }),
         h('button', { class: 'btn', onclick: () => exportPrintable(), text: 'Printable HTML' }),
         h('button', { class: 'btn', onclick: () => exportErrorNotebook(), text: 'Error notebook' }),
@@ -12926,6 +12998,102 @@ async function restoreFlow(file) {
 }
 
 /* ---------- exports ---------- */
+/* A shared bank is written in the IMPORT format, not the storage format.
+   That is not a detail: the storage record keys its answer by option id and
+   names records in the sender's own database, so a file in that shape reaches
+   the reader with an answer the parser cannot read and a dozen references to
+   rows they do not have. Writing the documented import shape instead means
+   the file goes through exactly the pipeline every other import does — and it
+   makes the privacy question trivial, because this is an allowlist: a field
+   is shared only if it is named here, so a personal field added to the record
+   later cannot leak by being forgotten. */
+function shareableQuestion(q) {
+  const opts = (q.options || []);
+  const answerIdx = opts.findIndex(o => o.id === q.correctOptionId);
+  const out = {
+    stem: q.stem,
+    options: opts.map((o, i) => {
+      const e = { letter: letterOf(i), text: o.text };
+      if (o.rationale) e.rationale = o.rationale;
+      return e;
+    }),
+    answer: answerIdx >= 0 ? letterOf(answerIdx) : ''
+  };
+  // Editorial work, which is the whole reason to hand somebody a bank rather
+  // than a list of questions. Only non-empty values, so the file stays
+  // readable by a person.
+  const carry = {
+    explanation: q.explanation, learningPoint: q.learningPoint,
+    domain: q.domainId, topic: q.topic, subtopic: q.subtopic,
+    module: q.srcModule, chapter: q.srcChapter, section: q.srcSection,
+    difficulty: q.difficulty, marks: q.marks,
+    originalNumber: q.originalNumber, externalId: q.externalId, locator: q.locator
+  };
+  Object.keys(carry).forEach(k => { if (carry[k] !== '' && carry[k] != null) out[k] = carry[k]; });
+  if ((q.tags || []).length) out.tags = q.tags.slice();
+  if (q.lockOptionOrder) out.lockOptionOrder = true;
+  return out;
+}
+
+/** A bank file meant for somebody else: the documented import shape, holding
+    nothing about how the sender has been getting on. Case-study questions go
+    inside their scenario so the link between them cannot be lost. */
+function shareableBank(course, questions, caseStudies) {
+  const cases = (caseStudies || []).filter(c => c && !c.archived);
+  const byCase = new Map(cases.map(c => [c.id, []]));
+  const standalone = [];
+  (questions || []).forEach(q => {
+    const bucket = q.caseStudyId && byCase.has(q.caseStudyId) ? byCase.get(q.caseStudyId) : standalone;
+    bucket.push(q);
+  });
+  const out = {
+    schema: 'mcq-mastery-import/1',
+    sharedAt: nowISO(),
+    course: { code: course.code, name: course.name, blueprint: course.blueprint },
+    questions: standalone.map(shareableQuestion)
+  };
+  const withQs = cases.filter(c => (byCase.get(c.id) || []).length);
+  if (withQs.length) {
+    out.caseStudies = withQs.map(c => ({
+      ref: c.ref || c.id, title: c.title || '', text: c.text || '',
+      domain: c.domainId || undefined,
+      questions: (byCase.get(c.id) || [])
+        .sort((a, b) => (a.caseSeq || 0) - (b.caseSeq || 0))
+        .map(shareableQuestion)
+    }));
+  }
+  return out;
+}
+
+async function exportShareableBank() {
+  const all = (await State.questions()).filter(q => isPracticeEligible(q));
+  if (!all.length) {
+    await modal({
+      title: 'Nothing ready to share yet',
+      body: h('p', {}, 'A shared bank carries only questions that would reach practice — a verified answer, a correct option, a sensible number of options. None here qualify yet.')
+    });
+    return;
+  }
+  const caseStudies = await CaseStudies.byCourse(State.course.id);
+  const ok = await modal({
+    title: 'Share this bank',
+    body: h('div', { class: 'stack' }, [
+      h('p', { class: 'small', style: 'margin:0' },
+        'Writes a file holding ' + all.length + ' question(s) — the wording, the answers, the domains, and the checks you have done on them.'),
+      h('div', { class: 'notice small', style: 'margin:0' },
+        'Your own progress is not in it. The file is written in the ordinary import format, which has no place to put a mastery score, an attempt count, a review date or a flag.'),
+      h('p', { class: 'tiny dim', style: 'margin:0' },
+        'Only questions that already reach practice are included. Whoever imports it drops it on Add Questions like any other file — and if they tick “treat an answer printed in the source as verified”, it reaches practice straight away.')
+    ]),
+    actions: [{ label: 'Cancel', value: null }, { label: 'Download', value: 'go', kind: 'primary' }]
+  });
+  if (!ok) return;
+  const payload = shareableBank(State.course, all, caseStudies);
+  download(State.course.code + '-shared-bank-' + todayKey() + '.json',
+    new Blob([JSON.stringify(payload, null, 1)], { type: 'application/json' }));
+  toast('Ready to share — ' + all.length + ' question(s), none of your progress', 'ok', 6000);
+}
+
 async function exportQuestionsJSON() {
   const all = await State.questions();
   const sources = await DB.byIndex('sources', 'courseId', State.course.id);
@@ -22988,6 +23156,96 @@ test('The note in the box says the things that would otherwise be a support mess
   // A bundle missing the launcher says so rather than leaving a dead reference.
   const partial = startHereText({ version: '1', when: 'now', missing: ['serve.ps1'] });
   assert(partial.indexOf('does not include serve.ps1') > 0, partial.slice(-200));
+});
+
+test('A shared bank carries the questions and none of the practising', () => {
+  const q = mkQ('Which control is BEST?', ['a', 'b', 'c', 'd'], 1, { domainId: 'D1', difficulty: 'hard' });
+  q.uuid = 'MY-UUID'; q.qid = 'CISA-0042'; q.batchId = 'BATCH-9';
+  q.marks = 2; q.topic = 'Change control'; q.explanation = 'Because.';
+  q.stats = { attempts: 17, correct: 4, mastery: 23, wrongStreak: 5, lastResult: 'incorrect' };
+  q.nextReviewAt = nowISO(); q.srStage = 3; q.flagged = true;
+  q.dismissedPairs = ['SOMEONE-ELSE']; q.canonicalUuid = 'X'; q.fingerprint = 'FP';
+
+  const out = shareableQuestion(q);
+  // The answer travels as a letter, which is what the importer actually reads
+  // — an option id would arrive meaning nothing and land in the review queue.
+  eq(out.answer, 'B', 'the second option was the right one');
+  eq(out.options.length, 4);
+  eq(out.options[0].letter, 'A');
+  eq(out.stem, q.stem);
+  eq(out.domain, 'D1'); eq(out.difficulty, 'hard'); eq(out.marks, 2);
+  eq(out.topic, 'Change control');
+
+  // It is an allowlist, so this holds for every personal field, named or not.
+  const shared = Object.keys(out);
+  ['stats', 'nextReviewAt', 'srStage', 'flagged', 'uuid', 'qid', 'batchId', 'courseId',
+   'dismissedPairs', 'canonicalUuid', 'fingerprint', 'dupOf', 'conflictWith', 'status',
+   'answerVerified', 'verifiedAt'].forEach(k => assert(shared.indexOf(k) < 0, k + ' must not travel'));
+  const text = JSON.stringify(out);
+  ['MY-UUID', 'CISA-0042', 'BATCH-9', 'SOMEONE-ELSE', 'FP', '"mastery"', '"wrongStreak"'].forEach(v =>
+    assert(text.indexOf(v) < 0, 'shared file still contains ' + v));
+  // And empty fields are left out rather than shipped as noise.
+  assert(!('subtopic' in out), 'nothing empty is written');
+});
+
+test('A shared bank is a file the importer can actually read', () => {
+  const a = mkQ('Standalone?', ['w', 'x', 'y', 'z'], 2, { domainId: 'D1' });
+  const c = mkQ('In a case?', ['w', 'x', 'y', 'z'], 0, { domainId: 'D2' });
+  c.caseStudyId = 'CS-ID'; c.caseSeq = 1;
+  const cases = [{ id: 'CS-ID', ref: 'CS-1', title: 'Kaveri', text: 'A passage.', domainId: 'D2' }];
+  const bank = shareableBank({ code: 'CISA', name: 'Test', blueprint: BP3 }, [a, c], cases);
+
+  eq(bank.schema, 'mcq-mastery-import/1', 'the documented import shape, not the storage one');
+  eq(bank.questions.length, 1, 'a case question does not also appear loose');
+  eq(bank.caseStudies.length, 1);
+  eq(bank.caseStudies[0].ref, 'CS-1');
+  eq(bank.caseStudies[0].questions.length, 1, 'it travels inside its scenario, so the link cannot be lost');
+  eq(bank.caseStudies[0].questions[0].answer, 'A');
+  eq(bank.course.code, 'CISA');
+  assert(!('id' in bank.course), 'the sender’s internal course id is not the reader’s');
+  assert(bank.course.blueprint, 'but the blueprint is, or the domain codes mean nothing');
+
+  // A scenario nobody has written questions for is not worth sending.
+  const empty = shareableBank({ code: 'CISA', name: 'T', blueprint: BP3 }, [a], cases);
+  assert(!empty.caseStudies, 'an empty scenario is left out entirely');
+});
+
+test('Dated material appears and stops appearing on the right days', () => {
+  const list = [
+    { id: 'always' },
+    { id: 'from-only', from: '2026-08-10' },
+    { id: 'until-only', until: '2026-08-20' },
+    { id: 'window', from: '2026-08-10', until: '2026-08-20' }
+  ];
+  const on = d => datedVisible(list, d).map(e => e.id).join(',');
+  eq(on('2026-08-09'), 'always,until-only', 'before the window opens');
+  eq(on('2026-08-10'), 'always,from-only,until-only,window', 'from is inclusive — the first day counts');
+  eq(on('2026-08-20'), 'always,from-only,until-only,window', 'until is inclusive — "until the 20th" means all of it');
+  eq(on('2026-08-21'), 'always,from-only', 'and the day after, it is gone');
+  eq(datedVisible(null, '2026-08-10').length, 0, 'nothing is not an error');
+  eq(datedVisible([null, undefined], '2026-08-10').length, 0, 'nor are holes in the list');
+});
+
+test('Notices reach the right course, and a link out is never a script', () => {
+  const list = [
+    { text: 'Everyone', from: '2026-08-01' },
+    { text: 'CISA only', course: 'cisa' },
+    { text: 'Someone else', course: 'DISA' },
+    { text: 'Expired', until: '2026-08-01' },
+    { course: 'CISA' }                        // no text: nothing to say
+  ];
+  const got = activeNotices(list, 'CISA', '2026-08-15').map(n => n.text);
+  eq(got.join('|'), 'Everyone|CISA only', 'course match is case-insensitive, and empty notices are dropped');
+  eq(activeNotices(list, 'CISA', '2026-08-15')[0].kind, 'note', 'kind defaults rather than coming out undefined');
+
+  // The manifest is same-origin, but a link is still only ever http(s).
+  eq(safeLinkOrNull({ url: 'javascript:alert(1)', label: 'x' }), null, 'javascript: is not a link');
+  eq(safeLinkOrNull({ url: 'data:text/html,<script>', label: 'x' }), null, 'nor is data:');
+  eq(safeLinkOrNull({ label: 'no url' }), null);
+  eq(safeLinkOrNull(null), null);
+  const ok = safeLinkOrNull({ url: ' https://chat.whatsapp.com/abc ', label: 'Group' });
+  assert(ok && ok.url === 'https://chat.whatsapp.com/abc', 'a real one survives, trimmed');
+  eq(ok.label, 'Group');
 });
 
 test('A reconnect only skips the merge question when it is genuinely settled', () => {

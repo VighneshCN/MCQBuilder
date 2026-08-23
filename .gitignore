@@ -24,9 +24,15 @@ mcq-mastery-safety-backup-*.zip
 
 # Question sets. These are source material, not code, and several are
 # copyrighted by their publishers. Keep them local and import them.
-data/
+#
+# data/* rather than data/, because git cannot re-include a file whose parent
+# DIRECTORY is excluded — and two files in here are meant to be published:
+# the catalogue the app reads, and anything you deliberately export to share.
+# Everything else in data/ stays local, which is still the default.
+data/*
+!data/starter-index.json
+!data/shared-*.json
 starter-questions-*.json
-starter-index.json
 
 # Anything you park here while working
 /private/
