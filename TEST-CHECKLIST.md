@@ -3,7 +3,7 @@
 Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
 a scratch course, so it never touches your real bank.
 
-**Current result: 201 passed, 0 failed, of 201.**
+**Current result: 203 passed, 0 failed, of 203.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -194,18 +194,22 @@ nine different requested counts.
 132. The verdict names its risk and shows its working, and never a percentage
 133. A paper with nothing left to mark is not a failed paper
 
+### Reconnecting to Drive (2)
+134. A reconnect only skips the merge question when it is genuinely settled
+135. Merging is the primary action wherever the two copies meet
+
 ### The rail on a phone (1)
-134. Every disconnected state offers a way out, on every browser
+136. Every disconnected state offers a way out, on every browser
 
 ### Keeping the browser from throwing it away (3)
-135. Nothing is said about durability until it changes the answer
-136. An unprotected bank is told the truth, and told what fixes it
-137. A granted promise is not oversold
+137. Nothing is said about durability until it changes the answer
+138. An unprotected bank is told the truth, and told what fixes it
+139. A granted promise is not oversold
 
 ### Taking the app with you (3)
-138. A copy is refused while the bank would not travel with it
-139. The note in the box says the things that would otherwise be a support message
-140. The bundle is a real zip that a zip reader can read back
+140. A copy is refused while the bank would not travel with it
+141. The note in the box says the things that would otherwise be a support message
+142. The bundle is a real zip that a zip reader can read back
 
 ### Everything else (4)
 29. Practice settings are per course, app preferences are shared
@@ -459,6 +463,15 @@ Automated tests cannot verify rendering or real browser storage.
 - [ ] Finish that session: the seed is on the results screen instead
 - [ ] Publish to GitHub Pages from a project repo (`user.github.io/repo/`): the
       app loads, installs, and opens offline
+
+### Reconnecting to Drive
+
+- [ ] Connect Drive, then disconnect and reconnect without changing anything:
+      the reconciliation dialog does NOT appear the second time
+- [ ] Change the bank on another device, then reconnect here: it DOES appear
+- [ ] On a phone, every dialog's buttons are stacked full width with the
+      primary action on top and Cancel at the bottom
+- [ ] On desktop they are still one right-aligned row
 
 ### The rail on a phone
 

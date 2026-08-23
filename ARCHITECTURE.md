@@ -478,6 +478,42 @@ caught and ignored, so `index.html` copied on its own behaves exactly as it did
 before this existed. Settings can unregister it and empty the cache, because a
 worker that needs devtools to undo is not one to ship.
 
+## Not re-asking a settled question
+
+`init()`'s silent reconnect has always compared Drive's `modifiedTime` against
+the `driveModifiedTime` stamp recorded at the last sync, and stayed quiet when
+they match. `connect()` — the explicit button — never did: it ran the full
+reconciliation dialog every time, whenever Drive held any questions at all.
+
+On Chrome that is rarely noticed, because the silent token refresh usually
+works and `connect()` is a once-ever action. On **Safari** it is the normal
+path: the token does not survive the session, so a person reconnects by hand
+every day, and met a dialog whose other routes are destructive every time.
+That is precisely how somebody learns to tap through a dialog without reading
+it — and the one occasion it matters is the one where it is not routine.
+
+`driveSyncSettled()` is the decision, pure and asserted: same file, both
+stamps present, stamps equal. Anything else — no record, a different file,
+differing stamps, a stamp that could not be read — returns false and the full
+dialog runs, because the cost of asking needlessly is a dialog and the cost of
+skipping wrongly is a merge that never happened. Settled means "Drive has not
+moved", not "the two are level", so a `driveDirtySince` left by an earlier
+session is still pushed on the way through.
+
+It also saves downloading the whole bank on every reconnect, since the
+`modifiedTime` check is a metadata request and `pull()` no longer runs.
+
+### Which action a dialog lands on
+
+Merge is the only non-destructive answer, so it carries `kind: 'primary'`
+everywhere the two copies meet, and "choose one side" never does. On a phone
+that marking was being undone by the layout: `.modal-f` is a right-aligned row
+that wraps, which put Cancel and the destructive escape hatch on the dominant
+first line and dropped the primary onto a second line by itself. Under 880px
+the actions now stack full width, `column-reverse` — every dialog in the app
+puts its primary action last, so that lifts merge to the top and leaves Cancel
+at the bottom, where a phone expects it.
+
 ## Fitting the rail on a phone
 
 The rail is one column of fixed chrome wrapped around one scrolling `.nav`, so

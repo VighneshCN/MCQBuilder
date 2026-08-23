@@ -243,6 +243,14 @@ body:has(.game-root) .view{padding-bottom:16px}
      being below the fold. A keyboard-shortcuts dialog on a device with no
      keyboard was never worth the space it took. */
   .rail-foot{display:none}
+  /* A dialog's actions are laid out in a row, right-aligned, and on a phone
+     that row wraps — which put Cancel and the destructive escape hatch on the
+     dominant first line and dropped the primary, safe action onto a second
+     one by itself. Stack them instead, full width. Every dialog in the app
+     puts its primary action last, so column-reverse lifts that one to the top
+     and leaves Cancel at the bottom, which is where a phone expects it. */
+  .modal-f{flex-direction:column-reverse;flex-wrap:nowrap;align-items:stretch;gap:8px}
+  .modal-f .btn{width:100%}
 }
 /* Older and smaller phones only. Above this the rail already fits with a full
    44px touch target on every row, and there is no reason to shrink it; below
@@ -15365,6 +15373,20 @@ const FileStore = {
   }
 };
 
+/** Can a reconnect skip the reconciliation dialog? Only when this browser is
+    demonstrably looking at the same file it last synced with, unmoved since.
+    Every other answer — no record, a different file, a stamp that differs, a
+    stamp that could not be read — is "ask", because the cost of asking
+    needlessly is a dialog and the cost of skipping wrongly is a merge that
+    never happened. */
+function driveSyncSettled(o) {
+  const i = o || {};
+  if (!i.knownFileId || !i.fileId) return false;
+  if (i.knownFileId !== i.fileId) return false;
+  if (!i.syncedStamp || !i.remoteStamp) return false;
+  return i.syncedStamp === i.remoteStamp;
+}
+
 const READONLY_MSG = 'The app is read-only because it cannot reach your data file. Reconnect it from the top bar, and nothing will be lost.';
 
 /* Hand the DAL its hooks. fsmeta is exempt from the veto: storing the handle
@@ -15690,6 +15712,27 @@ const DriveSync = {
       outright — connect() then rolls the whole attempt back rather than
       leaving a half-decided connection. */
   async _reconcileOnConnect() {
+    // Reconnecting to the same file this browser last synced with, which has
+    // not been touched since. There is genuinely nothing to reconcile, so
+    // asking is worse than useless: on a browser that cannot keep a Google
+    // token across sessions — Safari, mainly — it put a dialog whose other
+    // routes are destructive in front of somebody every single day, which is
+    // exactly how a person learns to tap through it without reading.
+    // init()'s silent-reconnect path has always made this comparison; connect()
+    // simply never did.
+    const knownFileId = await FileStore.meta('driveFileId');
+    const syncedStamp = await FileStore.meta('driveModifiedTime');
+    if (knownFileId && syncedStamp) {
+      let remoteStamp = null;
+      try { remoteStamp = await this._fetchModifiedTime(); } catch (e) { remoteStamp = null; }
+      if (driveSyncSettled({ knownFileId, fileId: this.fileId, syncedStamp, remoteStamp })) {
+        this.lastSyncedModifiedTime = remoteStamp;
+        // An edit from a previous session that never reached Drive still has
+        // to go now — settled means "Drive has not moved", not "we are level".
+        if (await FileStore.meta('driveDirtySince')) { this._pendingChange = true; await this.maybePush(true); }
+        return true;
+      }
+    }
     // By this point fileId always names a real Drive file — either found by
     // search or just created empty — so a pull() failure here is never "no
     // file yet"; it's a real problem (network error, or a newer app version
@@ -22945,6 +22988,43 @@ test('The note in the box says the things that would otherwise be a support mess
   // A bundle missing the launcher says so rather than leaving a dead reference.
   const partial = startHereText({ version: '1', when: 'now', missing: ['serve.ps1'] });
   assert(partial.indexOf('does not include serve.ps1') > 0, partial.slice(-200));
+});
+
+test('A reconnect only skips the merge question when it is genuinely settled', () => {
+  const F = 'file-abc';
+  // The one case that may skip: same file, and Drive has not moved since the
+  // stamp this browser recorded at its last sync.
+  assert(driveSyncSettled({ knownFileId: F, fileId: F, syncedStamp: 'T1', remoteStamp: 'T1' }));
+
+  // Everything else asks. Skipping wrongly means a merge that never happens,
+  // so every unknown resolves towards the dialog.
+  assert(!driveSyncSettled({ knownFileId: F, fileId: F, syncedStamp: 'T1', remoteStamp: 'T2' }), 'Drive moved elsewhere');
+  assert(!driveSyncSettled({ knownFileId: 'other', fileId: F, syncedStamp: 'T1', remoteStamp: 'T1' }), 'a different file than we synced with');
+  assert(!driveSyncSettled({ knownFileId: F, fileId: F, syncedStamp: null, remoteStamp: 'T1' }), 'never synced — first connect must ask');
+  assert(!driveSyncSettled({ knownFileId: F, fileId: F, syncedStamp: 'T1', remoteStamp: null }), 'could not read Drive — assume nothing');
+  assert(!driveSyncSettled({ knownFileId: null, fileId: F, syncedStamp: 'T1', remoteStamp: 'T1' }), 'no remembered file');
+  assert(!driveSyncSettled({ knownFileId: F, fileId: null, syncedStamp: 'T1', remoteStamp: 'T1' }), 'no file in hand');
+  assert(!driveSyncSettled({}), 'and nothing at all is not settled');
+  assert(!driveSyncSettled(null), 'nor does it throw on nothing');
+});
+
+test('Merging is the primary action wherever the two copies meet', () => {
+  // Merge is the only non-destructive answer, so it is what a person should
+  // land on by default and what a mis-tap should reach. The layout that puts
+  // it there is CSS; what is asserted here is that it is marked primary and
+  // that the destructive routes never are.
+  const dialogs = [
+    { name: 'Drive already has a bank', src: DriveSync._reconcileOnConnect.toString() },
+    { name: 'Drive changed elsewhere', src: DriveSync.init.toString() }
+  ];
+  dialogs.forEach(d => {
+    const i = d.src.indexOf("value: 'merge'");
+    assert(i > 0, d.name + ' offers a merge');
+    assert(d.src.slice(i, i + 60).indexOf("kind: 'primary'") > 0, d.name + ': merge is the primary action');
+    // and the escape hatch is not dressed up as the safe one
+    const c = d.src.indexOf("value: 'choose'");
+    if (c > 0) assert(d.src.slice(c, c + 60).indexOf("kind: 'primary'") < 0, d.name + ': choosing one side is never primary');
+  });
 });
 
 test('Every disconnected state offers a way out, on every browser', () => {
