@@ -4074,6 +4074,66 @@ function weaknessScore(g, minSample) {
   return { score: Math.round(s), why };
 }
 
+/* ---------- how ready each part of the syllabus is ----------
+   A daily question count is blind to the blueprint. Somebody can hit it for
+   three weeks entirely inside Domain 1 and reach the exam with Domain 5 — 26%
+   of a CISA paper — barely touched, having been told "on track" the whole way.
+
+   What matters is not which domain is furthest behind, but which shortfall
+   costs the most marks. A domain worth 26% that is 40% ready is a bigger
+   problem than one worth 12% that is 20% ready, and only weighting says so:
+
+       risk = share of the paper × how much of that domain is not yet solid
+
+   Weights are read as proportions rather than assumed to total 100, the same
+   way weightedPick() reads them, because nothing stops somebody typing five
+   numbers that come to 96.                                                 */
+function domainReadiness(pool, blueprint, masteryTarget) {
+  const target = masteryTarget != null ? masteryTarget : 75;
+  const bp = (blueprint || []).filter(d => d && d.id != null);
+  const totalW = bp.reduce((t, d) => t + Math.max(0, Number(d.weight) || 0), 0);
+  const rows = new Map();
+  bp.forEach(d => rows.set(d.id, {
+    id: d.id, name: d.name || d.id, weight: Math.max(0, Number(d.weight) || 0),
+    total: 0, unseen: 0, shaky: 0, solid: 0
+  }));
+  // Everything the blueprint does not name lands here, including questions
+  // filed under a domain that has since been deleted.
+  rows.set(null, { id: null, name: 'Unmapped', weight: 0, total: 0, unseen: 0, shaky: 0, solid: 0 });
+
+  (pool || []).forEach(q => {
+    const r = rows.get(rows.has(q.domainId) ? q.domainId : null);
+    r.total++;
+    const st = (q && q.stats) || {};
+    if (!st.attempts) r.unseen++;
+    // Below the mastery target is "shaky", and mastery already docks a correct
+    // answer you marked as a guess — so a lucky right answer lands here, not
+    // in solid. That is the whole reason this is not a headcount.
+    else if ((st.mastery || 0) < target) r.shaky++;
+    else r.solid++;
+  });
+
+  return Array.from(rows.values()).map(r => {
+    r.share = totalW ? r.weight / totalW : 0;
+    r.ready = r.total ? r.solid / r.total : 0;
+    r.coverage = r.total ? (r.total - r.unseen) / r.total : 0;
+    // A domain with no questions at all is a hole in the BANK, not a hole in
+    // the revision — no amount of practice closes it, because there is nothing
+    // to practise. Left at zero risk and flagged instead: calling it "0% ready,
+    // practise this" would send somebody to a session that cannot be built,
+    // when what they need is to import questions for it.
+    r.empty = r.total === 0 && r.share > 0;
+    r.risk = r.total ? r.share * (1 - r.ready) : 0;
+    return r;
+  }).sort((a, b) =>
+    b.risk - a.risk ||
+    // Between two equally risky domains, the one you know least about first:
+    // material never seen is a bigger unknown than material seen and failed.
+    b.unseen - a.unseen ||
+    b.total - a.total ||
+    String(a.id == null ? '￿' : a.id).localeCompare(String(b.id == null ? '￿' : b.id)));
+}
+
 /* ---------- what is left, and by when ----------
    Every measure in this app so far answers "how am I doing". A candidate in
    the last month is asking something else: what has to happen between now and
@@ -4114,6 +4174,23 @@ function studyPlan(opts) {
   // day, not none, and dividing by none is how a target becomes Infinity.
   const daysLeft = gap >= 0 ? gap + 1 : 0;
   const perDay = daysLeft > 0 ? Math.ceil(backlog / daysLeft) : backlog;
+
+  /* Two phases, because a plan that spends every day meeting new material and
+     none of it fixing what went wrong is not a revision plan. Coverage first —
+     see everything once — then consolidation. Sixty per cent of the run-in for
+     the first, which leaves a real stretch at the end for the questions that
+     actually need work rather than a scramble. */
+  const coverageDays = Math.max(1, Math.round(daysLeft * 0.6));
+  const coverageBy = todayKey(addDays(Math.max(0, coverageDays - 1)));
+  const unseenPerDay = unseen ? Math.min(unseen, Math.ceil(unseen / coverageDays)) : 0;
+  const phase = gap < 0 ? 'past' : !backlog ? 'clear' : unseen ? 'coverage' : 'consolidate';
+
+  const byDomain = domainReadiness(pool, o.blueprint, target);
+  // The highest-risk domain that still has something to do. A domain carrying
+  // no blueprint weight can never be the focus — nothing is riding on it — so
+  // an entirely unfiled bank simply has no focus, which is correct: there is
+  // no domain information to steer by yet.
+  const focus = byDomain.find(r => r.total > 0 && r.risk > 0) || null;
 
   const attempts = o.attempts || [];
   // DISTINCT questions, because the backlog's unit is the question. Answering
@@ -4175,7 +4252,10 @@ function studyPlan(opts) {
     set: true, examDate: o.examDate, today, daysLeft, past: gap < 0,
     unseen, weak, dueBefore, settled, backlog, perDay,
     doneToday, remainingToday: Math.max(0, perDay - doneToday),
-    recentPerDay, projected, state, verdict
+    recentPerDay, projected, state, verdict,
+    phase, coverageDays, coverageBy, unseenPerDay, byDomain, focus,
+    // Domains the blueprint expects and the bank holds nothing for.
+    emptyDomains: byDomain.filter(r => r.empty)
   };
 }
 
@@ -5797,7 +5877,8 @@ ROUTES.dashboard = async (root) => {
 
   const plan = studyPlan({
     examDate: Settings.get('examDate'), masteryTarget: Settings.get('masteryTarget'),
-    pool: active, casePool: caseActive, attempts
+    pool: active, casePool: caseActive, attempts,
+    blueprint: State.course.blueprint
   });
 
   await band('Dashboard', 'Position at a glance', [
@@ -5963,7 +6044,7 @@ function studyPlanCard(plan) {
 
   const rows = [
     plan.unseen ? [plan.unseen, 'never attempted'] : null,
-    plan.weak ? [plan.weak, 'attempted, still below your mastery target'] : null,
+    plan.weak ? [plan.weak, 'attempted, still shaky — including ones you got right by guessing'] : null,
     plan.dueBefore ? [plan.dueBefore, 'mastered, but falling due for review before the day'] : null
   ].filter(Boolean);
 
@@ -6014,7 +6095,60 @@ function studyPlanCard(plan) {
       h('div', {
         class: 'notice small ' + (plan.state === 'behind' ? 'warn' : plan.state === 'clear' || plan.state === 'ontrack' ? 'ok' : ''),
         style: 'margin:0'
-      }, plan.verdict)
+      }, plan.verdict),
+
+      // What today's number should be spent on. A count with no direction is
+      // how somebody spends three weeks inside one domain and still reads
+      // "on track" every morning.
+      plan.phase === 'coverage' ? h('div', { class: 'small muted', style: 'margin:0' },
+        // "1 question of today's 1" is not a sentence anybody wrote on purpose.
+        (plan.unseenPerDay >= plan.perDay
+          ? 'Today’s whole share should be questions you have never seen'
+          : 'Aim for ' + plan.unseenPerDay + ' of today’s ' + plan.perDay + ' to be questions you have never seen') +
+        ' — that covers the whole bank once by ' +
+        fmtDate(dateKeyToLocal(plan.coverageBy).toISOString()) + ', leaving the rest of the run-in to fix what needs fixing.')
+        : plan.phase === 'consolidate' ? h('div', { class: 'small muted', style: 'margin:0' },
+          'You have seen every question at least once. What is left is making it stick: ' +
+          plan.weak + ' still shaky, ' + plan.dueBefore + ' falling due for review before the day.')
+          : null,
+
+      // A different problem with a different fix, so it gets its own line.
+      plan.emptyDomains.length ? h('div', { class: 'notice warn small', style: 'margin:0' },
+        'Your bank has no questions at all for ' +
+        plan.emptyDomains.map(r => r.name + ' (' + Math.round(r.share * 100) + '% of the paper)').join(', ') +
+        '. No amount of practice covers that — those need importing.') : null,
+
+      plan.focus ? h('div', { class: 'row wrap', style: 'gap:10px;align-items:center' }, [
+        h('span', { class: 'small', style: 'flex:1;min-width:230px' }, [
+          'Furthest behind for what it is worth: ',
+          h('b', { text: plan.focus.name }),
+          ' — ' + Math.round(plan.focus.share * 100) + '% of the paper, ' +
+          Math.round(plan.focus.ready * 100) + '% of it solid.'
+        ]),
+        h('button', {
+          class: 'btn sm', text: 'Practise that',
+          onclick: () => configureMode('domain', { domains: [plan.focus.id] })
+        })
+      ]) : null,
+
+      // Folded: the headline above is the actionable part, and this is the
+      // evidence behind it for anybody who wants to look.
+      plan.byDomain.filter(r => r.total).length > 1 ? h('details', {}, [
+        h('summary', { class: 'small', style: 'cursor:pointer', text: 'Readiness by domain' }),
+        h('div', { class: 'stack', style: 'gap:5px;margin-top:8px' },
+          plan.byDomain.filter(r => r.total).map(r => h('div', {}, [
+            h('div', { class: 'row', style: 'gap:8px' }, [
+              h('span', { class: 'docnum', text: r.id || '—' }),
+              h('span', { class: 'small', style: 'flex:1', text: String(r.name).split(' ').slice(0, 6).join(' ') }),
+              h('span', { class: 'tiny dim nowrap', text: r.share ? Math.round(r.share * 100) + '% of paper' : 'not in the blueprint' }),
+              h('span', { class: 'num small', style: 'min-width:38px;text-align:right', text: Math.round(r.ready * 100) + '%' })
+            ]),
+            h('div', { class: 'bar', style: 'margin-top:3px' },
+              [h('i', { class: r.ready >= 0.75 ? 'g' : r.ready >= 0.4 ? 'a' : 'r', style: 'width:' + Math.round(r.ready * 100) + '%' })]),
+            r.unseen ? h('div', { class: 'tiny dim', text: r.unseen + ' never attempted · ' + r.shaky + ' shaky · ' + r.solid + ' solid' })
+              : h('div', { class: 'tiny dim', text: r.shaky + ' shaky · ' + r.solid + ' solid' })
+          ])))
+      ]) : null
     ])
   ]);
 }
@@ -6378,7 +6512,11 @@ function compositionEditor(cfg, pool, filters) {
   return wrap;
 }
 
-async function configureMode(mode) {
+/** `preset` lets a caller open a mode with a filter already made — the
+    dashboard's "practise the domain you are furthest behind on" button being
+    the only one so far. Everything remains editable once the dialog is open;
+    this is a starting point, never a lock. */
+async function configureMode(mode, preset) {
   const all = await State.questions();
   const isCaseMode = !!(MODES[mode] && MODES[mode].caseBank);
   // Titles for the picker, and the count of askable questions each scenario
@@ -6391,6 +6529,7 @@ async function configureMode(mode) {
   const allCaseQs = all.filter(isCaseQuestion);
   const body = h('div', { class: 'stack' });
   const f = { domains: [], topics: [], sources: [], modules: [], difficulty: [], batches: [], caseStudies: [] };
+  if (preset && preset.domains) f.domains = preset.domains.filter(Boolean);
 
   const mockOpening = mockOpeningFor(pool.length + casePool.length,
     Settings.get('mockCount'), Settings.get('mockMinutes'));
@@ -6444,7 +6583,9 @@ async function configureMode(mode) {
     const box = h('div', { class: 'seg' });
     items.forEach(it => {
       box.appendChild(h('button', {
-        class: 'chip', 'aria-pressed': 'false',
+        // Reads its state from the filter rather than assuming it starts empty,
+        // so a preset arrives with its chip already lit.
+        class: 'chip', 'aria-pressed': arr.indexOf(it.v) >= 0 ? 'true' : 'false',
         onclick: (e) => {
           const on = e.currentTarget.getAttribute('aria-pressed') === 'true';
           e.currentTarget.setAttribute('aria-pressed', on ? 'false' : 'true');
