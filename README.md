@@ -321,6 +321,18 @@ and key the app reads"** lists every accepted heading and JSON key — generated
 from the parser's own table, so it cannot advertise a column the app then
 ignores.
 
+### Protected PDFs
+
+A PDF that opens in your reader without asking for a password imports here the
+same way, even when it is marked as protected. Study material, exam papers and
+bank statements are routinely encrypted against *copying and printing* while
+carrying an empty user password — nothing is locked to you, and the app now
+derives the key and reads them. Revisions 2 to 6 are supported, RC4 and AES
+alike.
+
+A PDF that genuinely needs a password to open is refused, and says so, which is
+a different sentence from the one above — the app can tell the two apart.
+
 ### When a PDF will not read
 
 The app decodes PDF text itself, with no external library. That covers most
