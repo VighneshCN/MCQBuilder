@@ -354,7 +354,11 @@ body:has(.game-root) .view{padding-bottom:16px}
 .game-root .btn.ghost:hover{background:rgba(255,255,255,.14);color:#fff;border-color:rgba(255,255,255,.55)}
 
 /* balloon pop */
-.bp-hud{position:relative;z-index:15;display:flex;gap:10px;padding:10px;align-items:flex-start}
+/* wrap, because .bp-side is flex:none: anything that does not fit is clipped
+   by .game-root's overflow:hidden rather than wrapping, with no scrollbar and
+   no way to reach it. That is how the score and the Quit button ended up off
+   the right edge of a phone. */
+.bp-hud{position:relative;z-index:15;display:flex;flex-wrap:wrap;gap:10px;padding:10px;align-items:flex-start}
 .bp-card{flex:1;min-width:0;background:rgba(12,8,32,.72);border:1.5px solid rgba(255,255,255,.22);
   border-radius:var(--r-lg);padding:9px 13px;backdrop-filter:blur(3px)}
 .bp-card .eyebrow{color:rgba(255,255,255,.6)}
@@ -491,9 +495,17 @@ body:has(.game-root) .view{padding-bottom:16px}
      the 170px is the chrome above the stage, which varies with how the band
      above wraps, so fitStage() measures the real offset and trims the stage
      to end above the fold. */
-  .game-root{min-height:calc(100vh - 170px)}
+  /* dvh, not vh: on iOS 100vh is the height with the address bar HIDDEN, so a
+     vh-sized stage is taller than what you can actually see and the launcher
+     sits below the fold. dvh is the height you have right now. */
+  .game-root{min-height:calc(100dvh - 150px)}
   .bp-hud{padding:7px}
-  .bp-legend{grid-template-columns:1fr;gap:3px;max-height:33vh;overflow-y:auto}
+  /* Hearts, score and Quit go on their own full-width strip above the
+     question, so the question gets the whole width instead of competing with
+     an incompressible column beside it. */
+  .bp-side{order:1;flex-direction:row;align-items:center;justify-content:space-between;width:100%;gap:8px}
+  .bp-card{order:2;flex:1 1 100%}
+  .bp-legend{grid-template-columns:1fr;gap:3px;max-height:30dvh;overflow-y:auto}
   .bp-leg-t{font-size:11.5px}
   .bp-stem{font-size:13.5px}
   .bp-launcher{width:62px;height:54px}
@@ -18399,8 +18411,8 @@ const GAMES = [
     general: true,
     optionCount: null,
     minQuestions: 8,
-    blurb: 'Each question sends its options up as balloons. Aim, fire, and pop the correct one — the clock is the balloon leaving the screen.',
-    fits: 'Any subject. Each round is held still for as long as its text needs before the balloons lift off, so questions written in long sentences play as fairly as short ones — they simply get a longer look first.'
+    blurb: 'Each question sends its options up as balloons. Ninety seconds to read, then a minute to aim and fire before the last one gets away.',
+    fits: 'Any subject, and any length of question. Every round runs to the same clock — a minute and a half to read it with the balloons held down, then two thirty-second rises — so a question written in long sentences plays exactly as fairly as a short one. Miss a balloon on the way up and it comes back round once.'
   }
 ];
 
@@ -19341,10 +19353,13 @@ const BALLOON_COLORS = [
   { body: '#f783ac', knot: '#c2255c' }, { body: '#63e6be', knot: '#1a9a6e' }
 ];
 
+/* Every question now gets the same hundred and fifty seconds, so a tier no
+   longer buys speed — it buys length. Five lives throughout: one heart per
+   wrong answer, and the game ends when the last one goes. */
 const BALLOON_TIERS = {
-  gentle: { label: 'Gentle', rounds: 8,  lives: 4, floatMin: 15, floatMax: 21,   read: 1.15, desc: 'A long read, slow floats, four lives' },
-  brisk:  { label: 'Brisk',  rounds: 10, lives: 3, floatMin: 11, floatMax: 15,   read: 1.00, desc: 'A short read, then they go' },
-  frantic:{ label: 'Frantic',rounds: 12, lives: 3, floatMin: 7.5, floatMax: 10.5, read: 0.80, desc: 'Barely a glance before liftoff' }
+  gentle: { label: 'Short',  rounds: 8,  lives: 5, desc: 'Eight questions' },
+  brisk:  { label: 'Medium', rounds: 10, lives: 5, desc: 'Ten questions' },
+  frantic:{ label: 'Long',   rounds: 12, lives: 5, desc: 'Twelve questions' }
 };
 
 /* ---------- reading the round before it moves ----------
@@ -19366,40 +19381,26 @@ const BALLOON_TIERS = {
     tag cutoff ended up unrelated to the 60-character ranking cut. */
 const SHORT_OPTION_CUT = 60;
 
-/* Adult silent reading of non-fiction runs about 238 wpm, and an English word
-   averages ~5 characters plus a space, so one pass is roughly 42 ms/char.
-   perChar is 23 — about 55% of a pass — because the beat is a HEAD START, not
-   the whole read: the float and the legend carry the rest, and the stem never
-   leaves the card. stemWeight is 0.4 for the same reason. */
-const BP_READ = { base: 500, perChar: 23, stemWeight: 0.4, min: 1400, max: 5600, first: 800 };
-const BP_MS_PER_CHAR = 42;
+/* One shape for every question, whatever its length.
 
-function bpOptionChars(options) {
-  return (options || []).reduce((n, o) => n + String((o && o.text) || '').length, 0);
-}
+   Ninety seconds to read it with the balloons held at the bottom, then sixty
+   seconds of answering as they make two thirty-second rises — up and out of
+   frame, then in again from below. A hundred and fifty seconds in all.
 
-/** How long the round is held still before liftoff. */
-function bpReadMs(stem, options, tierRead, first) {
-  const chars = bpOptionChars(options) + String(stem || '').length * BP_READ.stemWeight;
-  const raw = (BP_READ.base + chars * BP_READ.perChar) * (tierRead || 1) + (first ? BP_READ.first : 0);
-  return Math.round(clamp(raw, BP_READ.min, BP_READ.max));
-}
+   What was here before scaled both beats from the question's own length and
+   capped the reading at 5.6 seconds. That is a glance, not a read: a CISA
+   stem with four full-sentence options runs past 400 characters, and nobody
+   is reading and deciding on that inside six seconds. The scaling was
+   carefully built and it was solving the wrong problem, so it is gone rather
+   than retuned — one number a player can learn beats three they cannot.
 
-/** Float seconds — ONE value for the whole round, placed across the tier's own
-    band by how much text the round carries. Four balloons at four different
-    random speeds is why the deadline was previously unreadable. */
-const BP_FLOAT = { lo: 56, hi: 300 };
-function bpFloatSec(tier, stem, options, readMs) {
-  const c = bpOptionChars(options);
-  const t = clamp((c - BP_FLOAT.lo) / (BP_FLOAT.hi - BP_FLOAT.lo), 0, 1);
-  let dur = tier.floatMin + t * (tier.floatMax - tier.floatMin);
-  // A floor, so no round can offer less than one full read plus two seconds to
-  // aim. On an ordinary bank this never binds; it exists so that one
-  // pathologically long question cannot produce a round nobody could answer.
-  const need = (c + String(stem || '').length * BP_READ.stemWeight) * BP_MS_PER_CHAR / 1000;
-  dur = Math.max(dur, need - (readMs || 0) / 1000 + 2);
-  return Math.min(dur, tier.floatMax * 1.6);
-}
+   A pass is thirty seconds because the balloon has to be catchable twice: one
+   long slow rise gives a player who looks up late no second chance. */
+const BP_ROUND = { readMs: 90000, passMs: 30000, passes: 2 };
+/** The whole answering window, once the balloons are up. */
+function bpLiveMs() { return BP_ROUND.passMs * BP_ROUND.passes; }
+/** A whole round, reading included — what a player experiences as "per question". */
+function bpRoundMs() { return BP_ROUND.readMs + bpLiveMs(); }
 
 /** Pick the round list from a SHORT-FIRST ranked pool.
     Taking a stable slice would keep only the short group — the hard filter we
@@ -19468,12 +19469,20 @@ async function runBalloonPop(questions) {
   // which of those it was in.
   let phase = 'idle';
   let readTimer = null, clockTimer = null, clockEnd = 0, clockTotal = 0;
+  /* The pending advance out of a round. It is a promise rather than a timer
+     now, because what ends a round is the player closing the answer note.
+     A promise cannot be cancelled, so the token says whether the resolution
+     that eventually arrives is still the one we want: closing the note to
+     quit resolves it exactly as closing it to continue does, and without
+     this the player would be dropped into the next question on the way out. */
+  let advanceGuard = null, advanceToken = 0;
   let readMs = 0, roundDur = 0, tagPlan = 'none', still = false, skipOn = false;
 
   const audio = GameAudio();
 
   function stopEverything() {
     if (readTimer) { clearTimeout(readTimer); readTimer = null; }
+    closeAnswerNote();
     if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
     disarmSkip();
     balloons.forEach(b => { if (b.el) b.el.remove(); });
@@ -19540,8 +19549,9 @@ async function runBalloonPop(questions) {
     // The options are the balloons. Nothing invented, nothing borrowed from
     // another question — the distractors are the examiner's own.
     const opts = shuffle(current.options.slice());
-    readMs = bpReadMs(current.stem, current.options, tier.read, round === 0);
-    roundDur = bpFloatSec(tier, current.stem, current.options, readMs);
+    readMs = BP_ROUND.readMs;
+    // One pass. The CSS repeats it; the clock below counts all of them.
+    roundDur = BP_ROUND.passMs / 1000;
     still = matchMedia('(prefers-reduced-motion:reduce)').matches;
     // A tag is worth ~50px of balloon, and on a small phone with a long
     // question that is exactly the height the balloon does not have — it ends
@@ -19582,7 +19592,7 @@ async function runBalloonPop(questions) {
       b.el.style.animationDelay = (i * 90) + 'ms';
       b.el.style.animationPlayState = 'running';
     });
-    startClock(Math.round(roundDur * 1000), 'live');
+    startClock(bpLiveMs(), 'live');
   }
 
   function timeUp() {
@@ -19647,6 +19657,15 @@ async function runBalloonPop(questions) {
     }
   }
   function pauseClock() { if (clockTimer) { clearInterval(clockTimer); clockTimer = null; } }
+  /** Dismiss the answer note if one is open, without advancing. Quitting mid
+      note would otherwise leave it on screen over whatever came next. */
+  function closeAnswerNote() {
+    if (!advanceGuard) return;
+    advanceGuard = null;
+    advanceToken++;   // whatever the note resolves with, it is no longer ours
+    const box = document.querySelector('.modal-bg .modal');
+    if (box && box._close) box._close(null);
+  }
 
   function drawStage() {
     host.textContent = '';
@@ -19827,7 +19846,8 @@ async function runBalloonPop(questions) {
       class: 'bp-balloon is-ready', id: id,
       // One duration for the whole round. Four balloons at four random speeds
       // is why the deadline used to be unreadable.
-      style: 'left:' + left + 'px;animation-duration:' + roundDur + 's;--tagw:' + g.tagW + 'px'
+      style: 'left:' + left + 'px;animation-duration:' + roundDur + 's;' +
+        'animation-iteration-count:' + BP_ROUND.passes + ';--tagw:' + g.tagW + 'px'
     }, [
       h('div', { class: 'bp-body', style: 'background:' + col.body }, h('span', { class: 'bp-letter', text: opt.letter })),
       h('div', { class: 'bp-knot', style: 'background:' + col.knot }),
@@ -19938,18 +19958,61 @@ async function runBalloonPop(questions) {
         h('span', { style: 'font-weight:700', text: good ? 'Correct' : (msg || 'Not that one') }),
         h('span', { class: 'tiny dim', style: 'min-width:0', text: good ? '' : '— it was ' + current.correctText })
       ]));
+      // No explanation here any more. It used to be cut at 220 characters with
+      // no ellipsis and no way to see the rest; the answer note now carries it
+      // whole, and two copies of a truncated one helped nobody.
       if (current.explanation) {
-        verdict.appendChild(h('div', { class: 'bp-verdict-why', text: current.explanation.slice(0, 220) }));
+        verdict.appendChild(h('div', { class: 'bp-verdict-why', text: 'The full explanation is in the note.' }));
       }
     }
 
     // A little longer than before, because the correct balloon now glides back
     // into frame over 450ms and the hold has to outlast that.
-    const hold = current.explanation ? 3200 : (good ? 1600 : 2600);
-    setTimeout(() => {
+    // The round now waits for the player, not for a stopwatch. A timed hold
+    // was always a guess at reading speed, and it guessed badly for exactly
+    // the questions whose explanation was worth reading — which is also why
+    // the explanation used to be cut off at 220 characters here.
+    showAnswerNote(good, msg);
+  }
+
+  /** The note that ends a round. Nothing advances until it is dismissed. */
+  function showAnswerNote(good, msg) {
+    const body = h('div', { class: 'stack', style: 'gap:12px' }, [
+      h('div', { class: 'row', style: 'gap:9px;align-items:baseline' }, [
+        h('span', { style: 'font-size:19px', text: good ? '✔' : '✘' }),
+        h('div', {}, [
+          h('div', { style: 'font-weight:700', text: good ? 'Correct' : (msg || 'Not that one') }),
+          good ? null : h('div', { class: 'small muted', style: 'margin-top:2px', text: 'The answer was ' + current.correctText })
+        ].filter(Boolean))
+      ]),
+      h('div', { class: 'notice small' }, current.stem),
+      good ? h('div', { class: 'small' }, [h('b', { text: 'You chose: ' }), h('span', { text: current.correctText })]) : null,
+      current.explanation
+        ? h('div', {}, [
+          h('div', { class: 'eyebrow', style: 'margin-bottom:4px', text: 'Why' }),
+          // In full. The card behind still shows the trimmed version; this is
+          // the one place the whole thing is readable.
+          h('div', { class: 'small', style: 'line-height:1.5', text: current.explanation })
+        ])
+        : h('div', { class: 'tiny dim', text: 'This question carries no explanation.' })
+    ].filter(Boolean));
+
+    const last = lives <= 0;
+    const token = ++advanceToken;
+    advanceGuard = modal({
+      title: last ? 'Out of lives' : 'Question ' + (round + 1) + ' of ' + order.length,
+      body: body,
+      sticky: true,
+      actions: [{ label: last ? 'See how you did' : 'Next question', value: 'go', kind: 'primary' }]
+    }).then(() => {
+      if (token !== advanceToken) return;   // cancelled, not dismissed
+      advanceGuard = null;
+      // The stage can be gone by the time this resolves — the player may have
+      // quit, or navigated away, while the note was open.
+      if (!document.body.contains(host)) return;
       if (lives <= 0) return finish();
       round++; nextRound();
-    }, hold);
+    });
   }
 
   function finish() {
@@ -22429,63 +22492,42 @@ test('The app never advertises question files it has not confirmed', async () =>
 
 const bpQ = (stem, lens) => ({ stem: stem, options: lens.map(n => ({ text: 'x'.repeat(n) })) });
 
-test('The reading beat grows with the text, and stops growing', () => {
-  const t = 1;
-  const a = bpReadMs('Short stem?', [10, 10, 10, 10].map(n => ({ text: 'x'.repeat(n) })), t, false);
-  const b = bpReadMs('Short stem?', [40, 40, 40, 40].map(n => ({ text: 'x'.repeat(n) })), t, false);
-  const c = bpReadMs('Short stem?', [80, 80, 80, 80].map(n => ({ text: 'x'.repeat(n) })), t, false);
-  assert(a < b && b < c, 'more text must buy more reading time (' + a + ', ' + b + ', ' + c + ')');
-  eq(bpReadMs('s', [500, 500, 500, 500].map(n => ({ text: 'x'.repeat(n) })), t, false), BP_READ.max,
-    'a runaway question is capped, not unbounded');
-  eq(bpReadMs('Hi?', [{ text: 'a' }], t, false), BP_READ.min, 'and a trivial one still gets a floor');
-  assert(Number.isInteger(a), 'the beat is a whole number of milliseconds');
+test('Every question gets the same hundred and fifty seconds', () => {
+  eq(BP_ROUND.readMs, 90000, 'ninety seconds to read it');
+  eq(bpLiveMs(), 60000, 'then sixty to answer');
+  eq(BP_ROUND.passes, 2, 'as two rises');
+  eq(BP_ROUND.passMs, 30000, 'of thirty seconds each');
+  eq(bpRoundMs(), 150000, 'a hundred and fifty in all');
 });
 
-test('A frantic round is read faster than a gentle one', () => {
-  const q = bpQ('Which control detects unauthorised change?', [30, 30, 30, 30]);
-  const f = bpReadMs(q.stem, q.options, BALLOON_TIERS.frantic.read, false);
-  const b = bpReadMs(q.stem, q.options, BALLOON_TIERS.brisk.read, false);
-  const g = bpReadMs(q.stem, q.options, BALLOON_TIERS.gentle.read, false);
-  assert(f < b && b < g, 'the tier must change the read, not just the float (' + f + ', ' + b + ', ' + g + ')');
-  assert(bpReadMs(q.stem, q.options, 1, true) > bpReadMs(q.stem, q.options, 1, false),
-    'the first round of a game gets longer, since the stage is new too');
-});
-
-test('Every balloon in a round floats for exactly the same time', () => {
-  // The direct regression for the old per-balloon Math.random(): four balloons
-  // at four speeds is why the deadline could not be read off the screen.
-  const q = bpQ('A question?', [24, 31, 18, 44]);
-  const a = bpFloatSec(BALLOON_TIERS.brisk, q.stem, q.options, 2000);
-  const b = bpFloatSec(BALLOON_TIERS.brisk, q.stem, q.options, 2000);
-  eq(a, b, 'the same round must produce the same float every time it is asked');
-});
-
-test('A float stays inside its tier, and the tiers stay in order', () => {
+test('Neither the question nor the tier moves the clock any more', () => {
+  // The model this replaced scaled both beats from the question's own length
+  // and capped the reading at 5.6 seconds. This is the guard against any of
+  // that quietly growing back.
   Object.keys(BALLOON_TIERS).forEach(k => {
     const t = BALLOON_TIERS[k];
-    [0, 40, 120, 240, 400].forEach(n => {
-      const q = bpQ('Stem?', [n / 4, n / 4, n / 4, n / 4]);
-      const d = bpFloatSec(t, q.stem, q.options, bpReadMs(q.stem, q.options, t.read, false));
-      assert(d >= t.floatMin - 0.001, k + ' at ' + n + ' chars fell below its own floor (' + d + ')');
-      assert(d <= t.floatMax * 1.6 + 0.001, k + ' at ' + n + ' chars ran past its ceiling (' + d + ')');
-    });
+    assert(t.read === undefined, k + ' must not carry a reading multiplier');
+    assert(t.floatMin === undefined && t.floatMax === undefined, k + ' must not carry a float band');
+    eq(t.lives, 5, k + ' gives five lives');
+    assert(t.rounds > 0, k + ' still says how long the game runs');
   });
-  const q = bpQ('Stem?', [26, 26, 26, 26]);
-  const f = bpFloatSec(BALLOON_TIERS.frantic, q.stem, q.options, 0);
-  const g = bpFloatSec(BALLOON_TIERS.gentle, q.stem, q.options, 0);
-  assert(f < g, 'frantic must still be faster than gentle for the same question');
+  assert(typeof self.bpReadMs === 'undefined' && typeof self.bpFloatSec === 'undefined',
+    'and the length-scaling functions are gone, not merely unused');
 });
 
-test('No round is shorter than one read of it', () => {
-  const q = bpQ('A demanding stem that itself runs on for a while?', [150, 150, 150, 150]);
-  const read = bpReadMs(q.stem, q.options, 1, false);
-  const total = read / 1000 + bpFloatSec(BALLOON_TIERS.brisk, q.stem, q.options, read);
-  const need = (bpOptionChars(q.options) + q.stem.length * BP_READ.stemWeight) * BP_MS_PER_CHAR / 1000;
-  assert(total >= need, 'an extreme question must still be answerable (' + total.toFixed(1) + 's for ' + need.toFixed(1) + 's of reading)');
-  // and the floor must not be firing on ordinary questions
-  const easy = bpQ('Short?', [12, 12, 12, 12]);
-  eq(bpFloatSec(BALLOON_TIERS.brisk, easy.stem, easy.options, 1500), BALLOON_TIERS.brisk.floatMin,
-    'a short question should sit exactly at the tier floor, untouched by the safety net');
+test('The reading beat outlasts a full read of the worst question', () => {
+  // Adult silent reading of non-fiction runs about 238 wpm, and an English
+  // word averages six characters with its space — roughly 42 ms a character.
+  // A demanding CISA question is a long stem plus four full-sentence options,
+  // and it has to be readable before a balloon so much as moves.
+  const MS_PER_CHAR = 42;
+  const stem = 'A demanding stem that itself runs on for a considerable while before it gets round to asking anything at all?';
+  const options = [150, 150, 150, 150].map(n => 'x'.repeat(n));
+  const chars = stem.length + options.reduce((n, o) => n + o.length, 0);
+  const need = chars * MS_PER_CHAR;
+  assert(need < BP_ROUND.readMs,
+    'reading time alone must cover it — needs ' + Math.round(need / 1000) + 's, gets ' + BP_ROUND.readMs / 1000 + 's');
+  assert(bpLiveMs() >= 60000, 'and the whole answering window is still there afterwards');
 });
 
 test('Short-option questions genuinely lead the game', () => {
