@@ -313,13 +313,21 @@ it means; anything it did recognise is filled in already. There is also a
 checkbox for "this file has no header row at all", which reads every row
 positionally.
 
-**Start from a template** on the same screen gives you six files already in the
-right shape: a question spreadsheet, a question JSON file, the case-study
-versions of both, and two Word sheets for the PDF route below. A `.csv` opened
-and re-saved as `.xlsx` imports identically. Next to them, **"See every column
-and key the app reads"** lists every accepted heading and JSON key — generated
-from the parser's own table, so it cannot advertise a column the app then
-ignores.
+**Start from a template** on the same screen hands you a file already in the
+right shape. Two kinds — questions and case studies — each in four formats:
+
+| | What it is for |
+| --- | --- |
+| `.csv` | One row per question. Opens anywhere. |
+| `.xlsx` | The same sheet as a real workbook, straight into Excel with no import dialog. |
+| `.json` | The same fields as structured data, for anything generating questions programmatically. |
+| `.docx` | A sheet you fill in and save as PDF — see *When a PDF will not read* below. |
+
+The `.csv` and the `.xlsx` are the same rows written twice, so they import
+identically; pick whichever you would rather edit in. Hovering a format says
+what it is for. Next to them, **"See every column and key the app reads"**
+lists every accepted heading and JSON key — generated from the parser's own
+table, so it cannot advertise a column the app then ignores.
 
 ### Protected PDFs
 
