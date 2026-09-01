@@ -3258,6 +3258,352 @@ async function xlsxToRows(arrayBuffer) {
 function colIndex(ref) { let n = 0; for (let i = 0; i < ref.length; i++) n = n * 26 + (ref.charCodeAt(i) - 64); return Math.max(0, n - 1); }
 function decodeXmlEnt(s) { return String(s).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d)); }
 
+/* ---------- PDF standard security ----------
+   Most "encrypted" PDFs are not locked to anybody. Study material, bank
+   statements and government forms are routinely protected against copying
+   and printing while carrying an EMPTY user password, which is why they open
+   in every reader without a prompt. Their streams are still encrypted on
+   disk, so a decoder that refuses everything with an /Encrypt dictionary
+   turns away a large share of perfectly readable documents.
+
+   This implements the standard security handler for that case: revisions 2
+   to 6, RC4 and AES. Where a real password IS required, it says so, which
+   the blanket refusal could never tell apart.
+
+   MD5 and RC4 are here because the browser does not provide them — both are
+   long dead for security, and both are still what the PDF format specifies.
+   Neither is used to protect anything here; they only reproduce the key
+   derivation the file was written with. AES and the SHA-2 family come from
+   SubtleCrypto.                                                            */
+
+const PDF_PAD = new Uint8Array([
+  0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56,
+  0xFF, 0xFA, 0x01, 0x08, 0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80,
+  0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A]);
+const EMPTY_BYTES = new Uint8Array(0);
+const HAS_SUBTLE = !!(self.crypto && self.crypto.subtle);
+
+function catBytes(list) {
+  let n = 0; list.forEach(a => n += a.length);
+  const out = new Uint8Array(n); let p = 0;
+  list.forEach(a => { out.set(a, p); p += a.length; });
+  return out;
+}
+function bytesEq(a, b, n) {
+  n = n == null ? Math.max(a.length, b.length) : n;
+  if (a.length < n || b.length < n) return false;
+  let diff = 0;
+  for (let i = 0; i < n; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
+/** MD5. Not a security primitive here — the PDF key derivation is defined in
+    terms of it, so reading the file requires reproducing it exactly. */
+const MD5_S = [7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+  5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+  4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+  6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21];
+const MD5_K = (() => {
+  const k = new Int32Array(64);
+  for (let i = 0; i < 64; i++) k[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) | 0;
+  return k;
+})();
+function md5(msg) {
+  const n = msg.length;
+  const total = ((n + 8) >> 6 << 6) + 64;
+  const buf = new Uint8Array(total);
+  buf.set(msg); buf[n] = 0x80;
+  const dv = new DataView(buf.buffer);
+  dv.setUint32(total - 8, (n << 3) >>> 0, true);
+  dv.setUint32(total - 4, Math.floor(n / 536870912) >>> 0, true);
+  let a0 = 0x67452301 | 0, b0 = 0xefcdab89 | 0, c0 = 0x98badcfe | 0, d0 = 0x10325476 | 0;
+  const M = new Int32Array(16);
+  for (let off = 0; off < total; off += 64) {
+    for (let i = 0; i < 16; i++) M[i] = dv.getInt32(off + i * 4, true);
+    let A = a0, B = b0, C = c0, D = d0;
+    for (let i = 0; i < 64; i++) {
+      let F, g;
+      if (i < 16) { F = (B & C) | (~B & D); g = i; }
+      else if (i < 32) { F = (D & B) | (~D & C); g = (5 * i + 1) & 15; }
+      else if (i < 48) { F = B ^ C ^ D; g = (3 * i + 5) & 15; }
+      else { F = C ^ (B | ~D); g = (7 * i) & 15; }
+      F = (F + A + MD5_K[i] + M[g]) | 0;
+      A = D; D = C; C = B;
+      B = (B + ((F << MD5_S[i]) | (F >>> (32 - MD5_S[i])))) | 0;
+    }
+    a0 = (a0 + A) | 0; b0 = (b0 + B) | 0; c0 = (c0 + C) | 0; d0 = (d0 + D) | 0;
+  }
+  const out = new Uint8Array(16), odv = new DataView(out.buffer);
+  odv.setInt32(0, a0, true); odv.setInt32(4, b0, true);
+  odv.setInt32(8, c0, true); odv.setInt32(12, d0, true);
+  return out;
+}
+
+/** RC4, likewise: required to read the file, never to protect one. */
+function rc4(key, data) {
+  const S = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) S[i] = i;
+  let j = 0, t;
+  for (let i = 0; i < 256; i++) {
+    j = (j + S[i] + key[i % key.length]) & 255;
+    t = S[i]; S[i] = S[j]; S[j] = t;
+  }
+  const out = new Uint8Array(data.length);
+  let i = 0; j = 0;
+  for (let k = 0; k < data.length; k++) {
+    i = (i + 1) & 255;
+    j = (j + S[i]) & 255;
+    t = S[i]; S[i] = S[j]; S[j] = t;
+    out[k] = data[k] ^ S[(S[i] + S[j]) & 255];
+  }
+  return out;
+}
+
+async function shaBits(bits, data) {
+  return new Uint8Array(await crypto.subtle.digest('SHA-' + bits, data));
+}
+function aesImport(raw, use) {
+  return crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, [use]);
+}
+/** CBC encrypt with NO padding, for a whole number of blocks. SubtleCrypto
+    always appends a PKCS#7 block; because CBC is sequential, the blocks
+    before it are exactly the unpadded result, so the tail is dropped. */
+async function aesCbcEncryptNoPad(rawKey, iv, data) {
+  if (data.length % 16) throw new Error('aesCbcEncryptNoPad: whole blocks only');
+  const k = await aesImport(rawKey, 'encrypt');
+  const full = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-CBC', iv }, k, data));
+  return full.subarray(0, data.length);
+}
+/** CBC decrypt with NO padding. SubtleCrypto insists on stripping padding,
+    so one extra ciphertext block is forged that decrypts to a full padding
+    block — C' = E(K, C_last XOR 0x10…) — which it then strips, leaving the
+    real plaintext untouched. */
+async function aesCbcDecryptNoPad(rawKey, iv, data) {
+  if (!data.length) return EMPTY_BYTES;
+  if (data.length % 16) throw new Error('aesCbcDecryptNoPad: whole blocks only');
+  const last = data.subarray(data.length - 16);
+  const target = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) target[i] = last[i] ^ 0x10;
+  const forged = await aesCbcEncryptNoPad(rawKey, new Uint8Array(16), target);
+  const ext = new Uint8Array(data.length + 16);
+  ext.set(data); ext.set(forged, data.length);
+  const k = await aesImport(rawKey, 'decrypt');
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, k, ext));
+}
+async function aesCbcDecryptPadded(rawKey, iv, data) {
+  const k = await aesImport(rawKey, 'decrypt');
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, k, data));
+}
+
+/* ---- just enough object syntax to read the /Encrypt dictionary ---- */
+
+/** A PDF string token — hex <...> or literal (...) — as bytes. */
+function pdfStrBytes(tok) {
+  if (tok[0] === '<') {
+    const hex = tok.slice(1, -1).replace(/[^0-9A-Fa-f]/g, '');
+    const out = new Uint8Array(hex.length >> 1);
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+    return out;
+  }
+  const body = tok.slice(1, -1), out = [];
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c !== '\\') { out.push(c.charCodeAt(0) & 255); continue; }
+    const nx = body[++i];
+    if (nx >= '0' && nx <= '7') {
+      let oct = nx;
+      while (oct.length < 3 && body[i + 1] >= '0' && body[i + 1] <= '7') oct += body[++i];
+      out.push(parseInt(oct, 8) & 255); continue;
+    }
+    const map = { n: 10, r: 13, t: 9, b: 8, f: 12 };
+    if (map[nx] != null) { out.push(map[nx]); continue; }
+    if (nx === '\n' || nx === '\r') continue;
+    if (nx != null) out.push(nx.charCodeAt(0) & 255);
+  }
+  return new Uint8Array(out);
+}
+/** The text of the dictionary starting at `from`, matched to its own close.
+    Hex and literal strings are stepped over, so an /O value ending "…>>>"
+    cannot be mistaken for the end of the dictionary. */
+function pdfDictAt(latin, from) {
+  if (from < 0 || latin.substr(from, 2) !== '<<') return null;
+  let depth = 0, i = from;
+  while (i < latin.length) {
+    const c = latin[i];
+    if (c === '(') {
+      let d = 1; i++;
+      while (i < latin.length && d) {
+        if (latin[i] === '\\') { i += 2; continue; }
+        if (latin[i] === '(') d++; else if (latin[i] === ')') d--;
+        i++;
+      }
+      continue;
+    }
+    if (c === '<' && latin[i + 1] === '<') { depth += 1; i += 2; continue; }
+    if (c === '<') { const e = latin.indexOf('>', i); if (e < 0) return null; i = e + 1; continue; }
+    if (c === '>' && latin[i + 1] === '>') { depth -= 1; i += 2; if (!depth) return latin.slice(from, i); continue; }
+    i++;
+  }
+  return null;
+}
+function pdfDictNum(d, key) { const m = new RegExp('/' + key + '\\s+(-?\\d+)(?!\\s+\\d+\\s+R)').exec(d); return m ? parseInt(m[1], 10) : null; }
+function pdfDictName(d, key) { const m = new RegExp('/' + key + '\\s*/([A-Za-z0-9]+)').exec(d); return m ? m[1] : null; }
+function pdfDictBool(d, key) { const m = new RegExp('/' + key + '\\s+(true|false)').exec(d); return m ? m[1] === 'true' : null; }
+const PDF_STR_RX = '(<[0-9A-Fa-f\\s]*>|\\((?:\\\\[\\s\\S]|[^\\\\()])*\\))';
+function pdfDictStr(d, key) {
+  const m = new RegExp('/' + key + '\\s*' + PDF_STR_RX).exec(d);
+  return m ? pdfStrBytes(m[1]) : null;
+}
+/** The first element of the trailer's /ID, which the legacy key derivation
+    mixes in. Absent in some files, where an empty string is what the spec
+    says to use. */
+function pdfFirstId(latin) {
+  const m = new RegExp('/ID\\s*\\[\\s*' + PDF_STR_RX).exec(latin);
+  return m ? pdfStrBytes(m[1]) : EMPTY_BYTES;
+}
+function pdfFindEncryptDict(latin) {
+  const ref = /\/Encrypt\s+(\d+)\s+(\d+)\s+R/.exec(latin);
+  if (ref) {
+    // An incrementally-updated file can define the object more than once;
+    // the last definition is the live one.
+    const re = new RegExp('(?:^|[^0-9])(' + ref[1] + '\\s+' + ref[2] + '\\s+obj)', 'g');
+    let m, at = -1;
+    while ((m = re.exec(latin))) at = m.index + m[0].length - m[1].length;
+    if (at < 0) return null;
+    return pdfDictAt(latin, latin.indexOf('<<', at));
+  }
+  const inline = /\/Encrypt\s*<</.exec(latin);
+  return inline ? pdfDictAt(latin, latin.indexOf('<<', inline.index)) : null;
+}
+
+/* ---- key derivation ---- */
+
+/** Algorithm 2: the file key for revisions 2 to 4, from an empty password. */
+function pdfLegacyKey(O, P, id, R, keyBytes, encryptMetadata) {
+  const pbuf = new Uint8Array(4);
+  new DataView(pbuf.buffer).setUint32(0, P >>> 0, true);
+  const parts = [PDF_PAD, O.subarray(0, 32), pbuf, id];
+  if (R >= 4 && encryptMetadata === false) parts.push(new Uint8Array([255, 255, 255, 255]));
+  let key = md5(catBytes(parts));
+  if (R >= 3) for (let i = 0; i < 50; i++) key = md5(key.subarray(0, keyBytes));
+  return key.subarray(0, keyBytes);
+}
+/** Algorithm 1: the key for one object, from the file key. */
+function pdfObjKey(fileKey, num, gen, aes) {
+  const ext = new Uint8Array(fileKey.length + 5 + (aes ? 4 : 0));
+  ext.set(fileKey);
+  const p = fileKey.length;
+  ext[p] = num & 255; ext[p + 1] = (num >> 8) & 255; ext[p + 2] = (num >> 16) & 255;
+  ext[p + 3] = gen & 255; ext[p + 4] = (gen >> 8) & 255;
+  if (aes) ext.set([0x73, 0x41, 0x6C, 0x54], p + 5);
+  return md5(ext).subarray(0, Math.min(fileKey.length + 5, 16));
+}
+/** Algorithm 2.B, the revision 6 hash: SHA-2 and AES, round on round, until
+    the last byte of the AES output says to stop. */
+async function pdfHash2B(pw, salt, udata) {
+  let K = await shaBits(256, catBytes([pw, salt, udata]));
+  let E = null, i = 0;
+  while (i < 64 || E[E.length - 1] > i - 32) {
+    const one = catBytes([pw, K, udata]);
+    const K1 = new Uint8Array(one.length * 64);
+    for (let r = 0; r < 64; r++) K1.set(one, r * one.length);
+    E = await aesCbcEncryptNoPad(K.subarray(0, 16), K.subarray(16, 32), K1);
+    let sum = 0;
+    for (let j = 0; j < 16; j++) sum += E[j];
+    const mod = sum % 3;
+    K = await shaBits(mod === 0 ? 256 : mod === 1 ? 384 : 512, E);
+    i++;
+  }
+  return K.subarray(0, 32);
+}
+/** Algorithm 4/5: does the EMPTY user password open this file? */
+function pdfEmptyPasswordOpens(R, key, U, id) {
+  if (R === 2) return bytesEq(rc4(key, PDF_PAD), U, 32);
+  let x = md5(catBytes([PDF_PAD, id]));
+  x = rc4(key, x);
+  for (let i = 1; i <= 19; i++) {
+    const k2 = new Uint8Array(key.length);
+    for (let j = 0; j < key.length; j++) k2[j] = key[j] ^ i;
+    x = rc4(k2, x);
+  }
+  return bytesEq(x, U, 16);
+}
+
+const PDF_LOCKED = 'This PDF needs a password to open. Remove the protection in a reader that has the password, or export the text to .docx / .txt.';
+
+/** Reads the /Encrypt dictionary and returns what is needed to decrypt the
+    file's streams, or null when the document is not encrypted after all.
+    Throws, with something a person can act on, when it cannot be opened. */
+async function pdfSecurity(latin) {
+  const dict = pdfFindEncryptDict(latin);
+  if (!dict) return null;
+  const filter = pdfDictName(dict, 'Filter');
+  if (filter && filter !== 'Standard') {
+    throw new Error('This PDF uses a custom security handler (' + filter + '), which this app cannot open. Export the text to .docx / .txt, or use the sheet template under “Start from a template”.');
+  }
+  const V = pdfDictNum(dict, 'V') || 0;
+  const R = pdfDictNum(dict, 'R') || 0;
+  const O = pdfDictStr(dict, 'O'), U = pdfDictStr(dict, 'U');
+  const P = pdfDictNum(dict, 'P');
+  if (!O || !U || P == null) throw new Error(PDF_LOCKED);
+
+  // Which cipher the streams use. V1 and V2 are RC4; from V4 a crypt filter
+  // names it, and /Identity means the streams were left in the clear.
+  let cfm = 'V2';
+  if (V >= 4) {
+    const stmf = pdfDictName(dict, 'StmF') || 'Identity';
+    cfm = stmf === 'Identity' ? 'None' : (pdfDictName(dict, 'CFM') || 'V2');
+  }
+  if (cfm === 'AESV2' || cfm === 'AESV3') {
+    if (!HAS_SUBTLE) throw new Error('This PDF is AES-encrypted, and this browser exposes no crypto API to decrypt it. Open the page over https, or export the text to .docx / .txt.');
+  }
+
+  let fileKey;
+  if (R >= 5) {
+    if (!HAS_SUBTLE) throw new Error('This PDF is AES-encrypted, and this browser exposes no crypto API to decrypt it. Open the page over https, or export the text to .docx / .txt.');
+    if (U.length < 48) throw new Error(PDF_LOCKED);
+    const vSalt = U.subarray(32, 40), kSalt = U.subarray(40, 48);
+    const check = R === 5 ? await shaBits(256, catBytes([EMPTY_BYTES, vSalt]))
+      : await pdfHash2B(EMPTY_BYTES, vSalt, EMPTY_BYTES);
+    if (!bytesEq(check, U, 32)) throw new Error(PDF_LOCKED);
+    const inter = R === 5 ? await shaBits(256, catBytes([EMPTY_BYTES, kSalt]))
+      : await pdfHash2B(EMPTY_BYTES, kSalt, EMPTY_BYTES);
+    const UE = pdfDictStr(dict, 'UE');
+    if (!UE || UE.length < 32) throw new Error(PDF_LOCKED);
+    fileKey = await aesCbcDecryptNoPad(inter, new Uint8Array(16), UE.subarray(0, 32));
+  } else {
+    const bits = pdfDictNum(dict, 'Length') || 40;
+    const keyBytes = R === 2 ? 5 : Math.max(5, Math.min(16, bits >> 3));
+    const id = pdfFirstId(latin);
+    fileKey = pdfLegacyKey(O, P, id, R, keyBytes, pdfDictBool(dict, 'EncryptMetadata'));
+    if (!pdfEmptyPasswordOpens(R, fileKey, U, id)) throw new Error(PDF_LOCKED);
+  }
+  return { cfm, fileKey, R, V };
+}
+
+/** One stream, decrypted. Encryption is applied after compression when a PDF
+    is written, so this runs before inflating. */
+async function pdfDecryptStream(sec, data, num, gen) {
+  if (!sec || sec.cfm === 'None') return data;
+  if (sec.cfm === 'AESV2' || sec.cfm === 'AESV3') {
+    const key = sec.cfm === 'AESV3' ? sec.fileKey : pdfObjKey(sec.fileKey, num, gen, true);
+    if (data.length <= 16) return EMPTY_BYTES;
+    const iv = data.subarray(0, 16);
+    let body = data.subarray(16);
+    if (body.length % 16) body = body.subarray(0, body.length - (body.length % 16));
+    if (!body.length) return EMPTY_BYTES;
+    try { return await aesCbcDecryptPadded(key, iv, body); }
+    catch (e) {
+      // A writer that padded the last block wrongly still holds readable
+      // text; take the blocks and strip the padding by hand.
+      const raw = await aesCbcDecryptNoPad(key, iv, body);
+      const pad = raw[raw.length - 1];
+      return pad >= 1 && pad <= 16 ? raw.subarray(0, raw.length - pad) : raw;
+    }
+  }
+  return rc4(pdfObjKey(sec.fileKey, num, gen, false), data);
+}
+
 /* ---------- PDF → text (best effort, uncompressed + FlateDecode) ---------- */
 async function pdfToText(arrayBuffer) {
   const u8 = new Uint8Array(arrayBuffer);
@@ -3273,7 +3619,11 @@ async function pdfToText(arrayBuffer) {
   if (latin.slice(0, 1024).indexOf('%PDF-') < 0) {
     throw new Error('That file is not a PDF — there is no PDF header in it. A page saved from a download link, or another kind of file renamed to .pdf, looks like this.');
   }
-  if (/\/Encrypt\b/.test(latin)) throw new Error('This PDF is encrypted. Remove the protection, or export the text to .docx / .txt.');
+  // An /Encrypt dictionary is not a refusal. Most protected documents carry
+  // an empty user password — protected against copying, not against being
+  // read — and open in any reader without a prompt. pdfSecurity works out
+  // the key for those, and throws only where a password is genuinely needed.
+  const sec = /\/Encrypt\b/.test(latin) ? await pdfSecurity(latin) : null;
   const out = [];
   const re = /stream\r?\n?/g;
   let m;
@@ -3287,18 +3637,47 @@ async function pdfToText(arrayBuffer) {
     // consuming the object that really follows and dropping it. That is why
     // a multi-page PDF used to yield only its first page.
     const next = end + 'endstream'.length;
-    const header = latin.slice(Math.max(0, m.index - 400), m.index);
-    let data = u8.subarray(start, end);
+    const header = latin.slice(Math.max(0, m.index - 600), m.index);
+    // Which object this stream belongs to. Revisions up to 4 derive a key
+    // per object, so the number and generation in front of it are part of
+    // reading it at all.
+    let objNum = 0, objGen = 0;
+    if (sec) {
+      const objRe = /(\d+)\s+(\d+)\s+obj\b/g;
+      let om, seen = null;
+      while ((om = objRe.exec(header))) seen = om;
+      if (seen) { objNum = parseInt(seen[1], 10); objGen = parseInt(seen[2], 10); }
+    }
+    // Where the data really ends. A directly-written /Length is exact and is
+    // trusted; failing that, the end-of-line the spec puts before the
+    // "endstream" keyword is NOT part of the data and has to come off. Left
+    // on, it reads to an inflater as junk after the compressed stream and
+    // the whole thing is thrown away — which is most streams, because most
+    // writers emit that EOL.
+    // The LAST /Length before the keyword, not the first: the lookback
+    // window can reach back into the previous object, whose length would
+    // cut this stream in the wrong place and lose it.
+    const lenRe = /\/Length\s+(\d+)(?!\s*\d+\s*R)/g;
+    let lenM, lenSeen = null;
+    while ((lenM = lenRe.exec(header))) lenSeen = lenM;
+    let stop = end;
+    if (lenSeen) {
+      const declared = start + parseInt(lenSeen[1], 10);
+      if (declared > start && declared <= end) stop = declared;
+    }
+    if (stop === end) while (stop > start && (u8[stop - 1] === 10 || u8[stop - 1] === 13)) stop--;
+    let data = u8.subarray(start, stop);
+    if (sec) {
+      // Encryption is applied after compression when a PDF is written, so it
+      // comes off first when reading.
+      try { data = await pdfDecryptStream(sec, data, objNum, objGen); }
+      catch (e) { re.lastIndex = next; continue; }
+    }
     if (/\/FlateDecode/.test(header)) {
-      // The end-of-line the spec puts between a stream's data and its
-      // "endstream" keyword is NOT part of the data. Handed to the inflater
-      // it reads as junk after the compressed stream and the whole stream is
-      // thrown away — which is most of them, because most writers emit that
-      // EOL. Trim it. The untrimmed bytes stay as a fallback for a writer
-      // that omitted the EOL and whose data really does end in one.
-      let e2 = end;
-      while (e2 > start && (u8[e2 - 1] === 10 || u8[e2 - 1] === 13)) e2--;
-      const tries = e2 < end ? [u8.subarray(start, e2), data] : [data];
+      // The untrimmed bytes stay as a fallback for a writer that omitted the
+      // EOL and whose data genuinely ends in one. Never for an encrypted
+      // stream, where the byte range is exact and a retry is meaningless.
+      const tries = (!sec && stop < end) ? [data, u8.subarray(start, end)] : [data];
       let done = null;
       for (const t of tries) {
         try { done = await inflateZlib(t); break; }
@@ -22345,6 +22724,228 @@ test('Every page of a PDF is read, not just the first', async () => {
   eq(out.candidates[1].stem, 'Second page question?');
   eq(out.candidates[2].stem, 'Third page question?');
   eq(out.candidates[2].answerLetter, 'A');
+});
+
+/* ---- PDF standard security ----
+   These fixtures were written by pypdf, an unrelated implementation, and
+   that is the whole point: a key derivation can only honestly be tested
+   against a file somebody else encrypted. Building one with the very
+   primitives under test would pass even if they were wrong, so long as they
+   were wrong in both directions. Every one carries an EMPTY user password —
+   protected against copying, not against being read — which is the shape
+   real study material arrives in. */
+const ENC_PDFS = {
+  /* V1/R2, 40-bit RC4 */
+  rc4_40:
+    'JVBERi0xLjMKJeLjz9MKMSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwovUGFnZXMgMiAwIFIKPj4KZW5kb2JqCjIgMCBvYmoKPDwK' +
+    'L1R5cGUgL1BhZ2VzCi9LaWRzIFsgMyAwIFIgXQovQ291bnQgMQo+PgplbmRvYmoKMyAwIG9iago8PAovVHlwZSAvUGFnZQovUGFy' +
+    'ZW50IDIgMCBSCi9NZWRpYUJveCBbIDAgMCA1OTUgODQyIF0KL1Jlc291cmNlcyA8PAovRm9udCA8PAovRjEgNCAwIFIKPj4KPj4K' +
+    'L0NvbnRlbnRzIDUgMCBSCj4+CmVuZG9iago0IDAgb2JqCjw8Ci9UeXBlIC9Gb250Ci9TdWJ0eXBlIC9UeXBlMQovQmFzZUZvbnQg' +
+    'L0hlbHZldGljYQo+PgplbmRvYmoKNSAwIG9iago8PAovRmlsdGVyIC9GbGF0ZURlY29kZQovTGVuZ3RoIDE4OAo+PgpzdHJlYW0K' +
+    'FaGFVWA7Es10WdNDXPfbyQzoKQxf2QJyTI6zE9PkqhLB6IHR11TdJJDKans9Lgk3Fursv234iNu3dqQtz29dlh8Y4+5ntqY0Ggg3' +
+    'Dyr0hXpqH+Ch97JsIMLoq30tVXi0DLKzbbO1DEr9PZnPp4te0qTiW1iEk1e4/qm+Oucodx4WTQQAN+Dq54S40ODX1cKkRqb1zjju' +
+    'q1EC73wuDBNreb0dAi2YsKybpAvGvh3iNqmRq/aMyA1vfaPght0KZW5kc3RyZWFtCmVuZG9iago2IDAgb2JqCjw8Ci9WIDEKL1Ig' +
+    'MgovTGVuZ3RoIDQwCi9QIDQyOTQ5NjcyOTIKL0ZpbHRlciAvU3RhbmRhcmQKL08gPDZkYTc3NzliZjQ4NjAxMDExMzUwOTBkOGIy' +
+    'OTcwNTk1ZThmMDQ4ZDE5ODJjNTdlNWY2MTFiNjAwZmYxZGQwOWU+Ci9VIDxjZTRiZTM1ODU1MWQ0YzI0NGNjMmZiMTdmZTI0ZTI1' +
+    'Y2IzZTA0YmJlMWQyMjk0NDQ3YTYwMmI0ODg3NTc2MzJhPgo+PgplbmRvYmoKeHJlZgowIDcKMDAwMDAwMDAwMCA2NTUzNSBmIAow' +
+    'MDAwMDAwMDE1IDAwMDAwIG4gCjAwMDAwMDAwNjQgMDAwMDAgbiAKMDAwMDAwMDEyMyAwMDAwMCBuIAowMDAwMDAwMjUxIDAwMDAw' +
+    'IG4gCjAwMDAwMDAzMjEgMDAwMDAgbiAKMDAwMDAwMDU4MSAwMDAwMCBuIAp0cmFpbGVyCjw8Ci9TaXplIDcKL1Jvb3QgMSAwIFIK' +
+    'L0lEIFsgPDM5MzI2NTYzMzQzMjY0NjUzODMxMzMzMTM3MzIzNzYxMzU2NDY1MzA2NTY0NjY2MjM2NjQzODY0NjYzMTYyMzQ+IDwz' +
+    'OTMyNjU2MzM0MzI2NDY1MzgzMTMzMzEzNzMyMzc2MTM1NjQ2NTMwNjU2NDY2NjIzNjY0Mzg2NDY2MzE2MjM0PiBdCi9FbmNyeXB0' +
+    'IDYgMCBSCj4+CnN0YXJ0eHJlZgo3OTUKJSVFT0YK',
+  /* V2/R3, 128-bit RC4, 50-round rehash */
+  rc4_128:
+    'JVBERi0xLjMKJeLjz9MKMSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwovUGFnZXMgMiAwIFIKPj4KZW5kb2JqCjIgMCBvYmoKPDwK' +
+    'L1R5cGUgL1BhZ2VzCi9LaWRzIFsgMyAwIFIgXQovQ291bnQgMQo+PgplbmRvYmoKMyAwIG9iago8PAovVHlwZSAvUGFnZQovUGFy' +
+    'ZW50IDIgMCBSCi9NZWRpYUJveCBbIDAgMCA1OTUgODQyIF0KL1Jlc291cmNlcyA8PAovRm9udCA8PAovRjEgNCAwIFIKPj4KPj4K' +
+    'L0NvbnRlbnRzIDUgMCBSCj4+CmVuZG9iago0IDAgb2JqCjw8Ci9UeXBlIC9Gb250Ci9TdWJ0eXBlIC9UeXBlMQovQmFzZUZvbnQg' +
+    'L0hlbHZldGljYQo+PgplbmRvYmoKNSAwIG9iago8PAovRmlsdGVyIC9GbGF0ZURlY29kZQovTGVuZ3RoIDE4OAo+PgpzdHJlYW0K' +
+    'Qx380GhFH8pzCikT287lKMkj8GDPymgII9KXtMKbZaW60/W22DJOYPN8U+ohg23MAgClotGrc16B3krU+SYW78GT8Zly1vdOvaxR' +
+    'd6WBGWV4zZkeQI8ru/XIoeFgALXuHOPZmFNr0rT9A2Bm7aeqenF+o1wBC1xrI/FAbXZO12X+qVbb4rNQ6v/jGpne9bBdd5rhLUWo' +
+    'SDmerCOiYeKLMJGfi9rl87PoS6wjfnn1z5xqFg0Ez6ujxkMxDjgKZW5kc3RyZWFtCmVuZG9iago2IDAgb2JqCjw8Ci9WIDIKL1Ig' +
+    'MwovTGVuZ3RoIDEyOAovUCA0Mjk0OTY3MjkyCi9GaWx0ZXIgL1N0YW5kYXJkCi9PIDxlZjliNjkyMzQ3NDlhOGJiMWE4NmIwMDgz' +
+    'MTUzZjM1ZmZlYWUwY2VkNGQyNDkzZTRjYmYzMDg2MjdjZjMxYTZjPgovVSA8MTA1OTgxMWM4NmM3ZmM2NTRiZDc5NGQ4ZGE3YTYw' +
+    'ZjMyOGJmNGU1ZTRlNzU4YTQxNjQwMDRlNTZmZmZhMDEwOD4KPj4KZW5kb2JqCnhyZWYKMCA3CjAwMDAwMDAwMDAgNjU1MzUgZiAK' +
+    'MDAwMDAwMDAxNSAwMDAwMCBuIAowMDAwMDAwMDY0IDAwMDAwIG4gCjAwMDAwMDAxMjMgMDAwMDAgbiAKMDAwMDAwMDI1MSAwMDAw' +
+    'MCBuIAowMDAwMDAwMzIxIDAwMDAwIG4gCjAwMDAwMDA1ODEgMDAwMDAgbiAKdHJhaWxlcgo8PAovU2l6ZSA3Ci9Sb290IDEgMCBS' +
+    'Ci9JRCBbIDwzOTMyNjU2MzM0MzI2NDY1MzgzMTMzMzEzNzMyMzc2MTM1NjQ2NTMwNjU2NDY2NjIzNjY0Mzg2NDY2MzE2MjM0PiA8' +
+    'MzkzMjY1NjMzNDMyNjQ2NTM4MzEzMzMxMzczMjM3NjEzNTY0NjUzMDY1NjQ2NjYyMzY2NDM4NjQ2NjMxNjIzND4gXQovRW5jcnlw' +
+    'dCA2IDAgUgo+PgpzdGFydHhyZWYKNzk2CiUlRU9GCg==',
+  /* V4/R4, AESV2, per-object key */
+  aes_128:
+    'JVBERi0xLjMKJeLjz9MKMSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwovUGFnZXMgMiAwIFIKPj4KZW5kb2JqCjIgMCBvYmoKPDwK' +
+    'L1R5cGUgL1BhZ2VzCi9LaWRzIFsgMyAwIFIgXQovQ291bnQgMQo+PgplbmRvYmoKMyAwIG9iago8PAovVHlwZSAvUGFnZQovUGFy' +
+    'ZW50IDIgMCBSCi9NZWRpYUJveCBbIDAgMCA1OTUgODQyIF0KL1Jlc291cmNlcyA8PAovRm9udCA8PAovRjEgNCAwIFIKPj4KPj4K' +
+    'L0NvbnRlbnRzIDUgMCBSCj4+CmVuZG9iago0IDAgb2JqCjw8Ci9UeXBlIC9Gb250Ci9TdWJ0eXBlIC9UeXBlMQovQmFzZUZvbnQg' +
+    'L0hlbHZldGljYQo+PgplbmRvYmoKNSAwIG9iago8PAovRmlsdGVyIC9GbGF0ZURlY29kZQovTGVuZ3RoIDIwOAo+PgpzdHJlYW0K' +
+    'oBxT79cTT6Mv0JjTyY+m/Y/gSwaGI807nSEsw5/YVMbUYcubblvGGpONiPTAseZ99ngeS/2UZJQ9Sc+uv9iclBiZNO5mQABU7XxI' +
+    'bPLELpEh8kaDF8UsqhgS6MN0fO9o8G1EMtEvcJxPuUX+qhh5dKNcYyihncRxiqqA6OEG1vZi1xORSoRRdZ/txYXyI9ByWp8GBFif' +
+    'anvQ92Qpkq+EhIuu0B+lnwxG61Rq1vvxgF0tj/ie4r07I++fLt/utGTeAlBJ09e35c9WRgjC/5WypgplbmRzdHJlYW0KZW5kb2Jq' +
+    'CjYgMCBvYmoKPDwKL1YgNAovUiA0Ci9MZW5ndGggMTI4Ci9QIDQyOTQ5NjcyOTIKL0ZpbHRlciAvU3RhbmRhcmQKL08gPGVmOWI2' +
+    'OTIzNDc0OWE4YmIxYTg2YjAwODMxNTNmMzVmZmVhZTBjZWQ0ZDI0OTNlNGNiZjMwODYyN2NmMzFhNmM+Ci9VIDwxMDU5ODExYzg2' +
+    'YzdmYzY1NGJkNzk0ZDhkYTdhNjBmMzI4YmY0ZTVlNGU3NThhNDE2NDAwNGU1NmZmZmEwMTA4PgovQ0YgPDwKL1N0ZENGIDw8Ci9B' +
+    'dXRoRXZlbnQgL0RvY09wZW4KL0NGTSAvQUVTVjIKL0xlbmd0aCAxNgo+Pgo+PgovU3RtRiAvU3RkQ0YKL1N0ckYgL1N0ZENGCj4+' +
+    'CmVuZG9iagp4cmVmCjAgNwowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMTUgMDAwMDAgbiAKMDAwMDAwMDA2NCAwMDAwMCBu' +
+    'IAowMDAwMDAwMTIzIDAwMDAwIG4gCjAwMDAwMDAyNTEgMDAwMDAgbiAKMDAwMDAwMDMyMSAwMDAwMCBuIAowMDAwMDAwNjAxIDAw' +
+    'MDAwIG4gCnRyYWlsZXIKPDwKL1NpemUgNwovUm9vdCAxIDAgUgovSUQgWyA8MzkzMjY1NjMzNDMyNjQ2NTM4MzEzMzMxMzczMjM3' +
+    'NjEzNTY0NjUzMDY1NjQ2NjYyMzY2NDM4NjQ2NjMxNjIzND4gPDM5MzI2NTYzMzQzMjY0NjUzODMxMzMzMTM3MzIzNzYxMzU2NDY1' +
+    'MzA2NTY0NjY2MjM2NjQzODY0NjYzMTYyMzQ+IF0KL0VuY3J5cHQgNiAwIFIKPj4Kc3RhcnR4cmVmCjkwOAolJUVPRgo=',
+  /* V5/R5, AES-256, SHA-256 key path */
+  aes_256_r5:
+    'JVBERi0xLjMKJeLjz9MKMSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwovUGFnZXMgMiAwIFIKPj4KZW5kb2JqCjIgMCBvYmoKPDwK' +
+    'L1R5cGUgL1BhZ2VzCi9LaWRzIFsgMyAwIFIgXQovQ291bnQgMQo+PgplbmRvYmoKMyAwIG9iago8PAovVHlwZSAvUGFnZQovUGFy' +
+    'ZW50IDIgMCBSCi9NZWRpYUJveCBbIDAgMCA1OTUgODQyIF0KL1Jlc291cmNlcyA8PAovRm9udCA8PAovRjEgNCAwIFIKPj4KPj4K' +
+    'L0NvbnRlbnRzIDUgMCBSCj4+CmVuZG9iago0IDAgb2JqCjw8Ci9UeXBlIC9Gb250Ci9TdWJ0eXBlIC9UeXBlMQovQmFzZUZvbnQg' +
+    'L0hlbHZldGljYQo+PgplbmRvYmoKNSAwIG9iago8PAovRmlsdGVyIC9GbGF0ZURlY29kZQovTGVuZ3RoIDIwOAo+PgpzdHJlYW0K' +
+    'xQtpluEJLb7N5Vf0Dd/GtaaPqxN05cp4Fs9k1j4ciCjIfxnd49d4LVtRdK5hVuRGRgESHsQQBWnlEOT6fdnuKJ32M7kqDw8BmiRs' +
+    'QqPe41hg2e8GEkOfEoQJ5M+UIQEkac1iLC853gJI0JXAu48kF+2+7NDGLf753avqala48P0VpDfX+5Bi9Yv/Q+WxkZ7+oSjjtBW7' +
+    'gK3kwTePjiMzvnXZYNqDAEFWuvgfKDJFYiWulzHVSMI8LdVUFpX+xPULKMt5vTSk1QX2Y5UMtGRhSwplbmRzdHJlYW0KZW5kb2Jq' +
+    'CjYgMCBvYmoKPDwKL1YgNQovUiA1Ci9MZW5ndGggMjU2Ci9QIDQyOTQ5NjcyOTIKL0ZpbHRlciAvU3RhbmRhcmQKL08gPDE4Yjg1' +
+    'MWJiMmMxNDhhNTE0M2JhZTE4ZDVjNTJjNzYzMWUxMjIyZmQwOGUxZGNhYmJkMGI3YWMxNGE0MzEwZTk4ZjdhMDBjYTdmOThhOTg5' +
+    'NTdjYjQyNzlkZTZjYTJlZT4KL1UgPDZhZmMwYjI3MTIzYjQ1NDljNmMxNWE0YjIwNmI0ODZhYjkwZDNkMWY3MTFiYzM0MDAyMjZm' +
+    'NDI3NDBiM2I2NTgxMTY3OWI4MzI4MDlkNzUzNDFkYmU0ZWE5ODQxNDIwNT4KL0NGIDw8Ci9TdGRDRiA8PAovQXV0aEV2ZW50IC9E' +
+    'b2NPcGVuCi9DRk0gL0FFU1YzCi9MZW5ndGggMzIKPj4KPj4KL1N0bUYgL1N0ZENGCi9TdHJGIC9TdGRDRgovT0UgPDcwZjExMGJk' +
+    'NTBkYmFhMzcxZTdmYTY5ZWFkM2UzMDk2YmQwNTAwZGY1OTkyYWRlMmZjZjgzYWZhOTIzM2JmZTQ+Ci9VRSA8OTYyYzIxMDg0NTlk' +
+    'ZDIyN2I3NGZjZDljMjAyMjc5MTQ0ZDhlYmM2YTJjYTg2N2VjOTM0ODJkMGNmNzdlY2UwYT4KL1Blcm1zIDxiNzE5MjNhMzBjZGY2' +
+    'OGU4NTU2YTIyMTk5NmM4ZTJkMz4KPj4KZW5kb2JqCnhyZWYKMCA3CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAxNSAwMDAw' +
+    'MCBuIAowMDAwMDAwMDY0IDAwMDAwIG4gCjAwMDAwMDAxMjMgMDAwMDAgbiAKMDAwMDAwMDI1MSAwMDAwMCBuIAowMDAwMDAwMzIx' +
+    'IDAwMDAwIG4gCjAwMDAwMDA2MDEgMDAwMDAgbiAKdHJhaWxlcgo8PAovU2l6ZSA3Ci9Sb290IDEgMCBSCi9JRCBbIDwzOTMyNjU2' +
+    'MzM0MzI2NDY1MzgzMTMzMzEzNzMyMzc2MTM1NjQ2NTMwNjU2NDY2NjIzNjY0Mzg2NDY2MzE2MjM0PiA8MzkzMjY1NjMzNDMyNjQ2' +
+    'NTM4MzEzMzMxMzczMjM3NjEzNTY0NjUzMDY1NjQ2NjYyMzY2NDM4NjQ2NjMxNjIzND4gXQovRW5jcnlwdCA2IDAgUgo+PgpzdGFy' +
+    'dHhyZWYKMTE1NgolJUVPRgo=',
+  /* V5/R6, AES-256, Algorithm 2.B */
+  aes_256_r6:
+    'JVBERi0xLjMKJeLjz9MKMSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwovUGFnZXMgMiAwIFIKPj4KZW5kb2JqCjIgMCBvYmoKPDwK' +
+    'L1R5cGUgL1BhZ2VzCi9LaWRzIFsgMyAwIFIgXQovQ291bnQgMQo+PgplbmRvYmoKMyAwIG9iago8PAovVHlwZSAvUGFnZQovUGFy' +
+    'ZW50IDIgMCBSCi9NZWRpYUJveCBbIDAgMCA1OTUgODQyIF0KL1Jlc291cmNlcyA8PAovRm9udCA8PAovRjEgNCAwIFIKPj4KPj4K' +
+    'L0NvbnRlbnRzIDUgMCBSCj4+CmVuZG9iago0IDAgb2JqCjw8Ci9UeXBlIC9Gb250Ci9TdWJ0eXBlIC9UeXBlMQovQmFzZUZvbnQg' +
+    'L0hlbHZldGljYQo+PgplbmRvYmoKNSAwIG9iago8PAovRmlsdGVyIC9GbGF0ZURlY29kZQovTGVuZ3RoIDIwOAo+PgpzdHJlYW0K' +
+    '1uPoBJiVW9Jpn8oDjT0nIe4PEyWgr/SoI6RJ2rw42czvT1zUKqtWLSn3TGThZrbEveymAC79KD/L6zjpKJme0xKoYrw6J3B99wtU' +
+    'pDDC2pXzCngLWp/mjGAj1t9G4bAsIwOI2/mlcso7meYuHTUz+lqmJBwRCmAs0NHRbmhx87TeC67GkfJ24JxycxHWQXXwJssFUmLI' +
+    'DVEySfF1+elY+6o8FZYKtbOIkXPL6nzPw+s7O14IOpDuDfnlzmGVn/2UyAJ8Mg97Uu1aZVfGVQF9lgplbmRzdHJlYW0KZW5kb2Jq' +
+    'CjYgMCBvYmoKPDwKL1YgNQovUiA2Ci9MZW5ndGggMjU2Ci9QIDQyOTQ5NjcyOTIKL0ZpbHRlciAvU3RhbmRhcmQKL08gPDdiZDJk' +
+    'NDkzYjgzN2E2YjUxZWIwMDU1NDJiNWVmM2E3NDNkOGZjMTJkMmMwNmMwNTQ0ZWM3NGI3YTdhMGI5YzExZDk0NmVhNjkwZmU4NmQx' +
+    'Zjg5OGZkMGYzZTk3MDdlMT4KL1UgPDY1NmQ4MmUzNmJhYzUzMDczYTEyY2U3ZDZlNGFjMjA2NTFkZjhiZDdiNDc3OTcwM2NiNDZh' +
+    'Zjc5MzNkMmNkMTg1NWQxOWQzNmQ5NzkxNjY4MTRmOWM1NjczN2VmOGQ2OT4KL0NGIDw8Ci9TdGRDRiA8PAovQXV0aEV2ZW50IC9E' +
+    'b2NPcGVuCi9DRk0gL0FFU1YzCi9MZW5ndGggMzIKPj4KPj4KL1N0bUYgL1N0ZENGCi9TdHJGIC9TdGRDRgovT0UgPGYyNmE4YTAx' +
+    'ZmVkNzVkYjE1OTgwMTA0ZGEzZTVhZmEyODRhOGEwOWRiOWFkZTNmMWYzYzMzNDYwMmFlM2IxN2E+Ci9VRSA8MmMxNjIwMGMzOGIx' +
+    'NWVmNGY2MDAxOWZhZWU3ZTU4ZWMxMThlNmRiOTdjYTNlOWZmZjExNzJjZGVjODNkNThmZT4KL1Blcm1zIDw3MGE4YmI5NzMyN2Fj' +
+    'N2MwYTE4NmYxOTU4NTE2YTgyYT4KPj4KZW5kb2JqCnhyZWYKMCA3CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAxNSAwMDAw' +
+    'MCBuIAowMDAwMDAwMDY0IDAwMDAwIG4gCjAwMDAwMDAxMjMgMDAwMDAgbiAKMDAwMDAwMDI1MSAwMDAwMCBuIAowMDAwMDAwMzIx' +
+    'IDAwMDAwIG4gCjAwMDAwMDA2MDEgMDAwMDAgbiAKdHJhaWxlcgo8PAovU2l6ZSA3Ci9Sb290IDEgMCBSCi9JRCBbIDwzOTMyNjU2' +
+    'MzM0MzI2NDY1MzgzMTMzMzEzNzMyMzc2MTM1NjQ2NTMwNjU2NDY2NjIzNjY0Mzg2NDY2MzE2MjM0PiA8MzkzMjY1NjMzNDMyNjQ2' +
+    'NTM4MzEzMzMxMzczMjM3NjEzNTY0NjUzMDY1NjQ2NjYyMzY2NDM4NjQ2NjMxNjIzND4gXQovRW5jcnlwdCA2IDAgUgo+PgpzdGFy' +
+    'dHhyZWYKMTE1NgolJUVPRgo=',
+  /* two pages, two object keys */
+  rc4_multi:
+    'JVBERi0xLjMKJeLjz9MKMSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwovUGFnZXMgMiAwIFIKPj4KZW5kb2JqCjIgMCBvYmoKPDwK' +
+    'L1R5cGUgL1BhZ2VzCi9LaWRzIFsgMyAwIFIgNiAwIFIgXQovQ291bnQgMgo+PgplbmRvYmoKMyAwIG9iago8PAovVHlwZSAvUGFn' +
+    'ZQovUGFyZW50IDIgMCBSCi9NZWRpYUJveCBbIDAgMCA1OTUgODQyIF0KL1Jlc291cmNlcyA8PAovRm9udCA8PAovRjEgNCAwIFIK' +
+    'Pj4KPj4KL0NvbnRlbnRzIDUgMCBSCj4+CmVuZG9iago0IDAgb2JqCjw8Ci9UeXBlIC9Gb250Ci9TdWJ0eXBlIC9UeXBlMQovQmFz' +
+    'ZUZvbnQgL0hlbHZldGljYQo+PgplbmRvYmoKNSAwIG9iago8PAovRmlsdGVyIC9GbGF0ZURlY29kZQovTGVuZ3RoIDE4OAo+Pgpz' +
+    'dHJlYW0KGvOwm/uSWCGJAFqosLlITCX7FJCzUqo5EkMtCqSSZg0RBM8kqyrt4xxVmqJmlJeURqQbdV6HLcVgQhaPzDWFGb8GMsqg' +
+    'XOU2swVxbYLQ0ZNPYOZwmmZ2uhizA+O1rckgjMGtN+3Hh+r8+qkPCrt4g+IpqpT/27owO7TsPWIdgR7QXi+9iCKTYTkDhNUxqFqM' +
+    'A+Te+VZtc7N4JeJUwSyvrbFeriRapD0G/+0vm/LHvXi/MGEWcuzRIEB9smgKZW5kc3RyZWFtCmVuZG9iago2IDAgb2JqCjw8Ci9U' +
+    'eXBlIC9QYWdlCi9QYXJlbnQgMiAwIFIKL01lZGlhQm94IFsgMCAwIDU5NSA4NDIgXQovUmVzb3VyY2VzIDw8Ci9Gb250IDw8Ci9G' +
+    'MSA0IDAgUgo+Pgo+PgovQ29udGVudHMgNyAwIFIKPj4KZW5kb2JqCjcgMCBvYmoKPDwKL0ZpbHRlciAvRmxhdGVEZWNvZGUKL0xl' +
+    'bmd0aCAxNjkKPj4Kc3RyZWFtCrc00StcKQqtO3GPCGEurRbnGQoQXMDAQPb37Tkhse986geCnwQUacWuhqaZ2jjPQBhcNTr4nOZY' +
+    'xRN1N7+0nM4VfKUZOXM0eqfH1j5HBgyIzL36s+2jMHCzyeVW6zTSBxnYFmjkMt5EB1jbhIutTWnHb/k+BNn7X32SQPhh0Ah9xTEE' +
+    'f/Bl2L7faKlu5EQW1YwQut1GYt9AqDlFD2gy1FHrM/rLK/QBWfEKZW5kc3RyZWFtCmVuZG9iago4IDAgb2JqCjw8Ci9WIDIKL1Ig' +
+    'MwovTGVuZ3RoIDEyOAovUCA0Mjk0OTY3MjkyCi9GaWx0ZXIgL1N0YW5kYXJkCi9PIDw1NjZmYTg3M2VlMzNjNzk3Y2QzYjkwNGZk' +
+    'YWRmODE0YWZhMzRkZjlhMzhmNmVkNDFiOTg0ZTJjNmRhMmFhNmY1PgovVSA8NWVkZDIzYjY0ZDAxMjQ2NDYzOGEzYzA2NmI1MTY3' +
+    'OGUyOGJmNGU1ZTRlNzU4YTQxNjQwMDRlNTZmZmZhMDEwOD4KPj4KZW5kb2JqCnhyZWYKMCA5CjAwMDAwMDAwMDAgNjU1MzUgZiAK' +
+    'MDAwMDAwMDAxNSAwMDAwMCBuIAowMDAwMDAwMDY0IDAwMDAwIG4gCjAwMDAwMDAxMjkgMDAwMDAgbiAKMDAwMDAwMDI1NyAwMDAw' +
+    'MCBuIAowMDAwMDAwMzI3IDAwMDAwIG4gCjAwMDAwMDA1ODcgMDAwMDAgbiAKMDAwMDAwMDcxNSAwMDAwMCBuIAowMDAwMDAwOTU2' +
+    'IDAwMDAwIG4gCnRyYWlsZXIKPDwKL1NpemUgOQovUm9vdCAxIDAgUgovSUQgWyA8NjQzMjYzNjE2NTMzNjYzMTMxMzQzMTM2NjI2' +
+    'MzM3MzkzNjM4MzIzMjY0MzYzMDYzMzQ2MjYzNjQzODM3Mzg2Mj4gPDY0MzI2MzYxNjUzMzY2MzEzMTM0MzEzNjYyNjMzNzM5MzYz' +
+    'ODMyMzI2NDM2MzA2MzM0NjI2MzY0MzgzNzM4NjI+IF0KL0VuY3J5cHQgOCAwIFIKPj4Kc3RhcnR4cmVmCjExNzEKJSVFT0YK',
+  /* a real user password */
+  locked:
+    'JVBERi0xLjMKJeLjz9MKMSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwovUGFnZXMgMiAwIFIKPj4KZW5kb2JqCjIgMCBvYmoKPDwK' +
+    'L1R5cGUgL1BhZ2VzCi9LaWRzIFsgMyAwIFIgXQovQ291bnQgMQo+PgplbmRvYmoKMyAwIG9iago8PAovVHlwZSAvUGFnZQovUGFy' +
+    'ZW50IDIgMCBSCi9NZWRpYUJveCBbIDAgMCA1OTUgODQyIF0KL1Jlc291cmNlcyA8PAovRm9udCA8PAovRjEgNCAwIFIKPj4KPj4K' +
+    'L0NvbnRlbnRzIDUgMCBSCj4+CmVuZG9iago0IDAgb2JqCjw8Ci9UeXBlIC9Gb250Ci9TdWJ0eXBlIC9UeXBlMQovQmFzZUZvbnQg' +
+    'L0hlbHZldGljYQo+PgplbmRvYmoKNSAwIG9iago8PAovRmlsdGVyIC9GbGF0ZURlY29kZQovTGVuZ3RoIDIwOAo+PgpzdHJlYW0K' +
+    '4anj34l3u78rinUpyFIaK8ame16qu71NwDtYyk3UrC83EE57qYSOXfj/2iJ/nrjHQnLlyN5PSgzSA6l6ZkfnbA8OT0KGSJaATkAg' +
+    '/WMgEuYfjaUJqsKmiwzadKfnUFkt0t+q+lIrS+neaxzLuimR4thCRaZhOPOuHq/28AI9NJAXGx4pZyHNs+0UpI9rUguMrH34Kpc/' +
+    'NLAu/07Hb3lYwTwnuXhUdEqlpDLUZHu2UV0/cHINCqvFrlxL2+jmfvpK6janra6/uGDIBwJUwxnZAgplbmRzdHJlYW0KZW5kb2Jq' +
+    'CjYgMCBvYmoKPDwKL1YgNAovUiA0Ci9MZW5ndGggMTI4Ci9QIDQyOTQ5NjcyOTIKL0ZpbHRlciAvU3RhbmRhcmQKL08gPDEyYjU5' +
+    'MjQwYzUyZjIzZmUxNjc1ODA1NzUwYWZjMTI2ZDQ1NDg5ZDMxMjlmZGJlZmI4ODhmZGU4ZDY0NzRmYTA+Ci9VIDwxYzAyMjhmYTA4' +
+    'YzdkMThjZjZiOWUyZjczZjJhYmUzMjI4YmY0ZTVlNGU3NThhNDE2NDAwNGU1NmZmZmEwMTA4PgovQ0YgPDwKL1N0ZENGIDw8Ci9B' +
+    'dXRoRXZlbnQgL0RvY09wZW4KL0NGTSAvQUVTVjIKL0xlbmd0aCAxNgo+Pgo+PgovU3RtRiAvU3RkQ0YKL1N0ckYgL1N0ZENGCj4+' +
+    'CmVuZG9iagp4cmVmCjAgNwowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMTUgMDAwMDAgbiAKMDAwMDAwMDA2NCAwMDAwMCBu' +
+    'IAowMDAwMDAwMTIzIDAwMDAwIG4gCjAwMDAwMDAyNTEgMDAwMDAgbiAKMDAwMDAwMDMyMSAwMDAwMCBuIAowMDAwMDAwNjAxIDAw' +
+    'MDAwIG4gCnRyYWlsZXIKPDwKL1NpemUgNwovUm9vdCAxIDAgUgovSUQgWyA8MzkzMjY1NjMzNDMyNjQ2NTM4MzEzMzMxMzczMjM3' +
+    'NjEzNTY0NjUzMDY1NjQ2NjYyMzY2NDM4NjQ2NjMxNjIzND4gPDM5MzI2NTYzMzQzMjY0NjUzODMxMzMzMTM3MzIzNzYxMzU2NDY1' +
+    'MzA2NTY0NjY2MjM2NjQzODY0NjYzMTYyMzQ+IF0KL0VuY3J5cHQgNiAwIFIKPj4Kc3RhcnR4cmVmCjkwOAolJUVPRgo=',
+};
+function b64ToBuf(s) {
+  const bin = atob(s.replace(/\s+/g, ''));
+  const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return u.buffer;
+}
+
+test('MD5 matches the RFC 1321 test suite', () => {
+  const hex = (u) => Array.from(u, (b) => b.toString(16).padStart(2, '0')).join('');
+  const enc = (s) => new TextEncoder().encode(s);
+  [['', 'd41d8cd98f00b204e9800998ecf8427e'],
+   ['a', '0cc175b9c0f1b6a831c399e269772661'],
+   ['abc', '900150983cd24fb0d6963f7d28e17f72'],
+   ['message digest', 'f96b697d7cb7938d525a2f31aaf161d0'],
+   ['abcdefghijklmnopqrstuvwxyz', 'c3fcd3d76192e4007dfb496cca67e13b'],
+   ['ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789', 'd174ab98d277d9f5a5611c2c9f419d9f'],
+   ['12345678901234567890123456789012345678901234567890123456789012345678901234567890', '57edf4a22be3c955ac49da2e2107b67a']
+  ].forEach(([input, want]) => eq(hex(md5(enc(input))), want, 'MD5 of ' + JSON.stringify(input.slice(0, 20))));
+});
+
+test('RC4 matches the RFC 6229 key-stream vectors', () => {
+  const hex = (u) => Array.from(u, (b) => b.toString(16).padStart(2, '0')).join('');
+  eq(hex(rc4(new Uint8Array([1, 2, 3, 4, 5]), new Uint8Array(16))), 'b2396305f03dc027ccc3524a0a1118a8', '40-bit key');
+  eq(hex(rc4(new Uint8Array([1, 2, 3, 4, 5, 6, 7]), new Uint8Array(16))), '293f02d47f37c9b633f2af5285feb46b', '56-bit key');
+});
+
+test('CBC without padding round-trips through the forged padding block', async () => {
+  if (!HAS_SUBTLE) return 'skipped — this browser exposes no SubtleCrypto';
+  const key = new Uint8Array(32).map((_, i) => i);
+  const iv = new Uint8Array(16).map((_, i) => 255 - i);
+  const plain = new TextEncoder().encode('sixteen byte xx!sixteen byte yy!');
+  const ct = await aesCbcEncryptNoPad(key, iv, plain);
+  eq(ct.length, 32, 'no padding block is appended');
+  const back = await aesCbcDecryptNoPad(key, iv, ct);
+  eq(new TextDecoder().decode(back), 'sixteen byte xx!sixteen byte yy!');
+});
+
+test('An encrypted PDF that opens without a password is read, not refused', async () => {
+  if (!HAS_SUBTLE) return 'skipped — this browser exposes no SubtleCrypto';
+  for (const name of ['rc4_40', 'rc4_128', 'aes_128', 'aes_256_r5', 'aes_256_r6']) {
+    const text = await pdfToText(b64ToBuf(ENC_PDFS[name]));
+    assert(text.indexOf('Q1. Which control is preventive?') >= 0, name + ': the question came through');
+    assert(text.indexOf('Answer: B') >= 0, name + ': and its answer');
+    const out = parseText(text, { template: 'lettered' });
+    eq(out.candidates.length, 1, name + ': one question');
+    eq(out.candidates[0].options.length, 4, name + ': with four options');
+    eq(out.candidates[0].answerLetter, 'B', name + ': and the right answer');
+  }
+});
+
+test('Every page of an encrypted PDF is decrypted with its own object key', async () => {
+  if (!HAS_SUBTLE) return 'skipped — this browser exposes no SubtleCrypto';
+  // Revisions up to 4 key each object separately, so a second page proves
+  // the object number really is being read rather than assumed.
+  const out = parseText(await pdfToText(b64ToBuf(ENC_PDFS.rc4_multi)), { template: 'lettered' });
+  eq(out.candidates.length, 2, 'both pages decrypted');
+  eq(out.candidates[0].options.length, 4);
+  eq(out.candidates[1].stem, 'Which finding is reported FIRST?');
+  eq(out.candidates[1].answerLetter, 'B');
+});
+
+test('A PDF that really needs a password is refused, and says so', async () => {
+  if (!HAS_SUBTLE) return 'skipped — this browser exposes no SubtleCrypto';
+  let msg = '';
+  try { await pdfToText(b64ToBuf(ENC_PDFS.locked)); } catch (e) { msg = e.message; }
+  assert(/needs a password/i.test(msg), 'the refusal names the real reason, got: ' + msg);
+  assert(!/could not be read reliably/i.test(msg), 'and is not mistaken for an undecodable text layer');
 });
 
 test('The .docx the app writes is one the app can read back', async () => {
