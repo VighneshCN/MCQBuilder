@@ -3707,29 +3707,157 @@ async function pdfToText(arrayBuffer) {
   }
   return text;
 }
+/** A content stream, split into the tokens text extraction cares about.
+    A tokeniser rather than a regex because PDF strings nest: "((a))" is one
+    string holding "(a)", and a pattern that treats every bracket alike drops
+    it or cuts it in half. */
+function pdfTokenize(s) {
+  const out = [];
+  const n = s.length;
+  const isWs = (c) => c === ' ' || c === '\n' || c === '\r' || c === '\t' || c === '\f' || c === '\x00';
+  const isDelim = (c) => c === '(' || c === ')' || c === '<' || c === '>' || c === '[' || c === ']' || c === '{' || c === '}' || c === '/' || c === '%';
+  let i = 0;
+  while (i < n) {
+    const ch = s[i];
+    if (isWs(ch)) { i++; continue; }
+    if (ch === '%') { while (i < n && s[i] !== '\n' && s[i] !== '\r') i++; continue; }
+    if (ch === '(') {
+      let depth = 1, j = i + 1, raw = '';
+      while (j < n && depth) {
+        const c = s[j];
+        if (c === '\\') { raw += c + (s[j + 1] || ''); j += 2; continue; }
+        if (c === '(') { depth++; raw += c; j++; continue; }
+        if (c === ')') { depth--; j++; if (!depth) break; raw += c; continue; }
+        raw += c; j++;
+      }
+      out.push({ k: 's', v: pdfStr('(' + raw + ')') });
+      i = j; continue;
+    }
+    if (ch === '<' && s[i + 1] === '<') { out.push({ k: 'd' }); i += 2; continue; }
+    if (ch === '>' && s[i + 1] === '>') { out.push({ k: 'D' }); i += 2; continue; }
+    if (ch === '<') {
+      const e = s.indexOf('>', i);
+      if (e < 0) break;
+      out.push({ k: 's', v: pdfStr(s.slice(i, e + 1)) });
+      i = e + 1; continue;
+    }
+    if (ch === '[') { out.push({ k: '[' }); i++; continue; }
+    if (ch === ']') { out.push({ k: ']' }); i++; continue; }
+    if (ch === '/') {
+      let j = i + 1;
+      while (j < n && !isWs(s[j]) && !isDelim(s[j])) j++;
+      out.push({ k: 'n', v: s.slice(i + 1, j) });
+      i = j; continue;
+    }
+    if ((ch >= '0' && ch <= '9') || ch === '-' || ch === '+' || ch === '.') {
+      let j = i;
+      while (j < n && /[0-9+\-.]/.test(s[j])) j++;
+      const v = parseFloat(s.slice(i, j));
+      out.push({ k: '#', v: isFinite(v) ? v : 0 });
+      i = j; continue;
+    }
+    let j = i;
+    while (j < n && !isWs(s[j]) && !isDelim(s[j])) j++;
+    if (j === i) { i++; continue; }
+    out.push({ k: 'o', v: s.slice(i, j) });
+    i = j;
+  }
+  return out;
+}
+
+/**
+ * The text of a content stream, one line per line of the page.
+ *
+ * Where the line breaks fall is the whole difficulty. A PDF holds no line
+ * breaks: it holds glyphs at coordinates. The only sound way to recover them
+ * is to replay the text-positioning operators and watch the vertical
+ * position — text that sits at a new height is a new line, and text at the
+ * same height is the same line however many operators put it there.
+ *
+ * Deciding it by operator instead, as this once did, is wrong in both
+ * directions and produces exactly the mess it sounds like. Td moves the pen
+ * sideways as readily as down, so a label set apart from its own option —
+ * "(a)" at one x, "Competitor analysis" at another, both on one line — was
+ * torn in half. And Tm was not consulted at all, so a generator that places
+ * every line with a matrix had its whole page run together into one line,
+ * swallowing the next question into the end of the previous answer.
+ */
 function extractPdfOps(s) {
   const lines = [];
   let buf = '';
-  const re = /(\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]*>)\s*(Tj|TJ|'|")|\[((?:[^\][]|\\.)*)\]\s*TJ|(T\*|Td|TD|ET|BT)/g;
-  let m;
-  while ((m = re.exec(s))) {
-    if (m[3] != null) {
-      const parts = m[3].match(/\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]*>|-?\d+(?:\.\d+)?/g) || [];
-      parts.forEach(p => {
-        if (p[0] === '(' || p[0] === '<') buf += pdfStr(p);
-        else if (parseFloat(p) < -120) buf += ' ';
-      });
-    } else if (m[1] != null) {
-      buf += pdfStr(m[1]);
-      if (m[2] === "'" || m[2] === '"') { lines.push(buf); buf = ''; }
-    } else if (m[4] === 'T*' || m[4] === 'Td' || m[4] === 'TD' || m[4] === 'ET') {
-      if (buf.trim()) lines.push(buf);
-      buf = '';
+  // The text LINE matrix. Only its translation matters here: glyph advances
+  // move the text matrix, but every new line starts from this one.
+  let ma = 1, mb = 0, mc = 0, md = 1, me = 0, mf = 0;
+  let leading = 0, fontSize = 0;
+  let lastY = null, lastX = 0;
+  const flush = () => {
+    const t = buf.replace(/\s+/g, ' ').trim();
+    if (t) lines.push(t);
+    buf = '';
+  };
+  const translate = (tx, ty) => {
+    me = ma * tx + mc * ty + me;
+    mf = mb * tx + md * ty + mf;
+  };
+  const show = (txt) => {
+    if (!txt) return;
+    // How far the text must move vertically to count as a new line, rather
+    // than as a superscript or a rounding wobble.
+    const size = Math.abs(fontSize * md) || Math.abs(fontSize) || 12;
+    if (lastY === null) { lastY = mf; lastX = me; }
+    else if (Math.abs(mf - lastY) > 0.4 * size) { flush(); lastY = mf; }
+    else if (me !== lastX && buf && !/\s$/.test(buf)) buf += ' ';
+    lastX = me;
+    buf += txt;
+  };
+  const st = [];
+  const num = (back) => { const x = st[st.length - back]; return x && x.k === '#' ? x.v : 0; };
+  const str = () => { const x = st[st.length - 1]; return x && x.k === 's' ? x.v : ''; };
+  for (const t of pdfTokenize(s)) {
+    if (t.k === ']') {
+      const arr = [];
+      while (st.length && st[st.length - 1].k !== '[') arr.unshift(st.pop());
+      st.pop();
+      st.push({ k: 'a', v: arr });
+      continue;
     }
+    if (t.k === 'D') {
+      while (st.length && st[st.length - 1].k !== 'd') st.pop();
+      st.pop();
+      continue;
+    }
+    if (t.k !== 'o') { st.push(t); continue; }
+    switch (t.v) {
+      case 'BT': flush(); ma = 1; mb = 0; mc = 0; md = 1; me = 0; mf = 0; lastY = null; break;
+      case 'ET': flush(); lastY = null; break;
+      case 'Tf': fontSize = num(1); break;
+      case 'TL': leading = num(1); break;
+      case 'Td': translate(num(2), num(1)); break;
+      case 'TD': leading = -num(1); translate(num(2), num(1)); break;
+      case 'T*': translate(0, -leading); break;
+      case 'Tm': ma = num(6); mb = num(5); mc = num(4); md = num(3); me = num(2); mf = num(1); break;
+      case 'Tj': show(str()); break;
+      case "'": translate(0, -leading); show(str()); break;
+      case '"': translate(0, -leading); show(str()); break;
+      case 'TJ': {
+        const x = st[st.length - 1];
+        if (x && x.k === 'a') {
+          x.v.forEach(el => {
+            if (el.k === 's') show(el.v);
+            // A big negative kern is a word gap the font would have drawn.
+            else if (el.k === '#' && el.v < -120 && buf && !/\s$/.test(buf)) buf += ' ';
+          });
+        }
+        break;
+      }
+      default: break;
+    }
+    st.length = 0;
   }
-  if (buf.trim()) lines.push(buf);
-  return lines.map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean).join('\n');
+  flush();
+  return lines.join('\n');
 }
+
 function pdfStr(tok) {
   if (tok[0] === '<') {
     const hex = tok.slice(1, -1).replace(/\s+/g, '');
@@ -22946,6 +23074,55 @@ test('A PDF that really needs a password is refused, and says so', async () => {
   try { await pdfToText(b64ToBuf(ENC_PDFS.locked)); } catch (e) { msg = e.message; }
   assert(/needs a password/i.test(msg), 'the refusal names the real reason, got: ' + msg);
   assert(!/could not be read reliably/i.test(msg), 'and is not mistaken for an undecodable text layer');
+});
+
+test('Line breaks follow where text sits, not which operator moved it', () => {
+  // A page laid out the way plenty of real generators do it: every line
+  // placed with its own Tm and never a Td or T*, and each option's label set
+  // at one x with its text at another, on the same line. Decided by operator,
+  // this collapsed into a single line — the whole page, no questions at all —
+  // and where a Td was used it tore "(a)" away from its own option.
+  const place = (y, runs) => runs.map(([x, t]) =>
+    '1 0 0 1 ' + x + ' ' + y + ' Tm (' + t.replace(/([()\\])/g, '\\$1') + ') Tj').join('\n');
+  const stream = 'BT /F1 10 Tf\n' + [
+    place(800, [[40, 'Which of the following is a type of strategic analysis?']]),
+    place(780, [[40, '(a)'], [70, 'Competitor analysis']]),
+    place(760, [[40, '(b)'], [70, 'Determinants analysis']]),
+    place(740, [[40, '(c)'], [70, 'Environmental analysis']]),
+    place(720, [[40, '(d)'], [70, 'Market analysis']]),
+    place(700, [[40, '3. Entering into business of manufacturing Robots can best be described as:']]),
+    place(680, [[40, '(a)'], [70, 'Backward vertical integration']]),
+    place(660, [[40, '(b)'], [70, 'Conglomerate diversification']]),
+    place(640, [[40, 'Answer: (c)']])
+  ].join('\n') + '\nET';
+
+  const text = extractPdfOps(stream);
+  eq(text.split('\n').length, 9, 'nine lines on the page, nine lines of text');
+  eq(text.split('\n')[1], '(a) Competitor analysis', 'a label and its option are one line, with a space between');
+
+  const out = parseText(text, { template: 'auto' });
+  eq(out.candidates.length, 2, 'and the second question is its own, not the tail of an option');
+  eq(out.candidates[0].stem, 'Which of the following is a type of strategic analysis?', 'the stem keeps its opening');
+  eq(out.candidates[0].options.length, 4, 'four options, not seven');
+  eq(out.candidates[0].options[0].text, 'Competitor analysis', 'and no stray bracket left on the front');
+  eq(out.candidates[1].stem, 'Entering into business of manufacturing Robots can best be described as:');
+  eq(out.candidates[1].answerLetter, 'C');
+});
+
+test('A superscript does not start a new line, a real drop does', () => {
+  const s = 'BT /F1 10 Tf 1 0 0 1 40 800 Tm (Section 143) Tj 1 0 0 1 90 803 Tm (2) Tj ' +
+    '1 0 0 1 100 800 Tm (of the Act) Tj 1 0 0 1 40 780 Tm (Answer: B) Tj ET';
+  eq(extractPdfOps(s), 'Section 143 2 of the Act\nAnswer: B',
+    'three points of lift is a superscript; twenty is the next line');
+});
+
+test('A nested parenthesis inside a PDF string survives', () => {
+  // "((a))" is one string holding "(a)". A pattern that treats every bracket
+  // alike either drops it or cuts it in half.
+  eq(extractPdfOps('BT /F1 10 Tf 1 0 0 1 40 800 Tm ((a) Competitor analysis) Tj ET'),
+    '(a) Competitor analysis');
+  eq(extractPdfOps('BT /F1 10 Tf 1 0 0 1 40 800 Tm (\\(b\\) Escaped instead) Tj ET'),
+    '(b) Escaped instead', 'and the escaped spelling of the same thing still works');
 });
 
 test('The .docx the app writes is one the app can read back', async () => {
