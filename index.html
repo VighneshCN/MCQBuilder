@@ -3140,6 +3140,51 @@ async function zipFiles(entries) {
   return new Blob(chunks.concat(central, [eocd]), { type: 'application/zip' });
 }
 
+/* ---------- text → DOCX ----------
+   The smallest .docx Word and Google Docs will both open: four parts, one
+   run per paragraph, no styles beyond bold. It exists so a template can be
+   handed out as a document the person fills in and exports to PDF, and its
+   correctness bar is docxToText below — whatever this writes, that must read
+   back line for line, which is what the round-trip tests assert.            */
+const DOCX_PARTS = {
+  types: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+    '</Types>',
+  rels: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+    '</Relationships>',
+  docRels: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>'
+};
+/** One paragraph. A plain string is body text; { text, bold } sets it in bold,
+    which the instruction blocks use for headings. An empty string is a blank
+    line, and stays one — the sheet layouts separate questions with them. */
+function docxPara(p) {
+  const o = typeof p === 'string' ? { text: p } : (p || {});
+  const t = String(o.text == null ? '' : o.text);
+  if (!t) return '<w:p/>';
+  const pr = o.bold ? '<w:rPr><w:b/></w:rPr>' : '';
+  return '<w:p><w:r>' + pr + '<w:t xml:space="preserve">' + esc(t) + '</w:t></w:r></w:p>';
+}
+async function buildDocx(paragraphs) {
+  const doc = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
+    (paragraphs || []).map(docxPara).join('') +
+    '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr>' +
+    '</w:body></w:document>';
+  const blob = await zipFiles([
+    { name: '[Content_Types].xml', data: DOCX_PARTS.types },
+    { name: '_rels/.rels', data: DOCX_PARTS.rels },
+    { name: 'word/_rels/document.xml.rels', data: DOCX_PARTS.docRels },
+    { name: 'word/document.xml', data: doc }
+  ]);
+  return new Blob([blob], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+}
+
 /* ---------- DOCX → text (paragraphs and tables preserved) ---------- */
 async function docxToText(arrayBuffer) {
   const zip = await unzip(arrayBuffer);
@@ -3219,7 +3264,15 @@ async function pdfToText(arrayBuffer) {
   let latin = '';
   const CH = 32768;
   for (let i = 0; i < u8.length; i += CH) latin += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
-  if (latin.slice(0, 5) !== '%PDF-') throw new Error('That file is not a PDF.');
+  // The header is not required to sit at byte zero. A byte-order mark, or a
+  // generator's preamble, legitimately precedes it, and every real reader
+  // scans the opening kilobyte for it — so insisting on offset 0 rejects
+  // files that are perfectly good PDFs. Nothing below depends on the offset:
+  // the cross-reference table is never consulted, streams are found by
+  // scanning, so a shifted header changes only this test.
+  if (latin.slice(0, 1024).indexOf('%PDF-') < 0) {
+    throw new Error('That file is not a PDF — there is no PDF header in it. A page saved from a download link, or another kind of file renamed to .pdf, looks like this.');
+  }
   if (/\/Encrypt\b/.test(latin)) throw new Error('This PDF is encrypted. Remove the protection, or export the text to .docx / .txt.');
   const out = [];
   const re = /stream\r?\n?/g;
@@ -3228,22 +3281,42 @@ async function pdfToText(arrayBuffer) {
     const start = m.index + m[0].length;
     const end = latin.indexOf('endstream', start);
     if (end < 0) break;
+    // Resume PAST the whole "endstream" keyword. Resuming at it leaves the
+    // scanner sitting three characters before the "stream" inside the word
+    // itself, which it then matches as the start of another stream —
+    // consuming the object that really follows and dropping it. That is why
+    // a multi-page PDF used to yield only its first page.
+    const next = end + 'endstream'.length;
     const header = latin.slice(Math.max(0, m.index - 400), m.index);
     let data = u8.subarray(start, end);
     if (/\/FlateDecode/.test(header)) {
-      try { data = await inflateZlib(data); }
-      catch (e) { try { data = await inflateRaw(data); } catch (e2) { re.lastIndex = end; continue; } }
+      // The end-of-line the spec puts between a stream's data and its
+      // "endstream" keyword is NOT part of the data. Handed to the inflater
+      // it reads as junk after the compressed stream and the whole stream is
+      // thrown away — which is most of them, because most writers emit that
+      // EOL. Trim it. The untrimmed bytes stay as a fallback for a writer
+      // that omitted the EOL and whose data really does end in one.
+      let e2 = end;
+      while (e2 > start && (u8[e2 - 1] === 10 || u8[e2 - 1] === 13)) e2--;
+      const tries = e2 < end ? [u8.subarray(start, e2), data] : [data];
+      let done = null;
+      for (const t of tries) {
+        try { done = await inflateZlib(t); break; }
+        catch (e) { try { done = await inflateRaw(t); break; } catch (e2b) { /* try the next form */ } }
+      }
+      if (!done) { re.lastIndex = next; continue; }
+      data = done;
     } else if (/\/(DCTDecode|JPXDecode|CCITTFaxDecode|RunLengthDecode|LZWDecode|ASCII85Decode)/.test(header)) {
-      re.lastIndex = end; continue;
+      re.lastIndex = next; continue;
     }
     let txt = '';
     const CH2 = 32768;
     for (let i = 0; i < data.length; i += CH2) txt += String.fromCharCode.apply(null, data.subarray(i, i + CH2));
     if (/BT[\s\S]{0,4000}?ET/.test(txt) || /\bTj\b|\bTJ\b/.test(txt)) out.push(extractPdfOps(txt));
-    re.lastIndex = end;
+    re.lastIndex = next;
   }
   const text = out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-  if (!text) throw new Error('No extractable text layer. This is probably a scanned PDF — use Add from Image instead.');
+  if (!text) throw new Error('No extractable text layer. This is probably a scanned PDF — use Add from Image instead, or copy the questions into the Question sheet template under “Start from a template” and export that to PDF.');
   // A from-scratch decoder cannot resolve every PDF structure (linearized
   // files, compressed object streams, predictor-filtered or hint streams
   // sitting alongside real content streams, non-WinAnsi subset fonts). When
@@ -3251,7 +3324,7 @@ async function pdfToText(arrayBuffer) {
   // successful import — fail with a concrete next step instead.
   const printable = (text.match(/[ -~\n\t]/g) || []).length;
   if (printable / text.length < 0.85 || text.replace(/\s/g, '').length < 30) {
-    throw new Error('This PDF\'s text layer could not be read reliably (its internal structure — a compressed or linearized layout — defeats this app\'s built-in decoder). Open it in Word or Google Docs and save/export as .docx, or export the page(s) as text, then import that instead. Add from Image also works page by page.');
+    throw new Error('This PDF\'s text layer could not be read reliably (its internal structure — a compressed or linearized layout — defeats this app\'s built-in decoder). The dependable way round it: download the Question sheet or Case study sheet template under “Start from a template”, paste the text into it, and save that as PDF. Opening the original in Word or Google Docs and saving as .docx also works, as does Add from Image, page by page.');
   }
   return text;
 }
@@ -3371,14 +3444,49 @@ const RX = {
   // at all — is accepted, which real answer lines do inconsistently.
   answerLetter: /^\s*[\(\[]?\s*([a-hA-H])\b[\)\].:]?\s*[-–:]?\s*(.*)$/,
   keyPair: /(?:^|[\s,;|])(?:q\.?\s*)?(\d{1,4})\s*[.):\-=]?\s*([a-hA-H])(?=$|[\s,;|.])/g,
-  header: /^\s*(page\s+\d+|chapter\s+\d+|module\s+\d+|\d+\s*\|\s*page|copyright|all rights reserved)\b/i
+  header: /^\s*(page\s+\d+|chapter\s+\d+|module\s+\d+|\d+\s*\|\s*page|copyright|all rights reserved)\b/i,
+  /* The sheet layout. A .pdf, .docx or .txt arrives here as free text, so a
+     scenario and the questions hanging off it can only be told apart by
+     markers the person writing the file puts there deliberately. These are
+     what the downloadable sheet templates emit. */
+  caseStart: /^\s*case\s*(?:ref|reference|id|study)?\s*[:\-–]\s*(\S.*)$/i,
+  caseTitleLine: /^\s*(?:case\s*)?title\s*[:\-–]\s*(\S.*)$/i,
+  // "SCENARIO:" alone on its line opens the passage. A trailing colon is
+  // optional so "SCENARIO" on its own works too.
+  scenarioOpen: /^\s*(?:scenario|case\s*text|passage)\s*[:\-–]?\s*$/i,
+  // Load-bearing, not decoration: a passage is free prose across blank
+  // lines, so without a sentinel there is no telling where it stops and the
+  // first stem starts.
+  scenarioClose: /^\s*end\s*(?:of\s*)?(?:scenario|case|passage)\s*[.:]?\s*$/i,
+  caseEnd: /^\s*end\s*(?:of\s*)?case\s*study\s*[.:]?\s*$/i,
+  // Per-question (or sheet-wide) metadata, so a text import keeps what the
+  // spreadsheet columns carry. Deliberately NOT matched before the answer
+  // and explanation rules — see where it is tested in parseText.
+  meta: /^\s*(domains?|topics?|sub\s*topic|module|chapter|section|difficulty|level|tags?|keywords|marks?|points)\s*[:\-–]\s*(\S.*)$/i,
+  // The line the downloadable sheets print at the top. Everything above it
+  // is the how-to-fill-this-in block, which is addressed to the person and
+  // is not content — see where parseText drops it.
+  sheetBanner: /^\s*MCQ\s*MASTERY\b.*\bSHEET\b\s*$/i
 };
+/** RX.meta's capture group is a spelling; this is the field it feeds. */
+const META_FIELD = {
+  domain: 'domainRaw', domains: 'domainRaw',
+  topic: 'topic', topics: 'topic', 'sub topic': 'subtopic', subtopic: 'subtopic',
+  module: 'srcModule', chapter: 'srcChapter', section: 'srcSection',
+  difficulty: 'difficulty', level: 'difficulty',
+  tag: 'tags', tags: 'tags', keywords: 'tags',
+  mark: 'marks', marks: 'marks', points: 'marks'
+};
+function metaFieldOf(label) {
+  return META_FIELD[String(label || '').toLowerCase().replace(/\s+/g, ' ').trim()] || '';
+}
 const PARSE_TEMPLATES = [
   { id: 'auto',      name: 'Auto-detect (recommended)', desc: 'Tries numbered stems with lettered options, then bullets, then tables.' },
   { id: 'lettered',  name: 'Numbered stem + A/B/C/D options', desc: 'Q1. … then A) … B) … C) … D)' },
   { id: 'bullets',   name: 'Stem + bulleted options', desc: 'Stem line followed by bullet or dash options.' },
   { id: 'inline',    name: 'One question per line block, answer inline', desc: 'Stem, options, then Answer: C on its own line.' },
-  { id: 'table',     name: 'Tabular (tab-separated)', desc: 'Stem, A, B, C, D, Answer, Explanation across a row.' }
+  { id: 'table',     name: 'Tabular (tab-separated)', desc: 'Stem, A, B, C, D, Answer, Explanation across a row.' },
+  { id: 'sheet',     name: 'MCQ Mastery sheet (from the .docx template)', desc: 'The layout the downloadable question and case study sheets use — including CASE: and SCENARIO: for scenarios. Auto-detect reads it too; pick this to insist on it.' }
 ];
 
 /** True for a line that is itself meaningful MCQ structure (answer/option/
@@ -3386,7 +3494,13 @@ const PARSE_TEMPLATES = [
  * never be mistaken for a repeated page header or footer. */
 function looksStructuralLine(t) {
   return RX.answer.test(t) || RX.explanation.test(t) || RX.qStart.test(t) || RX.qWord.test(t) ||
-    RX.optionOnly.test(t) || /^\s*[\(\[]?[a-hA-H]\s*[\)\].:\-]/.test(t);
+    RX.optionOnly.test(t) || /^\s*[\(\[]?[a-hA-H]\s*[\)\].:\-]/.test(t) ||
+    // Sheet markers and metadata repeat once per case or per question by
+    // design — "SCENARIO:" in a six-case file, "Difficulty: medium" in a
+    // fifty-question one. Stripping them as a running header would take the
+    // layout apart, so they are structure, not decoration.
+    RX.scenarioOpen.test(t) || RX.scenarioClose.test(t) || RX.caseStart.test(t) ||
+    RX.caseTitleLine.test(t) || RX.caseEnd.test(t) || RX.meta.test(t);
 }
 function cleanLines(text) {
   const raw = String(text).replace(/\r\n?/g, '\n').split('\n');
@@ -3445,15 +3559,52 @@ function looksLikeOption(line, prevWasOption, idxExpected) {
 function parseText(text, opts) {
   opts = opts || {};
   const template = opts.template || 'auto';
-  const lines = cleanLines(text);
+  let lines = cleanLines(text);
+  // A sheet from the template carries a block of instructions above its
+  // banner. Those are addressed to whoever fills it in, not to the parser,
+  // and reporting them as unresolved text would make every clean import look
+  // like it half-failed. The banner is the boundary; anything above it goes.
+  const bannerAt = lines.findIndex(l => RX.sheetBanner.test(l.t));
+  if (bannerAt >= 0) lines = lines.slice(bannerAt + 1);
+  /* Whether to read CASE:/SCENARIO: as structure at all. "Case: Salomon v
+     Salomon" is an ordinary line in law and audit material, and taking it
+     for a scenario marker would quietly divert every question after it into
+     the case study bank. So the markers only wake up on a deliberate signal:
+     the template was chosen by hand, the sheet banner is present, or the
+     document actually opens and closes a scenario. */
+  const sheetMode = template === 'sheet' || bannerAt >= 0 ||
+    (lines.some(l => RX.scenarioOpen.test(l.t)) && lines.some(l => RX.scenarioClose.test(l.t)));
   const candidates = [];
   const unresolved = [];
+  const caseStudies = [];
   let cur = null, mode = 'idle', expl = [], stemBuf = [];
+  /* Sheet layout state. `curCase` is the scenario questions are currently
+     hanging off; `sheetMeta` are the header-block values that stand as
+     defaults until a question overrides them for itself. */
+  let curCase = null, scenarioBuf = null;
+  const sheetMeta = {};
+
+  // Values are left as the raw strings the file wrote. candidateToQuestion
+  // already coerces them — difficulty against DIFFICULTY, marks through
+  // parseFloat, tags by splitting — exactly as it does for a spreadsheet, so
+  // the two routes cannot drift apart.
+  const applyMeta = (target, field, value) => { if (field && value) target[field] = value.trim(); };
+  const closeScenario = () => {
+    if (!curCase || scenarioBuf == null) return;
+    curCase.text = scenarioBuf.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    scenarioBuf = null;
+  };
 
   const flush = () => {
     if (!cur) return;
     cur.stem = stemBuf.join('\n').trim();
     cur.explanation = expl.join('\n').trim();
+    // Defaults fill in only where the question said nothing itself, nearest
+    // first: what the scenario declared, then what the sheet header did.
+    const owner = cur.caseRef && caseStudies.find(c => c.ref === cur.caseRef);
+    [owner ? owner.meta : null, sheetMeta].forEach(src => {
+      if (src) Object.keys(src).forEach(k => { if (cur[k] == null || cur[k] === '') cur[k] = src[k]; });
+    });
     if (cur.stem) candidates.push(cur); else unresolved.push({ line: cur.line, text: '(question with no stem)' });
     cur = null; stemBuf = []; expl = []; mode = 'idle';
   };
@@ -3461,16 +3612,48 @@ function parseText(text, opts) {
     flush();
     cur = {
       line: lineNo, originalNumber: n ? String(n) : '', options: [], answerRaw: '', answerLetter: '',
-      conf: { stem: 0.9, options: 0, answer: 0, explanation: 0 }, weakOptions: false
+      conf: { stem: 0.9, options: 0, answer: 0, explanation: 0 }, weakOptions: false,
+      caseRef: curCase ? curCase.ref : '', caseSeq: 0
     };
+    if (curCase) cur.caseSeq = ++curCase.seq;
     stemBuf = rest ? [rest] : []; mode = 'stem';
   };
 
   for (let i = 0; i < lines.length; i++) {
     const L = lines[i], t = L.t.trim();
+
+    // Inside a scenario NOTHING else applies. The passage is ordinary prose:
+    // it will contain lines opening with a capital letter and a bracket, and
+    // sentences that read as stems, and every one of them belongs to the
+    // passage. Only the closing sentinel gets out of here — including past
+    // the blank-line skip below, because a two-paragraph scenario needs its
+    // blank lines kept.
+    if (scenarioBuf) {
+      if (RX.scenarioClose.test(t)) { closeScenario(); continue; }
+      scenarioBuf.push(L.t);
+      continue;
+    }
+
     if (!t) { if (mode === 'stem' && stemBuf.length) mode = 'stem'; continue; }
     // A separate answer key is harvested below, never parsed as questions.
     if (isKeyLine(t)) { flush(); continue; }
+
+    /* ---- sheet layout markers ---- */
+    const caseM = sheetMode ? RX.caseStart.exec(t) : null;
+    if (caseM) {
+      flush(); closeScenario();
+      const ref = caseM[1].trim();
+      // The same reference twice is one scenario continued, not two.
+      curCase = caseStudies.find(c => c.ref === ref) || null;
+      if (!curCase) { curCase = { ref, title: '', text: '', domainRaw: '', topic: '', seq: 0, meta: {} }; caseStudies.push(curCase); }
+      continue;
+    }
+    if (curCase && RX.caseEnd.test(t)) { flush(); closeScenario(); curCase = null; continue; }
+    if (curCase && !curCase.title) {
+      const tm = RX.caseTitleLine.exec(t);
+      if (tm) { curCase.title = tm[1].trim(); continue; }
+    }
+    if (curCase && sheetMode && RX.scenarioOpen.test(t)) { flush(); scenarioBuf = []; continue; }
 
     if (template === 'table' || (template === 'auto' && t.indexOf('\t') >= 0 && t.split('\t').length >= 4)) {
       const cells = t.split('\t').map(s => s.trim());
@@ -3513,6 +3696,28 @@ function parseText(text, opts) {
       cur.conf.explanation = 0.9;
       mode = 'expl';
       continue;
+    }
+    /* Metadata the sheet layout carries — "Domain: D3", "Difficulty: hard".
+       Tested only here, AFTER the answer and explanation rules, because
+       RX.explanation already owns "reason", "note" and "solution" and would
+       lose them to this. Restricted to the three modes the sheet actually
+       puts metadata in — the header block (idle), and after the answer or
+       the explanation — so that a stem or an option reading "Section: 404 of
+       the Act" keeps its line instead of being eaten as a field. */
+    if (mode === 'idle' || mode === 'answer' || mode === 'expl') {
+      const mm = RX.meta.exec(t);
+      if (mm) {
+        const field = metaFieldOf(mm[1]);
+        if (field) {
+          if (cur) applyMeta(cur, field, mm[2]);
+          // Between a CASE: line and its first question, metadata describes
+          // the scenario; the same words in the sheet header describe the
+          // whole sheet.
+          else if (curCase && !curCase.seq) { applyMeta(curCase, field, mm[2]); applyMeta(curCase.meta, field, mm[2]); }
+          else applyMeta(sheetMeta, field, mm[2]);
+          continue;
+        }
+      }
     }
     // Anything unlabeled once the answer is already known is explanation —
     // whether or not it starts by restating "Answer: B" or just "B.". Some
@@ -3589,6 +3794,12 @@ function parseText(text, opts) {
     if (!cur) unresolved.push({ line: L.n, text: t.slice(0, 160) });
   }
   flush();
+  // A file that ends without its closing sentinel still gets its passage.
+  closeScenario();
+  caseStudies.forEach(c => {
+    if (!c.title) c.title = c.ref;
+    if (!c.text) unresolved.push({ line: 0, text: 'Case study "' + c.ref + '" has no scenario text. Check that the passage sits between SCENARIO: and END SCENARIO.' });
+  });
 
   // Separate answer key ("1. A  2. C 3. B") anywhere in the document.
   const keyMap = harvestAnswerKey(text);
@@ -3600,7 +3811,7 @@ function parseText(text, opts) {
       c.conf.answer = 0.8;
     }
   });
-  return { candidates, unresolved, keyMap };
+  return { candidates, unresolved, keyMap, caseStudies };
 }
 
 function harvestAnswerKey(text) {
@@ -9897,7 +10108,9 @@ const IMPORT_TEMPLATES = [
   { id: 'csv', ico: '▦', label: 'Question spreadsheet (.csv)', desc: 'One question per row, with its options in their own columns. Opens in Excel, Numbers or Sheets.', run: () => downloadQuestionTemplateCSV() },
   { id: 'json', ico: '{ }', label: 'Question file (.json)', desc: 'The same fields as structured data, for anything generating questions programmatically.', run: () => downloadQuestionTemplateJSON() },
   { id: 'case-csv', ico: '❐', label: 'Case study spreadsheet (.csv)', desc: 'Rows sharing a case reference become one scenario. Paste the passage into one cell; you need not repeat it down every row.', run: () => downloadCaseTemplateCSV() },
-  { id: 'case-json', ico: '❐', label: 'Case study file (.json)', desc: 'Each scenario carries its own questions, so the link between them cannot be lost. The sturdier of the two for long passages.', run: () => downloadCaseTemplateJSON() }
+  { id: 'case-json', ico: '❐', label: 'Case study file (.json)', desc: 'Each scenario carries its own questions, so the link between them cannot be lost. The sturdier of the two for long passages.', run: () => downloadCaseTemplateJSON() },
+  { id: 'sheet-doc', ico: '📄', label: 'Question sheet for PDF (.docx)', desc: 'For questions that live in a PDF this app cannot read. Paste the text in, save the sheet as PDF, and drop that back in above.', run: () => downloadQuestionSheetDOCX() },
+  { id: 'case-sheet-doc', ico: '📄', label: 'Case study sheet for PDF (.docx)', desc: 'The same route for a scenario and the questions hanging off it — the only way to bring a case study in from a document.', run: () => downloadCaseSheetDOCX() }
 ];
 
 const IMPORT_STEPS = [
@@ -11211,14 +11424,60 @@ async function pasteTextWorkflow() {
 /* ---------- the shape the app expects ----------
    Every template below is written from IMPORT_FIELDS, the same table the
    parser reads and the reference panel renders — so a template can never
-   hand you a column the app then ignores.                                  */
+   hand you a column the app then ignores.
+
+   The worked examples are written once, here, and every template renders
+   from them. Someone comparing the spreadsheet route against the document
+   one then sees the same question in both, and there is only one place to
+   edit when the example needs to change.                                   */
+
+const SAMPLE_Q = {
+  stem: 'An IS auditor finds a control weakness during fieldwork. What should the auditor do FIRST?',
+  options: [
+    { text: 'Report it to the audit committee', why: 'Reporting before corroborating risks a finding that does not survive scrutiny.' },
+    { text: 'Corroborate the finding with additional evidence', why: 'Corroboration is what makes the finding defensible, and it comes first.' },
+    { text: 'Recommend a corrective control', why: 'Recommending a control presumes the weakness is established, which it is not yet.' },
+    { text: 'Widen the scope of the audit', why: 'Scope is set in planning; widening it here is a reaction, not a first step.' }
+  ],
+  answer: 'B',
+  explanation: 'Findings are corroborated before they are reported; conclusions rest on sufficient evidence.',
+  domain: 'D1', topic: 'Audit evidence', module: 'Module 1', difficulty: 'medium', tags: 'evidence,fieldwork'
+};
+
+const SAMPLE_CASE = {
+  ref: 'CS-1',
+  title: 'Kaveri Textiles — ERP post-implementation',
+  domain: 'D5',
+  text: 'Kaveri Textiles Ltd is a mid-sized garment manufacturer with three plants and a central warehouse. Over the last eighteen months it has replaced a set of standalone accounting, payroll and inventory systems with a single ERP, cut over plant by plant. The final plant went live six weeks ago.\n\nDuring the cutover the project team was granted temporary access to production so that data migration errors could be corrected quickly. That access has not been withdrawn. Two developers still hold accounts that can post journal entries and adjust inventory quantities, and the emergency change procedure written for the cutover — a verbal approval from the project manager, documented afterwards — is still the one being followed for defect fixes.\n\nThe internal audit team has been asked to review the post-implementation position before the financial year closes. Its first pass finds that reconciliations between the ERP inventory ledger and the physical stock counts at two plants have not been completed since go-live, that the ERP’s own audit log is enabled but has never been reviewed, and that the disaster recovery plan still names the retired systems. Management’s response is that the plants are running, orders are shipping, and the team is stretched.',
+  questions: [
+    {
+      stem: 'Which finding should the IS auditor report as the MOST significant?',
+      options: ['The disaster recovery plan still names the retired systems', 'Developers retain production access granted for the cutover', 'The ERP audit log has never been reviewed', 'Inventory reconciliations are outstanding at two plants'],
+      answer: 'B', domain: 'D5', difficulty: 'medium',
+      explanation: 'Standing developer access to production is the finding that makes every other control unreliable, because it permits unrecorded change.'
+    },
+    {
+      stem: 'The emergency change procedure used during cutover is still in force. What should the auditor recommend FIRST?',
+      options: ['Withdraw the procedure and apply the standard change process', 'Document the verbal approvals retrospectively', 'Ask management to accept the risk formally', 'Test a sample of emergency changes'],
+      answer: 'A', domain: 'D3', difficulty: 'medium',
+      explanation: 'The cutover justification has expired, so the compensating procedure should end with it.'
+    },
+    {
+      stem: 'Management responds that the plants are running and the team is stretched. What is the auditor’s correct course?',
+      options: ['Close the findings as accepted by management', 'Escalate directly to the external auditor', 'Report the findings with the risk stated, and let those accountable decide', 'Defer the review until after the year end'],
+      answer: 'C', domain: 'D1', difficulty: 'hard',
+      explanation: 'The auditor reports and states risk; accepting it is a management decision, recorded as such.'
+    }
+  ]
+};
 
 function downloadQuestionTemplateCSV() {
+  const o = SAMPLE_Q.options;
   const csv = toCSV([
     ['Question', 'A', 'B', 'C', 'D', 'Answer', 'Explanation', 'Why A', 'Why B', 'Why C', 'Why D', 'Domain', 'Topic', 'Module', 'Difficulty', 'Tags'],
-    ['An IS auditor finds a control weakness during fieldwork. What should the auditor do FIRST?', 'Report it to the audit committee', 'Corroborate the finding with additional evidence', 'Recommend a corrective control', 'Widen the scope of the audit', 'B', 'Findings are corroborated before they are reported; conclusions rest on sufficient evidence.',
-      'Reporting before corroborating risks a finding that does not survive scrutiny.', 'Corroboration is what makes the finding defensible, and it comes first.', 'Recommending a control presumes the weakness is established, which it is not yet.', 'Scope is set in planning; widening it here is a reaction, not a first step.',
-      'D1', 'Audit evidence', 'Module 1', 'medium', 'evidence,fieldwork']
+    [SAMPLE_Q.stem, o[0].text, o[1].text, o[2].text, o[3].text, SAMPLE_Q.answer, SAMPLE_Q.explanation,
+      o[0].why, o[1].why, o[2].why, o[3].why,
+      SAMPLE_Q.domain, SAMPLE_Q.topic, SAMPLE_Q.module, SAMPLE_Q.difficulty, SAMPLE_Q.tags]
   ]);
   download('question-import-template.csv', new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
   toast('Template downloaded', 'ok');
@@ -11243,32 +11502,16 @@ function downloadQuestionTemplateJSON() {
 }
 
 function downloadCaseTemplateCSV() {
-  const passage = 'Kaveri Textiles Ltd is a mid-sized garment manufacturer with three plants and a central warehouse. Over the last eighteen months it has replaced a set of standalone accounting, payroll and inventory systems with a single ERP, cut over plant by plant. The final plant went live six weeks ago.\n\nDuring the cutover the project team was granted temporary access to production so that data migration errors could be corrected quickly. That access has not been withdrawn. Two developers still hold accounts that can post journal entries and adjust inventory quantities, and the emergency change procedure written for the cutover — a verbal approval from the project manager, documented afterwards — is still the one being followed for defect fixes.\n\nThe internal audit team has been asked to review the post-implementation position before the financial year closes. Its first pass finds that reconciliations between the ERP inventory ledger and the physical stock counts at two plants have not been completed since go-live, that the ERP’s own audit log is enabled but has never been reviewed, and that the disaster recovery plan still names the retired systems. Management’s response is that the plants are running, orders are shipping, and the team is stretched.';
-  const rows = [
-    ['Case ref', 'Case title', 'Case text', 'Question', 'A', 'B', 'C', 'D', 'Answer', 'Explanation', 'Domain', 'Difficulty'],
-    ['CS-1', 'Kaveri Textiles — ERP post-implementation', passage,
-      'Which finding should the IS auditor report as the MOST significant?',
-      'The disaster recovery plan still names the retired systems',
-      'Developers retain production access granted for the cutover',
-      'The ERP audit log has never been reviewed',
-      'Inventory reconciliations are outstanding at two plants',
-      'B', 'Standing developer access to production is the finding that makes every other control unreliable, because it permits unrecorded change.', 'D5', 'medium'],
-    ['CS-1', '', '',
-      'The emergency change procedure used during cutover is still in force. What should the auditor recommend FIRST?',
-      'Withdraw the procedure and apply the standard change process',
-      'Document the verbal approvals retrospectively',
-      'Ask management to accept the risk formally',
-      'Test a sample of emergency changes',
-      'A', 'The cutover justification has expired, so the compensating procedure should end with it.', 'D3', 'medium'],
-    ['CS-1', '', '',
-      'Management responds that the plants are running and the team is stretched. What is the auditor’s correct course?',
-      'Close the findings as accepted by management',
-      'Escalate directly to the external auditor',
-      'Report the findings with the risk stated, and let those accountable decide',
-      'Defer the review until after the year end',
-      'C', 'The auditor reports and states risk; accepting it is a management decision, recorded as such.', 'D1', 'hard']
-  ];
-  download('case-study-import-template.csv', new Blob(['﻿' + toCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+  const rows = [['Case ref', 'Case title', 'Case text', 'Question', 'A', 'B', 'C', 'D', 'Answer', 'Explanation', 'Domain', 'Difficulty']];
+  // The passage is written into the first row only; the parser reads the
+  // first non-empty case text under a reference, so repeating a two-page
+  // scenario down every row would be pointless work.
+  SAMPLE_CASE.questions.forEach((q, i) => {
+    rows.push([SAMPLE_CASE.ref, i ? '' : SAMPLE_CASE.title, i ? '' : SAMPLE_CASE.text,
+      q.stem, q.options[0], q.options[1], q.options[2], q.options[3],
+      q.answer, q.explanation, q.domain, q.difficulty]);
+  });
+  download('case-study-import-template.csv', new Blob(['\ufeff' + toCSV(rows)], { type: 'text/csv;charset=utf-8' }));
   toast('Template downloaded', 'ok');
 }
 
@@ -11276,28 +11519,96 @@ function downloadCaseTemplateJSON() {
   const json = JSON.stringify({
     schema: 'mcq-mastery-import/1',
     caseStudies: [{
-      ref: 'CS-1',
-      title: 'Kaveri Textiles — ERP post-implementation',
-      text: 'Kaveri Textiles Ltd is a mid-sized garment manufacturer with three plants and a central warehouse. Over the last eighteen months it has replaced a set of standalone accounting, payroll and inventory systems with a single ERP, cut over plant by plant. The final plant went live six weeks ago.\n\nDuring the cutover the project team was granted temporary access to production so that data migration errors could be corrected quickly. That access has not been withdrawn. Two developers still hold accounts that can post journal entries and adjust inventory quantities, and the emergency change procedure written for the cutover — a verbal approval from the project manager, documented afterwards — is still the one being followed for defect fixes.\n\nThe internal audit team has been asked to review the post-implementation position before the financial year closes. Its first pass finds that reconciliations between the ERP inventory ledger and the physical stock counts at two plants have not been completed since go-live, that the ERP’s own audit log is enabled but has never been reviewed, and that the disaster recovery plan still names the retired systems. Management’s response is that the plants are running, orders are shipping, and the team is stretched.',
-      domain: 'D5',
-      questions: [
-        {
-          stem: 'Which finding should the IS auditor report as the MOST significant?',
-          options: ['The disaster recovery plan still names the retired systems', 'Developers retain production access granted for the cutover', 'The ERP audit log has never been reviewed', 'Inventory reconciliations are outstanding at two plants'],
-          answer: 'B', domain: 'D5', difficulty: 'medium',
-          explanation: 'Standing developer access to production is the finding that makes every other control unreliable, because it permits unrecorded change.'
-        },
-        {
-          stem: 'The emergency change procedure used during cutover is still in force. What should the auditor recommend FIRST?',
-          options: ['Withdraw the procedure and apply the standard change process', 'Document the verbal approvals retrospectively', 'Ask management to accept the risk formally', 'Test a sample of emergency changes'],
-          answer: 'A', domain: 'D3', difficulty: 'medium',
-          explanation: 'The cutover justification has expired, so the compensating procedure should end with it.'
-        }
-      ]
+      ref: SAMPLE_CASE.ref, title: SAMPLE_CASE.title, text: SAMPLE_CASE.text, domain: SAMPLE_CASE.domain,
+      questions: SAMPLE_CASE.questions.map(q => ({
+        stem: q.stem, options: q.options, answer: q.answer,
+        domain: q.domain, difficulty: q.difficulty, explanation: q.explanation
+      }))
     }]
   }, null, 2);
   download('case-study-import-template.json', new Blob([json], { type: 'application/json' }));
   toast('Template downloaded', 'ok');
+}
+
+/* ---------- the document route ----------
+   A PDF reaches the parser as plain text, so what a PDF template can fix is
+   the LAYOUT of that text. These two write a Word file already in the shape
+   parseText reads: fill it in, export it to PDF, drop it back in. It is the
+   way round a PDF whose own text layer this app cannot decode — and the only
+   way to bring a case study in from a document at all.
+
+   The instruction block sits above the banner line on purpose: parseText
+   drops everything above it, so the how-to can be addressed to a person
+   without the parser trying to read it as questions.                       */
+
+/** The lines one question occupies in a sheet. Shared by both templates so
+    the standalone and case-study layouts cannot drift apart. `inherited` is
+    the domain already in force from the banner or the CASE: block — a
+    question only prints its own when it differs, which keeps the sample
+    uncluttered and shows the override working where it matters. */
+function sheetQuestionLines(q, n, inherited) {
+  const opts = q.options.map((o, i) => LETTERS[i] + ') ' + (typeof o === 'string' ? o : o.text));
+  return ['Q' + n + '. ' + q.stem].concat(opts, [
+    'Answer: ' + q.answer,
+    'Explanation: ' + q.explanation
+  ], q.domain && q.domain !== inherited ? ['Domain: ' + q.domain] : [],
+     q.difficulty ? ['Difficulty: ' + q.difficulty] : []);
+}
+
+function downloadQuestionSheetDOCX() {
+  const paras = [
+    { text: 'Question sheet — how to fill this in', bold: true },
+    'Copy the text out of your PDF, then replace the sample question below with your own.',
+    '',
+    'Keep the labels exactly as they are: Q1. for the question, A) B) C) D) for the options, then Answer: and Explanation:. They are what the app reads.',
+    'One question per block, with a blank line between blocks. Copy the whole block for each further question and renumber it.',
+    'The Domain, Module and Topic lines under the banner apply to every question in the sheet. Repeat any of them inside a question block to override it for that one question.',
+    'Anything above the banner line is ignored on import, so these instructions can stay where they are.',
+    '',
+    'When the sheet is filled in: File → Save as (or Download) → PDF, then drop that PDF into Add Questions. Importing this .docx directly works just as well.',
+    ''
+  ];
+  paras.push({ text: 'MCQ MASTERY — QUESTION SHEET', bold: true });
+  paras.push('Domain: ' + SAMPLE_Q.domain);
+  paras.push('Module: ' + SAMPLE_Q.module);
+  paras.push('Topic: ' + SAMPLE_Q.topic);
+  paras.push('');
+  sheetQuestionLines(SAMPLE_Q, 1, SAMPLE_Q.domain).forEach(l => paras.push(l));
+  buildDocx(paras).then(b => {
+    download('question-sheet-for-pdf.docx', b);
+    toast('Template downloaded', 'ok');
+  });
+}
+
+function downloadCaseSheetDOCX() {
+  const paras = [
+    { text: 'Case study sheet — how to fill this in', bold: true },
+    'One scenario per CASE: block. The reference after it (CS-1, CS-2, …) is yours to choose and only has to be unique within this file — questions under the same reference become one case study.',
+    '',
+    'The passage goes between SCENARIO: and END SCENARIO, on lines of its own. END SCENARIO is not decoration: without it the app cannot tell where the passage stops and the first question begins. Blank lines inside the passage are kept.',
+    'DOMAIN under a CASE: line applies to that scenario’s questions unless a question sets its own.',
+    'The questions themselves take the same shape as the question sheet: Q1., then A) B) C) D), then Answer: and Explanation:.',
+    'Anything above the banner line is ignored on import, so these instructions can stay where they are.',
+    '',
+    'When the sheet is filled in: File → Save as (or Download) → PDF, then drop that PDF into Add Questions. Importing this .docx directly works just as well.',
+    ''
+  ];
+  paras.push({ text: 'MCQ MASTERY — CASE STUDY SHEET', bold: true });
+  paras.push('');
+  paras.push('CASE: ' + SAMPLE_CASE.ref);
+  paras.push('TITLE: ' + SAMPLE_CASE.title);
+  paras.push('DOMAIN: ' + SAMPLE_CASE.domain);
+  paras.push('SCENARIO:');
+  SAMPLE_CASE.text.split('\n').forEach(l => paras.push(l));
+  paras.push('END SCENARIO');
+  SAMPLE_CASE.questions.forEach((q, i) => {
+    paras.push('');
+    sheetQuestionLines(q, i + 1, SAMPLE_CASE.domain).forEach(l => paras.push(l));
+  });
+  buildDocx(paras).then(b => {
+    download('case-study-sheet-for-pdf.docx', b);
+    toast('Template downloaded', 'ok');
+  });
 }
 
 /** Kept for anything still asking for both at once. */
@@ -11324,6 +11635,19 @@ function showImportReference() {
         'Spreadsheet headings are matched without regard to case, and dashes and underscores count as spaces — so “Question_Text”, “question text” and “QUESTION TEXT” are the same heading. A column the app does not recognise is never silently guessed at: it asks you which column is which instead.'),
       h('div', { class: 'notice small' },
         'Options can also arrive as a JSON array under “options” or “choices” — plain strings, or objects with text and optionally letter. The answer may be a letter, the full text of the right option, or a zero-based “correctIndex”.'),
+      h('div', { class: 'notice small' }, [
+        h('b', { text: 'A .pdf, .docx or .txt has no columns.' }),
+        h('span', { text: ' It is read as plain text instead, so the layout carries the fields: ' }),
+        h('code', { class: 'srcline', text: 'Q1.' }), h('span', { text: ' the question, ' }),
+        h('code', { class: 'srcline', text: 'A)' }), h('span', { text: ' each option, then ' }),
+        h('code', { class: 'srcline', text: 'Answer:' }), h('span', { text: ' and ' }),
+        h('code', { class: 'srcline', text: 'Explanation:' }),
+        h('span', { text: '. Domain, Topic, Module, Difficulty, Tags and Marks are written the same way, one per line. A scenario is opened with ' }),
+        h('code', { class: 'srcline', text: 'CASE: CS-1' }), h('span', { text: ' and its passage sits between ' }),
+        h('code', { class: 'srcline', text: 'SCENARIO:' }), h('span', { text: ' and ' }),
+        h('code', { class: 'srcline', text: 'END SCENARIO' }),
+        h('span', { text: '. The two .docx sheets above are already in that shape.' })
+      ]),
       h('div', { class: 'tbl-wrap' }, h('table', {}, [
         h('thead', {}, h('tr', {}, ['Field', 'Spreadsheet heading', 'JSON key'].map(t => h('th', { text: t })))), tb
       ]))
@@ -11336,7 +11660,7 @@ function showImportReference() {
 function templateCard() {
   const rows = h('div', { class: 'card-b stack' });
   rows.appendChild(h('p', { class: 'small muted', style: 'margin:0' },
-    'A file already in the shape the parser expects — fill it in and drop it back in above. A .csv opened and re-saved as .xlsx imports identically; the app reads both.'));
+    'A file already in the shape the parser expects — fill it in and drop it back in above. A .csv opened and re-saved as .xlsx imports identically; the app reads both. The two .docx sheets are for questions trapped in a PDF this app cannot decode: paste the text in, save the sheet as PDF, and import that.'));
   IMPORT_TEMPLATES.forEach(t => {
     rows.appendChild(h('button', { class: 'method-row', onclick: t.run }, [
       h('span', { class: 'method-ico', text: t.ico }),
@@ -21961,6 +22285,222 @@ test('JSON case studies carry their own questions, in order', () => {
   eq(plain.candidates.length, 1);
   eq(plain.candidates[0].stem, 'A stem given under the "text" key?');
   eq(plain.candidates[0].caseRef, '', 'and the question is standalone');
+});
+
+/* ---- the document route: .pdf / .docx / .txt sheets ---- */
+
+test('A PDF header need not sit at byte zero', async () => {
+  const enc = new TextEncoder();
+  const body = '%PDF-1.4\n1 0 obj\n<< /Length 120 >>\nstream\nBT (Q1. Which control is preventive?) Tj T* (A) Log review) Tj T* (Answer: B) Tj ET\nendstream\nendobj\n';
+  // A byte-order mark and a generator preamble ahead of the header are both
+  // legal, and both used to be rejected outright.
+  const shifted = enc.encode('﻿\n' + body);
+  const text = await pdfToText(shifted.buffer);
+  assert(text.indexOf('Q1. Which control is preventive?') >= 0, 'the text layer is still read through the offset header');
+  // A file with no header anywhere is still refused.
+  let refused = '';
+  try { await pdfToText(enc.encode('<html>Not a PDF at all</html>').buffer); }
+  catch (e) { refused = e.message; }
+  assert(/not a PDF/i.test(refused), 'a file that is not a PDF is still named as one, got: ' + refused);
+});
+
+/** A PDF in the shape real exporters write: one Flate content stream per
+    page, each closed by the end-of-line the spec puts before "endstream". */
+async function fakePdf(pages) {
+  if (typeof self.CompressionStream !== 'function') return null;
+  const enc = new TextEncoder();
+  const parts = [enc.encode('%PDF-1.4\n')];
+  for (const lines of pages) {
+    const body = 'BT /F1 9 Tf 40 800 Td 12 TL\n' + lines.map(l => '(' + l.replace(/([()\\])/g, '\\$1') + ') Tj T*\n').join('') + 'ET';
+    const cs = new CompressionStream('deflate');
+    const z = new Uint8Array(await new Response(new Blob([enc.encode(body)]).stream().pipeThrough(cs)).arrayBuffer());
+    parts.push(enc.encode('<< /Length ' + z.length + ' /Filter /FlateDecode >>\nstream\n'), z, enc.encode('\nendstream\nendobj\n'));
+  }
+  let n = 0; parts.forEach(p => n += p.length);
+  const out = new Uint8Array(n); let o = 0;
+  parts.forEach(p => { out.set(p, o); o += p.length; });
+  return out.buffer;
+}
+
+test('A compressed stream still decodes with the newline the spec puts before endstream', async () => {
+  const buf = await fakePdf([['Q1. Which control is preventive?', 'A) Log review', 'B) Segregation of duties', 'Answer: B']]);
+  if (!buf) return 'skipped — this browser has no Compression Streams';
+  const text = await pdfToText(buf);
+  assert(text.indexOf('Q1. Which control is preventive?') >= 0, 'the stream inflated despite its trailing EOL');
+  assert(text.indexOf('Answer: B') >= 0);
+});
+
+test('Every page of a PDF is read, not just the first', async () => {
+  // The scan used to resume ON the word "endstream", immediately re-matching
+  // the "stream" inside it and swallowing whatever object came next — so a
+  // multi-page document quietly lost everything after page one.
+  const buf = await fakePdf([
+    ['Q1. First page question?', 'A) One', 'B) Two', 'Answer: A'],
+    ['Q2. Second page question?', 'A) Three', 'B) Four', 'Answer: B'],
+    ['Q3. Third page question?', 'A) Five', 'B) Six', 'Answer: A']
+  ]);
+  if (!buf) return 'skipped — this browser has no Compression Streams';
+  const out = parseText(await pdfToText(buf), { template: 'lettered' });
+  eq(out.candidates.length, 3, 'all three pages came through');
+  eq(out.candidates[1].stem, 'Second page question?');
+  eq(out.candidates[2].stem, 'Third page question?');
+  eq(out.candidates[2].answerLetter, 'A');
+});
+
+test('The .docx the app writes is one the app can read back', async () => {
+  const blob = await buildDocx(['Ampersands & "quotes" survive', '', "So does an apostrophe's <angle>"]);
+  const back = await docxToText(await blob.arrayBuffer());
+  eq(back, 'Ampersands & "quotes" survive\n\nSo does an apostrophe\'s <angle>',
+    'every character round-trips, and the blank line stays a blank line');
+});
+
+/** Build what a download button writes, without the download. */
+async function grabTemplate(fn) {
+  const realDownload = self.download, realToast = self.toast;
+  let blob = null;
+  self.download = (n, b) => { blob = b; };
+  self.toast = () => {};
+  try {
+    fn();
+    for (let i = 0; i < 100 && !blob; i++) await new Promise(r => setTimeout(r, 10));
+  } finally { self.download = realDownload; self.toast = realToast; }
+  return blob;
+}
+
+test('The question sheet round-trips from .docx back into a question', async () => {
+  const blob = await grabTemplate(downloadQuestionSheetDOCX);
+  assert(blob, 'the template was written');
+  const out = parseText(await docxToText(await blob.arrayBuffer()), { template: 'auto' });
+  eq(out.candidates.length, 1, 'the sample question, and nothing else');
+  eq(out.unresolved.length, 0, 'the instruction block above the banner is not reported as leftover text');
+  const c = out.candidates[0];
+  eq(c.stem, SAMPLE_Q.stem);
+  eq(c.options.length, 4);
+  eq(c.options[1].text, SAMPLE_Q.options[1].text);
+  eq(c.answerLetter, 'B');
+  eq(c.explanation, SAMPLE_Q.explanation);
+  eq(c.domainRaw, 'D1', 'the banner block stands as the default for every question');
+  eq(c.topic, 'Audit evidence');
+  eq(c.srcModule, 'Module 1');
+  eq(c.difficulty, 'medium');
+});
+
+test('The case study sheet round-trips, scenario and all', async () => {
+  const blob = await grabTemplate(downloadCaseSheetDOCX);
+  assert(blob, 'the template was written');
+  const out = parseText(await docxToText(await blob.arrayBuffer()), { template: 'auto' });
+  eq(out.unresolved.length, 0);
+  eq(out.caseStudies.length, 1);
+  eq(out.caseStudies[0].ref, 'CS-1');
+  eq(out.caseStudies[0].title, SAMPLE_CASE.title);
+  eq(out.caseStudies[0].text, SAMPLE_CASE.text, 'the passage comes back paragraph for paragraph');
+  eq(out.candidates.length, 3);
+  out.candidates.forEach((c, i) => {
+    eq(c.caseRef, 'CS-1', 'every question hangs off the scenario');
+    eq(c.caseSeq, i + 1, 'and keeps its order within it');
+  });
+  eq(out.candidates[0].domainRaw, 'D5', 'the domain under CASE: carries down');
+  eq(out.candidates[1].domainRaw, 'D3', 'and a question that states its own wins');
+});
+
+test('Scenario prose is inert — no line inside it is read as structure', () => {
+  const sheet = [
+    'MCQ MASTERY — CASE STUDY SHEET',
+    'CASE: CS-9',
+    'TITLE: A tricky passage',
+    'SCENARIO:',
+    'The plant went live in March.',
+    'A) was the first to cut over, and B) followed in June.',
+    '1. The warehouse came last.',
+    '',
+    'Answer: the board never got one.',
+    'END SCENARIO',
+    'Q1. Which plant cut over first?',
+    'A) The first plant',
+    'B) The warehouse',
+    'Answer: A'
+  ].join('\n');
+  const out = parseText(sheet, { template: 'sheet' });
+  eq(out.candidates.length, 1, 'exactly one question — nothing in the passage became a second');
+  eq(out.caseStudies.length, 1);
+  assert(out.caseStudies[0].text.indexOf('A) was the first to cut over') >= 0, 'an option-shaped line stays in the passage');
+  assert(out.caseStudies[0].text.indexOf('1. The warehouse came last.') >= 0, 'so does a stem-shaped one');
+  assert(out.caseStudies[0].text.indexOf('Answer: the board never got one.') >= 0, 'and so does an answer-shaped one');
+  eq(out.candidates[0].answerLetter, 'A', 'the real answer, after END SCENARIO, is still read');
+  eq(out.candidates[0].caseSeq, 1);
+});
+
+test('Sheet metadata does not swallow the explanation, and vice versa', () => {
+  const sheet = [
+    'MCQ MASTERY — QUESTION SHEET',
+    'Q1. Which control is preventive?',
+    'A) Log review',
+    'B) Segregation of duties',
+    'Answer: B',
+    'Explanation: Segregation stops the act; a log only records it.',
+    'Reason it matters: the distractor is detective, not preventive.',
+    'Difficulty: hard',
+    'Tags: controls,preventive',
+    'Marks: 2'
+  ].join('\n');
+  const out = parseText(sheet, { template: 'sheet' });
+  eq(out.candidates.length, 1);
+  const c = out.candidates[0];
+  eq(c.difficulty, 'hard');
+  eq(c.tags, 'controls,preventive');
+  eq(c.marks, '2');
+  assert(c.explanation.indexOf('Segregation stops the act') >= 0, 'the explanation survives the metadata that follows it');
+  assert(c.explanation.indexOf('the distractor is detective') >= 0, 'and so does a second line that RX.explanation owns');
+});
+
+test('A stem or option that reads like a field keeps its line', () => {
+  const out = parseText([
+    'Q1. Section: 143(3) of the Companies Act requires what?',
+    'A) Topic: an unqualified opinion',
+    'B) A report on internal financial controls',
+    'Answer: B'
+  ].join('\n'), { template: 'lettered' });
+  eq(out.candidates.length, 1);
+  eq(out.candidates[0].stem, 'Section: 143(3) of the Companies Act requires what?', 'the stem is not eaten as a Section field');
+  eq(out.candidates[0].options[0].text, 'Topic: an unqualified opinion', 'nor the option as a Topic field');
+  eq(out.candidates[0].options.length, 2);
+});
+
+test('A stray "Case:" in ordinary material does not open a scenario', () => {
+  // Law and audit material is full of these. Read as a marker, this line
+  // would divert every question after it into the case study bank.
+  const out = parseText([
+    'Case: Salomon v A Salomon & Co Ltd [1897] AC 22',
+    'Q1. What did the House of Lords hold?',
+    'A) A company is not distinct from its members',
+    'B) A company is a separate legal person',
+    'Answer: B'
+  ].join('\n'), { template: 'auto' });
+  eq(out.caseStudies.length, 0, 'no scenario was invented');
+  eq(out.candidates.length, 1);
+  eq(out.candidates[0].caseRef, '', 'and the question stays in the standalone bank');
+  // The same line inside a real sheet IS a marker.
+  const sheet = parseText([
+    'MCQ MASTERY — CASE STUDY SHEET',
+    'Case: Salomon v A Salomon & Co Ltd [1897] AC 22',
+    'SCENARIO:', 'A company was incorporated.', 'END SCENARIO',
+    'Q1. What did the House of Lords hold?',
+    'A) Not distinct', 'B) A separate legal person',
+    'Answer: B'
+  ].join('\n'), { template: 'auto' });
+  eq(sheet.caseStudies.length, 1, 'the banner makes the same line structural');
+  eq(sheet.candidates[0].caseRef, 'Salomon v A Salomon & Co Ltd [1897] AC 22');
+});
+
+test('An ordinary document still declares no case studies', () => {
+  const out = parseText([
+    'Q1. Which is a detective control?',
+    'A) Firewall', 'B) Log review',
+    'Answer: B'
+  ].join('\n'), { template: 'auto' });
+  eq(out.caseStudies.length, 0);
+  eq(out.candidates[0].caseRef, '', 'and its question is standalone');
+  eq(out.candidates[0].caseSeq, 0);
 });
 
 test('Spreadsheet rows sharing a case reference become one scenario', () => {
