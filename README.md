@@ -313,12 +313,67 @@ it means; anything it did recognise is filled in already. There is also a
 checkbox for "this file has no header row at all", which reads every row
 positionally.
 
-**Start from a template** on the same screen gives you four files already in the
-right shape: a question spreadsheet, a question JSON file, and the case-study
-versions of both. A `.csv` opened and re-saved as `.xlsx` imports identically.
-Next to them, **"See every column and key the app reads"** lists every accepted
-heading and JSON key — generated from the parser's own table, so it cannot
-advertise a column the app then ignores.
+**Start from a template** on the same screen gives you six files already in the
+right shape: a question spreadsheet, a question JSON file, the case-study
+versions of both, and two Word sheets for the PDF route below. A `.csv` opened
+and re-saved as `.xlsx` imports identically. Next to them, **"See every column
+and key the app reads"** lists every accepted heading and JSON key — generated
+from the parser's own table, so it cannot advertise a column the app then
+ignores.
+
+### When a PDF will not read
+
+The app decodes PDF text itself, with no external library. That covers most
+documents, but not every one: a PDF built from compressed object streams, or
+one whose fonts carry no usable character map, has no text this app can reach —
+and a scanned PDF has no text at all. It says so rather than importing nonsense.
+
+The way round it is **Question sheet for PDF (.docx)** and **Case study sheet
+for PDF (.docx)** under *Start from a template*. Copy the text out of the
+original, paste it into the sheet, and save the sheet as PDF. Because the layout
+is one the parser is built around, what comes back is exactly what you put in:
+
+```
+MCQ MASTERY — QUESTION SHEET
+Domain: D1
+Module: Module 1
+
+Q1. An IS auditor finds a control weakness. What should the auditor do FIRST?
+A) Report it to the audit committee
+B) Corroborate the finding with additional evidence
+Answer: B
+Explanation: Findings are corroborated before they are reported.
+Difficulty: medium
+```
+
+`Domain`, `Module` and `Topic` under the banner apply to every question in the
+sheet; repeating any of them inside a question block overrides it there. The
+instruction block above the banner is ignored on import, so it can stay.
+
+The case-study sheet adds three markers, and is the only way to bring a scenario
+in from a document rather than a spreadsheet:
+
+```
+CASE: CS-1
+TITLE: Kaveri Textiles — ERP post-implementation
+DOMAIN: D5
+SCENARIO:
+The whole passage, across as many paragraphs as it takes.
+END SCENARIO
+
+Q1. Which finding should the auditor report as the MOST significant?
+...
+```
+
+`END SCENARIO` is not decoration. A passage is ordinary prose, and without a
+closing marker there is nothing to say where it stops and the first question
+starts. Questions under one `CASE:` reference become one case study, numbered in
+the order they appear. Neither marker is read as structure in an ordinary
+document — a line like `Case: Salomon v Salomon` stays text unless the sheet
+banner is present, or the document really does open and close a scenario.
+
+Both sheets import as `.docx` directly too, if you would rather skip the PDF
+step.
 
 ### Two settings that matter on import
 
@@ -368,7 +423,8 @@ paragraph as the explanation, options split across lines, and answer keys
 
 **Start from a template** in Add Questions gives you a worked example of every
 supported field. The app generates these itself; there are no template files to
-find.
+find. The two `.docx` sheets there are the same thing for documents rather than
+spreadsheets — see *When a PDF will not read* above.
 
 ### Shipping question sets with the app
 
