@@ -3217,6 +3217,7 @@ const XLSX_PARTS = {
     '<Default Extension="xml" ContentType="application/xml"/>' +
     '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
     '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
     '</Types>',
   rels: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
@@ -3225,7 +3226,33 @@ const XLSX_PARTS = {
   wbRels: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
     '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
-    '</Relationships>'
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+    '</Relationships>',
+  /* Two formats: a bold header row, and body cells that wrap and sit at the
+     top, so a two-page case passage in one cell reads as a paragraph rather
+     than a single line running off the screen.
+
+     The part is here for a second reason. It is optional by the spec, and
+     both readers this was tested against are happy without it — but Excel is
+     the fussiest consumer and a missing styles part is the usual cause of
+     its "we found a problem with some content" repair prompt on minimal
+     workbooks. The two <fill> entries are not padding either: Excel requires
+     the first to be none and the second gray125, in that order.            */
+  styles: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<styleSheet xmlns="' + XLSX_NS + '">' +
+    '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>' +
+    '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>' +
+    '<fills count="2"><fill><patternFill patternType="none"/></fill>' +
+    '<fill><patternFill patternType="gray125"/></fill></fills>' +
+    '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+    '<cellXfs count="3">' +
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
+    '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>' +
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>' +
+    '</cellXfs>' +
+    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
+    '</styleSheet>'
 };
 /** Zero-based column index to its spreadsheet letters: 0 → A, 26 → AA. */
 function xlsxCol(i) {
@@ -3251,7 +3278,8 @@ async function buildXlsx(rows, sheetName) {
     const cs = (cells || []).map((v, c) => {
       const s = v == null ? '' : String(v);
       if (!s) return '';
-      return '<c r="' + xlsxCol(c) + n + '" t="inlineStr"><is><t xml:space="preserve">' + esc(s) + '</t></is></c>';
+      return '<c r="' + xlsxCol(c) + n + '" s="' + (r ? 2 : 1) + '" t="inlineStr">' +
+        '<is><t xml:space="preserve">' + esc(s) + '</t></is></c>';
     }).join('');
     // Never self-closing, even when every cell is empty.
     return '<row r="' + n + '">' + cs + '</row>';
@@ -3266,7 +3294,8 @@ async function buildXlsx(rows, sheetName) {
     { name: '_rels/.rels', data: XLSX_PARTS.rels },
     { name: 'xl/workbook.xml', data: workbook },
     { name: 'xl/_rels/workbook.xml.rels', data: XLSX_PARTS.wbRels },
-    { name: 'xl/worksheets/sheet1.xml', data: sheet }
+    { name: 'xl/worksheets/sheet1.xml', data: sheet },
+    { name: 'xl/styles.xml', data: XLSX_PARTS.styles }
   ]);
   return new Blob([blob], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
