@@ -3189,6 +3189,88 @@ async function buildDocx(paragraphs) {
   return new Blob([blob], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
 }
 
+/* ---------- rows → XLSX ----------
+   The smallest workbook Excel, Numbers and Sheets will all open, written on
+   the same ZIP writer as the .docx above. It exists because the app has
+   always READ .xlsx and only ever handed out .csv, which means a detour
+   through Excel's import dialog for a file this app produced itself.
+
+   Its correctness bar is xlsxToRows below — whatever this writes, that must
+   read back cell for cell, which is what the round-trip test asserts. Four
+   things in here are load-bearing to that, and each fails silently:
+
+     · the worksheet must be xl/worksheets/sheet1.xml, the only name the
+       reader looks for;
+     · tags must be unprefixed — <x:row> matches nothing;
+     · a <row> must never self-close, or the reader drops it and every row
+       after it shifts up one;
+     · every cell needs its r="A1" reference, or they all land in column A.
+
+   Cells are written as inline strings. That skips the shared-string table
+   altogether, and is the one branch the reader entity-decodes: a bare <v> is
+   taken verbatim, so text must never go there.                             */
+const XLSX_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+const XLSX_PARTS = {
+  types: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+    '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+    '</Types>',
+  rels: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+    '</Relationships>',
+  wbRels: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
+    '</Relationships>'
+};
+/** Zero-based column index to its spreadsheet letters: 0 → A, 26 → AA. */
+function xlsxCol(i) {
+  let s = '', n = i + 1;
+  while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = (n - r - 1) / 26; }
+  return s;
+}
+/** Column widths, so a two-page case passage does not land in a column eight
+    characters wide. Ignored by the reader; it is for whoever opens the file. */
+function xlsxCols(rows) {
+  const width = [];
+  rows.forEach(r => (r || []).forEach((v, i) => {
+    const len = String(v == null ? '' : v).length;
+    width[i] = Math.max(width[i] || 10, Math.min(60, len + 2));
+  }));
+  if (!width.length) return '';
+  return '<cols>' + width.map((w, i) =>
+    '<col min="' + (i + 1) + '" max="' + (i + 1) + '" width="' + w + '" customWidth="1"/>').join('') + '</cols>';
+}
+async function buildXlsx(rows, sheetName) {
+  const body = (rows || []).map((cells, r) => {
+    const n = r + 1;
+    const cs = (cells || []).map((v, c) => {
+      const s = v == null ? '' : String(v);
+      if (!s) return '';
+      return '<c r="' + xlsxCol(c) + n + '" t="inlineStr"><is><t xml:space="preserve">' + esc(s) + '</t></is></c>';
+    }).join('');
+    // Never self-closing, even when every cell is empty.
+    return '<row r="' + n + '">' + cs + '</row>';
+  }).join('');
+  const sheet = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<worksheet xmlns="' + XLSX_NS + '">' + xlsxCols(rows) + '<sheetData>' + body + '</sheetData></worksheet>';
+  const workbook = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<workbook xmlns="' + XLSX_NS + '" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+    '<sheets><sheet name="' + esc(sheetName || 'Template') + '" sheetId="1" r:id="rId1"/></sheets></workbook>';
+  const blob = await zipFiles([
+    { name: '[Content_Types].xml', data: XLSX_PARTS.types },
+    { name: '_rels/.rels', data: XLSX_PARTS.rels },
+    { name: 'xl/workbook.xml', data: workbook },
+    { name: 'xl/_rels/workbook.xml.rels', data: XLSX_PARTS.wbRels },
+    { name: 'xl/worksheets/sheet1.xml', data: sheet }
+  ]);
+  return new Blob([blob], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+
 /* ---------- DOCX → text (paragraphs and tables preserved) ---------- */
 async function docxToText(arrayBuffer) {
   const zip = await unzip(arrayBuffer);
@@ -10647,14 +10729,31 @@ async function openCaseStudy(csOrId, isNew) {
    Nothing reaches the practice pool without passing through this screen.
    ========================================================================== */
 
-/** What "Start from a template" offers. The case study bank appends to this. */
+/** What "Start from a template" offers: two kinds of file, each in the four
+    formats the app reads. Grouped rather than listed flat, because eight
+    near-identical titles down a card told you less than two do — the choice
+    that matters is questions or case study, and the format is a detail of
+    how you would rather edit it. Each `desc` becomes the button's tooltip,
+    so nothing written on the old rows is lost. */
 const IMPORT_TEMPLATES = [
-  { id: 'csv', ico: '▦', label: 'Question spreadsheet (.csv)', desc: 'One question per row, with its options in their own columns. Opens in Excel, Numbers or Sheets.', run: () => downloadQuestionTemplateCSV() },
-  { id: 'json', ico: '{ }', label: 'Question file (.json)', desc: 'The same fields as structured data, for anything generating questions programmatically.', run: () => downloadQuestionTemplateJSON() },
-  { id: 'case-csv', ico: '❐', label: 'Case study spreadsheet (.csv)', desc: 'Rows sharing a case reference become one scenario. Paste the passage into one cell; you need not repeat it down every row.', run: () => downloadCaseTemplateCSV() },
-  { id: 'case-json', ico: '❐', label: 'Case study file (.json)', desc: 'Each scenario carries its own questions, so the link between them cannot be lost. The sturdier of the two for long passages.', run: () => downloadCaseTemplateJSON() },
-  { id: 'sheet-doc', ico: '📄', label: 'Question sheet for PDF (.docx)', desc: 'For questions that live in a PDF this app cannot read. Paste the text in, save the sheet as PDF, and drop that back in above.', run: () => downloadQuestionSheetDOCX() },
-  { id: 'case-sheet-doc', ico: '📄', label: 'Case study sheet for PDF (.docx)', desc: 'The same route for a scenario and the questions hanging off it — the only way to bring a case study in from a document.', run: () => downloadCaseSheetDOCX() }
+  {
+    ico: '▦', label: 'Questions',
+    formats: [
+      { ext: '.csv', desc: 'One question per row, with its options in their own columns. Opens in Excel, Numbers or Sheets.', run: () => downloadQuestionTemplateCSV() },
+      { ext: '.xlsx', desc: 'The same sheet as a real workbook — opens straight into Excel with no import dialog on the way.', run: () => downloadQuestionTemplateXLSX() },
+      { ext: '.json', desc: 'The same fields as structured data, for anything generating questions programmatically.', run: () => downloadQuestionTemplateJSON() },
+      { ext: '.docx', label: '.docx — for PDF', desc: 'For questions that live in a PDF this app cannot read. Paste the text in, save the sheet as PDF, and drop that back in above.', run: () => downloadQuestionSheetDOCX() }
+    ]
+  },
+  {
+    ico: '❐', label: 'Case studies',
+    formats: [
+      { ext: '.csv', desc: 'Rows sharing a case reference become one scenario. Paste the passage into one cell; you need not repeat it down every row.', run: () => downloadCaseTemplateCSV() },
+      { ext: '.xlsx', desc: 'The same sheet as a real workbook, which carries a two-page passage in one cell more gracefully than a .csv does.', run: () => downloadCaseTemplateXLSX() },
+      { ext: '.json', desc: 'Each scenario carries its own questions, so the link between them cannot be lost. The sturdier of the two for long passages.', run: () => downloadCaseTemplateJSON() },
+      { ext: '.docx', label: '.docx — for PDF', desc: 'The same route for a scenario and the questions hanging off it — the only way to bring a case study in from a document.', run: () => downloadCaseSheetDOCX() }
+    ]
+  }
 ];
 
 const IMPORT_STEPS = [
@@ -12015,17 +12114,44 @@ const SAMPLE_CASE = {
   ]
 };
 
-function downloadQuestionTemplateCSV() {
+/* The spreadsheet templates are one set of rows rendered two ways. Written
+   once here so the .csv and the .xlsx cannot drift apart. */
+function questionTemplateRows() {
   const o = SAMPLE_Q.options;
-  const csv = toCSV([
+  return [
     ['Question', 'A', 'B', 'C', 'D', 'Answer', 'Explanation', 'Why A', 'Why B', 'Why C', 'Why D', 'Domain', 'Topic', 'Module', 'Difficulty', 'Tags'],
     [SAMPLE_Q.stem, o[0].text, o[1].text, o[2].text, o[3].text, SAMPLE_Q.answer, SAMPLE_Q.explanation,
       o[0].why, o[1].why, o[2].why, o[3].why,
       SAMPLE_Q.domain, SAMPLE_Q.topic, SAMPLE_Q.module, SAMPLE_Q.difficulty, SAMPLE_Q.tags]
-  ]);
-  download('question-import-template.csv', new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
+  ];
+}
+function caseTemplateRows() {
+  const rows = [['Case ref', 'Case title', 'Case text', 'Question', 'A', 'B', 'C', 'D', 'Answer', 'Explanation', 'Domain', 'Difficulty']];
+  // The passage is written into the first row only; the parser reads the
+  // first non-empty case text under a reference, so repeating a two-page
+  // scenario down every row would be pointless work.
+  SAMPLE_CASE.questions.forEach((q, i) => {
+    rows.push([SAMPLE_CASE.ref, i ? '' : SAMPLE_CASE.title, i ? '' : SAMPLE_CASE.text,
+      q.stem, q.options[0], q.options[1], q.options[2], q.options[3],
+      q.answer, q.explanation, q.domain, q.difficulty]);
+  });
+  return rows;
+}
+/** A .csv leads with a byte-order mark, or Excel reads it as the local
+    code page and mangles every em dash in the sample. */
+function downloadCSV(name, rows) {
+  download(name, new Blob(['\ufeff' + toCSV(rows)], { type: 'text/csv;charset=utf-8' }));
   toast('Template downloaded', 'ok');
 }
+async function downloadXLSX(name, rows, sheet) {
+  download(name, await buildXlsx(rows, sheet));
+  toast('Template downloaded', 'ok');
+}
+
+function downloadQuestionTemplateCSV() { downloadCSV('question-import-template.csv', questionTemplateRows()); }
+function downloadQuestionTemplateXLSX() { downloadXLSX('question-import-template.xlsx', questionTemplateRows(), 'Questions'); }
+function downloadCaseTemplateCSV() { downloadCSV('case-study-import-template.csv', caseTemplateRows()); }
+function downloadCaseTemplateXLSX() { downloadXLSX('case-study-import-template.xlsx', caseTemplateRows(), 'Case studies'); }
 
 function downloadQuestionTemplateJSON() {
   const json = JSON.stringify({
@@ -12045,19 +12171,6 @@ function downloadQuestionTemplateJSON() {
   toast('Template downloaded', 'ok');
 }
 
-function downloadCaseTemplateCSV() {
-  const rows = [['Case ref', 'Case title', 'Case text', 'Question', 'A', 'B', 'C', 'D', 'Answer', 'Explanation', 'Domain', 'Difficulty']];
-  // The passage is written into the first row only; the parser reads the
-  // first non-empty case text under a reference, so repeating a two-page
-  // scenario down every row would be pointless work.
-  SAMPLE_CASE.questions.forEach((q, i) => {
-    rows.push([SAMPLE_CASE.ref, i ? '' : SAMPLE_CASE.title, i ? '' : SAMPLE_CASE.text,
-      q.stem, q.options[0], q.options[1], q.options[2], q.options[3],
-      q.answer, q.explanation, q.domain, q.difficulty]);
-  });
-  download('case-study-import-template.csv', new Blob(['\ufeff' + toCSV(rows)], { type: 'text/csv;charset=utf-8' }));
-  toast('Template downloaded', 'ok');
-}
 
 function downloadCaseTemplateJSON() {
   const json = JSON.stringify({
@@ -12199,20 +12312,24 @@ function showImportReference() {
   });
 }
 
-/** The card that offers the templates. Built as a function because the case
-    study bank adds its own pair to it. */
+/** The card that offers the templates. Two groups, four formats each, with
+    the format buttons as siblings of the title rather than children of a
+    row: a .method-row is itself a <button>, and a button inside a button is
+    not valid HTML, so the group container is a plain flex row that borrows
+    .method-ico and .method-title for its looks. */
 function templateCard() {
   const rows = h('div', { class: 'card-b stack' });
   rows.appendChild(h('p', { class: 'small muted', style: 'margin:0' },
-    'A file already in the shape the parser expects — fill it in and drop it back in above. A .csv opened and re-saved as .xlsx imports identically; the app reads both. The two .docx sheets are for questions trapped in a PDF this app cannot decode: paste the text in, save the sheet as PDF, and import that.'));
-  // Two up. Six of these stacked is a wall, and the order pairs off neatly
-  // across a row — the two question formats, the two case-study formats,
-  // then the two PDF sheets — so nothing needs reordering to read well.
+    'A file already in the shape the parser expects — fill one in and drop it back in above.'));
   const grid = h('div', { class: 'grid g2 stretch' });
-  IMPORT_TEMPLATES.forEach(t => {
-    grid.appendChild(h('button', { class: 'method-row', onclick: t.run }, [
-      h('span', { class: 'method-ico', text: t.ico }),
-      h('div', {}, [h('div', { class: 'method-title', text: t.label }), h('div', { class: 'card-desc', text: t.desc })])
+  IMPORT_TEMPLATES.forEach(g => {
+    grid.appendChild(h('div', { class: 'row', style: 'align-items:flex-start;gap:11px' }, [
+      h('span', { class: 'method-ico', text: g.ico }),
+      h('div', {}, [
+        h('div', { class: 'method-title', text: g.label }),
+        h('div', { class: 'row wrap', style: 'gap:6px;margin-top:6px' }, g.formats.map(f =>
+          h('button', { class: 'btn sm ghost', title: f.desc, onclick: f.run, text: f.label || f.ext })))
+      ])
     ]));
   });
   rows.appendChild(grid);
@@ -23233,6 +23350,56 @@ test('An option that wraps onto the next line is still joined up', () => {
     'Segregation of development and production access, enforced by the identity platform rather than by local configuration',
     'the wrapped half is joined back on');
   eq(out.candidates[0].answerLetter, 'A');
+});
+
+test('Column references run past Z', () => {
+  eq(xlsxCol(0), 'A'); eq(xlsxCol(25), 'Z');
+  eq(xlsxCol(26), 'AA'); eq(xlsxCol(51), 'AZ'); eq(xlsxCol(52), 'BA');
+});
+
+test('An empty row still holds its place in the sheet', async () => {
+  if (!HAS_CS) return 'skipped — this browser has no Compression Streams';
+  // A <row> written self-closing is invisible to the reader, and every row
+  // after it shifts up one — an import silently misaligned by one line.
+  const rows = [['Question', 'A', 'B'], ['', '', ''], ['Second question', 'x', 'y']];
+  const back = await xlsxToRows(await (await buildXlsx(rows)).arrayBuffer());
+  eq(back.length, 3, 'the blank row is still a row');
+  eq((back[2] || [])[0], 'Second question', 'so nothing after it has shifted up');
+});
+
+test('The .xlsx the app writes is one the app can read back', async () => {
+  if (!HAS_CS) return 'skipped — this browser has no Compression Streams';
+  // The case template is the demanding one: a two-page passage in one cell,
+  // em dashes and curly apostrophes, and interior blank cells on the rows
+  // that do not repeat the scenario.
+  const rows = caseTemplateRows();
+  const back = await xlsxToRows(await (await buildXlsx(rows, 'Case studies')).arrayBuffer());
+  eq(back.length, rows.length, 'every row survives — a self-closing <row> would drop one and shift the rest');
+  rows.forEach((r, i) => r.forEach((v, j) =>
+    eq(back[i][j] || '', v, 'cell at row ' + i + ', column ' + j)));
+  assert(back[1][2].indexOf('\n\n') > 0, 'the passage keeps its paragraph breaks');
+  assert(back[1][2].indexOf('—') > 0, 'and its em dashes');
+  eq(back[2][1], '', 'an interior blank cell is restored, not closed up');
+});
+
+test('A workbook and a spreadsheet import to exactly the same questions', async () => {
+  if (!HAS_CS) return 'skipped — this browser has no Compression Streams';
+  // What actually matters: both formats are the same rows, so both must
+  // arrive at the same candidates through the same importer.
+  const rows = caseTemplateRows();
+  const direct = rowsToCandidates(rows);
+  const viaXlsx = rowsToCandidates(await xlsxToRows(await (await buildXlsx(rows)).arrayBuffer()));
+  eq(viaXlsx.candidates.length, direct.candidates.length);
+  eq(viaXlsx.caseStudies.length, 1);
+  eq(viaXlsx.caseStudies[0].text, direct.caseStudies[0].text, 'the scenario survives the round trip whole');
+  direct.candidates.forEach((c, i) => {
+    const x = viaXlsx.candidates[i];
+    eq(x.stem, c.stem, 'stem ' + i);
+    eq(x.answerLetter, c.answerLetter, 'answer ' + i);
+    eq(x.caseRef, c.caseRef, 'case ref ' + i);
+    eq(x.caseSeq, c.caseSeq, 'case sequence ' + i);
+    eq(x.options.length, c.options.length, 'option count ' + i);
+  });
 });
 
 test('The .docx the app writes is one the app can read back', async () => {
