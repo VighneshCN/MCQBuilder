@@ -3789,7 +3789,7 @@ function extractPdfOps(s) {
   // move the text matrix, but every new line starts from this one.
   let ma = 1, mb = 0, mc = 0, md = 1, me = 0, mf = 0;
   let leading = 0, fontSize = 0;
-  let lastY = null, lastX = 0;
+  let lastY = null, lastEndX = 0;
   const flush = () => {
     const t = buf.replace(/\s+/g, ' ').trim();
     if (t) lines.push(t);
@@ -3804,10 +3804,20 @@ function extractPdfOps(s) {
     // How far the text must move vertically to count as a new line, rather
     // than as a superscript or a rounding wobble.
     const size = Math.abs(fontSize * md) || Math.abs(fontSize) || 12;
-    if (lastY === null) { lastY = mf; lastX = me; }
+    if (lastY === null) lastY = mf;
     else if (Math.abs(mf - lastY) > 0.4 * size) { flush(); lastY = mf; }
-    else if (me !== lastX && buf && !/\s$/.test(buf)) buf += ' ';
-    lastX = me;
+    // Sideways, the question is whether the pen SKIPPED anything. Merely
+    // moving is not enough: a heading whose first letter is set large, or a
+    // year kerned as "202" then "6", repositions between every run and is
+    // still one word. Only a gap wider than the previous run could have
+    // closed is a space — otherwise "INTERMEDIATE COURSE" comes back as
+    // "I NTERMEDIATE C OURSE".
+    else if (me - lastEndX > 0.25 * size && buf && !/\s$/.test(buf)) buf += ' ';
+    lastY = mf;
+    // Where this run should end. There are no font metrics here, so an
+    // average glyph of half an em — coarse, but the distinction being drawn
+    // is only kern-versus-space.
+    lastEndX = me + txt.length * size * 0.5;
     buf += txt;
   };
   const st = [];
@@ -4008,6 +4018,23 @@ function looksStructuralLine(t) {
     // layout apart, so they are structure, not decoration.
     RX.scenarioOpen.test(t) || RX.scenarioClose.test(t) || RX.caseStart.test(t) ||
     RX.caseTitleLine.test(t) || RX.caseEnd.test(t) || RX.meta.test(t);
+}
+/**
+ * A line that cannot be the continuation of an option, however much it looks
+ * like loose text: a running heading in capitals, or a bare page number.
+ *
+ * Wrapped option text is ordinary prose and is neither. Without this, a
+ * booklet's own furniture — "CASE SCENARIOS", a page number, "CASE SCENARIO
+ * 5" — glues itself onto the last option and drags the passage behind it in,
+ * which is how one option came to hold three headings and the opening of a
+ * case study.
+ */
+function breaksOptionRun(t) {
+  const s = String(t || '').trim();
+  if (!s) return false;
+  if (/^\d{1,4}$/.test(s)) return true;
+  const letters = s.replace(/[^A-Za-z]/g, '');
+  return letters.length >= 4 && /\s/.test(s) && s === s.toUpperCase();
 }
 function cleanLines(text) {
   const raw = String(text).replace(/\r\n?/g, '\n').split('\n');
@@ -4289,6 +4316,12 @@ function parseText(text, opts) {
 
     if (cur && mode === 'stem') { stemBuf.push(t); continue; }
     if (cur && mode === 'options' && cur.options.length) {
+      // A heading or a page number ends the question instead of joining it.
+      if (breaksOptionRun(t)) {
+        flush();
+        unresolved.push({ line: L.n, text: t.slice(0, 160) });
+        continue;
+      }
       // continuation of the last option (wrapped text, or text that landed
       // on the line after a lone option letter)
       const last = cur.options[cur.options.length - 1];
@@ -23109,11 +23142,36 @@ test('Line breaks follow where text sits, not which operator moved it', () => {
   eq(out.candidates[1].answerLetter, 'C');
 });
 
+test('Repositioning inside a word is a kern, not a space', () => {
+  // Straight from a real import's unresolved-content panel, where a heading
+  // set with a large first letter came back as "I NTERMEDIATE C OURSE" and a
+  // year kerned in two runs as "202 6". Moving the pen is not the test; the
+  // test is whether it skipped past where the previous run could reach.
+  const run = (x, y, size, t) =>
+    '/F1 ' + size + ' Tf 1 0 0 1 ' + x + ' ' + y + ' Tm (' + t.replace(/([()\\])/g, '\\$1') + ') Tj';
+  const stream = 'BT\n' + [
+    run(40, 800, 14, 'I'), run(48, 800, 10, 'NTERMEDIATE'),
+    run(120, 800, 14, 'C'), run(129, 800, 10, 'OURSE'),
+    run(40, 780, 10, '[RELEVANT FOR MAY, '), run(135, 780, 10, '202'), run(151, 780, 10, '6'),
+    run(170, 780, 10, ' EXAMINATION AND ONWARDS]'),
+    run(40, 760, 10, '(a)'), run(70, 760, 10, 'Competitor analysis')
+  ].join('\n') + '\nET';
+  const lines = extractPdfOps(stream).split('\n');
+  eq(lines[0], 'INTERMEDIATE COURSE', 'a large first letter does not split its own word');
+  eq(lines[1], '[RELEVANT FOR MAY, 2026 EXAMINATION AND ONWARDS]', 'nor does a kerned year');
+  eq(lines[2], '(a) Competitor analysis', 'while a real gap is still a space');
+});
+
 test('A superscript does not start a new line, a real drop does', () => {
-  const s = 'BT /F1 10 Tf 1 0 0 1 40 800 Tm (Section 143) Tj 1 0 0 1 90 803 Tm (2) Tj ' +
-    '1 0 0 1 100 800 Tm (of the Act) Tj 1 0 0 1 40 780 Tm (Answer: B) Tj ET';
-  eq(extractPdfOps(s), 'Section 143 2 of the Act\nAnswer: B',
-    'three points of lift is a superscript; twenty is the next line');
+  // A footnote marker sits a few points above its own baseline and must stay
+  // on that line; the next line proper sits twenty below.
+  const s = 'BT /F1 10 Tf 1 0 0 1 40 800 Tm (Section 143) Tj 1 0 0 1 96 803 Tm (2) Tj ' +
+    '1 0 0 1 106 800 Tm (of the Act) Tj 1 0 0 1 40 780 Tm (Answer: B) Tj ET';
+  const lines = extractPdfOps(s).split('\n');
+  eq(lines.length, 2, 'two lines on the page, not four and not one');
+  assert(/^Section 143/.test(lines[0]) && /of the Act$/.test(lines[0]),
+    'the lifted glyph stays on the line it belongs to, got: ' + JSON.stringify(lines[0]));
+  eq(lines[1], 'Answer: B');
 });
 
 test('A nested parenthesis inside a PDF string survives', () => {
@@ -23123,6 +23181,49 @@ test('A nested parenthesis inside a PDF string survives', () => {
     '(a) Competitor analysis');
   eq(extractPdfOps('BT /F1 10 Tf 1 0 0 1 40 800 Tm (\\(b\\) Escaped instead) Tj ET'),
     '(b) Escaped instead', 'and the escaped spelling of the same thing still works');
+});
+
+test('A heading after the options ends the question instead of joining it', () => {
+  // From a real import, where option (c) came back holding "Product
+  // Development CASE SCENARIOS 17 CASE SCENARIO 5 Ajay S, founder and CEO
+  // of ABC Industries…" — three pieces of the booklet's own furniture and
+  // the opening of the next case study, all glued onto one option.
+  const out = parseText([
+    'Q4. Which expansion strategy would Ansoff recommend?',
+    '(a) Diversification',
+    '(b) Market Penetration',
+    '(c) Product Development',
+    'CASE SCENARIOS',
+    '17',
+    'CASE SCENARIO 5',
+    'Ajay S, founder and CEO of ABC Industries, is renowned for his business acumen.',
+    'Q5. What should Ajay do FIRST?',
+    '(a) Expand', '(b) Consolidate',
+    'Answer: (b)'
+  ].join('\n'), { template: 'auto' });
+  eq(out.candidates.length, 2, 'two questions, not one that swallowed everything after it');
+  eq(out.candidates[0].options.length, 3);
+  eq(out.candidates[0].options[2].text, 'Product Development', 'the last option keeps only its own text');
+  eq(out.candidates[1].stem, 'What should Ajay do FIRST?');
+  assert(out.unresolved.some(u => u.text === 'CASE SCENARIOS'), 'the heading is reported, not silently dropped');
+});
+
+test('An option that wraps onto the next line is still joined up', () => {
+  // The behaviour the guard above must not break: real option text runs on,
+  // and a continuation line is ordinary prose rather than a heading.
+  const out = parseText([
+    'Q1. Which control BEST prevents unauthorised production changes?',
+    'A) Segregation of development and production access, enforced by',
+    'the identity platform rather than by local configuration',
+    'B) Log review',
+    'Answer: A'
+  ].join('\n'), { template: 'lettered' });
+  eq(out.candidates.length, 1);
+  eq(out.candidates[0].options.length, 2);
+  eq(out.candidates[0].options[0].text,
+    'Segregation of development and production access, enforced by the identity platform rather than by local configuration',
+    'the wrapped half is joined back on');
+  eq(out.candidates[0].answerLetter, 'A');
 });
 
 test('The .docx the app writes is one the app can read back', async () => {
