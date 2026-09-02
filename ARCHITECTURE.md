@@ -1095,9 +1095,17 @@ from its registered origin(s) — so it needs setting up once per deployment,
 not once per visitor: `DEFAULT_DRIVE_CLIENT_ID` holds it for whoever deploys
 this copy of the app, and every other visitor just sees "Connect Google
 Drive" with no setup screen at all. `effectiveDriveClientId()` falls back to
-a per-browser override in Settings, for a fork running from a different
-origin. Settings → "Where your data lives" has the one-time Cloud Console
-walkthrough, shown only when no client ID — default or override — is set.
+a per-browser override, for a fork running from a different origin. That
+override lives in `localStorage` (`mcq.driveClientId`), deliberately not in
+the `settings` store: `settings` is part of the bank that syncs through Drive
+and the local file, so an ID typed once on one machine used to ride the sync
+onto every other device signed into the same account — each of which then
+reported it was "using a custom Google connection" nobody there had chosen.
+`migrateDriveClientIdOutOfSync()` lifts any such row out of the store at boot,
+and an override that merely repeats `DEFAULT_DRIVE_CLIENT_ID` counts as no
+override at all. Settings → "Where your data lives" has the one-time Cloud
+Console walkthrough, shown only when no client ID — default or override — is
+set.
 
 Read-only enforcement (`_writeVeto`) stays local-folder-only: a Drive push
 that fails leaves the change sitting in IndexedDB to retry, rather than
