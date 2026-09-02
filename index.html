@@ -1510,7 +1510,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.3.0', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.3.1', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -15180,6 +15180,53 @@ ROUTES.settings = async (root) => {
     }
   }
 
+  // Three rounds of "it says 9 here and 10 there" went by on guesswork,
+  // because nothing in the app would say what each browser actually believed.
+  // These are the exact fields the sync decisions are made from. Copy shows
+  // them as text, so two devices can be compared side by side.
+  if (DriveSync.configured || DriveSync.connected) {
+    const facts = () => ([
+      ['Build', APP.version],
+      ['This browser', (DriveSync.connected ? 'signed in' : 'signed out') + (DriveSync._pendingChange ? ', changes waiting' : ', nothing waiting')],
+      ['Last agreed with Drive', DriveSync.lastPushedAt ? fmtDate(DriveSync.lastPushedAt, true) : 'not recorded'],
+      ['Drive file changed', DriveSync.lastSyncedModifiedTime || 'not recorded'],
+      ['Unsynced since', driveDiag._dirty || 'nothing unsynced'],
+      ['Questions here', String(driveDiag._q === null ? '…' : driveDiag._q)],
+      ['Due today here', String(driveDiag._due === null ? '…' : driveDiag._due)],
+      ['Drive says its file changed', driveDiag._remote === null ? 'not checked' : (driveDiag._remote || 'could not reach Drive')]
+    ]);
+    const rows = h('div', { class: 'stack', style: 'margin-top:8px' });
+    const draw = () => {
+      rows.textContent = '';
+      facts().forEach(([k, v]) => rows.appendChild(h('div', { class: 'row', style: 'gap:8px' }, [
+        h('span', { class: 'tiny dim', style: 'min-width:170px', text: k }), h('span', { class: 'tiny', text: v })
+      ])));
+    };
+    draw();
+    driveDiag(draw);
+    db.appendChild(h('details', { style: 'margin-top:10px' }, [
+      h('summary', { class: 'tiny dim', style: 'cursor:pointer', text: 'Sync diagnostics — what this browser believes' }),
+      h('div', { class: 'stack', style: 'margin-top:6px' }, [
+        rows,
+        h('div', { class: 'row wrap', style: 'gap:8px' }, [
+          h('button', {
+            class: 'btn sm', text: 'Check Drive now',
+            onclick: async () => { await driveDiag.checkRemote(); draw(); }
+          }),
+          h('button', {
+            class: 'btn sm', text: 'Copy',
+            onclick: async () => {
+              const text = facts().map(([k, v]) => k + ': ' + v).join('\n');
+              try { await navigator.clipboard.writeText(text); toast('Copied.', 'ok'); }
+              catch (e) { await modal({ title: 'Sync diagnostics', body: h('pre', { class: 'tiny', style: 'white-space:pre-wrap', text: text }) }); }
+            }
+          })
+        ]),
+        h('p', { class: 'tiny dim', style: 'margin:0' }, '"Drive says its file changed" later than "Drive file changed" means Drive holds something this browser has not taken yet — use Load from Drive. The same two matching while this browser has changes waiting means this browser is the one that is ahead — use Sync now.')
+      ])
+    ]));
+  }
+
   db.appendChild(h('div', { class: 'grid g2' }, [localBlock, driveBlock]));
   // The override field above only ever renders while Google Drive is the
   // one being set up and nothing else is connected — once a local folder
@@ -18119,6 +18166,26 @@ async function requireNoteBackup(rec) {
 }
 
 /* ---------- storage status bar ---------- */
+/** The numbers behind the diagnostics panel that have to be read rather than
+    remembered. Filled in asynchronously and redrawn, so opening Settings is
+    never held up by a database count or a network call. */
+function driveDiag(redraw) {
+  driveDiag._q = driveDiag._q === undefined ? null : driveDiag._q;
+  Promise.all([DB.count('questions'), FileStore.meta('driveDirtySince'), State.questions().catch(() => [])])
+    .then(([n, dirty, all]) => {
+      driveDiag._q = n;
+      driveDiag._dirty = dirty ? fmtDate(dirty, true) : '';
+      const now = new Date();
+      driveDiag._due = (all || []).filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= now && q.status === 'active').length;
+      if (redraw) redraw();
+    }).catch(() => { });
+}
+driveDiag._q = null; driveDiag._due = null; driveDiag._dirty = ''; driveDiag._remote = null;
+driveDiag.checkRemote = async function () {
+  try { driveDiag._remote = await DriveSync._fetchModifiedTime(); }
+  catch (e) { driveDiag._remote = ''; }
+};
+
 function updateStorageBar() {
   // Where the data lives has just changed, or been re-checked — exactly when
   // the browser-only banner has to appear or disappear.
