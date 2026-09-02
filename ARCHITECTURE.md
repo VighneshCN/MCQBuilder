@@ -1142,6 +1142,21 @@ this, a failed silent renewal at boot started no timer and registered no
 listener: the browser saved locally and pushed nothing until somebody noticed
 the sidebar and tapped Reconnect.
 
+The auto-retry only ever runs for a bank that already lives on Drive
+(`configured`), and every attempt is `_requestToken(true)` — silent, no popup.
+A browser-only bank schedules nothing and is asked nothing; it gets the banner
+below instead.
+
+`browserOnlyRisk()` decides the one warning that cannot live in Settings, and
+`#riskbar` renders it under the sticky band in every view. It used to be told
+only by the Settings card and the rail's storage bar, and on a phone the rail
+is behind a hamburger — so the device least likely to have a folder was the
+device least likely to hear about it. It stays a warning rather than a wall:
+"Not now" hides it for the session, "Stop reminding me" records the question
+count in `browserOnlyAckedCount` and stays quiet until the bank grows
+`RISK_ACK_GROWTH` past it — deliberately working in one browser and discarding
+it afterwards is a legitimate thing to do.
+
 What no amount of this can fix, because there is no server: a browser that has
 never connected anything is invisible to every other one. Work done there is
 not lost — connecting Drive later reconciles it, offering a merge that keeps

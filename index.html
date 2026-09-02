@@ -203,6 +203,18 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   color:var(--accent-1);background:var(--grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
 }
 .view{padding:22px 26px 80px;max-width:1220px;width:100%}
+/* Sits under the sticky band, in every view, on every screen size — the rail's
+   storage bar is behind a hamburger on a phone, so on the device most likely
+   to be browser-only it was the one place a person never looked. */
+.riskbar{
+  position:sticky;top:0;z-index:19;display:flex;flex-wrap:wrap;align-items:center;gap:8px;
+  padding:9px 26px;font-size:13px;line-height:1.4;
+  background:var(--amber-tint);border-bottom:1px solid var(--rule);
+}
+.riskbar .rb-text{flex:1 1 240px;min-width:0}
+.riskbar .btn{padding:4px 10px;font-size:12.5px}
+.riskbar.hidden{display:none}
+@media (max-width:720px){ .riskbar{padding:8px 14px} }
 /* A running game is the only thing on the screen that matters, and on a phone
    this band's stat cards wrap to a second row and cost it ~140px — the exact
    height the play field is short of. They describe the games LIST, not the
@@ -1844,6 +1856,9 @@ const Settings = {
     externalOcrEnabled: false,
     storeSourceImages: true,
     imageMaxKB: 500,
+    // Null until somebody dismisses the browser-only banner for good; then the
+    // question count at that moment, so growth past it can bring it back.
+    browserOnlyAckedCount: null,
     notesMaxKB: 2000,
     lastBackupAt: null
   },
@@ -6620,6 +6635,7 @@ function renderShell() {
 
   const main = h('main', { class: 'main' });
   main.appendChild(h('div', { class: 'control-band', id: 'band' }));
+  main.appendChild(h('div', { class: 'riskbar hidden', id: 'riskbar' }));
   main.appendChild(h('div', { class: 'view', id: 'view' }));
   app.appendChild(rail);
   app.appendChild(main);
@@ -6628,6 +6644,7 @@ function renderShell() {
   // caller needs it populated immediately, not just the boot path, so this
   // isn't left for each call site to remember on its own.
   updateStorageBar();
+  updateRiskBar();
 }
 function closeMobileNav() {
   const railEl = $('#rail'); if (railEl) railEl.classList.remove('open');
@@ -6763,6 +6780,7 @@ async function go(view, arg) {
     target.appendChild(h('div', { class: 'notice bad' }, 'Something went wrong rendering this screen: ' + e.message));
   }
   refreshBadges();
+  updateRiskBar();
 }
 async function refreshBadges() {
   if (!State.course) return;
@@ -16113,6 +16131,75 @@ function browserIsOnlyCopy() {
   return true;
 }
 
+/* ---------- the one warning that must not live in Settings ----------
+   A bank with nowhere to go but this browser is the only state in the app
+   where doing nothing can lose everything, and it was announced in two places
+   a person can go a whole week without opening: the Settings card, and the
+   storage bar at the bottom of the rail — which on a phone is behind the
+   hamburger. So the device least likely to have a folder was the device least
+   likely to be told.
+
+   It is a warning, not a wall. Working in one browser deliberately, meaning to
+   throw the lot away afterwards, is a legitimate thing to do: "Not now" is one
+   tap, and "Stop reminding me" is permanent — until the bank grows past what
+   was waved away, which is the only honest reason to bring it back. */
+
+const RISK_ACK_GROWTH = 25;   // questions added past an acknowledgement before it is worth saying again
+
+/** Decides the banner without touching the DOM, so the rule is testable and
+    the renderer stays a renderer. Returns null when nothing should be said. */
+function browserOnlyRisk(o) {
+  const i = o || {};
+  if (!i.browserOnly) return null;       // it lives in a file or in Drive
+  if (!i.questions) return null;         // nothing to lose yet
+  if (i.hiddenThisSession) return null;  // "not now" means not now
+  if (i.ackedCount !== null && i.ackedCount !== undefined && i.questions <= i.ackedCount + RISK_ACK_GROWTH) return null;
+  return {
+    text: i.questions + ' question' + (i.questions === 1 ? '' : 's') + ' saved only in this browser. Clearing browsing data — or the browser clearing it for you — would take them.',
+    acked: i.ackedCount !== null && i.ackedCount !== undefined
+  };
+}
+
+const RISK_COUNT_TTL_MS = 3000;   // this is a warning, not a live counter
+
+function updateRiskBar() {
+  const bar = $('#riskbar');
+  if (!bar) return;
+  // Async only because the count comes from IndexedDB; nothing here waits on
+  // it, and a failed read simply leaves the bar as it was. The count is held
+  // for a few seconds so this can be called from everywhere the storage state
+  // changes without becoming a database read per write.
+  const fresh = Date.now() - (updateRiskBar._at || 0) < RISK_COUNT_TTL_MS;
+  (fresh ? Promise.resolve(updateRiskBar._n) : DB.count('questions')).then(n => {
+    updateRiskBar._n = n; updateRiskBar._at = Date.now();
+    const ackedRaw = Settings.get('browserOnlyAckedCount');
+    const risk = browserOnlyRisk({
+      browserOnly: browserIsOnlyCopy(),
+      questions: n,
+      hiddenThisSession: !!State._riskHiddenThisSession,
+      ackedCount: (ackedRaw === null || ackedRaw === undefined || ackedRaw === '') ? null : Number(ackedRaw)
+    });
+    bar.textContent = '';
+    bar.classList.toggle('hidden', !risk);
+    if (!risk) return;
+    bar.appendChild(h('span', { class: 'rb-text' }, [h('b', { text: 'Not saved anywhere else. ' }), risk.text]));
+    if (FileStore.tier !== 'manual') {
+      bar.appendChild(h('button', { class: 'btn sm', onclick: () => connectFlow(), text: 'Connect a folder' }));
+    }
+    bar.appendChild(h('button', { class: 'btn sm primary', onclick: () => driveConnectFlow(), text: 'Connect Drive' }));
+    bar.appendChild(h('button', { class: 'btn sm ghost', onclick: () => { State._riskHiddenThisSession = true; updateRiskBar(); }, text: 'Not now' }));
+    bar.appendChild(h('button', {
+      class: 'btn sm ghost', title: 'Stop showing this until the bank grows',
+      onclick: async () => {
+        await Settings.set('browserOnlyAckedCount', n);
+        State._riskHiddenThisSession = true;
+        toast('Understood — this stays hidden unless the bank grows past ' + (n + RISK_ACK_GROWTH) + ' questions.', 'ok', 6000);
+        updateRiskBar();
+      }, text: 'Stop reminding me'
+    }));
+  }).catch(() => { });
+}
+
 /** Ask the browser to keep the bank, but only when it is worth a prompt.
     Safe to call repeatedly: it returns early once granted. */
 async function ensureDurableStorage() {
@@ -17931,6 +18018,9 @@ async function requireNoteBackup(rec) {
 
 /* ---------- storage status bar ---------- */
 function updateStorageBar() {
+  // Where the data lives has just changed, or been re-checked — exactly when
+  // the browser-only banner has to appear or disappear.
+  updateRiskBar();
   const bar = $('#storagebar');
   if (!bar) return;
   // Whichever backend is actually active carries the main indicator — only
@@ -25543,6 +25633,30 @@ test('Work done while Drive is unreachable is still marked for pushing', async (
     if (savedMark) await FileStore.setMeta('driveDirtySince', savedMark);
     else await FileStore.delMeta('driveDirtySince');
   }
+});
+
+test('The browser-only warning is loud once, then respects being waved away', () => {
+  // It is shown outside Settings, in every view, because the storage bar that
+  // used to carry it is behind a hamburger on a phone. That makes restraint
+  // the other half of the feature: somebody deliberately working in one
+  // browser and throwing it away afterwards must be able to end it.
+  const on = { browserOnly: true, questions: 40, hiddenThisSession: false, ackedCount: null };
+  assert(browserOnlyRisk(on), 'a bank with nowhere else to go says so');
+  assert(/40 questions/.test(browserOnlyRisk(on).text), 'and says how much is at stake');
+  eq(browserOnlyRisk(Object.assign({}, on, { questions: 1 })).text.indexOf('1 question saved') === 0, true, 'singular reads properly');
+
+  eq(browserOnlyRisk(Object.assign({}, on, { browserOnly: false })), null, 'a folder or Drive silences it entirely');
+  eq(browserOnlyRisk(Object.assign({}, on, { questions: 0 })), null, 'nothing to lose, nothing to say');
+  eq(browserOnlyRisk(Object.assign({}, on, { hiddenThisSession: true })), null, '"not now" means not now');
+  eq(browserOnlyRisk(null), null, 'and it never throws on nothing');
+
+  // "Stop reminding me" records the size of the bank at that moment.
+  eq(browserOnlyRisk(Object.assign({}, on, { ackedCount: 40 })), null, 'acknowledged at 40, silent at 40');
+  eq(browserOnlyRisk(Object.assign({}, on, { ackedCount: 40, questions: 40 + RISK_ACK_GROWTH })), null, 'and through the grace it allows');
+  assert(browserOnlyRisk(Object.assign({}, on, { ackedCount: 40, questions: 41 + RISK_ACK_GROWTH })),
+    'but a bank that has grown well past what was waved away is worth saying once more');
+  eq(browserOnlyRisk({ browserOnly: true, questions: 10, ackedCount: 0 }), null,
+    'acknowledging an empty bank still counts as an acknowledgement');
 });
 
 test('A lapsed Drive sign-in retries itself instead of waiting to be noticed', async () => {
