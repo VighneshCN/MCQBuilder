@@ -15098,7 +15098,7 @@ ROUTES.settings = async (root) => {
       DriveSync.problem ? DriveSync.problem
         : (typeof navigator !== 'undefined' && navigator.onLine === false)
           ? 'Offline — nothing is lost; it syncs when you are back on a connection.'
-          : 'Signed out of Google in this browser. Safari cannot keep a Google sign-in across a reload, so this is normal there — one tap puts it back.'));
+          : 'Signed out of Google in this browser. Safari cannot keep a Google sign-in across a reload, so this is normal there. The app keeps trying quietly — when it cannot get back in without asking, one tap does it.'));
     driveBlock.appendChild(h('p', { class: 'tiny dim' }, DriveSync.lastPushedAt ? 'Last synced ' + fmtDate(DriveSync.lastPushedAt, true) : 'Nothing recorded yet for this browser.'));
     driveBlock.appendChild(h('button', { class: 'btn primary', onclick: () => driveConnectFlow(), text: 'Sign in to Google again' }));
     driveBlock.appendChild(h('details', { style: 'margin-top:8px' }, [
@@ -16860,6 +16860,9 @@ const DRIVE_FILE_NAME = 'mcq-mastery-data.json';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const DRIVE_PUSH_DEBOUNCE_MS = 6 * 1000;      // push shortly after the last change settles
 const DRIVE_PUSH_MAX_GAP_MS = 20 * 1000;      // never let a burst of activity go unpushed longer than this
+const DRIVE_RESUME_FIRST_MS = 30 * 1000;      // first unattended attempt at getting a lapsed token back
+const DRIVE_RESUME_MAX_MS = 10 * 60 * 1000;   // …doubling to this, so a browser that can never renew stops hammering
+const DRIVE_RESUME_MIN_GAP_MS = 15 * 1000;    // two events arriving together are one attempt
 const DRIVE_SAFETY_TIMER_MS = 60 * 1000;      // coarse fallback if a debounced push is ever lost
 const DRIVE_TOKEN_TIMEOUT_MS = 20 * 1000;     // a sign-in request that never answers must still end
 
@@ -16946,6 +16949,7 @@ const DriveSync = {
   // every time they reloaded without a network. Nothing was wrong with their
   // data; the app simply had not been asked the right question.
   connected: false, configured: false, fileId: null, accessToken: null, tokenExpiresAt: 0,
+  _resumeTimer: null, _resumeDelay: null, _resuming: false, _resumeWatching: false, _lastResumeAt: 0,
   _retrying: false, _lastRetryAt: 0,
   lastPushedAt: null, lastSyncedModifiedTime: null, problem: null, setupError: null,
   _tokenClient: null, _tokenClientId: null, _pushTimer: null, _debounceTimer: null,
@@ -17003,16 +17007,31 @@ const DriveSync = {
     // actually pending.
     this.lastPushedAt = (await FileStore.meta('driveLastSyncedAt')) || null;
     this._remoteQuestionCount = (await FileStore.meta('driveQuestionCount')) || 0;
-    const dirtySince = await FileStore.meta('driveDirtySince');
+    // Whatever happens with the token, this browser is now watching for a
+    // chance to get one: a tab brought back to the front, a network that
+    // returns, or simply time passing. Registered before the first attempt so
+    // that a failure is a wait rather than a dead end.
+    this._watchForResume();
     try {
       await this._loadGis();
       await this._requestToken(true);
       this.connected = !!this.accessToken;
     } catch (e) { this.connected = false; }
-    if (!this.connected) { updateStorageBar(); return; }
+    if (!this.connected) { this._scheduleResume(); updateStorageBar(); return; }
     this._startTimer();
     updateStorageBar();
+    await this._catchUpWithDrive();
+  },
 
+  /**
+   * Everything that happens once a token is in hand: find out whether Drive
+   * moved while this browser was away, and reconcile if it did. Called at boot
+   * and again by every later resume, because a sign-in that arrives ten
+   * minutes into a session has exactly the same catching up to do as one that
+   * arrives at boot.
+   */
+  async _catchUpWithDrive() {
+    const dirtySince = await FileStore.meta('driveDirtySince');
     try {
       const remoteModified = await this._fetchModifiedTime();
       if (!remoteModified || remoteModified === this.lastSyncedModifiedTime) {
@@ -17079,6 +17098,77 @@ const DriveSync = {
       }
       await this._recordSyncedStamp();
     } catch (e) { /* best-effort — this browser just stays on what it has until the next successful check */ }
+  },
+
+  /* ---------- getting the connection back on its own ----------
+     A Drive connection is meant to survive a reload: the file, the sync
+     stamps and the dirty marker all do. The Google token does not, and on
+     Safari it cannot — a reloaded page has no way to renew one without
+     asking. Until now a failed silent renewal at boot was the end of it: no
+     timer was started, no listener was registered, and the only way back was
+     for somebody to notice the sidebar and tap Reconnect. So a browser could
+     sit for an hour, perfectly able to sign in, saving everything locally and
+     pushing none of it.
+
+     Now every failure schedules another attempt, and the events that most
+     often mean "this will work now" — the tab coming back to the front, the
+     network returning — try immediately. All of it is silent: no popup ever
+     appears on its own. Where a silent renewal genuinely cannot succeed
+     (Safari with the sign-in frame blocked) this costs one blocked frame per
+     attempt, which is why the interval backs off rather than polling. */
+
+  /** Registered once. Cheap, and they fire only when something has changed. */
+  _watchForResume() {
+    if (this._resumeWatching) return;
+    this._resumeWatching = true;
+    const attempt = () => { this.tryResume(); };
+    window.addEventListener('online', attempt);
+    window.addEventListener('focus', attempt);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) attempt(); });
+  },
+
+  /** Next unattended attempt, backing off so a browser that can never renew
+      silently is not knocking on Google's door every half minute all day. */
+  _scheduleResume() {
+    if (!this.configured || this.connected) return;
+    clearTimeout(this._resumeTimer);
+    this._resumeDelay = Math.min(this._resumeDelay ? this._resumeDelay * 2 : DRIVE_RESUME_FIRST_MS, DRIVE_RESUME_MAX_MS);
+    this._resumeTimer = setTimeout(() => this.tryResume(), this._resumeDelay);
+  },
+
+  /**
+   * Try to put the connection back without troubling anybody. Returns true
+   * only when a token was obtained AND the catch-up ran, so the caller can
+   * treat it as "this browser is level with Drive again".
+   */
+  async tryResume() {
+    if (!this.configured || this.connected || this._resuming) return false;
+    // A local folder took over as the active backend — Drive is not this
+    // bank's home any more and must not quietly reclaim it.
+    if (FileStore.connected) return false;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) { this._scheduleResume(); return false; }
+    // Two events can arrive together (focus and visibilitychange, most
+    // often); one attempt covers both.
+    if (Date.now() - (this._lastResumeAt || 0) < DRIVE_RESUME_MIN_GAP_MS) return false;
+    this._lastResumeAt = Date.now();
+    this._resuming = true;
+    try {
+      await this._loadGis();
+      await this._requestToken(true);
+      this.connected = !!this.accessToken;
+    } catch (e) { this.connected = false; }
+    finally { this._resuming = false; }
+    if (!this.connected) { this._scheduleResume(); updateStorageBar(); return false; }
+    clearTimeout(this._resumeTimer);
+    this._resumeDelay = null;
+    this.problem = null;
+    this._startTimer();
+    updateStorageBar();
+    await this._catchUpWithDrive();
+    // Anything this browser wrote while signed out has been waiting for
+    // exactly this moment.
+    if (await FileStore.meta('driveDirtySince')) { this._pendingChange = true; await this.maybePush(true); }
+    return true;
   },
 
   _loadGis() {
@@ -17179,7 +17269,12 @@ const DriveSync = {
   async _ensureToken() {
     if (this.accessToken && Date.now() < this.tokenExpiresAt) return true;
     try { await this._requestToken(true); return true; }
-    catch (e) { this.connected = false; this.problem = 'Sign-in expired — reconnect in Settings.'; updateStorageBar(); return false; }
+    catch (e) {
+      this.connected = false;
+      this.problem = 'Sign-in expired — trying to renew it; nothing is lost meanwhile.';
+      this._watchForResume(); this._scheduleResume();
+      updateStorageBar(); return false;
+    }
   },
 
   /** connect() only handles Google auth and the Drive file itself — whether
@@ -17323,6 +17418,7 @@ const DriveSync = {
       try { google.accounts.oauth2.revoke(this.accessToken, () => { }); } catch (e) { }
     }
     clearTimeout(this._debounceTimer);
+    clearTimeout(this._resumeTimer); this._resumeDelay = null;
     if (this._pushTimer) { clearInterval(this._pushTimer); this._pushTimer = null; }
     this.connected = false; this.configured = false; this.accessToken = null; this.fileId = null; this.problem = null; this.setupError = null;
     this._pendingChange = false; this._firstUnpushedChangeAt = null; this.lastSyncedModifiedTime = null;
@@ -17674,7 +17770,10 @@ const DriveSync = {
         // A real reason beats a spinner that never stops. This used to say
         // "reconnecting…" for ever while the actual explanation sat unread in
         // this.problem, because the check for it came after this branch.
-        return { tone: 'warn', label: this.problem ? 'Drive: ' + this.problem : 'Drive: tap to reconnect' };
+        // An attempt genuinely in flight is the one case where a spinner is
+        // the truth, and it is bounded by the token timeout.
+        if (this._resuming) return { tone: 'warn', label: 'Drive: signing back in…' };
+        return { tone: 'warn', label: this.problem ? 'Drive: ' + this.problem : 'Drive: signed out — retrying, or tap to sign in' };
       }
       return null;
     }
@@ -25443,6 +25542,48 @@ test('Work done while Drive is unreachable is still marked for pushing', async (
     D._pendingChange = saved.p; D._firstUnpushedChangeAt = saved.f;
     if (savedMark) await FileStore.setMeta('driveDirtySince', savedMark);
     else await FileStore.delMeta('driveDirtySince');
+  }
+});
+
+test('A lapsed Drive sign-in retries itself instead of waiting to be noticed', async () => {
+  const D = DriveSync;
+  const saved = { c: D.connected, g: D.configured, t: D._resumeTimer, d: D._resumeDelay, l: D._lastResumeAt };
+  const savedFs = FileStore.connected;
+  try {
+    clearTimeout(D._resumeTimer); D._resumeTimer = null; D._resumeDelay = null; D._lastResumeAt = 0;
+
+    // Nothing is scheduled for a bank that does not live on Drive, and none
+    // of the guards may reach the network to find that out.
+    D.configured = false; D.connected = false;
+    D._scheduleResume();
+    eq(D._resumeDelay, null, 'a browser with no Drive connection schedules nothing');
+    eq(await D.tryResume(), false, 'and has nothing to resume');
+
+    // The backoff doubles rather than knocking on Google's door every 30s all
+    // day on a browser where silent renewal can never work.
+    D.configured = true; D.connected = false;
+    D._scheduleResume();
+    eq(D._resumeDelay, DRIVE_RESUME_FIRST_MS, 'the first retry is soon');
+    D._scheduleResume();
+    eq(D._resumeDelay, DRIVE_RESUME_FIRST_MS * 2, 'each failure waits longer');
+    for (let i = 0; i < 12; i++) D._scheduleResume();
+    eq(D._resumeDelay, DRIVE_RESUME_MAX_MS, 'and it stops growing at the cap');
+    clearTimeout(D._resumeTimer); D._resumeTimer = null;
+
+    // A local folder is the active backend: Drive must not reclaim the bank
+    // behind its back, however configured it still looks.
+    FileStore.connected = true;
+    eq(await D.tryResume(), false, 'a folder-backed bank is left alone');
+    FileStore.connected = false;
+
+    // Already connected is not a reason to ask Google for anything.
+    D.connected = true;
+    eq(await D.tryResume(), false, 'a live connection is not resumed on top of itself');
+  } finally {
+    clearTimeout(D._resumeTimer);
+    D.connected = saved.c; D.configured = saved.g;
+    D._resumeTimer = saved.t; D._resumeDelay = saved.d; D._lastResumeAt = saved.l;
+    FileStore.connected = savedFs;
   }
 });
 

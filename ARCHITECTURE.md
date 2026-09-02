@@ -1131,6 +1131,24 @@ Safari, which cannot carry a Google token across a reload, keying it to a live
 token reported "Browser only" and offered a fresh connection for a bank that
 was sitting in Drive.
 
+The connection is meant to outlive a reload, and everything except the Google
+token does: the file id, the sync stamps and the dirty marker are all in
+`fsmeta`. A token cannot be, and on Safari cannot even be renewed silently, so
+`tryResume()` keeps trying for one — scheduled with a backoff from 30s to 10
+minutes, and immediately when the tab returns to the front or the network comes
+back. Each success runs `_catchUpWithDrive()` (the same reconciliation boot
+does) and flushes anything `driveDirtySince` recorded while signed out. Before
+this, a failed silent renewal at boot started no timer and registered no
+listener: the browser saved locally and pushed nothing until somebody noticed
+the sidebar and tapped Reconnect.
+
+What no amount of this can fix, because there is no server: a browser that has
+never connected anything is invisible to every other one. Work done there is
+not lost — connecting Drive later reconciles it, offering a merge that keeps
+both sides — but until that browser is opened again, no other device can know
+the work exists. That is the cost of the local-first design, not a defect in
+the sync.
+
 Read-only enforcement (`_writeVeto`) stays local-folder-only: a Drive push
 that fails leaves the change sitting in IndexedDB to retry, rather than
 blocking editing outright the way a missing local file does. Drive's failure
