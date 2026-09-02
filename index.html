@@ -16160,6 +16160,38 @@ function browserOnlyRisk(o) {
   };
 }
 
+/* The other silent way to lose work: Drive is the backend, something has been
+   answered or edited here, and it has not reached Drive — an expired Google
+   sign-in, a background tab frozen mid-upload, a flight. Nothing is lost, and
+   the next successful sync sends it. But until then this browser holds the
+   only copy of that work, and opening the bank somewhere else hands you the
+   older one, with no hint that anything is missing. That is worth saying out
+   loud, in the same place, and it was previously only ever visible as a line
+   in a sidebar that a phone keeps behind a hamburger. */
+const UNSYNCED_GRACE_MS = 2 * 60 * 1000;   // below this it is just the ordinary debounce, not news
+
+/** A timestamp that may be an ISO string, epoch milliseconds, or nothing at
+    all, as one number of milliseconds — or null when it is not a time. */
+function asMillis(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = typeof v === 'number' ? v : Date.parse(v);
+  return isNaN(n) ? null : n;
+}
+
+function unsyncedRisk(o) {
+  const i = o || {};
+  if (!i.driveConfigured) return null;           // no Drive, nothing to be behind
+  if (!i.dirtySince) return null;                // everything here has been sent
+  const age = (i.now || Date.now()) - i.dirtySince;
+  if (!(age >= UNSYNCED_GRACE_MS)) return null;  // a push is simply in flight
+  return {
+    connected: !!i.driveConnected,
+    text: i.driveConnected
+      ? 'Work done here has not reached Google Drive yet. Open your bank on another device now and you will get the older copy.'
+      : 'Signed out of Google, so work done here has not reached Drive. It is safe in this browser — but another device will get the older copy until you sign in.'
+  };
+}
+
 const RISK_COUNT_TTL_MS = 3000;   // this is a warning, not a live counter
 
 function updateRiskBar() {
@@ -16170,8 +16202,12 @@ function updateRiskBar() {
   // for a few seconds so this can be called from everywhere the storage state
   // changes without becoming a database read per write.
   const fresh = Date.now() - (updateRiskBar._at || 0) < RISK_COUNT_TTL_MS;
-  (fresh ? Promise.resolve(updateRiskBar._n) : DB.count('questions')).then(n => {
-    updateRiskBar._n = n; updateRiskBar._at = Date.now();
+  const read = fresh
+    ? Promise.resolve(updateRiskBar._cache)
+    : Promise.all([DB.count('questions'), FileStore.meta('driveDirtySince')]).then(r => ({ n: r[0], dirty: r[1] || null }));
+  read.then(c => {
+    updateRiskBar._cache = c; updateRiskBar._at = Date.now();
+    const n = c.n;
     const ackedRaw = Settings.get('browserOnlyAckedCount');
     const risk = browserOnlyRisk({
       browserOnly: browserIsOnlyCopy(),
@@ -16179,23 +16215,51 @@ function updateRiskBar() {
       hiddenThisSession: !!State._riskHiddenThisSession,
       ackedCount: (ackedRaw === null || ackedRaw === undefined || ackedRaw === '') ? null : Number(ackedRaw)
     });
+    // Not both at once: a bank with nowhere to go is the bigger of the two,
+    // and two stacked banners is how a person learns to ignore the strip.
+    // The persisted marker is an ISO string; the in-memory one is a number
+    // from Date.now(). Both are legitimate answers to "since when", so take
+    // whichever exists and normalise here rather than trusting either shape.
+    const behind = risk ? null : unsyncedRisk({
+      driveConfigured: DriveSync.configured || DriveSync.connected,
+      driveConnected: DriveSync.connected,
+      dirtySince: asMillis(c.dirty) || asMillis(DriveSync._firstUnpushedChangeAt),
+      now: Date.now()
+    });
     bar.textContent = '';
-    bar.classList.toggle('hidden', !risk);
-    if (!risk) return;
-    bar.appendChild(h('span', { class: 'rb-text' }, [h('b', { text: 'Not saved anywhere else. ' }), risk.text]));
-    if (FileStore.tier !== 'manual') {
-      bar.appendChild(h('button', { class: 'btn sm', onclick: () => connectFlow(), text: 'Connect a folder' }));
+    bar.classList.toggle('hidden', !risk && !behind);
+    if (risk) {
+      bar.appendChild(h('span', { class: 'rb-text' }, [h('b', { text: 'Not saved anywhere else. ' }), risk.text]));
+      if (FileStore.tier !== 'manual') {
+        bar.appendChild(h('button', { class: 'btn sm', onclick: () => connectFlow(), text: 'Connect a folder' }));
+      }
+      bar.appendChild(h('button', { class: 'btn sm primary', onclick: () => driveConnectFlow(), text: 'Connect Drive' }));
+      bar.appendChild(h('button', { class: 'btn sm ghost', onclick: () => { State._riskHiddenThisSession = true; updateRiskBar(); }, text: 'Not now' }));
+      bar.appendChild(h('button', {
+        class: 'btn sm ghost', title: 'Stop showing this until the bank grows',
+        onclick: async () => {
+          await Settings.set('browserOnlyAckedCount', n);
+          State._riskHiddenThisSession = true;
+          toast('Understood — this stays hidden unless the bank grows past ' + (n + RISK_ACK_GROWTH) + ' questions.', 'ok', 6000);
+          updateRiskBar();
+        }, text: 'Stop reminding me'
+      }));
+      return;
     }
-    bar.appendChild(h('button', { class: 'btn sm primary', onclick: () => driveConnectFlow(), text: 'Connect Drive' }));
-    bar.appendChild(h('button', { class: 'btn sm ghost', onclick: () => { State._riskHiddenThisSession = true; updateRiskBar(); }, text: 'Not now' }));
+    bar.appendChild(h('span', { class: 'rb-text' }, [h('b', { text: 'Not synced yet. ' }), behind.text]));
     bar.appendChild(h('button', {
-      class: 'btn sm ghost', title: 'Stop showing this until the bank grows',
+      class: 'btn sm primary',
       onclick: async () => {
-        await Settings.set('browserOnlyAckedCount', n);
-        State._riskHiddenThisSession = true;
-        toast('Understood — this stays hidden unless the bank grows past ' + (n + RISK_ACK_GROWTH) + ' questions.', 'ok', 6000);
+        // One button for both states: sign in if that is what is missing, then
+        // push either way. Never mind which of the two the person is in.
+        if (!DriveSync.connected) { await DriveSync.tryResume(); }
+        if (!DriveSync.connected) { await driveConnectFlow(); }
+        const ok = await DriveSync.maybePush(true);
+        toast(ok ? 'Synced to Drive.' : 'Still not synced — see Settings for why.', ok ? 'ok' : 'bad', 6000);
+        updateRiskBar._at = 0;
         updateRiskBar();
-      }, text: 'Stop reminding me'
+      },
+      text: behind.connected ? 'Sync now' : 'Sign in and sync'
     }));
   }).catch(() => { });
 }
@@ -17324,34 +17388,12 @@ const DriveSync = {
     return true;
   },
 
-  /** One silent attempt to get back on Drive, at most one at a time and never
-      more than once a minute. Deliberately says nothing when it fails: the
-      status bar already carries the state, and a browser that structurally
-      cannot do silent refresh would otherwise produce a toast on every glance
-      at the app. */
-  async retryQuietly() {
-    if (this.connected || !this.configured || this._retrying) return false;
-    if (this._lastRetryAt && Date.now() - this._lastRetryAt < 60000) return false;
-    this._retrying = true;
-    this._lastRetryAt = Date.now();
-    try {
-      await this._loadGis();
-      await this._requestToken(true);
-      if (!this.accessToken) return false;
-      this.connected = true; this.problem = null;
-      this._startTimer();
-      updateStorageBar();
-      if (this._pendingChange || await FileStore.meta('driveDirtySince')) {
-        this._pendingChange = true;
-        await this.maybePush(true);
-      }
-      return true;
-    } catch (e) {
-      return false;
-    } finally {
-      this._retrying = false;
-    }
-  },
+  /** Kept for the lifecycle hook that has always called it. There used to be
+      two silent-retry implementations side by side, each with its own throttle
+      — and this one pushed whatever was waiting without ever asking whether
+      Drive had moved in the meantime, which is how two browsers end up quietly
+      disagreeing. One implementation now, and it catches up before it pushes. */
+  retryQuietly() { return this.tryResume(); },
 
   async _ensureToken() {
     if (this.accessToken && Date.now() < this.tokenExpiresAt) return true;
@@ -17648,6 +17690,9 @@ const DriveSync = {
       answer. Distinct from _recordSyncedStamp, which stores Drive's own
       modifiedTime so a change made elsewhere can be noticed. */
   async _markInSync(when) {
+    // The banner below caches what it read for a few seconds; a sync landing
+    // is exactly when that cache must not be trusted.
+    if (typeof updateRiskBar === 'function') updateRiskBar._at = 0;
     this.lastPushedAt = when || nowISO();
     await FileStore.setMeta('driveLastSyncedAt', this.lastPushedAt);
   },
@@ -25657,6 +25702,31 @@ test('The browser-only warning is loud once, then respects being waved away', ()
     'but a bank that has grown well past what was waved away is worth saying once more');
   eq(browserOnlyRisk({ browserOnly: true, questions: 10, ackedCount: 0 }), null,
     'acknowledging an empty bank still counts as an acknowledgement');
+});
+
+test('Work that has not reached Drive yet says so, once it is worth saying', () => {
+  // The confusion this exists to stop: answer questions on a phone, open the
+  // bank on a laptop, and get the older copy with nothing anywhere saying the
+  // phone was still holding the newer one.
+  const now = Date.now();
+  const old = now - (UNSYNCED_GRACE_MS + 1000);
+  eq(unsyncedRisk({ driveConfigured: false, dirtySince: old, now }), null, 'no Drive, nothing to be behind');
+  eq(unsyncedRisk({ driveConfigured: true, dirtySince: null, now }), null, 'nothing waiting, nothing to say');
+  eq(unsyncedRisk({ driveConfigured: true, dirtySince: now - 5000, now }), null, 'an ordinary debounce is not news');
+  eq(unsyncedRisk(null), null, 'and it never throws on nothing');
+
+  const live = unsyncedRisk({ driveConfigured: true, driveConnected: true, dirtySince: old, now });
+  assert(live && /another device/i.test(live.text), 'a stuck push names the consequence, not the mechanism');
+  eq(live.connected, true);
+  const out = unsyncedRisk({ driveConfigured: true, driveConnected: false, dirtySince: old, now });
+  assert(out && /signed out/i.test(out.text), 'and a signed-out browser says which of the two it is');
+  assert(/safe in this browser/i.test(out.text), 'without implying anything has been lost');
+
+  // Both marker shapes in use — the persisted ISO string and the in-memory
+  // Date.now() — have to mean the same thing to it.
+  eq(asMillis(null), null); eq(asMillis(''), null); eq(asMillis('not a date'), null);
+  eq(asMillis(1700000000000), 1700000000000, 'epoch milliseconds pass through');
+  eq(asMillis('2026-01-02T03:04:05.000Z'), Date.parse('2026-01-02T03:04:05.000Z'), 'and an ISO string parses');
 });
 
 test('A lapsed Drive sign-in retries itself instead of waiting to be noticed', async () => {

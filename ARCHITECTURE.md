@@ -1157,6 +1157,15 @@ count in `browserOnlyAckedCount` and stays quiet until the bank grows
 `RISK_ACK_GROWTH` past it — deliberately working in one browser and discarding
 it afterwards is a legitimate thing to do.
 
+`unsyncedRisk()` fills the other half of the same strip. Drive being the
+backend does not mean this browser is level with it: a Google sign-in expires,
+a backgrounded tab is frozen mid-upload, a phone leaves signal. Nothing is lost
+— `driveDirtySince` survives and the next sync sends it — but until then this
+browser holds the newer copy, and opening the bank elsewhere hands you the
+older one with nothing saying so. Past a two-minute grace (below that it is
+just the debounce) the banner says it, and offers one button that signs in if
+that is what is missing and pushes either way.
+
 What no amount of this can fix, because there is no server: a browser that has
 never connected anything is invisible to every other one. Work done there is
 not lost — connecting Drive later reconciles it, offering a merge that keeps
