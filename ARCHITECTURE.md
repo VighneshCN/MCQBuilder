@@ -1157,6 +1157,17 @@ count in `browserOnlyAckedCount` and stays quiet until the bank grows
 `RISK_ACK_GROWTH` past it — deliberately working in one browser and discarding
 it afterwards is a legitimate thing to do.
 
+`buildPayload()` re-reads only the stores `FileStore.touch()` marked dirty
+since the last build, and that marking is deliberately independent of which
+backend is connected — Drive calls `buildPayload()` with no folder in sight.
+While it sat behind `if (!this.connected) return`, a Drive-only bank (every
+iPhone: no folder picker exists there) built its payload once and then pushed
+that same first snapshot for the rest of the page's life. Every sync reported
+success and none of them carried anything answered since; only a reload, which
+drops `_cache`, let new work through, which is why it presented as intermittent
+rather than broken. The journal, the snapshot decision and the `dirty` flag stay
+behind the connected check, because those really are the local file's business.
+
 A push is one whole-file `PATCH`, so on a bank of any size it is a long
 request and a phone's wandering signal ends it. `push()` retries the network
 class of failure once, 2.5s later, reusing the body it already serialised —

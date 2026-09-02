@@ -16527,9 +16527,19 @@ const FileStore = {
 
   /** Called by the DAL after any successful write. */
   touch(store, op, payload, key) {
-    if (!this.connected) return;
     if (store === 'fsmeta') return;
+    // The dirty set describes the DATA, not this backend: buildPayload() reads
+    // it to decide which stores to re-read, and Google Drive calls
+    // buildPayload() whether or not a local folder is connected. Marking it
+    // only when a folder was connected meant a Drive-only bank — every iPhone,
+    // where folders do not exist — rebuilt its payload once, then pushed that
+    // same first snapshot for the rest of the page's life. Every sync
+    // "succeeded"; none of them carried anything answered since. Only a reload
+    // (which drops _cache) let new work through, which is exactly why it
+    // looked intermittent rather than broken.
     this._dirtyStores.add(store);
+    // Everything below is the local file's business, and only its business.
+    if (!this.connected) return;
     this.dirty = true;
 
     // Decide whether this change can be journalled cheaply, or whether it
@@ -25749,6 +25759,39 @@ test('The browser-only warning is loud once, then respects being waved away', ()
     'but a bank that has grown well past what was waved away is worth saying once more');
   eq(browserOnlyRisk({ browserOnly: true, questions: 10, ackedCount: 0 }), null,
     'acknowledging an empty bank still counts as an acknowledgement');
+});
+
+test('A Drive-only bank stops re-uploading the first snapshot it ever built', async () => {
+  // The bug: FileStore.touch() marked nothing while no folder was connected,
+  // so buildPayload()'s dirty set stayed empty and it returned its cached
+  // stores unchanged. Drive pushed that first snapshot over and over — one
+  // browser answering questions, another loading the bank and seeing none of
+  // them, and every sync reporting success. iOS has no folder picker at all,
+  // so on a phone this was the only path there is.
+  const F = FileStore;
+  const saved = { connected: F.connected, cache: F._cache, dirty: new Set(F._dirtyStores), flag: F.dirty };
+  try {
+    F.connected = false;            // Drive is the backend; no folder anywhere
+    F._cache = null; F._dirtyStores = new Set(); F.dirty = false;
+
+    const first = await F.buildPayload();
+    assert(first.stores.questions, 'the first build reads every store');
+    eq(F._dirtyStores.size, 0, 'and clears the set behind it');
+    const beforeArray = F._cache.questions;
+
+    F.touch('questions', 'p', { uuid: 'not-written-anywhere' });
+    assert(F._dirtyStores.has('questions'), 'a later write marks the store, folder or no folder');
+    eq(F.dirty, false, 'without claiming a local file needs writing when there is none');
+
+    await F.buildPayload();
+    assert(F._cache.questions !== beforeArray, 'so the next payload is re-read rather than the stale one');
+
+    F.touch('fsmeta', 'p', {});
+    assert(!F._dirtyStores.has('fsmeta'), 'handle bookkeeping is still never user data');
+  } finally {
+    F.connected = saved.connected; F._cache = saved.cache;
+    F._dirtyStores = saved.dirty; F.dirty = saved.flag;
+  }
 });
 
 test('A failed sync says what happened, not what the browser called it', () => {
