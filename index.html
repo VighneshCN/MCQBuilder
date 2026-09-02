@@ -12564,10 +12564,82 @@ function loadImage(file) {
   });
 }
 
+/* ---------- local OCR: resolving the engine's own files ----------
+   tesseract.js is four things, not one: the wrapper script you point the app
+   at, a Web Worker script, a WebAssembly core, and the language data. Left to
+   itself the library fetches the last three from a CDN — so an app that
+   promises OCR never leaves your machine would, on its first run, quietly
+   fetch 15 MB from unpkg and fail outright on a train. Every path is pinned
+   to the folder the wrapper script sits in, and a missing file is reported by
+   name instead of being turned into a network request behind your back. */
+
+/** The folder holding the OCR script — everything else is resolved from it. */
+function ocrVendorBase() {
+  const p = (Settings.get('ocrScriptPath') || '').trim();
+  const cut = p.lastIndexOf('/');
+  return cut >= 0 ? p.slice(0, cut + 1) : '';
+}
+
+/* Names differ across tesseract.js versions, so each slot lists what a build
+   might have called its file, best first. The core is offered as an explicit
+   file rather than a folder because v3 and earlier accept only a file path;
+   v4+ accept either. */
+const OCR_ENGINE_FILES = {
+  worker: ['worker.min.js', 'worker.js', 'tesseract-worker.js'],
+  core: ['tesseract-core-simd.wasm.js', 'tesseract-core.wasm.js', 'tesseract-core.js'],
+  lang: ['eng.traineddata.gz', 'eng.traineddata']
+};
+
+/** true / false present, or null when the question cannot be asked at all —
+    opening index.html straight off the disk (file://) blocks fetch, and there
+    a missing file cannot be told apart from a working one. */
+async function ocrVendorFilePresent(url) {
+  try {
+    const r = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+    return !!r.ok;
+  } catch (e) { return null; }
+}
+
+/**
+ * Work out what the vendored engine actually provides. Returns the options
+ * tesseract.js needs, the files that are definitely absent, and whether any
+ * of it could be checked — `certain: false` means run and see, since guessing
+ * wrong is recoverable and refusing to try is not.
+ */
+async function resolveOcrEngine() {
+  const base = ocrVendorBase();
+  const picked = {}, missing = [];
+  let certain = true;
+  for (const slot of ['worker', 'core', 'lang']) {
+    let hit = null, sawAnswer = false;
+    for (const name of OCR_ENGINE_FILES[slot]) {
+      const present = await ocrVendorFilePresent(base + name);
+      if (present === null) continue;
+      sawAnswer = true;
+      if (present) { hit = name; break; }
+    }
+    if (!sawAnswer) { certain = false; hit = OCR_ENGINE_FILES[slot][0]; }
+    else if (!hit) { missing.push(OCR_ENGINE_FILES[slot].join(' or ')); hit = OCR_ENGINE_FILES[slot][0]; }
+    picked[slot] = hit;
+  }
+  return {
+    base, missing, certain,
+    options: {
+      workerPath: base + picked.worker,
+      corePath: base + picked.core,
+      langPath: base,
+      // The library expects eng.traineddata.gz unless told otherwise; a plain
+      // .traineddata download is the common way this goes wrong.
+      gzip: picked.lang.slice(-3) === '.gz'
+    }
+  };
+}
+
 /**
  * OCR hook. No engine is bundled, because no OCR library small enough to embed
  * offline exists — so this loads a local vendor script if you have placed one
- * next to index.html. Nothing is ever sent over the network by this app.
+ * next to index.html, and pins the engine's own worker, core and language
+ * files to that same folder. Nothing is ever sent over the network by this app.
  */
 async function runOCR(canvas, textArea, statusEl) {
   if (!Settings.get('ocrEnabled')) {
@@ -12575,7 +12647,7 @@ async function runOCR(canvas, textArea, statusEl) {
       title: 'OCR is not enabled',
       body: h('div', { class: 'stack' }, [
         h('p', {}, 'No OCR engine is bundled with this application. Nothing is sent to a server, so text recognition needs an engine on your own machine.'),
-        h('p', { class: 'small muted' }, 'To enable it: download tesseract.js, put tesseract.min.js and its worker and language files in a folder called vendor next to index.html, then switch OCR on in Settings.'),
+        h('p', { class: 'small muted' }, 'To enable it: download tesseract.js and put all four pieces in a folder called vendor next to index.html — tesseract.min.js, worker.min.js, a core file (tesseract-core-simd.wasm.js or tesseract-core.wasm.js, with its .wasm beside it) and the language data eng.traineddata.gz — then switch OCR on in Settings.'),
         h('p', { class: 'small muted', style: 'margin:0' }, 'Until then, transcribe the question in the box on the right — the parser handles the rest.')
       ])
     });
@@ -12590,8 +12662,29 @@ async function runOCR(canvas, textArea, statusEl) {
         document.head.appendChild(s);
       });
     }
+    const engine = await resolveOcrEngine();
+    if (engine.missing.length) {
+      // Running anyway would work — by fetching these from a CDN. That is
+      // exactly the promise this feature is built around, so stop instead and
+      // name what is missing.
+      throw new Error('the OCR folder (' + (engine.base || './') + ') is missing ' + engine.missing.join(' and ') +
+        ' — copy the rest of the tesseract.js files in beside the script, or OCR would have to fetch them over the network');
+    }
     statusEl.textContent = 'Reading the image…';
-    const out = await self.Tesseract.recognize(canvas, 'eng');
+    const opts = Object.assign({}, engine.options, {
+      logger: m => { if (m && m.status) statusEl.textContent = m.status + (typeof m.progress === 'number' ? ' · ' + Math.round(m.progress * 100) + '%' : ''); }
+    });
+    let out;
+    try {
+      out = await self.Tesseract.recognize(canvas, 'eng', opts);
+    } catch (first) {
+      // The one guess in here worth a second attempt: whether the language
+      // file is the gzipped one. Only retried when nothing could be probed —
+      // otherwise the answer was known and the failure is something else.
+      if (engine.certain) throw first;
+      opts.gzip = !opts.gzip;
+      out = await self.Tesseract.recognize(canvas, 'eng', opts);
+    }
     const words = (out.data && out.data.words) || [];
     const low = words.filter(w => w.confidence < 70).length;
     textArea.value = (out.data && out.data.text) || '';
@@ -15353,7 +15446,8 @@ ROUTES.settings = async (root) => {
       checkField('Use a local OCR engine', 'ocrEnabled', 'Nothing is bundled and nothing is sent anywhere — this needs a one-time technical setup step. Ask whoever set up this app if you’re not sure.'),
       h('div', { class: 'field' }, [
         h('label', { text: 'Local OCR script path' }),
-        h('input', { type: 'text', value: Settings.get('ocrScriptPath'), onchange: async e => { await Settings.set('ocrScriptPath', e.target.value.trim()); toast('Saved'); } })
+        h('input', { type: 'text', value: Settings.get('ocrScriptPath'), onchange: async e => { await Settings.set('ocrScriptPath', e.target.value.trim()); toast('Saved'); } }),
+        h('div', { class: 'small muted' }, 'The engine’s other files are read from this same folder: worker.min.js, a core file (tesseract-core-simd.wasm.js or tesseract-core.wasm.js) and the language data eng.traineddata.gz. If any is missing, OCR stops and says which one rather than fetching it over the network.')
       ]),
       h('div', { class: 'notice small', style: 'margin-top:2px' }, 'External OCR is a separate, opt-in option below — unlike local OCR, it sends the image to an API of your choosing.'),
       checkField('Allow external OCR', 'externalOcrEnabled', 'Sends the cropped image to an API you configure yourself, only when you click “Try external OCR” on the Add from image screen. Off by default; this is the one thing in the app that can leave your machine.'),

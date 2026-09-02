@@ -45,6 +45,14 @@ $mime = @{
     '.svg'  = 'image/svg+xml'
     '.ico'  = 'image/x-icon'
     '.woff2'= 'font/woff2'
+    # The vendored OCR engine, for anyone who has set up local Tesseract.
+    # A .wasm served as octet-stream is refused by the browser's streaming
+    # compiler, and the language data has to arrive as bytes, not as text.
+    '.wasm' = 'application/wasm'
+    '.gz'   = 'application/gzip'
+    '.traineddata' = 'application/octet-stream'
+    '.data' = 'application/octet-stream'
+    '.zip'  = 'application/zip'
 }
 
 # Find a free port. 8080 first, then upwards, in case something already has it.
@@ -106,6 +114,10 @@ while ($true) {
         }
 
         $parts = $requestLine.Split(' ')
+        # The app asks HEAD before running OCR, to find out which of the
+        # engine's files are actually in the folder. Answering with a body
+        # would work but wastes a multi-megabyte read on every check.
+        $method = if ($parts.Length -ge 1) { $parts[0].ToUpperInvariant() } else { 'GET' }
         $target = if ($parts.Length -ge 2) { $parts[1] } else { '/' }
         $target = $target.Split('?')[0]
         $target = [System.Uri]::UnescapeDataString($target)
@@ -124,13 +136,21 @@ while ($true) {
         } catch { }
 
         if ($full) {
-            $bytes = [System.IO.File]::ReadAllBytes($full)
+            # A HEAD only needs the length, and the language data behind one of
+            # these is 15 MB — reading it to answer "is it there?" is waste.
+            if ($method -eq 'HEAD') {
+                $bytes = [byte[]]@()
+                $len = (Get-Item -LiteralPath $full).Length
+            } else {
+                $bytes = [System.IO.File]::ReadAllBytes($full)
+                $len = $bytes.Length
+            }
             $ext = [System.IO.Path]::GetExtension($full).ToLowerInvariant()
             $ct = $mime[$ext]
             if (-not $ct) { $ct = 'application/octet-stream' }
             $head = "HTTP/1.1 200 OK`r`n" +
                     "Content-Type: $ct`r`n" +
-                    "Content-Length: $($bytes.Length)`r`n" +
+                    "Content-Length: $len`r`n" +
                     "Cache-Control: no-store`r`n" +
                     "Connection: close`r`n`r`n"
             Write-Host ("  200  " + $target) -ForegroundColor DarkGray
@@ -145,7 +165,7 @@ while ($true) {
 
         $headBytes = [System.Text.Encoding]::ASCII.GetBytes($head)
         $stream.Write($headBytes, 0, $headBytes.Length)
-        $stream.Write($bytes, 0, $bytes.Length)
+        if ($method -ne 'HEAD') { $stream.Write($bytes, 0, $bytes.Length) }
         $stream.Flush()
     } catch {
         # A dropped or timed-out connection must never take the server down.

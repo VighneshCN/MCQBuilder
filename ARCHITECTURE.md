@@ -15,6 +15,18 @@ opt-in, off-by-default paths a user can turn on for themselves: external OCR
 and Google Drive sync (their own Google account, narrowest possible scope —
 see "Google Drive sync" below). Neither runs unless deliberately switched on.
 
+Local OCR is not one of those two, and stays local by construction. tesseract.js
+is four separate pieces — wrapper script, Web Worker, WebAssembly core and
+language data — and the library's defaults fetch the last three from a CDN, so
+"local OCR" would have made a 15 MB network request on its first run and failed
+outright offline. `resolveOcrEngine()` pins `workerPath`, `corePath` and
+`langPath` to the folder holding the script named in Settings, probes that
+folder with `HEAD` to see which filenames a given tesseract.js version shipped
+(and whether the language data is gzipped), and refuses to run naming the
+missing file rather than letting the library reach for a CDN. Where the probe
+itself cannot answer — `file://`, where `fetch` is blocked — it runs on the
+usual names and retries once with the other gzip setting.
+
 Source is maintained as 17 modules concatenated in numeric order into the
 `<script>` block of `index.html`. Editing `index.html` directly works; keeping
 the modules and re-concatenating is easier to maintain.
