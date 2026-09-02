@@ -1157,6 +1157,16 @@ count in `browserOnlyAckedCount` and stays quiet until the bank grows
 `RISK_ACK_GROWTH` past it — deliberately working in one browser and discarding
 it afterwards is a legitimate thing to do.
 
+A push is one whole-file `PATCH`, so on a bank of any size it is a long
+request and a phone's wandering signal ends it. `push()` retries the network
+class of failure once, 2.5s later, reusing the body it already serialised —
+never an auth or status failure, which retrying cannot fix — and
+`describeSyncFailure()` turns what is left into words. A failed `fetch()`
+throws the browser's own text ("Load failed" on WebKit, "Failed to fetch" on
+Chrome), which appeared verbatim in the sidebar and read like an app fault
+rather than a dropped upload; the payload size is named alongside it, since a
+multi-megabyte bank going up in one request is usually the reason.
+
 `unsyncedRisk()` fills the other half of the same strip. Drive being the
 backend does not mean this browser is level with it: a Google sign-in expires,
 a backgrounded tab is frozen mid-upload, a phone leaves signal. Nothing is lost

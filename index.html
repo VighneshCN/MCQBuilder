@@ -17092,6 +17092,35 @@ function translateGoogleAuthError(code) {
   return known[code] || 'Could not connect to Google — try again in a moment.';
 }
 
+/**
+ * What actually went wrong, in words. A failed fetch() throws a TypeError
+ * whose message is the browser's own — "Load failed" on WebKit, "Failed to
+ * fetch" on Chrome — which told somebody watching their bank fail to sync
+ * precisely nothing, and read like an app error rather than a network one.
+ * Size is named where it is known, because a bank of several megabytes going
+ * up in one request over a mobile connection is the usual reason.
+ */
+function describeSyncFailure(e, bytes) {
+  const raw = (e && e.message) || '';
+  const size = bytes ? ' (' + Math.round(bytes / 104857.6) / 10 + ' MB)' : '';
+  const network = /load failed|failed to fetch|networkerror|network request failed|connection appears to be offline/i.test(raw);
+  if (network || !raw) {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return 'Not synced — this device is offline. Your work is safe here and goes up as soon as you are back on a connection.';
+    }
+    return 'Not synced — the upload' + size + ' did not get through. Nothing is lost; it retries on its own, and Sync now in Settings forces it.';
+  }
+  const status = raw.match(/Drive returned (\d+)/);
+  if (status) {
+    const code = Number(status[1]);
+    if (code === 403) return 'Google refused the upload (403) — usually the daily quota, or the file being made read-only in Drive.';
+    if (code === 404) return 'That Drive file is gone — it was deleted or moved out of reach. Reconnect from Settings to make a new one.';
+    if (code >= 500) return 'Google Drive is having trouble its end (' + code + '). Your work is safe here; this retries on its own.';
+    return 'Google Drive refused the upload (' + code + ').';
+  }
+  return 'Last sync failed: ' + raw;
+}
+
 const DriveSync = {
   // `connected` means "there is a live token right now". `configured` means
   // "this browser's bank lives on Drive" — which is true across a refresh, and
@@ -17616,6 +17645,7 @@ const DriveSync = {
     if (!(await this._ensureToken())) return false;
     if (this._pushing) return false;
     this._pushing = true;
+    this._lastPayloadBytes = 0;   // a size from the previous push must never be reported against this one
     try {
       const payload = await FileStore.buildPayload();
       const newCount = (payload.stores.questions || []).length;
@@ -17626,11 +17656,28 @@ const DriveSync = {
         toast(this.problem, 'bad', 10000);
         return false;
       }
-      const res = await fetch('https://www.googleapis.com/upload/drive/v3/files/' + this.fileId + '?uploadType=media&fields=modifiedTime', {
+      // Serialised once: the size is wanted for the error message, and a
+      // second JSON.stringify of a multi-megabyte bank to build a retry would
+      // be the most expensive thing in the method.
+      const body = JSON.stringify(payload);
+      this._lastPayloadBytes = body.length;
+      const send = () => fetch('https://www.googleapis.com/upload/drive/v3/files/' + this.fileId + '?uploadType=media&fields=modifiedTime', {
         method: 'PATCH',
         headers: { 'Authorization': 'Bearer ' + this.accessToken, 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body
       });
+      let res;
+      try {
+        res = await send();
+      } catch (netErr) {
+        // A whole-bank upload is one long request, and on a phone one moment
+        // of a wandering signal ends it. Retrying immediately costs nothing
+        // when it works and is exactly what the person would have done by
+        // hand; only the network class of failure is retried, never an auth
+        // or a status error, which retrying cannot fix.
+        await new Promise(r => setTimeout(r, 2500));
+        res = await send();
+      }
       if (this._handleAuthFailure(res)) return false;
       if (!res.ok) throw new Error('Drive returned ' + res.status);
       const meta = await res.json().catch(() => null);
@@ -17644,7 +17691,7 @@ const DriveSync = {
       updateStorageBar();
       return true;
     } catch (e) {
-      this.problem = 'Last sync failed: ' + e.message;
+      this.problem = describeSyncFailure(e, this._lastPayloadBytes);
       updateStorageBar();
       return false;
     } finally {
@@ -25702,6 +25749,26 @@ test('The browser-only warning is loud once, then respects being waved away', ()
     'but a bank that has grown well past what was waved away is worth saying once more');
   eq(browserOnlyRisk({ browserOnly: true, questions: 10, ackedCount: 0 }), null,
     'acknowledging an empty bank still counts as an acknowledgement');
+});
+
+test('A failed sync says what happened, not what the browser called it', () => {
+  // "Load failed" is WebKit's own words for any failed fetch, and it appeared
+  // verbatim in the sidebar of somebody whose bank had simply not finished
+  // uploading over a mobile connection. It reads like the app broke.
+  const online = typeof navigator !== 'undefined' ? navigator.onLine : true;
+  const net = describeSyncFailure(new TypeError('Load failed'), 11400000);
+  if (online) {
+    assert(/did not get through/.test(net), 'a dropped upload is described as one: ' + net);
+    assert(/10\.9 MB/.test(net), 'and names the size, which is usually why: ' + net);
+    assert(/Nothing is lost/.test(net), 'and says the thing that actually matters');
+    assert(/failed to fetch/i.test(describeSyncFailure(new TypeError('Failed to fetch'))) === false,
+      'Chrome’s wording is translated too, not passed through');
+  }
+  assert(/quota|read-only/.test(describeSyncFailure(new Error('Drive returned 403'))), '403 is explained');
+  assert(/gone/.test(describeSyncFailure(new Error('Drive returned 404'))), '404 names the real cause');
+  assert(/their |its end/.test(describeSyncFailure(new Error('Drive returned 503'))), 'a 5xx is Google’s problem, said so');
+  assert(/something odd/.test(describeSyncFailure(new Error('something odd'))),
+    'and anything unrecognised is still shown rather than swallowed');
 });
 
 test('Work that has not reached Drive yet says so, once it is worth saying', () => {
