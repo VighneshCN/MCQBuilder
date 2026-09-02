@@ -1119,6 +1119,18 @@ override at all. Settings → "Where your data lives" has the one-time Cloud
 Console walkthrough, shown only when no client ID — default or override — is
 set.
 
+Two status surfaces read the same state and used to disagree about it. The
+"last synced" stamp now lives in `fsmeta` (`driveLastSyncedAt`, written by
+`_markInSync()` on a push, on adopting the remote copy, and whenever a boot
+check finds the two already level) rather than in memory only — held in memory
+it was null after every reload, so a bank that had been on Drive for weeks was
+described as awaiting its first sync while the sidebar said "syncing…" with
+nothing pending. And Settings' "Where your data lives" keys off `configured`
+rather than `connected`, the distinction `updateStorageBar()` already drew: on
+Safari, which cannot carry a Google token across a reload, keying it to a live
+token reported "Browser only" and offered a fresh connection for a bank that
+was sitting in Drive.
+
 Read-only enforcement (`_writeVeto`) stays local-folder-only: a Drive push
 that fails leaves the change sitting in IndexedDB to retry, rather than
 blocking editing outright the way a missing local file does. Drive's failure

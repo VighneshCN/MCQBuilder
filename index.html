@@ -14984,10 +14984,18 @@ ROUTES.settings = async (root) => {
   await band('Settings', 'How the app behaves', [{ k: 'Courses', v: String(State.courses.length) }]);
 
   /* ---- where the data lives ---- */
-  const activeMode = FileStore.connected ? 'local' : (DriveSync.connected ? 'drive' : 'none');
+  // "Where does this bank live" is answered by `configured`, not by whether a
+  // Google token happens to be live this second. Keying it to `connected` told
+  // an iPhone — where Safari cannot carry the token across a reload, so this is
+  // the ordinary state — that it was "Browser only" and offered to connect
+  // Drive from scratch, while the sidebar two inches away said Drive was
+  // connected and needed one tap. The storage bar was taught this distinction
+  // already; this card never was.
+  const activeMode = FileStore.connected ? 'local' : ((DriveSync.connected || DriveSync.configured) ? 'drive' : 'none');
+  const driveSignedOut = activeMode === 'drive' && !DriveSync.connected;
   const modeBadge =
     activeMode === 'local' ? { c: 'b-active', t: 'Local folder' } :
-    activeMode === 'drive' ? { c: DriveSync.problem ? 'b-conflict' : 'b-active', t: 'Google Drive' } :
+    activeMode === 'drive' ? { c: (DriveSync.problem || driveSignedOut) ? 'b-conflict' : 'b-active', t: 'Google Drive' } :
     FileStore.needsReconnect ? { c: 'b-conflict', t: 'Reconnect needed' } : { c: 'b-review', t: 'Browser only' };
   const dataCard = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
     h('div', { class: 'card-h' }, [h('h3', { text: 'Where your data lives' }), h('div', { class: 'spacer' }),
@@ -15050,7 +15058,8 @@ ROUTES.settings = async (root) => {
   }
 
   /* -- google drive -- */
-  driveBlock.appendChild(h('div', { class: 'eyebrow' }, DriveSync.connected ? 'Google Drive — active' : 'Google Drive'));
+  driveBlock.appendChild(h('div', { class: 'eyebrow' },
+    DriveSync.connected ? 'Google Drive — active' : (driveSignedOut ? 'Google Drive — active, signed out' : 'Google Drive')));
   if (!DriveSync.connected && DriveSync.setupError) {
     driveBlock.appendChild(h('div', { class: 'notice bad small' }, [
       h('b', { text: DriveSync.hasLiveToken() ? 'Signed in to Google — the Drive file itself didn’t set up: ' : 'Could not connect: ' }),
@@ -15064,13 +15073,41 @@ ROUTES.settings = async (root) => {
     driveBlock.appendChild(h('p', { class: 'small' }, 'Reachable from any device signed into this Google account. Changes push within seconds.'));
     driveBlock.appendChild(h(DriveSync.problem ? 'div' : 'p',
       DriveSync.problem ? { class: 'notice warn small' } : { class: 'tiny dim' },
-      DriveSync.problem ? DriveSync.problem : (DriveSync.lastPushedAt ? 'Last synced ' + fmtDate(DriveSync.lastPushedAt, true) : 'Connected — first sync happens shortly.')));
+      DriveSync.problem ? DriveSync.problem
+        : DriveSync.lastPushedAt ? 'Last synced ' + fmtDate(DriveSync.lastPushedAt, true)
+          // A bank already on Drive is not waiting for a first sync, and saying
+          // so next to a "Sync now" button read as something being stuck.
+          : DriveSync.everSynced() ? 'Connected — this bank is already on Drive. The next change pushes on its own.'
+            : 'Connected — first sync happens shortly.'));
     driveBlock.appendChild(h('details', { style: 'margin-top:8px' }, [
       h('summary', { class: 'small', style: 'cursor:pointer', text: 'More — sync, load, disconnect' }),
       h('div', { class: 'row wrap', style: 'gap:8px;margin-top:10px' }, [
         h('button', { class: 'btn sm primary', onclick: async () => { const ok = await DriveSync.maybePush(true); toast(ok ? 'Synced to Drive.' : 'Could not sync — see the status above.', ok ? 'ok' : 'bad'); go('settings'); }, text: 'Sync now' }),
         h('button', { class: 'btn sm', onclick: async () => { await DriveSync.pullNow(); go('settings'); }, text: 'Load from Drive' }),
         h('button', { class: 'btn sm danger', onclick: async () => { await driveDisconnectFlow(); go('settings'); }, text: 'Disconnect' })
+      ])
+    ]));
+  } else if (driveSignedOut) {
+    // The bank is on Drive and stays on Drive; only the Google session is
+    // missing. Everything still saves here meanwhile — touch() records the
+    // change and the next successful sign-in pushes it — so this is a sign-in
+    // prompt, not a fault, and certainly not an invitation to connect Drive
+    // as though this were a fresh browser.
+    driveBlock.appendChild(h('p', { class: 'small' }, 'Your bank lives in this Drive file. Everything you do stays saved in this browser meanwhile and pushes as soon as you are signed in again.'));
+    driveBlock.appendChild(h('div', { class: 'notice warn small' },
+      DriveSync.problem ? DriveSync.problem
+        : (typeof navigator !== 'undefined' && navigator.onLine === false)
+          ? 'Offline — nothing is lost; it syncs when you are back on a connection.'
+          : 'Signed out of Google in this browser. Safari cannot keep a Google sign-in across a reload, so this is normal there — one tap puts it back.'));
+    driveBlock.appendChild(h('p', { class: 'tiny dim' }, DriveSync.lastPushedAt ? 'Last synced ' + fmtDate(DriveSync.lastPushedAt, true) : 'Nothing recorded yet for this browser.'));
+    driveBlock.appendChild(h('button', { class: 'btn primary', onclick: () => driveConnectFlow(), text: 'Sign in to Google again' }));
+    driveBlock.appendChild(h('details', { style: 'margin-top:8px' }, [
+      h('summary', { class: 'small', style: 'cursor:pointer', text: 'More — disconnect' }),
+      h('div', { class: 'stack', style: 'margin-top:10px' }, [
+        h('p', { class: 'tiny dim', style: 'margin:0' }, 'Disconnecting only forgets the link here — the file stays in your Drive with everything synced up to now.'),
+        h('div', { class: 'row wrap', style: 'gap:8px' }, [
+          h('button', { class: 'btn sm danger', onclick: async () => { await driveDisconnectFlow(); go('settings'); }, text: 'Disconnect' })
+        ])
       ])
     ]));
   } else if (activeMode === 'local') {
@@ -16960,6 +16997,11 @@ const DriveSync = {
     }
     this.fileId = fileId;
     this.lastSyncedModifiedTime = await FileStore.meta('driveModifiedTime');
+    // Outlives the tab. Held only in memory, this was null on every reload,
+    // so a bank that had been on Drive for weeks was described as waiting for
+    // its first sync — in the sidebar and in Settings at once — with nothing
+    // actually pending.
+    this.lastPushedAt = (await FileStore.meta('driveLastSyncedAt')) || null;
     this._remoteQuestionCount = (await FileStore.meta('driveQuestionCount')) || 0;
     const dirtySince = await FileStore.meta('driveDirtySince');
     try {
@@ -16980,6 +17022,10 @@ const DriveSync = {
         // tab closed mid-push), it needs retrying now rather than sitting
         // unsynced indefinitely while the status bar still claims "synced".
         if (dirtySince) { this._pendingChange = true; await this.maybePush(true); }
+        // Drive was reached and matches what this browser last wrote. That is
+        // a sync result, not a non-event: without recording it the status
+        // lines have nothing to show but a promise of a sync to come.
+        else if (remoteModified) { await this._markInSync(); updateStorageBar(); }
         return;
       }
       if (dirtySince) {
@@ -17207,6 +17253,7 @@ const DriveSync = {
         // An edit from a previous session that never reached Drive still has
         // to go now — settled means "Drive has not moved", not "we are level".
         if (await FileStore.meta('driveDirtySince')) { this._pendingChange = true; await this.maybePush(true); }
+        else await this._markInSync();
         return true;
       }
     }
@@ -17279,8 +17326,9 @@ const DriveSync = {
     if (this._pushTimer) { clearInterval(this._pushTimer); this._pushTimer = null; }
     this.connected = false; this.configured = false; this.accessToken = null; this.fileId = null; this.problem = null; this.setupError = null;
     this._pendingChange = false; this._firstUnpushedChangeAt = null; this.lastSyncedModifiedTime = null;
-    this._remoteQuestionCount = 0; this._driveShrinkOk = null;
+    this._remoteQuestionCount = 0; this._driveShrinkOk = null; this.lastPushedAt = null;
     await FileStore.delMeta('driveFileId');
+    await FileStore.delMeta('driveLastSyncedAt');
     await FileStore.delMeta('driveConnected');
     await FileStore.delMeta('driveModifiedTime');
     await FileStore.delMeta('driveDirtySince');
@@ -17361,7 +17409,7 @@ const DriveSync = {
       if (this._handleAuthFailure(res)) return false;
       if (!res.ok) throw new Error('Drive returned ' + res.status);
       const meta = await res.json().catch(() => null);
-      this.lastPushedAt = nowISO();
+      await this._markInSync();
       this.problem = null;
       this._pendingChange = false; this._firstUnpushedChangeAt = null;
       this._remoteQuestionCount = newCount; this._driveShrinkOk = null;
@@ -17410,6 +17458,21 @@ const DriveSync = {
       return j.modifiedTime || null;
     } catch (e) { return null; }
   },
+
+  /** "This browser and Drive were the same at this moment" — written down
+      rather than remembered, because every status line in the app answers
+      "when did this last agree with Drive?" and a reload used to lose the
+      answer. Distinct from _recordSyncedStamp, which stores Drive's own
+      modifiedTime so a change made elsewhere can be noticed. */
+  async _markInSync(when) {
+    this.lastPushedAt = when || nowISO();
+    await FileStore.setMeta('driveLastSyncedAt', this.lastPushedAt);
+  },
+
+  /** Has this browser ever been level with Drive at all? True for a bank that
+      is already up there, false only for a connection that has never synced —
+      which is the one case where promising a first sync is honest. */
+  everSynced() { return !!(this.lastPushedAt || this.lastSyncedModifiedTime); },
 
   async _recordSyncedStamp(mt) {
     const stamp = mt || await this._fetchModifiedTime();
@@ -17493,6 +17556,8 @@ const DriveSync = {
     this._remoteQuestionCount = (payload.stores.questions || []).length;
     await FileStore.setMeta('driveQuestionCount', this._remoteQuestionCount);
     await FileStore.delMeta('driveDirtySince');
+    // This browser now holds exactly what Drive holds — as level as a push.
+    await this._markInSync();
     // The stores under the app have just been replaced wholesale, so which
     // course is selected has to be decided again — without this, a browser
     // that had no course stays on the onboarding screen with the whole bank
@@ -17615,7 +17680,11 @@ const DriveSync = {
     }
     if (this.problem) return { tone: 'bad', label: this.problem };
     if (this._pendingChange) return { tone: 'ok', label: 'Drive: syncing…' };
-    return { tone: 'ok', label: this.lastPushedAt ? 'Drive synced ' + fmtDate(this.lastPushedAt, true) : 'Drive connected — syncing…' };
+    if (this.lastPushedAt) return { tone: 'ok', label: 'Drive synced ' + fmtDate(this.lastPushedAt, true) };
+    // "syncing…" here said the same thing as the line above it while meaning
+    // the opposite — nothing is pending; this browser simply has not checked
+    // yet in this session. Say that instead of borrowing the busy word.
+    return { tone: 'ok', label: this.everSynced() ? 'Drive connected — up to date' : 'Drive connected — first sync shortly' };
   }
 };
 
