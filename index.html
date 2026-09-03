@@ -1511,7 +1511,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.4.2', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.5.0', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -16009,6 +16009,11 @@ async function deleteCourseForever(course) {
   // deletion stranded on one device for ever.
   if (typeof DriveSync !== 'undefined') DriveSync.allowDriveShrink('course delete: ' + course.code);
 
+  // The course itself, not only its questions. Tombstoning the questions alone
+  // meant a device that had not caught up kept the course row, its sessions,
+  // notes, sources and case studies — and pushed them all back, so the course
+  // reappeared everywhere, empty, and deleting it again restarted the loop.
+  await DB.put('tombstones', courseTombstone(course.id, course.code));
   for (const q of qs) {
     if (q.qid) await DB.put('tombstones', { qid: q.qid, uuid: q.uuid, retiredAt: nowISO(), reason: 'course deleted' });
     await DB.del('questions', q.uuid);
@@ -16310,6 +16315,51 @@ const Durability = {
 /** True when losing browser storage would lose something that exists nowhere
     else. A connected folder or Drive makes eviction a non-event: boot reloads
     the bank from the file. */
+/**
+ * A bank file is JSON, or that JSON gzipped — told apart by the two bytes gzip
+ * always starts with rather than by anything we have to remember or record.
+ * Reading is therefore version-proof in one direction: a build that has never
+ * written a compressed file can still be handed one, as long as it has
+ * DecompressionStream, which every browser this app supports does.
+ */
+async function readBankBytes(buf) {
+  const bytes = new Uint8Array(buf);
+  const gzipped = bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+  let text;
+  if (gzipped) {
+    if (typeof self.DecompressionStream !== 'function') {
+      throw new Error('This copy of the bank is compressed and this browser cannot read it — update the app on this device.');
+    }
+    text = await new Response(
+      new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))
+    ).text();
+  } else {
+    text = new TextDecoder().decode(bytes);
+  }
+  try { return JSON.parse(text); }
+  catch (e) { throw new Error('That file did not look like an MCQ Mastery snapshot.'); }
+}
+
+/* A deletion of a whole course, recorded in the same store its questions use.
+   The key has to be a qid, so it is namespaced — no real Question ID can
+   collide with it, and a version of the app that predates this simply sees a
+   tombstone whose uuid is empty and ignores it. */
+const COURSE_TOMBSTONE = 'COURSE:';
+function courseTombstone(courseId, code) {
+  return { qid: COURSE_TOMBSTONE + courseId, courseId, code: code || '', retiredAt: nowISO(), reason: 'course deleted' };
+}
+function retiredCourseIds(tombstones) {
+  const out = new Set();
+  (tombstones || []).forEach(t => {
+    if (t && typeof t.qid === 'string' && t.qid.indexOf(COURSE_TOMBSTONE) === 0) {
+      out.add(t.courseId || t.qid.slice(COURSE_TOMBSTONE.length));
+    }
+  });
+  return out;
+}
+/** Every store filed under a course, and the field naming it. */
+const COURSE_SCOPED = ['sources', 'batches', 'presets', 'notes', 'sessions', 'caseStudies'];
+
 function browserIsOnlyCopy() {
   if (FileStore.connected) return false;
   if (typeof DriveSync !== 'undefined' && DriveSync.configured) return false;
@@ -17933,11 +17983,29 @@ const DriveSync = {
       // Serialised once: the size is wanted for the error message, and a
       // second JSON.stringify of a multi-megabyte bank to build a retry would
       // be the most expensive thing in the method.
-      const body = JSON.stringify(payload);
-      this._lastPayloadBytes = body.length;
+      const text = JSON.stringify(payload);
+      // A bank of any size goes up whole, every time, because Drive has no
+      // cheap append. JSON of question text and base64 images compresses by
+      // roughly five to ten times, which is the difference between a sync a
+      // phone finishes on a train and one it drops. Where the browser cannot
+      // compress, or compression fails, the plain text goes up exactly as
+      // before — the file format is "gzip or JSON", decided by reading it.
+      let body = text, encoded = false;
+      if (typeof self.CompressionStream === 'function') {
+        try {
+          body = await new Response(
+            new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'))
+          ).blob();
+          encoded = true;
+        } catch (e) { body = text; encoded = false; }
+      }
+      this._lastPayloadBytes = encoded ? body.size : text.length;
       const send = () => fetch('https://www.googleapis.com/upload/drive/v3/files/' + this.fileId + '?uploadType=media&fields=modifiedTime', {
         method: 'PATCH',
-        headers: { 'Authorization': 'Bearer ' + this.accessToken, 'Content-Type': 'application/json' },
+        headers: {
+          'Authorization': 'Bearer ' + this.accessToken,
+          'Content-Type': encoded ? 'application/gzip' : 'application/json'
+        },
         body
       });
       let res;
@@ -17987,7 +18055,7 @@ const DriveSync = {
     });
     if (this._handleAuthFailure(res)) throw new Error('Google sign-in is no longer valid.');
     if (!res.ok) throw new Error('Drive returned ' + res.status);
-    const payload = await res.json();
+    const payload = await readBankBytes(await res.arrayBuffer());
     if (!payload || !payload.stores) throw new Error('That file did not look like an MCQ Mastery snapshot.');
     if ((payload.schema || 1) > APP.schema) throw new Error('That snapshot was written by a newer version of the app.');
     return payload;
@@ -18799,21 +18867,33 @@ async function mergeBankPayloads(localPayload, remotePayload) {
   report.stores.tombstones = { added: tr.added };
   const retiredUuids = new Set(tr.rows.map(t => t.uuid).filter(Boolean));
 
-  ['courses', 'sources', 'batches', 'presets', 'notes', 'sessions', 'caseStudies'].forEach(s => {
+  // A course retired on either side takes everything filed under it with it,
+  // the same way a retired question takes its answers. Without this the union
+  // handed the deleting device its own course back on the next merge.
+  const retiredCourses = retiredCourseIds(tr.rows);
+  const dropped = row => row && retiredCourses.has(row.courseId);
+  const courseR = mergeKeyedRows(localPayload.stores.courses || [], remotePayload.stores.courses || [], 'id');
+  merged.stores.courses = courseR.rows.filter(c => !retiredCourses.has(c.id));
+  report.stores.courses = { added: courseR.added, updated: courseR.updated,
+    tombstoned: courseR.rows.length - merged.stores.courses.length };
+  COURSE_SCOPED.forEach(s => {
     const r = mergeKeyedRows(localPayload.stores[s] || [], remotePayload.stores[s] || [], 'id');
-    merged.stores[s] = r.rows;
-    report.stores[s] = { added: r.added, updated: r.updated };
+    merged.stores[s] = r.rows.filter(row => !dropped(row));
+    report.stores[s] = { added: r.added, updated: r.updated, tombstoned: r.rows.length - merged.stores[s].length };
   });
 
   const qr = mergeKeyedRows(localPayload.stores.questions || [], remotePayload.stores.questions || [], 'uuid');
-  const revivedQuestions = qr.rows.filter(q => retiredUuids.has(q.uuid)).length;
-  merged.stores.questions = qr.rows.filter(q => !retiredUuids.has(q.uuid));
+  const goneQ = q => retiredUuids.has(q.uuid) || retiredCourses.has(q.courseId);
+  const revivedQuestions = qr.rows.filter(goneQ).length;
+  merged.stores.questions = qr.rows.filter(q => !goneQ(q));
   report.stores.questions = { added: qr.added, updated: qr.updated, tombstoned: revivedQuestions };
   merged.touchedQuestionUuids = qr.touchedKeys.filter(k => !retiredUuids.has(k));
 
   ['attempts', 'questionVersions', 'audit'].forEach(s => {
     const r = mergeAppendOnlyRows(s, localPayload.stores[s] || [], remotePayload.stores[s] || []);
-    const rows = s === 'attempts' ? r.rows.filter(a => !retiredUuids.has(a.questionUuid)) : r.rows;
+    const rows = s === 'attempts'
+      ? r.rows.filter(a => !retiredUuids.has(a.questionUuid) && !retiredCourses.has(a.courseId))
+      : r.rows;
     merged.stores[s] = rows;
     report.stores[s] = { added: r.added, tombstoned: s === 'attempts' ? (r.rows.length - rows.length) : 0 };
   });
@@ -18872,7 +18952,30 @@ async function applyMergedBank(merged) {
   // scratch so a push right after this never uploads pre-merge data.
   FileStore._cache = null;
 
+  // A question's mastery is derived from its whole answer history, but it is
+  // stored on the question — so the row that wins a merge brings a score
+  // calculated on only one device's half of that history. Recompute the ones
+  // the merge actually touched, from the answers both sides now hold. Written
+  // without a stamp: this is arithmetic over existing facts, not an edit, and
+  // stamping it would hand this device every future merge.
   const touched = new Set(merged.touchedQuestionUuids || []);
+  if (touched.size) {
+    const byQ = new Map();
+    await DB.each('attempts', a => {
+      if (!touched.has(a.questionUuid)) return;
+      if (!byQ.has(a.questionUuid)) byQ.set(a.questionUuid, []);
+      byQ.get(a.questionUuid).push(a);
+    });
+    const rescored = [];
+    for (const uuid of touched) {
+      const q = await DB.get('questions', uuid);
+      if (!q) continue;
+      const hist = byQ.get(uuid) || [];
+      const score = masteryOf(q, hist).score;
+      if (q.stats && q.stats.mastery !== score) { q.stats.mastery = score; rescored.push(q); }
+    }
+    if (rescored.length) await DB.putMany('questions', rescored);
+  }
   if (touched.size) {
     const byCourse = new Map();
     merged.stores.questions.forEach(q => { if (touched.has(q.uuid)) { if (!byCourse.has(q.courseId)) byCourse.set(q.courseId, []); byCourse.get(q.courseId).push(q.uuid); } });
@@ -18897,8 +19000,31 @@ async function applyMergedBank(merged) {
  * person running the built-in tests.
  */
 async function applyTombstoneRemovals(merged) {
-  const retired = new Set(((merged && merged.stores && merged.stores.tombstones) || []).map(t => t.uuid).filter(Boolean));
-  if (!retired.size) return 0;
+  const tombs = (merged && merged.stores && merged.stores.tombstones) || [];
+  const retired = new Set(tombs.map(t => t.uuid).filter(Boolean));
+  const courses = retiredCourseIds(tombs);
+
+  // A course retired anywhere is retired here: the course row and every store
+  // filed under it, mirroring what the deletion did on the device that made it.
+  let coursesGone = 0;
+  for (const courseId of courses) {
+    if (await DB.get('courses', courseId)) { await DB.del('courses', courseId); coursesGone++; }
+    for (const store of COURSE_SCOPED) {
+      let rows = [];
+      try { rows = await DB.byIndex(store, 'courseId', courseId); } catch (e) { rows = []; }
+      for (const row of rows) if (row && row.id != null) await DB.del(store, row.id);
+    }
+    try { await DB.del('idRegister', courseId); } catch (e) { /* nothing registered */ }
+    if (typeof Settings !== 'undefined' && Settings.clearCourse) await Settings.clearCourse(courseId);
+    await DB.each('questions', q => { if (q.courseId === courseId) retired.add(q.uuid); });
+  }
+
+  if (!retired.size && !coursesGone) return 0;
+  if (!retired.size) {
+    FileStore.allowShrink('merge honoured a course deleted on another device');
+    if (typeof DriveSync !== 'undefined') DriveSync.allowDriveShrink('merge honoured a course deleted on another device');
+    return coursesGone;
+  }
   const kept = new Set(((merged.stores.questions) || []).map(q => q.uuid));
   // Which of the retired uuids this browser actually still holds — one pass,
   // rather than a read per tombstone. Tombstones are never pruned, so a bank
@@ -18917,9 +19043,10 @@ async function applyTombstoneRemovals(merged) {
   // bank collapses unexpectedly and wrong here: this shrank because somebody
   // deleted a course on purpose, on another device, and that is exactly what
   // has to reach Drive.
-  if (removed) {
-    FileStore.allowShrink('merge honoured ' + removed + ' deletion(s) made on another device');
-    if (typeof DriveSync !== 'undefined') DriveSync.allowDriveShrink('merge honoured ' + removed + ' deletion(s) made on another device');
+  if (removed || coursesGone) {
+    const why = 'merge honoured ' + (coursesGone ? coursesGone + ' course deletion(s) and ' : '') + removed + ' question deletion(s) made on another device';
+    FileStore.allowShrink(why);
+    if (typeof DriveSync !== 'undefined') DriveSync.allowDriveShrink(why);
   }
   return removed;
 }
@@ -26279,6 +26406,77 @@ test('A deletion made on another device actually deletes, and can then be pushed
     if (wasMark) await FileStore.setMeta('driveDirtySince', wasMark);
     else await FileStore.delMeta('driveDirtySince');
   }
+});
+
+test('A deleted course stays deleted, and takes only its own things with it', async () => {
+  // Tombstoning the questions alone left the course row, its sessions, notes,
+  // sources and case studies on any device that had not caught up — which
+  // pushed them all back, so the course reappeared everywhere, empty, and
+  // deleting it again restarted the loop.
+  const stores = extra => Object.assign({
+    courses: [], sources: [], batches: [], attempts: [], sessions: [], audit: [], images: [],
+    idRegister: [], tombstones: [], presets: [], notes: [], caseStudies: [], questionVersions: [],
+    questions: [], settings: []
+  }, extra || {});
+  const behind = { savedAt: '2026-01-01T00:00:00Z', stores: stores({
+    courses: [{ id: 'gone', code: 'GONE' }, { id: 'keep', code: 'KEEP' }],
+    questions: [{ uuid: 'q1', courseId: 'gone', updatedAt: '2026-01-01T00:00:00Z' },
+                { uuid: 'q2', courseId: 'keep', updatedAt: '2026-01-01T00:00:00Z' }],
+    attempts: [{ sessionId: 's1', questionUuid: 'q1', courseId: 'gone', ts: '2026-01-01T00:00:00Z' },
+               { sessionId: 's2', questionUuid: 'q2', courseId: 'keep', ts: '2026-01-01T00:00:00Z' }],
+    sessions: [{ id: 's1', courseId: 'gone' }, { id: 's2', courseId: 'keep' }],
+    notes: [{ id: 'n1', courseId: 'gone' }], caseStudies: [{ id: 'c1', courseId: 'gone' }],
+    sources: [{ id: 'src1', courseId: 'gone' }]
+  }) };
+  const deleted = { savedAt: '2026-02-01T00:00:00Z', stores: stores({
+    courses: [{ id: 'keep', code: 'KEEP' }],
+    questions: [{ uuid: 'q2', courseId: 'keep', updatedAt: '2026-01-01T00:00:00Z' }],
+    attempts: [{ sessionId: 's2', questionUuid: 'q2', courseId: 'keep', ts: '2026-01-01T00:00:00Z' }],
+    sessions: [{ id: 's2', courseId: 'keep' }],
+    tombstones: [courseTombstone('gone', 'GONE')]
+  }) };
+
+  const { merged, report } = await mergeBankPayloads(behind, deleted);
+  eq(merged.stores.courses.length, 1, 'the deleted course does not come back');
+  eq(merged.stores.courses[0].id, 'keep');
+  eq(report.stores.courses.tombstoned, 1, 'and the merge says it removed one');
+  assert(merged.stores.questions.every(q => q.courseId !== 'gone'), 'its questions go with it');
+  assert(merged.stores.attempts.every(a => a.courseId !== 'gone'), 'and their answers');
+  eq(merged.stores.notes.length, 0); eq(merged.stores.caseStudies.length, 0); eq(merged.stores.sources.length, 0);
+  eq(merged.stores.sessions.length, 1, 'its sessions too');
+  eq(merged.stores.questions.length, 1, 'and the OTHER course is untouched throughout');
+
+  // Idempotent: the same merge applied twice must not keep finding work to do.
+  const twice = await mergeBankPayloads(merged, deleted);
+  eq(twice.merged.stores.courses.length, 1);
+  eq(twice.merged.stores.questions.length, 1);
+
+  // A course tombstone must never be mistaken for a question one.
+  const ct = courseTombstone('x', 'X');
+  eq(ct.uuid, undefined, 'it carries no question uuid, so older builds ignore it');
+  eq(retiredCourseIds([ct, { qid: 'CISA-Q-1', uuid: 'u' }]).size, 1, 'and only course tombstones are read as courses');
+});
+
+test('A bank file may be gzipped or plain, and is told apart by its own bytes', async () => {
+  // Drive has no cheap append, so every sync is the whole bank. Compressed, a
+  // phone finishes it; uncompressed it drops one. Reading has to accept both,
+  // for ever — a file written by any version must stay readable.
+  const payload = { app: 'mcq-mastery', schema: APP.schema, savedAt: nowISO(), stores: { questions: [{ uuid: 'a' }] } };
+  const text = JSON.stringify(payload);
+  const plain = await readBankBytes(new TextEncoder().encode(text).buffer);
+  eq(plain.stores.questions.length, 1, 'plain JSON still reads');
+  if (typeof self.CompressionStream === 'function') {
+    const gz = await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+    const bytes = new Uint8Array(gz);
+    eq(bytes[0], 0x1f, 'gzip announces itself in its first two bytes'); eq(bytes[1], 0x8b);
+    assert(gz.byteLength < text.length, 'and it is smaller than what went in');
+    const back = await readBankBytes(gz);
+    eq(back.stores.questions.length, 1, 'and it reads back identically');
+    eq(back.savedAt, payload.savedAt);
+  }
+  let threw = false;
+  try { await readBankBytes(new TextEncoder().encode('nonsense').buffer); } catch (e) { threw = /did not look like/.test(e.message); }
+  assert(threw, 'and something that is neither is refused by name');
 });
 
 test('A deletion is counted as a deletion, not netted against what arrived', async () => {

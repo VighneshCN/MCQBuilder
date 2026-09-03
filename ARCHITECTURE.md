@@ -1168,6 +1168,28 @@ drops `_cache`, let new work through, which is why it presented as intermittent
 rather than broken. The journal, the snapshot decision and the `dirty` flag stay
 behind the connected check, because those really are the local file's business.
 
+The uploaded bytes are gzipped where the browser can (`CompressionStream`), and
+a bank file is read as "gzip or JSON", decided by the two bytes gzip always
+starts with rather than by anything recorded. Question text and base64 images
+compress by roughly an order of magnitude, which on a phone is the difference
+between a sync that finishes and one that drops; a browser without compression
+uploads exactly what it did before, and either shape stays readable for ever.
+
+Deleting a course writes a course-level tombstone (`COURSE:<id>` in the same
+store its questions use, so an older build sees a tombstone with no uuid and
+ignores it). The merge drops the course row and every store filed under it —
+questions, answers, sessions, notes, sources, batches, presets, case studies —
+on both sides. Tombstoning only the questions left the rest to be pushed back by
+whichever device had not caught up, so a deleted course reappeared everywhere,
+empty, and deleting it again restarted the loop.
+
+`applyMergedBank` also recomputes mastery for the questions a merge touched,
+from the answers both sides now hold: the score is derived from the whole
+history but stored on the question, so the row that wins a merge otherwise
+carries a number calculated on half of it. Written without a stamp — arithmetic
+over existing facts is not an edit, and stamping it would hand that device every
+future merge.
+
 A push is one whole-file `PATCH`, so on a bank of any size it is a long
 request and a phone's wandering signal ends it. `push()` retries the network
 class of failure once, 2.5s later, reusing the body it already serialised —
