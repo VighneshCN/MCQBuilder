@@ -1510,7 +1510,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.3.4', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.3.5', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -17465,7 +17465,16 @@ const DriveSync = {
         ok(resp);
       };
       this._tokenClient.error_callback = (err) => no(new Error((err && err.type) || 'could not get permission'));
-      this._tokenClient.requestAccessToken(silent ? { prompt: '' } : {});
+      // prompt:'none' is the only genuinely silent request Google offers — no
+      // screens at all, an error instead when interaction would be needed.
+      // This used to send prompt:'' , which means "ask only the first time":
+      // Safari cannot show Google its existing session from here, so Google
+      // treated every attempt as a first one and opened the account chooser.
+      // A page refresh therefore landed on "Choose an account", unasked, and
+      // picking one did nothing — a window opened without a user's gesture has
+      // no working way back to the page that opened it. Automatic attempts
+      // must fail quietly; only the button a person presses may open anything.
+      this._tokenClient.requestAccessToken(silent ? { prompt: 'none' } : {});
     });
   },
 
@@ -17498,7 +17507,7 @@ const DriveSync = {
     try { await this._requestToken(true); return true; }
     catch (e) {
       this.connected = false;
-      this.problem = 'Sign-in expired — trying to renew it; nothing is lost meanwhile.';
+      this.problem = 'Signed out of Google — tap to sign in. Nothing is lost meanwhile.';
       this._watchForResume(); this._scheduleResume();
       updateStorageBar(); return false;
     }
