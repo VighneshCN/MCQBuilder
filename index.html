@@ -1511,7 +1511,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.3.6', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.4.0', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1791,6 +1791,20 @@ const DB = {
    Some settings describe the app (theme, OCR); those stay global.
    Others describe how a *qualification* is practised — a CISA mock is not
    a DISA mock — and those are stored per course, keyed 'name@courseId'.  */
+/* Settings that describe THIS machine rather than this student's study, and so
+   must never travel between devices: where a vendored OCR engine sits on disk,
+   whether this browser keeps an offline copy, which course this device happens
+   to be looking at, what this screen looks like at night, and an
+   acknowledgement given on one device about that device's own storage. A
+   laptop's vendor path is meaningless on a phone, and adopting it silently
+   breaks OCR there. Everything else — how a mock is marked, when the exam is,
+   the review ladder — is the student's, and belongs on every device they use. */
+const DEVICE_LOCAL_SETTINGS = ['theme', 'activeCourseId', 'offlineEnabled', 'audioMuted',
+  'ocrEnabled', 'ocrScriptPath', 'externalOcrEnabled', 'browserOnlyAckedCount', 'lastBackupAt'];
+function isDeviceLocalSetting(k) {
+  return DEVICE_LOCAL_SETTINGS.indexOf(String(k || '').split('@')[0]) >= 0;
+}
+
 const COURSE_SETTINGS = ['mockCount', 'mockMinutes', 'mockAllowPause', 'srIntervals', 'weakMinSample', 'masteryTarget', 'mockCaseCount',
   // How this course's exam is actually marked. Per course because a CISA
   // paper and a CA paper are marked nothing like each other.
@@ -1891,7 +1905,12 @@ const Settings = {
     const cid = courseId || (State && State.course ? State.course.id : null);
     const key = (cid && isCourseSetting(k)) ? courseKey(k, cid) : k;
     this.cache[key] = v;
-    await DB.put('settings', { k: key, v });
+    // Stamped so a merge can tell which device changed a setting last. Without
+    // this the merge compared whole-payload timestamps, and buildPayload()
+    // stamps the local payload at the moment of the merge — so the local side
+    // always won and no setting ever crossed devices: an exam date, a mock
+    // length or a negative-marking rule set on a laptop never reached a phone.
+    await DB.put('settings', { k: key, v, updatedAt: nowISO() });
     return v;
   },
   /** Forget a course's overrides when the course itself is deleted. */
@@ -8594,6 +8613,9 @@ async function runSession(s) {
           // even though the Discard dialog reassures the student that
           // "anything already answered is already recorded".
           s.flags[q.uuid] = !s.flags[q.uuid]; q.flagged = !!s.flags[q.uuid];
+          // Stamped, or the merge cannot tell this device changed the record and
+          // the flag is dropped the next time the other side's copy wins.
+          q.updatedAt = nowISO();
           await Promise.all([Session.save(s), DB.put('questions', q)]);
           State.invalidate();
           render();
@@ -8796,7 +8818,7 @@ async function runSession(s) {
       if (!s.responses[q.uuid] || !MODES[s.mode].reveal) { e.preventDefault(); choose(q, order[li >= 0 ? li : ni]); }
       return;
     }
-    if (k === 'F') { e.preventDefault(); s.flags[q.uuid] = !s.flags[q.uuid]; q.flagged = !!s.flags[q.uuid]; Promise.all([Session.save(s), DB.put('questions', q)]).then(() => { State.invalidate(); render(); }); }
+    if (k === 'F') { e.preventDefault(); s.flags[q.uuid] = !s.flags[q.uuid]; q.flagged = !!s.flags[q.uuid]; q.updatedAt = nowISO(); Promise.all([Session.save(s), DB.put('questions', q)]).then(() => { State.invalidate(); render(); }); }
     else if (e.key === 'ArrowRight' || k === 'N' || e.key === 'Enter') { e.preventDefault(); if (idx < s.questionUuids.length - 1) move(1); }
     else if (e.key === 'ArrowLeft' || k === 'P') { e.preventDefault(); move(-1); }
     else if (e.key === '?') { e.preventDefault(); showShortcuts(); }
@@ -8817,6 +8839,7 @@ function learningPointBox(q) {
   const save = debounce(async () => {
     const fresh = await Questions.get(q.uuid);
     fresh.learningPoint = ta.value.slice(0, 600);
+    fresh.updatedAt = nowISO();
     await DB.put('questions', fresh);
     State.invalidate();
   }, 700);
@@ -9615,6 +9638,7 @@ ROUTES.bank = async (root) => {
       if (!q.correctOptionId) continue;
       q.answerVerified = 'verified'; q.verifiedAt = nowISO(); q.verifyNote = 'Bulk verification';
       if (q.status === 'needs_answer' || q.status === 'draft') q.status = q.domainId ? 'active' : 'needs_class';
+      q.updatedAt = nowISO();
       await DB.put('questions', q);
       await audit('verify', 'question', q.qid, null, { answerVerified: 'verified' }, 'bulk');
       applied++;
@@ -10024,10 +10048,10 @@ async function openQuestion(uuidStr) {
     // list on screen even though the record itself saved correctly.
     if (State.view === 'bank') go('bank'); else if (State.view === 'import') go('import');
   } else if (res === 'flag') {
-    const fresh = await Questions.get(uuidStr); fresh.flagged = !fresh.flagged; await DB.put('questions', fresh); State.invalidate(); toast(fresh.flagged ? 'Flagged' : 'Unflagged');
+    const fresh = await Questions.get(uuidStr); fresh.flagged = !fresh.flagged; fresh.updatedAt = nowISO(); await DB.put('questions', fresh); State.invalidate(); toast(fresh.flagged ? 'Flagged' : 'Unflagged');
   } else if (res === 'archive') {
     const ok = await confirmBox('Archive this question?', 'It leaves the practice pool but keeps its Question ID, sources and attempt history. Archiving is reversible.');
-    if (ok) { const fresh = await Questions.get(uuidStr); const prev = fresh.status; fresh.status = 'archived'; await DB.put('questions', fresh); await audit('archive', 'question', fresh.qid, { status: prev }, { status: 'archived' }, ''); State.invalidate(); toast('Archived'); if (State.view === 'bank') go('bank'); }
+    if (ok) { const fresh = await Questions.get(uuidStr); const prev = fresh.status; fresh.status = 'archived'; fresh.updatedAt = nowISO(); await DB.put('questions', fresh); await audit('archive', 'question', fresh.qid, { status: prev }, { status: 'archived' }, ''); State.invalidate(); toast('Archived'); if (State.view === 'bank') go('bank'); }
   }
 }
 
@@ -11941,7 +11965,7 @@ async function admitBatch() {
     for (const q of needsRecheck) {
       const before = q.status;
       const r = await recheckQuestion(q, { bank: live, index, byUuid });
-      if (r.changed || q.status !== before) await DB.put('questions', q);
+      if (r.changed || q.status !== before) { q.updatedAt = nowISO(); await DB.put('questions', q); }
     }
   }
   for (const it of rejected) {
@@ -15954,6 +15978,11 @@ async function deleteCourseForever(course) {
   // The bank is about to shrink on purpose, so the file layer must not
   // mistake it for the catastrophic-loss case it normally refuses to write.
   FileStore.allowShrink('course delete: ' + course.code);
+  // The Drive side has its own shrink guard, and it was never told. Deleting a
+  // course on a Drive-backed device therefore made the next push refuse — "Sync
+  // blocked to protect Drive" — with no way out that the message named, and the
+  // deletion stranded on one device for ever.
+  if (typeof DriveSync !== 'undefined') DriveSync.allowDriveShrink('course delete: ' + course.code);
 
   for (const q of qs) {
     if (q.qid) await DB.put('tombstones', { qid: q.qid, uuid: q.uuid, retiredAt: nowISO(), reason: 'course deleted' });
@@ -15998,10 +16027,15 @@ async function deleteCourseForever(course) {
  * somebody's data silently.
  */
 async function purgeSelfTestArtifacts() {
+  // Once per browser. The attempts it removes live in the synced bank, so a
+  // merge with a device that has not yet been repaired brings them back — and
+  // repairing again on every boot rewrites the question, which pushes, which
+  // gives the other device something to merge back. One pass, recorded.
+  if (await FileStore.meta('selfTestPurgeDone')) return;
   let bogus;
   try { bogus = (await DB.all('attempts')).filter(a => typeof a.sessionId === 'string' && a.sessionId.indexOf('test-session-') === 0); }
   catch (e) { return; }
-  if (!bogus.length) return;
+  if (!bogus.length) { await FileStore.setMeta('selfTestPurgeDone', nowISO()); return; }
   const uuids = new Set(bogus.map(a => a.questionUuid));
   for (const a of bogus) await DB.del('attempts', a.id);
   let fixed = 0;
@@ -16014,6 +16048,7 @@ async function purgeSelfTestArtifacts() {
     fixed++;
   }
   State.invalidate();
+  await FileStore.setMeta('selfTestPurgeDone', nowISO());
   await audit('repair', 'system', '', null, { removedAttempts: bogus.length, questionsRebuilt: fixed }, 'self-test artefacts');
   setTimeout(() => toast('Removed ' + bogus.length + ' answer(s) written by the built-in tests, and rebuilt ' +
     fixed + ' question(s) from the history that remains.', 'ok', 9000), 1200);
@@ -16046,12 +16081,22 @@ async function undoLastAutoMerge() {
   State.invalidate();
   await adoptCourses();
   await audit('repair', 'system', '', null, { restoredTo: snap.at, questions: qs }, 'undo automatic merge');
+  let sent = true;
   if (typeof DriveSync !== 'undefined' && DriveSync.configured) {
+    // An undo usually makes the bank smaller, which is precisely what the
+    // shrink guard exists to refuse — so say, once, that this one is intended.
+    FileStore.allowShrink('undo of an automatic merge');
+    DriveSync.allowDriveShrink('undo of an automatic merge');
+    DriveSync._holdPush = null;
     DriveSync._pendingChange = true;
-    await DriveSync.maybePush(true);
+    sent = await DriveSync.maybePush(true);
   }
-  await FileStore.delMeta('preMergeSnapshot');
-  toast('Restored the state from before the last merge.', 'ok', 7000);
+  // The snapshot is this state's only copy. Throwing it away after a push that
+  // did not happen would let the next boot merge the pre-undo copy straight
+  // back from Drive, with nothing left to undo it with a second time.
+  if (sent) await FileStore.delMeta('preMergeSnapshot');
+  toast(sent ? 'Restored the state from before the last merge.'
+    : 'Restored here, but Drive could not be updated — the undo is kept, so try Sync now.', sent ? 'ok' : 'warn', 9000);
   await go(State.view || 'dashboard');
 }
 
@@ -16121,6 +16166,7 @@ async function wipeCourse() {
   // The bank is about to shrink on purpose, so the file layer must not
   // mistake it for the catastrophic-loss case it normally refuses to write.
   FileStore.allowShrink('course wipe: ' + State.course.code);
+  if (typeof DriveSync !== 'undefined') DriveSync.allowDriveShrink('course wipe: ' + State.course.code);
 
   for (const q of all) {
     if (q.qid) await DB.put('tombstones', { qid: q.qid, uuid: q.uuid, retiredAt: nowISO(), reason: 'course wipe' });
@@ -17254,6 +17300,8 @@ const DriveSync = {
   // data; the app simply had not been asked the right question.
   connected: false, configured: false, fileId: null, accessToken: null, tokenExpiresAt: 0,
   _resumeTimer: null, _resumeDelay: null, _resuming: false, _resumeWatching: false, _lastResumeAt: 0,
+  // Why this browser must not upload right now, or null when it may.
+  _holdPush: null,
   _retrying: false, _lastRetryAt: 0,
   lastPushedAt: null, lastSyncedModifiedTime: null, problem: null, setupError: null,
   _tokenClient: null, _tokenClientId: null, _pushTimer: null, _debounceTimer: null,
@@ -17299,6 +17347,15 @@ const DriveSync = {
       // enforcing that — the folder wins, and Drive is left disconnected
       // (its file is untouched; only this app's link to it is dropped).
       await FileStore.delMeta('driveConnected');
+      // The stamps go with it. Left behind, a later switch back to Drive found
+      // a modifiedTime and a fingerprint that still matched the file as it was
+      // BEFORE everything done in the folder — so the reconnect took the
+      // "already settled" fast path, skipped the push, and left that work
+      // stranded while both status lines said synced.
+      await FileStore.delMeta('driveModifiedTime');
+      await FileStore.delMeta('driveSyncedSignature');
+      await FileStore.delMeta('driveLastSyncedAt');
+      this.lastSyncedModifiedTime = null; this.lastPushedAt = null;
       this.configured = false;
       setTimeout(() => toast('A local folder and Google Drive were both connected — only one is used at a time, so Drive was disconnected here. Reconnect it from Settings if you meant to switch.', 'info', 10000), 1500);
       return;
@@ -17394,9 +17451,13 @@ const DriveSync = {
           ]),
           actions: [{ label: 'Not now', value: false }, { label: 'Apply the deletion', value: true, kind: 'primary' }]
         });
-        // Declining leaves both copies exactly as they are. The same question
-        // is asked again next time rather than being decided by silence.
-        if (!go) return;
+        // Declining leaves both copies exactly as they are — and critically,
+        // stops this browser pushing until it has been resolved. Without that
+        // hold, the next ordinary edit force-pushed this un-merged bank over
+        // Drive, undoing the deletion globally and discarding whatever else the
+        // other device had done. The same question is asked again next time
+        // rather than being decided by silence.
+        if (!go) { this._holdPush = 'a deletion from another device is waiting to be applied'; updateStorageBar(); return; }
       }
 
       // Insurance, not a feature. Merging is non-destructive by construction,
@@ -17404,7 +17465,14 @@ const DriveSync = {
       // runs on its own, with nobody watching. The pre-merge state is kept in
       // fsmeta, which never syncs and never appears in an export, so it costs
       // one copy of the bank in this browser and nothing anywhere else.
-      await FileStore.setMeta('preMergeSnapshot', { at: nowISO(), stores: localPayload.stores });
+      // Only when the merge actually changes something here. A catch-up that
+      // finds nothing new used to write a second full copy of the bank into
+      // IndexedDB anyway, on every boot, for nothing to undo.
+      const changesHere = removed > 0
+        || (merged.stores.questions || []).length !== (localPayload.stores.questions || []).length
+        || (merged.stores.attempts || []).length !== (localPayload.stores.attempts || []).length
+        || ((report.stores.questions && report.stores.questions.updated) || 0) > 0;
+      if (changesHere) await FileStore.setMeta('preMergeSnapshot', { at: nowISO(), stores: localPayload.stores });
       await applyMergedBank(merged);
       // Push only when this browser actually contributed something Drive did
       // not have. A merge that produced exactly what was downloaded needs no
@@ -17421,8 +17489,15 @@ const DriveSync = {
       if (added || gained) {
         toast('Caught up with Google Drive' + (gained ? ' — ' + gained + ' question(s) updated from elsewhere' : '') + '.', 'ok', 5000);
       }
+      this._holdPush = null;
       await this._recordSyncedStamp();
-    } catch (e) { /* best-effort — this browser just stays on what it has until the next successful check */ }
+    } catch (e) {
+      // Could not read Drive, or could not merge it. Whatever is here has NOT
+      // been reconciled, so pushing it would overwrite a Drive copy this
+      // browser never managed to look at. Hold until a catch-up succeeds.
+      this._holdPush = 'this browser could not read Google Drive to catch up first';
+      updateStorageBar();
+    }
   },
 
   /* ---------- getting the connection back on its own ----------
@@ -17616,7 +17691,13 @@ const DriveSync = {
 
       const proceed = await this._reconcileOnConnect();
       if (!proceed) {
-        this.connected = false; this.fileId = null;
+        // Backing out of the reconciliation is a decision not to connect. It
+        // used to null the file id while leaving `configured` set, so the
+        // resume machinery went on asking Google for a file called "null"
+        // every time the tab came forward, and reported that as a sync error.
+        this.connected = false; this.fileId = null; this.configured = false;
+        this._holdPush = null;
+        clearTimeout(this._resumeTimer); this._resumeDelay = null;
         updateStorageBar();
         return;
       }
@@ -17725,7 +17806,19 @@ const DriveSync = {
     // any pending one now, or an edit made just before disconnecting is
     // silently lost instead of "kept synced up to now" as every caller's
     // confirmation dialog promises.
-    if (this._pendingChange) await this.maybePush(true);
+    if (this._pendingChange) {
+      const sent = await this.maybePush(true);
+      // The dialogs that lead here all promise the Drive copy is complete up to
+      // now. When the flush fails that promise is false, and disconnecting
+      // deletes the very marker that recorded the work as unsent — so it would
+      // never be sent, by anything, ever.
+      if (!sent) {
+        const anyway = await confirmBox('Disconnect without finishing the sync?',
+          'Some work here has not reached Google Drive, and it could not be sent just now. Disconnecting keeps it in this browser, but the Drive copy will be missing it and nothing will retry — take a backup first if this browser is the only place it exists.',
+          false, 'Disconnect anyway');
+        if (!anyway) return false;
+      }
+    }
     if (this.accessToken && window.google && google.accounts && google.accounts.oauth2) {
       try { google.accounts.oauth2.revoke(this.accessToken, () => { }); } catch (e) { }
     }
@@ -17743,6 +17836,7 @@ const DriveSync = {
     await FileStore.delMeta('driveQuestionCount');
     updateStorageBar();
     toast('Google Drive disconnected — the file stays in your Drive, this only forgets it here.', 'ok');
+    return true;
   },
 
   /** Called by the DAL after any successful write, mirroring
@@ -17792,6 +17886,13 @@ const DriveSync = {
 
   async push() {
     if (!this.connected || this._pushing) return false;
+    // Set when this browser knows it is not reconciled with Drive. Uploading
+    // from here would overwrite work it has not seen.
+    if (this._holdPush) {
+      this.problem = 'Not syncing yet — ' + this._holdPush + '.';
+      updateStorageBar();
+      return false;
+    }
     // The token check happens BEFORE the guard is raised. It used to be after,
     // which meant a _requestToken that never settled left _pushing stuck true
     // for the life of the page — every later push returning false at the line
@@ -17839,8 +17940,9 @@ const DriveSync = {
       // cannot be checked against the screen; one that reports what it sent
       // can be, in a glance, on the spot.
       this.lastPushedSummary = { questions: newCount, due: dueTodayIn(payload.stores.questions || []) };
-      // What went up, as this browser will recognise it later.
-      await FileStore.setMeta('driveSyncedSignature', await this._localSignature());
+      // What went up, as this browser will recognise it later — taken from the
+      // payload, so a write made during the upload stays marked as unsynced.
+      await FileStore.setMeta('driveSyncedSignature', this._signatureOf(payload.stores));
       await this._markInSync();
       this.problem = null;
       this._pendingChange = false; this._firstUnpushedChangeAt = null;
@@ -17912,6 +18014,19 @@ const DriveSync = {
       if (u > newest) newest = u;
     });
     return n + '|' + (await DB.count('attempts')) + '|' + newest;
+  },
+
+  /** The same fingerprint, taken from a payload rather than from the database.
+      Reading the live database after an upload describes a bank that may have
+      moved on since the bytes were serialised — an answer given during a
+      multi-megabyte upload was folded into the fingerprint as though it had
+      been sent, and then nothing ever sent it. The upload's own contents are
+      the only honest answer to "what does Drive have". */
+  _signatureOf(stores) {
+    const qs = (stores && stores.questions) || [];
+    let newest = '';
+    qs.forEach(q => { const u = q.updatedAt || q.createdAt || ''; if (u > newest) newest = u; });
+    return qs.length + '|' + (((stores && stores.attempts) || []).length) + '|' + newest;
   },
 
   /** "This browser and Drive were the same at this moment" — written down
@@ -18629,9 +18744,21 @@ async function mergeBankPayloads(localPayload, remotePayload) {
   const report = { stores: {} };
   const merged = { stores: {} };
 
-  const localNewer = (Date.parse(localPayload.savedAt || 0) || 0) >= (Date.parse(remotePayload.savedAt || 0) || 0);
-  merged.stores.settings = ((localNewer ? localPayload : remotePayload).stores.settings || []).slice();
-  report.stores.settings = { kept: localNewer ? 'local' : 'remote' };
+  // Per setting, not per side. Taking one side wholesale meant the loser's
+  // settings vanished — and since the local payload is stamped at merge time,
+  // the local side won every comparison, so a setting changed anywhere else
+  // could never arrive: an exam date or a marking rule set on a laptop was
+  // invisible on the phone for ever. Rows written before this carried no stamp
+  // and are treated as the older of the two, which is what they are.
+  //
+  // Device-local keys are the exception and stay exactly as this machine has
+  // them — a vendored OCR path from a laptop is not merely useless on a phone,
+  // it breaks OCR there.
+  const localSettings = (localPayload.stores.settings || []);
+  const remoteShareable = (remotePayload.stores.settings || []).filter(r => !isDeviceLocalSetting(r.k));
+  const sr = mergeKeyedRows(localSettings, remoteShareable, 'k');
+  merged.stores.settings = sr.rows;
+  report.stores.settings = { added: sr.added, updated: sr.updated };
 
   // Tombstones first, and ahead of everything else: a retirement recorded
   // on either side (from the backed-up, danger-styled "Wipe course" flow)
@@ -18688,6 +18815,34 @@ async function applyMergedBank(merged) {
     await DB.putMany(s, merged.stores[s] || []);
   }
   await DB.putMany('questions', merged.stores.questions || []);
+
+  // putMany adds and overwrites; it cannot remove. mergeBankPayloads drops
+  // questions and attempts named by a tombstone from either side — a course
+  // deliberately wiped on another device — and that removal was then thrown
+  // away here, so the wiped questions stayed in this browser and were pushed
+  // straight back to Drive on the next sync. A deletion that will not stay
+  // deleted is worse than one that never happened: it comes back on every
+  // device, and the person has to do it again and watch it fail again.
+  const retired = new Set((merged.stores.tombstones || []).map(t => t.uuid).filter(Boolean));
+  if (retired.size) {
+    const kept = new Set((merged.stores.questions || []).map(q => q.uuid));
+    let removed = 0;
+    for (const uuid of retired) {
+      if (kept.has(uuid)) continue;          // a tombstone the merge chose not to honour
+      await DB.del('questions', uuid);
+      const hist = await DB.byIndex('attempts', 'questionUuid', uuid);
+      for (const a of hist) if (a.id != null) await DB.del('attempts', a.id);
+      removed++;
+    }
+    // Both backends refuse a push that shrinks the bank, which is right when a
+    // bank collapses unexpectedly and wrong here: this shrank because somebody
+    // deleted a course on purpose, on another device, and that is exactly what
+    // has to reach Drive.
+    if (removed) {
+      FileStore.allowShrink('merge honoured ' + removed + ' deletion(s) made on another device');
+      if (typeof DriveSync !== 'undefined') DriveSync.allowDriveShrink('merge honoured ' + removed + ' deletion(s) made on another device');
+    }
+  }
 
   // FileStore.buildPayload() caches its last snapshot and only refreshes the
   // stores its own touch() marked dirty — which never fires for a store this
@@ -18798,7 +18953,10 @@ async function connectFlow() {
       actions: [{ label: 'Cancel', value: false }, { label: 'Continue', value: true, kind: 'primary' }]
     });
     if (!ok) return;
-    await DriveSync.disconnect();
+    // disconnect() can now refuse — it asks first when it holds work Drive has
+    // not got. Backing out there must back out of the switch too, or the folder
+    // is connected underneath a Drive connection that was never released.
+    if ((await DriveSync.disconnect()) === false) return;
   }
   const useFolder = FileStore.capability() === 'folder';
   const ok = await modal({
@@ -23013,12 +23171,17 @@ test('mergeIdRegisterRows never lets the Question ID watermark move backwards', 
   const r2 = mergeIdRegisterRows(local2, remote2);
   eq(r2.rows[0].lastSeq, 75, 'a higher remote watermark must be adopted, or a later next() could re-issue an id already used on Drive');
 });
-test('mergeBankPayloads merges questions and reports the before/after counts, without touching settings key-by-key', () => {
+test('mergeBankPayloads merges questions, and settings key-by-key except the device-local ones', () => {
   const local = {
     savedAt: '2026-01-01T00:00:00Z',
     stores: {
       questions: [{ uuid: 'q1', updatedAt: '2026-01-01T00:00:00Z', stem: 'local q1' }],
-      courses: [], sources: [], batches: [], attempts: [], sessions: [], settings: [{ k: 'theme', v: 'dark' }],
+      courses: [], sources: [], batches: [], attempts: [], sessions: [],
+      settings: [
+        { k: 'theme', v: 'dark', updatedAt: '2026-01-01T00:00:00Z' },
+        { k: 'ocrScriptPath', v: '/laptop/vendor/tesseract.min.js', updatedAt: '2026-01-01T00:00:00Z' },
+        { k: 'examDate@cisa', v: '2026-06-01', updatedAt: '2026-01-01T00:00:00Z' }
+      ],
       audit: [], images: [], idRegister: [], tombstones: [], presets: [], notes: [], caseStudies: [], questionVersions: []
     }
   };
@@ -23026,15 +23189,26 @@ test('mergeBankPayloads merges questions and reports the before/after counts, wi
     savedAt: '2026-03-01T00:00:00Z',
     stores: {
       questions: [{ uuid: 'q2', updatedAt: '2026-01-01T00:00:00Z', stem: 'remote q2' }],
-      courses: [], sources: [], batches: [], attempts: [], sessions: [], settings: [{ k: 'theme', v: 'light' }],
+      courses: [], sources: [], batches: [], attempts: [], sessions: [],
+      settings: [
+        { k: 'theme', v: 'light', updatedAt: '2026-03-01T00:00:00Z' },
+        { k: 'ocrScriptPath', v: '/phone/nowhere.js', updatedAt: '2026-03-01T00:00:00Z' },
+        { k: 'examDate@cisa', v: '2026-09-15', updatedAt: '2026-03-01T00:00:00Z' },
+        { k: 'passPct@cisa', v: 65, updatedAt: '2026-03-01T00:00:00Z' }
+      ],
       audit: [], images: [], idRegister: [], tombstones: [], presets: [], notes: [], caseStudies: [], questionVersions: []
     }
   };
   return mergeBankPayloads(local, remote).then(({ merged, report }) => {
     eq(merged.stores.questions.length, 2, 'q1 and q2 must both survive the merge');
     eq(report.questionsBefore.local, 1); eq(report.questionsBefore.remote, 1); eq(report.questionsAfter, 2);
-    eq(merged.stores.settings[0].v, 'light', 'settings must come wholesale from the newer payload (remote here), never merged key-by-key');
-    eq(report.stores.settings.kept, 'remote');
+    const val = k => (merged.stores.settings.find(r => r.k === k) || {}).v;
+    // The student's own settings follow the newer stamp, whichever device made it.
+    eq(val('examDate@cisa'), '2026-09-15', 'an exam date set on the other device must arrive');
+    eq(val('passPct@cisa'), 65, 'and a setting this device has never seen must arrive too');
+    // The machine's own settings never move.
+    eq(val('theme'), 'dark', 'appearance stays whatever this device is set to');
+    eq(val('ocrScriptPath'), '/laptop/vendor/tesseract.min.js', 'and a local engine path is never overwritten by another machine\u2019s');
   });
 });
 
@@ -26000,6 +26174,44 @@ test('A failed sync says what happened, not what the browser called it', () => {
   assert(/their |its end/.test(describeSyncFailure(new Error('Drive returned 503'))), 'a 5xx is Google’s problem, said so');
   assert(/something odd/.test(describeSyncFailure(new Error('something odd'))),
     'and anything unrecognised is still shown rather than swallowed');
+});
+
+test('A deletion made on another device actually deletes, and can then be pushed', async () => {
+  // applyMergedBank only ever put rows, never removed them. mergeBankPayloads
+  // correctly dropped questions named by a tombstone, and then this threw that
+  // decision away: the wiped questions stayed in the database, were pushed back
+  // to Drive on the next sync, and the deletion undid itself everywhere. The
+  // consent prompt added at boot promised a removal that could not happen.
+  const uuid = 'selftest-tombstone-' + (await DB.count('questions'));
+  const wasShrinkOk = DriveSync._driveShrinkOk;
+  try {
+    await DB.putRaw('questions', { uuid, qid: 'ZZZ-Q-999999', courseId: 'selftest-course', status: 'active', stem: 'scratch', options: [], stats: {}, updatedAt: nowISO() });
+    assert(await DB.get('questions', uuid), 'the scratch question is in the database to begin with');
+
+    const merged = { stores: {}, touchedQuestionUuids: [] };
+    BACKUP_STORES.forEach(st => { merged.stores[st] = []; });
+    merged.stores.tombstones = [{ qid: 'ZZZ-Q-999999', uuid, at: nowISO() }];
+    await applyMergedBank(merged);
+
+    eq(await DB.get('questions', uuid), undefined, 'a question the merge retired is actually gone from this browser');
+    assert(DriveSync._driveShrinkOk, 'and the shrink guard is told, so the smaller bank can still reach Drive');
+  } finally {
+    await DB.delRaw('questions', uuid);
+    DriveSync._driveShrinkOk = wasShrinkOk;
+  }
+});
+
+test('A push records what it uploaded, not what the database says afterwards', () => {
+  // The fingerprint decides whether a later boot thinks this browser is level
+  // with Drive. Taken from live IndexedDB after the upload, an answer given
+  // during a multi-megabyte upload was folded in as though it had been sent —
+  // and then nothing ever sent it, on any device, silently.
+  const sent = { questions: [{ uuid: 'a', updatedAt: '2026-01-01T00:00:00.000Z' }], attempts: [{}] };
+  const afterwards = { questions: [{ uuid: 'a', updatedAt: '2026-09-09T00:00:00.000Z' }], attempts: [{}, {}] };
+  const sigSent = DriveSync._signatureOf(sent);
+  assert(sigSent !== DriveSync._signatureOf(afterwards), 'a write made during the upload must change the fingerprint');
+  eq(sigSent, '1|1|2026-01-01T00:00:00.000Z', 'and the recorded one describes the payload that actually went up');
+  eq(DriveSync._signatureOf({}), '0|0|', 'an empty payload has an empty fingerprint rather than throwing');
 });
 
 test('An automatic merge only stops for the one thing that can remove work', () => {
