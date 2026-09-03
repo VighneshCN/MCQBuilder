@@ -17423,88 +17423,11 @@ const DriveSync = {
         else if (remoteModified) { await this._markInSync(); updateStorageBar(); }
         return;
       }
-      // Drive has moved since this browser last agreed with it. There is
-      // exactly one right answer here and it never needed asking for: merge.
-      // The merge is a union — every answer from both sides survives, keyed by
-      // session, question and timestamp, and each record resolves to whichever
-      // side touched it last — so there is nothing a person could tell it that
-      // it does not already know, and nothing to lose by not asking.
-      //
-      // It used to ask. With unsynced work here it put up a three-way dialog
-      // mid-boot; with none, it silently replaced this browser's copy with
-      // Drive's. That second path is the one that hurt: "nothing unsynced" is
-      // only ever this browser's own belief, and a push that reported success
-      // without carrying what it claimed left a browser holding newer work it
-      // had already marked as sent — then overwrote it on the next boot,
-      // quietly, in favour of the older copy. Merging cannot do that. It is
-      // also the only behaviour that makes two devices converge without
-      // somebody deciding which one to trust.
       const remote = await this.pull();
-      const localPayload = await FileStore.buildPayload();
-      const { merged, report } = await mergeBankPayloads(localPayload, remote);
-      const before = { q: (remote.stores.questions || []).length, a: (remote.stores.attempts || []).length };
-
-      // A merge is additive in every case but one. A course wiped on another
-      // device leaves tombstones, and those are honoured — the questions they
-      // name are removed here rather than being resurrected by this browser
-      // having an older copy. That is the only way an automatic merge can take
-      // questions away from somebody, so it is the only thing worth stopping
-      // for. Size differences are not: merging a bank of 40 with a bank of
-      // 1300 keeps all 1340.
-      // The number the merge actually retired, not the net change in size.
-      // Netting them meant a catch-up that brought 50 new questions and retired
-      // 50 others computed zero: no consent asked, no snapshot written, and 50
-      // questions plus their whole answer history deleted silently with nothing
-      // left to undo it with.
-      const removed = (report.stores.questions && report.stores.questions.tombstoned) || 0;
-      if (removed > 0) {
-        const go = await modal({
-          title: 'A deletion made elsewhere is about to apply here',
-          body: h('div', { class: 'stack' }, [
-            h('p', {}, removed + ' question(s) in this browser were deleted on another device since these two last matched. Everything else merges as usual — every answer from both sides is kept.'),
-            h('div', { class: 'notice warn small' }, 'If that deletion was a mistake, say Not now: this browser still holds those questions, and nothing here is changed until you agree.')
-          ]),
-          actions: [{ label: 'Not now', value: false }, { label: 'Apply the deletion', value: true, kind: 'primary' }]
-        });
-        // Declining leaves both copies exactly as they are — and critically,
-        // stops this browser pushing until it has been resolved. Without that
-        // hold, the next ordinary edit force-pushed this un-merged bank over
-        // Drive, undoing the deletion globally and discarding whatever else the
-        // other device had done. The same question is asked again next time
-        // rather than being decided by silence.
-        if (!go) { this._holdPush = 'a deletion from another device is waiting to be applied'; updateStorageBar(); return; }
-      }
-
-      // Insurance, not a feature. Merging is non-destructive by construction,
-      // but "by construction" is an argument, not a rollback — and this one
-      // runs on its own, with nobody watching. The pre-merge state is kept in
-      // fsmeta, which never syncs and never appears in an export, so it costs
-      // one copy of the bank in this browser and nothing anywhere else.
-      // Only when the merge actually changes something here. A catch-up that
-      // finds nothing new used to write a second full copy of the bank into
-      // IndexedDB anyway, on every boot, for nothing to undo.
-      const changesHere = removed > 0
-        || ((report.stores.attempts && report.stores.attempts.tombstoned) || 0) > 0
-        || (merged.stores.questions || []).length !== (localPayload.stores.questions || []).length
-        || (merged.stores.attempts || []).length !== (localPayload.stores.attempts || []).length
-        || ((report.stores.questions && report.stores.questions.updated) || 0) > 0;
-      if (changesHere) await FileStore.setMeta('preMergeSnapshot', { at: nowISO(), stores: localPayload.stores });
-      await applyMergedBank(merged);
-      // Push only when this browser actually contributed something Drive did
-      // not have. A merge that produced exactly what was downloaded needs no
-      // upload, and re-uploading a multi-megabyte bank for nothing is the kind
-      // of cost a phone pays for twice.
-      const contributed = dirtySince
-        || (merged.stores.questions || []).length !== before.q
-        || (merged.stores.attempts || []).length !== before.a
-        || JSON.stringify((merged.stores.questions || []).map(q => q.updatedAt).sort()) !==
-           JSON.stringify((remote.stores.questions || []).map(q => q.updatedAt).sort());
+      const outcome = await this._mergeInRemote(remote);
+      if (!outcome.applied) return;      // declined; the hold is already set
+      const contributed = outcome.contributed || dirtySince;
       if (contributed) await this.push();
-      const added = (report.stores.attempts && report.stores.attempts.added) || 0;
-      const gained = (report.stores.questions && (report.stores.questions.added + report.stores.questions.updated)) || 0;
-      if (added || gained) {
-        toast('Caught up with Google Drive' + (gained ? ' — ' + gained + ' question(s) updated from elsewhere' : '') + '.', 'ok', 5000);
-      }
       this._holdPush = null;
       // Level with Drive without having pushed — the merge produced exactly
       // what was downloaded. Without refreshing the fingerprint the next boot
@@ -17518,6 +17441,71 @@ const DriveSync = {
       this._holdPush = 'this browser could not read Google Drive to catch up first';
       updateStorageBar();
     }
+  },
+
+  /**
+   * Fold a Drive copy into this browser and say what happened. The one routine
+   * behind every reconciliation there is, so that connecting, resuming and
+   * booting cannot mean three different things — they are all the same
+   * request: make these two one bank.
+   *
+   * Merging is additive in every case but one. A course wiped on another device
+   * leaves tombstones, those are honoured, and the questions they name are
+   * removed here rather than resurrected by this browser holding an older copy.
+   * That is the only way this can take work away from somebody, so it is the
+   * only thing it stops to ask about — and it asks on the real count of what is
+   * being retired, never on the change in bank size, because questions arriving
+   * cancel questions leaving and hide the deletion completely.
+   */
+  async _mergeInRemote(remote) {
+    const localPayload = await FileStore.buildPayload();
+    const { merged, report } = await mergeBankPayloads(localPayload, remote);
+    const removed = (report.stores.questions && report.stores.questions.tombstoned) || 0;
+    if (removed > 0) {
+      const go = await modal({
+        title: 'A deletion made elsewhere is about to apply here',
+        body: h('div', { class: 'stack' }, [
+          h('p', {}, removed + ' question(s) in this browser were deleted on another device since these two last matched. Everything else merges as usual — every answer from both sides is kept.'),
+          h('div', { class: 'notice warn small' }, 'If that deletion was a mistake, say Not now: this browser still holds those questions, and nothing here is changed until you agree.')
+        ]),
+        actions: [{ label: 'Not now', value: false }, { label: 'Apply the deletion', value: true, kind: 'primary' }]
+      });
+      if (!go) {
+        // Declining leaves both copies exactly as they are — and stops this
+        // browser pushing until it is resolved. Without that hold, the next
+        // ordinary edit force-pushed this un-merged bank over Drive, undoing
+        // the deletion globally and discarding whatever else the other device
+        // had done. The same question is asked again next time rather than
+        // being decided by silence.
+        this._holdPush = 'a deletion from another device is waiting to be applied';
+        updateStorageBar();
+        return { applied: false, removed, report };
+      }
+    }
+    // Only when the merge actually changes something here. A catch-up that
+    // finds nothing new used to write a second full copy of the bank into
+    // IndexedDB anyway, on every boot, for nothing to undo.
+    const changesHere = removed > 0
+      || ((report.stores.attempts && report.stores.attempts.tombstoned) || 0) > 0
+      || (merged.stores.questions || []).length !== (localPayload.stores.questions || []).length
+      || (merged.stores.attempts || []).length !== (localPayload.stores.attempts || []).length
+      || ((report.stores.questions && report.stores.questions.updated) || 0) > 0;
+    if (changesHere) await FileStore.setMeta('preMergeSnapshot', { at: nowISO(), stores: localPayload.stores });
+    // What this browser holds that Drive did not, and therefore whether Drive
+    // needs the merged result back. Re-uploading a multi-megabyte bank that
+    // already matches is a cost a phone pays for nothing.
+    const contributed = removed > 0
+      || (merged.stores.questions || []).length !== (remote.stores.questions || []).length
+      || (merged.stores.attempts || []).length !== (remote.stores.attempts || []).length
+      || JSON.stringify((merged.stores.questions || []).map(q => q.updatedAt).sort()) !==
+         JSON.stringify((remote.stores.questions || []).map(q => q.updatedAt).sort());
+    await applyMergedBank(merged);
+    const gained = (report.stores.questions && (report.stores.questions.added + report.stores.questions.updated)) || 0;
+    const answers = (report.stores.attempts && report.stores.attempts.added) || 0;
+    if (gained || answers) {
+      toast('Caught up with Google Drive' + (gained ? ' — ' + gained + ' question(s) updated from elsewhere' : '') + '.', 'ok', 5000);
+    }
+    return { applied: true, removed, contributed, report };
   },
 
   /* ---------- getting the connection back on its own ----------
@@ -17777,48 +17765,23 @@ const DriveSync = {
     }
     const remoteCount = (remote.stores.questions || []).length;
     if (!remoteCount) { await this.push(); return true; }
-    const localCount = (await DB.all('questions')).length;
-    const dramaticLoss = localCount === 0 || localCount < remoteCount * 0.5;
-    for (; ;) {
-      let choice = await modal({
-        title: 'There is already a bank in Google Drive',
-        body: h('div', { class: 'stack' }, [
-          h('p', {}, 'That Drive file already holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '.'),
-          h('p', { class: 'small' }, 'This browser currently holds ' + localCount + ' question(s).'),
-          h('div', { class: 'notice small' }, 'Merging keeps everything both copies hold — nothing is discarded, and this browser is backed up first, automatically.')
-        ]),
-        actions: [
-          { label: 'Cancel', value: '' },
-          { label: 'Choose one side instead', value: 'choose' },
-          { label: 'Merge both', value: 'merge', kind: 'primary' }
-        ]
-      });
-      if (choice === 'choose') {
-        choice = await chooseOneSideDialog('Google Drive', 'drive', remoteCount, localCount, dramaticLoss);
-        if (!choice) continue; // "Back" really goes back now, not all the way out
-      }
-      if (choice === 'drive') {
-        if (!(await requireSafetyBackup('discarding this browser’s bank for the Drive copy', chooseOneSideDialog._skipBackup))) return false;
-        await this._applyRemote(remote);
-        return true;
-      }
-      if (choice === 'browser') {
-        if (!(await requireExternalBackup(remote, 'mcq-mastery-drive', 'the Drive copy', 'overwriting the Drive copy with this browser’s bank', chooseOneSideDialog._skipBackup))) return false;
-        this.allowDriveShrink('confirmed by the user, after a backup, in the Drive reconciliation dialog');
-        await this.push();
-        return true;
-      }
-      if (choice === 'merge') {
-        if (!(await requireSafetyBackup('merging this browser’s bank with what is in Google Drive'))) return false;
-        const localPayload = await FileStore.buildPayload();
-        const { merged, report } = await mergeBankPayloads(localPayload, remote);
-        await applyMergedBank(merged);
-        await this.push();
-        await showMergeReport(report, 'Merged with Google Drive', 'Both copies were combined and pushed back to Drive — this browser and Drive now match.');
-        return true;
-      }
-      return false;
-    }
+
+    // Connecting Drive IS the decision. Somebody who picks their own account
+    // and their own file has already said what they want: one bank, in both
+    // places. Asking them to choose between the two copies afterwards — and
+    // downloading a backup file first — was the app second-guessing an
+    // instruction it had just been given, and it is the same request the boot
+    // path answers silently every day. Same routine, same answer.
+    //
+    // Nothing is discarded by it, and the state before it is kept in fsmeta, so
+    // "Undo the last automatic merge" covers this too. The one way it can take
+    // anything away — a deletion recorded elsewhere — still stops and asks.
+    const outcome = await this._mergeInRemote(remote);
+    if (!outcome.applied) return false;
+    if (outcome.contributed) await this.push();
+    await showMergeReport(outcome.report, 'Connected to Google Drive',
+      'Both copies were combined — this browser and Drive now hold the same bank. Nothing was discarded.');
+    return true;
   },
 
   async disconnect() {
