@@ -1510,7 +1510,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.3.2', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.3.3', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -4984,6 +4984,24 @@ function applyAttempt(q, att) {
     const sch = scheduleNext(att.correct, att.confidence, q.srStage);
     q.srStage = sch.stage; q.nextReviewAt = sch.at; q.srReason = sch.reason;
   }
+  // Answering changes the record — mastery, streak, the date it next falls
+  // due — so it is an edit, and the merge decides which of two devices holds
+  // the newer version of a question by reading exactly this field. Without it,
+  // two devices held different versions under identical stamps and the answer
+  // never crossed.
+  q.updatedAt = nowISO();
+  return q;
+}
+
+/** Rebuild a question's rolling counters from its answer history, in order.
+    Used to undo writes that should never have happened; the history itself is
+    append-only and is the source of truth for all of it. */
+function rebuildQuestionStats(q, hist) {
+  const blank = blankQuestion(q.courseId);
+  q.stats = blank.stats;
+  q.srStage = 0; q.nextReviewAt = null; q.srReason = null;
+  (hist || []).slice().sort((a, b) => new Date(a.ts) - new Date(b.ts)).forEach(a => applyAttempt(q, a));
+  q.stats.mastery = masteryOf(q, hist || []).score;
   return q;
 }
 
@@ -6077,15 +6095,6 @@ const Session = {
     const hist = await DB.byIndex('attempts', 'questionUuid', q.uuid);
     fresh.stats.mastery = masteryOf(fresh, hist).score;
     fresh.flagged = !!s.flags[q.uuid] || fresh.flagged;
-    // Answering a question changes it: its mastery, its streak, and the date
-    // it next falls due. Without stamping that, `updatedAt` still said what it
-    // said before the answer — and the merge resolves a record by comparing
-    // exactly that field. Two devices would end up with identical timestamps
-    // on two different versions of the same question, and the merge would keep
-    // whichever it happened to be holding: the answer simply never crossed.
-    // Every other write in the app stamps this; the one made most often did
-    // not.
-    fresh.updatedAt = nowISO();
     await DB.put('questions', fresh);
     State.invalidate();
     return att;
@@ -15955,6 +15964,41 @@ async function deleteCourseForever(course) {
   toast(course.code + ' deleted. Your safety backup is saved.', 'ok');
   renderShell();
   go('settings');
+}
+
+/**
+ * Undo the one thing a test suite should never have been able to do. Version
+ * 1.3.2 shipped a self-test that ran a real answer through the ordinary
+ * scoring path against whichever question happened to be first in the bank —
+ * so pressing "Run built-in tests" wrote a fabricated wrong answer into a real
+ * question's history, moved its mastery and brought its review date forward.
+ *
+ * The attempt log is append-only and every counter is derived from it, so this
+ * is fully reversible: drop the fabricated attempts, then rebuild the affected
+ * questions from the attempts that remain. Runs once at boot, finds nothing on
+ * a bank that never ran that build, and says what it did rather than repairing
+ * somebody's data silently.
+ */
+async function purgeSelfTestArtifacts() {
+  let bogus;
+  try { bogus = (await DB.all('attempts')).filter(a => typeof a.sessionId === 'string' && a.sessionId.indexOf('test-session-') === 0); }
+  catch (e) { return; }
+  if (!bogus.length) return;
+  const uuids = new Set(bogus.map(a => a.questionUuid));
+  for (const a of bogus) await DB.del('attempts', a.id);
+  let fixed = 0;
+  for (const uuid of uuids) {
+    const q = await DB.get('questions', uuid);
+    if (!q) continue;
+    rebuildQuestionStats(q, await DB.byIndex('attempts', 'questionUuid', uuid));
+    q.updatedAt = nowISO();
+    await DB.put('questions', q);
+    fixed++;
+  }
+  State.invalidate();
+  await audit('repair', 'system', '', null, { removedAttempts: bogus.length, questionsRebuilt: fixed }, 'self-test artefacts');
+  setTimeout(() => toast('Removed ' + bogus.length + ' answer(s) written by the built-in tests, and rebuilt ' +
+    fixed + ' question(s) from the history that remains.', 'ok', 9000), 1200);
 }
 
 async function recomputeAll() {
@@ -25866,28 +25910,37 @@ test('A failed sync says what happened, not what the browser called it', () => {
     'and anything unrecognised is still shown rather than swallowed');
 });
 
-test('Answering a question stamps it, so a merge can tell which side is newer', async () => {
+test('Answering a question stamps it, so a merge can tell which side is newer', () => {
   // mergeKeyedRows resolves a question by comparing updatedAt. Answering
   // changed mastery, streak and the next review date but left updatedAt where
-  // it was — so two devices ended up holding different versions of the same
-  // question under identical timestamps, and a merge kept whichever it already
-  // had. The answer never crossed, however many times either side synced.
-  const all = await DB.all('questions');
-  const q = all.find(x => x.status === 'active' && x.correctOptionId) || all[0];
-  if (!q) return;                       // an empty scratch bank has nothing to prove
+  // it was, so two devices held different versions of the same question under
+  // identical stamps and a merge kept whichever it already had — the answer
+  // never crossed, however many times either side synced.
+  //
+  // Pure by construction. The first version of this test ran a real answer
+  // through Session.commit() against whatever question happened to be first in
+  // the bank, which wrote a fabricated attempt into somebody's actual history.
+  // A test suite offered to a person as "Run built-in tests" must not be able
+  // to touch their data at all.
+  const q = mkQ('Scratch — does answering stamp the record?', ['a', 'b', 'c', 'd'], 0);
+  q.updatedAt = '2020-01-01T00:00:00.000Z';
   const before = q.updatedAt;
-  const session = { id: 'test-session-' + Date.now(), courseId: q.courseId, mode: 'practice', optionOrders: {}, flags: {} };
-  const rec = { at: nowISO(), selectedOptionId: (q.options[0] || {}).id, correct: false, confidence: 'unsure', ms: 1000 };
-  await Session.commit(session, q, rec);
-  const after = await DB.get('questions', q.uuid);
-  assert(after.updatedAt && after.updatedAt !== before,
-    'the record an answer changed carries a newer stamp than the one it replaced');
-  assert(Date.parse(after.updatedAt) >= Date.parse(rec.at), 'and the stamp is the moment of the answer, not an older one');
-  // Two sides of the same question, one answered: the answered one must win.
-  const mine = Object.assign({}, q, { updatedAt: before });
-  const theirs = after;
-  const merged = mergeKeyedRows([mine], [theirs], 'uuid');
-  eq(merged.rows[0].updatedAt, theirs.updatedAt, 'so the merge takes the answered side');
+  applyAttempt(q, { correct: false, confidence: 'unsure', ms: 1000, ts: nowISO() });
+  assert(q.updatedAt !== before, 'the answered record carries a newer stamp than the one it replaced');
+  assert(Date.parse(q.updatedAt) > Date.parse(before), 'and it moves forward, not back');
+  assert(q.nextReviewAt, 'and it is scheduled to come round again');
+
+  // Two sides of one question, one of them answered: the answered side wins.
+  const mine = Object.assign({}, q, { updatedAt: before, nextReviewAt: null });
+  const merged = mergeKeyedRows([mine], [q], 'uuid');
+  eq(merged.rows[0].updatedAt, q.updatedAt, 'so the merge takes the answered side');
+  eq(merged.rows[0].nextReviewAt, q.nextReviewAt, 'bringing its review date with it');
+
+  // Rolling counters rebuild from history alone, which is what makes a bad
+  // write undoable.
+  const rebuilt = rebuildQuestionStats(Object.assign({}, q, { courseId: 'test-course' }), []);
+  eq(rebuilt.stats.attempts, 0, 'no history, no attempts');
+  eq(rebuilt.nextReviewAt, null, 'and nothing scheduled');
 });
 
 test('Work that has not reached Drive yet says so, once it is worth saying', () => {
@@ -26189,6 +26242,7 @@ async function boot() {
   // Before anything reads the client ID: lift any override an older version
   // left inside the synced settings store into this browser's own storage.
   await migrateDriveClientIdOutOfSync();
+  await purgeSelfTestArtifacts();
   applyTheme();
   State.courses = await DB.all('courses');
   const wanted = Settings.get('activeCourseId');
