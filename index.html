@@ -1511,7 +1511,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.4.0', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.4.1', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -2294,7 +2294,6 @@ const Questions = {
     if (prev) await audit('edit', 'question', q.qid || q.uuid, summarise(prev), summarise(q), reason || '');
     return q;
   },
-  async putRaw(q) { await DB.put('questions', q); return q; },
   async admit(list, courseId, note) {
     // Allocates the permanent Question IDs. Called once, at the end of import.
     const need = list.filter(q => !q.qid);
@@ -14223,6 +14222,12 @@ async function restoreFlow(file) {
       const seq = IdRegister.seqOf(q.qid);
       if (seq > (maxSeqByCourse.get(q.courseId) || 0)) maxSeqByCourse.set(q.courseId, seq);
     }
+    // Restoring is a deliberate statement about what this bank should be, made
+    // now. Written with the stamps the backup file happened to carry, the very
+    // next merge with Drive compared those old stamps against the copies the
+    // restore was meant to replace and put the old ones straight back.
+    const restoredAt = nowISO();
+    out.forEach(q => { q.updatedAt = restoredAt; });
     await DB.putMany('questions', out);
     for (const [cid, seq] of maxSeqByCourse) await IdRegister.reserveUpTo(cid, seq);
     report.stores.questions = out.length;
@@ -17403,6 +17408,11 @@ const DriveSync = {
         // what it claimed), it needs sending now rather than sitting here
         // indefinitely while the status bar claims "synced". The marker is
         // this browser's belief; the fingerprint is what is actually here.
+        // Reaching Drive and finding it unmoved is a successful catch-up: this
+        // browser is reconciled, so any hold from a previous attempt is over.
+        // Clearing it only inside the merge branch left a held browser waiting
+        // for ANOTHER device to touch the file before it could sync again.
+        this._holdPush = null;
         const sig = await this._localSignature();
         const sentSig = await FileStore.meta('driveSyncedSignature');
         const reallyBehind = sentSig ? sig !== sentSig : false;
@@ -17441,7 +17451,12 @@ const DriveSync = {
       // questions away from somebody, so it is the only thing worth stopping
       // for. Size differences are not: merging a bank of 40 with a bank of
       // 1300 keeps all 1340.
-      const removed = (localPayload.stores.questions || []).length - (merged.stores.questions || []).length;
+      // The number the merge actually retired, not the net change in size.
+      // Netting them meant a catch-up that brought 50 new questions and retired
+      // 50 others computed zero: no consent asked, no snapshot written, and 50
+      // questions plus their whole answer history deleted silently with nothing
+      // left to undo it with.
+      const removed = (report.stores.questions && report.stores.questions.tombstoned) || 0;
       if (removed > 0) {
         const go = await modal({
           title: 'A deletion made elsewhere is about to apply here',
@@ -17469,6 +17484,7 @@ const DriveSync = {
       // finds nothing new used to write a second full copy of the bank into
       // IndexedDB anyway, on every boot, for nothing to undo.
       const changesHere = removed > 0
+        || ((report.stores.attempts && report.stores.attempts.tombstoned) || 0) > 0
         || (merged.stores.questions || []).length !== (localPayload.stores.questions || []).length
         || (merged.stores.attempts || []).length !== (localPayload.stores.attempts || []).length
         || ((report.stores.questions && report.stores.questions.updated) || 0) > 0;
@@ -17490,6 +17506,10 @@ const DriveSync = {
         toast('Caught up with Google Drive' + (gained ? ' — ' + gained + ' question(s) updated from elsewhere' : '') + '.', 'ok', 5000);
       }
       this._holdPush = null;
+      // Level with Drive without having pushed — the merge produced exactly
+      // what was downloaded. Without refreshing the fingerprint the next boot
+      // reads "behind" and uploads the whole bank again, every time.
+      if (!contributed) await FileStore.setMeta('driveSyncedSignature', await this._localSignature());
       await this._recordSyncedStamp();
     } catch (e) {
       // Could not read Drive, or could not merge it. Whatever is here has NOT
@@ -18118,8 +18138,17 @@ const DriveSync = {
 
   async _applyRemote(payload) {
     const names = syncStores();
+    // Keep this machine's own settings across a wholesale adopt. The merge path
+    // already refuses to import them; this path replaced the store outright, so
+    // taking Drive's copy handed a phone the laptop's vendored OCR path (which
+    // breaks OCR there), its appearance, its selected course, and an
+    // acknowledgement about a different device's storage.
+    const mine = new Map((await DB.all('settings')).filter(r => isDeviceLocalSetting(r.k)).map(r => [r.k, r]));
     for (const s of names) {
-      const rows = Array.isArray(payload.stores[s]) ? payload.stores[s] : [];
+      let rows = Array.isArray(payload.stores[s]) ? payload.stores[s] : [];
+      if (s === 'settings') {
+        rows = rows.filter(r => !isDeviceLocalSetting(r.k)).concat(Array.from(mine.values()));
+      }
       await DB.clearRaw(s);
       if (rows.length) await DB.putManyRaw(s, rows);
     }
@@ -18814,7 +18843,19 @@ async function applyMergedBank(merged) {
     if (s === 'questions') continue;
     await DB.putMany(s, merged.stores[s] || []);
   }
-  await DB.putMany('questions', merged.stores.questions || []);
+  // A merge starts by serialising the bank, then spends the length of a pull
+  // and a merge — twenty seconds on a phone — before writing the result back.
+  // Anything answered in that window was overwritten by the pre-pull copy of
+  // its own record. Rows the database now holds with a newer stamp win: the
+  // merge has nothing newer to say about them.
+  const incoming = merged.stores.questions || [];
+  const keep = [];
+  for (const q of incoming) {
+    const live = await DB.get('questions', q.uuid);
+    if (live && (live.updatedAt || '') > (q.updatedAt || '')) continue;
+    keep.push(q);
+  }
+  await DB.putMany('questions', keep);
 
   // putMany adds and overwrites; it cannot remove. mergeBankPayloads drops
   // questions and attempts named by a tombstone from either side — a course
@@ -18823,26 +18864,7 @@ async function applyMergedBank(merged) {
   // straight back to Drive on the next sync. A deletion that will not stay
   // deleted is worse than one that never happened: it comes back on every
   // device, and the person has to do it again and watch it fail again.
-  const retired = new Set((merged.stores.tombstones || []).map(t => t.uuid).filter(Boolean));
-  if (retired.size) {
-    const kept = new Set((merged.stores.questions || []).map(q => q.uuid));
-    let removed = 0;
-    for (const uuid of retired) {
-      if (kept.has(uuid)) continue;          // a tombstone the merge chose not to honour
-      await DB.del('questions', uuid);
-      const hist = await DB.byIndex('attempts', 'questionUuid', uuid);
-      for (const a of hist) if (a.id != null) await DB.del('attempts', a.id);
-      removed++;
-    }
-    // Both backends refuse a push that shrinks the bank, which is right when a
-    // bank collapses unexpectedly and wrong here: this shrank because somebody
-    // deleted a course on purpose, on another device, and that is exactly what
-    // has to reach Drive.
-    if (removed) {
-      FileStore.allowShrink('merge honoured ' + removed + ' deletion(s) made on another device');
-      if (typeof DriveSync !== 'undefined') DriveSync.allowDriveShrink('merge honoured ' + removed + ' deletion(s) made on another device');
-    }
-  }
+  await applyTombstoneRemovals(merged);
 
   // FileStore.buildPayload() caches its last snapshot and only refreshes the
   // stores its own touch() marked dirty — which never fires for a store this
@@ -18862,6 +18884,41 @@ async function applyMergedBank(merged) {
   // _applyRemote: without re-adopting, an install with no course of its own
   // stays on the onboarding screen holding somebody's entire bank.
   await adoptCourses();
+}
+
+/**
+ * The removal half of a merge. putMany can add and overwrite; it cannot take
+ * anything away — so mergeBankPayloads correctly dropping the questions named
+ * by a tombstone meant nothing until here: the wiped questions stayed in the
+ * database and were pushed straight back to Drive, undoing the deletion on
+ * every device that had already applied it.
+ *
+ * Split out of applyMergedBank so it can be tested without that function's
+ * tail, which re-adopts courses and would move the selected course under a
+ * person running the built-in tests.
+ */
+async function applyTombstoneRemovals(merged) {
+  const retired = new Set(((merged && merged.stores && merged.stores.tombstones) || []).map(t => t.uuid).filter(Boolean));
+  if (!retired.size) return 0;
+  const kept = new Set(((merged.stores.questions) || []).map(q => q.uuid));
+  let removed = 0;
+  for (const uuid of retired) {
+    if (kept.has(uuid)) continue;            // a tombstone this merge chose not to honour
+    if (!(await DB.get('questions', uuid))) continue;
+    await DB.del('questions', uuid);
+    const hist = await DB.byIndex('attempts', 'questionUuid', uuid);
+    for (const a of hist) if (a.id != null) await DB.del('attempts', a.id);
+    removed++;
+  }
+  // Both backends refuse a push that shrinks the bank, which is right when a
+  // bank collapses unexpectedly and wrong here: this shrank because somebody
+  // deleted a course on purpose, on another device, and that is exactly what
+  // has to reach Drive.
+  if (removed) {
+    FileStore.allowShrink('merge honoured ' + removed + ' deletion(s) made on another device');
+    if (typeof DriveSync !== 'undefined') DriveSync.allowDriveShrink('merge honoured ' + removed + ' deletion(s) made on another device');
+  }
+  return removed;
 }
 
 /** Shared summary dialog for every merge point below. */
@@ -26183,22 +26240,69 @@ test('A deletion made on another device actually deletes, and can then be pushed
   // to Drive on the next sync, and the deletion undid itself everywhere. The
   // consent prompt added at boot promised a removal that could not happen.
   const uuid = 'selftest-tombstone-' + (await DB.count('questions'));
+  // Everything this touches, saved. applyTombstoneRemovals arms BOTH shrink
+  // guards, and a guarded delete marks the bank dirty for whichever backend is
+  // connected — a test that leaves either behind has changed the app for the
+  // person who ran it.
   const wasShrinkOk = DriveSync._driveShrinkOk;
+  const wasFileShrink = FileStore._shrinkOk;
+  const wasDirty = FileStore.dirty, wasPending = DriveSync._pendingChange;
+  const wasFirstUnpushed = DriveSync._firstUnpushedChangeAt;
+  const wasMark = await FileStore.meta('driveDirtySince');
   try {
     await DB.putRaw('questions', { uuid, qid: 'ZZZ-Q-999999', courseId: 'selftest-course', status: 'active', stem: 'scratch', options: [], stats: {}, updatedAt: nowISO() });
     assert(await DB.get('questions', uuid), 'the scratch question is in the database to begin with');
 
-    const merged = { stores: {}, touchedQuestionUuids: [] };
-    BACKUP_STORES.forEach(st => { merged.stores[st] = []; });
-    merged.stores.tombstones = [{ qid: 'ZZZ-Q-999999', uuid, at: nowISO() }];
-    await applyMergedBank(merged);
+    const merged = { stores: { questions: [], tombstones: [{ qid: 'ZZZ-Q-999999', uuid, at: nowISO() }] } };
+    const removed = await applyTombstoneRemovals(merged);
 
+    eq(removed, 1, 'the removal half of the merge reports what it took away');
     eq(await DB.get('questions', uuid), undefined, 'a question the merge retired is actually gone from this browser');
     assert(DriveSync._driveShrinkOk, 'and the shrink guard is told, so the smaller bank can still reach Drive');
+
+    // A tombstone the merge chose to keep must never be acted on, and a
+    // tombstone for something already gone must not be counted twice.
+    eq(await applyTombstoneRemovals(merged), 0, 'a second pass removes nothing');
+    eq(await applyTombstoneRemovals({ stores: { questions: [{ uuid: 'kept-1' }], tombstones: [{ uuid: 'kept-1' }] } }), 0,
+      'a question the merge kept is not deleted because a tombstone names it');
+    eq(await applyTombstoneRemovals({ stores: {} }), 0, 'and a merge with no tombstones does nothing at all');
   } finally {
     await DB.delRaw('questions', uuid);
     DriveSync._driveShrinkOk = wasShrinkOk;
+    FileStore._shrinkOk = wasFileShrink;
+    FileStore.dirty = wasDirty;
+    DriveSync._pendingChange = wasPending;
+    DriveSync._firstUnpushedChangeAt = wasFirstUnpushed;
+    if (wasMark) await FileStore.setMeta('driveDirtySince', wasMark);
+    else await FileStore.delMeta('driveDirtySince');
   }
+});
+
+test('A deletion is counted as a deletion, not netted against what arrived', async () => {
+  // The consent prompt and the only rollback that exists were both gated on the
+  // NET change in bank size. A catch-up that brought 50 new questions and
+  // retired 50 others computed zero: nothing asked, nothing snapshotted, and 50
+  // questions plus their answer history deleted in silence.
+  const q = u => ({ uuid: u, qid: u, courseId: 'c', status: 'active', updatedAt: '2026-01-01T00:00:00Z', options: [], stats: {} });
+  const stores = extra => Object.assign({
+    courses: [], sources: [], batches: [], attempts: [], sessions: [], audit: [], images: [],
+    idRegister: [], tombstones: [], presets: [], notes: [], caseStudies: [], questionVersions: [],
+    questions: [], settings: []
+  }, extra || {});
+  const local = { savedAt: '2026-01-01T00:00:00Z', stores: stores({ questions: [q('a'), q('b'), q('c'), q('d')] }) };
+  const remote = {
+    savedAt: '2026-02-01T00:00:00Z',
+    stores: stores({
+      questions: [q('e'), q('f')],
+      tombstones: [{ qid: 'a', uuid: 'a', at: '2026-02-01T00:00:00Z' }, { qid: 'b', uuid: 'b', at: '2026-02-01T00:00:00Z' }]
+    })
+  };
+  const { merged, report } = await mergeBankPayloads(local, remote);
+  eq(merged.stores.questions.length, local.stores.questions.length,
+    'two arrived and two were retired, so the bank is exactly the same size — which is the trap');
+  eq(report.stores.questions.tombstoned, 2, 'and the merge knows perfectly well that two were retired');
+  assert(report.stores.questions.tombstoned > 0,
+    'the boot path must gate its prompt and its snapshot on this, never on the size difference');
 });
 
 test('A push records what it uploaded, not what the database says afterwards', () => {
