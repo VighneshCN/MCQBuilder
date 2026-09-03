@@ -15213,6 +15213,7 @@ ROUTES.settings = async (root) => {
             class: 'btn sm', text: 'Check Drive now',
             onclick: async () => { await driveDiag.checkRemote(); draw(); }
           }),
+          h('button', { class: 'btn sm', text: 'What is in the Drive file?', onclick: () => driveDiag.inspectRemote() }),
           h('button', {
             class: 'btn sm', text: 'Copy',
             onclick: async () => {
@@ -18184,6 +18185,44 @@ driveDiag._q = null; driveDiag._due = null; driveDiag._dirty = ''; driveDiag._re
 driveDiag.checkRemote = async function () {
   try { driveDiag._remote = await DriveSync._fetchModifiedTime(); }
   catch (e) { driveDiag._remote = ''; }
+};
+
+/**
+ * Read the Drive file and report what is actually inside it, without applying
+ * any of it. "Is my work in the file, or only on this device?" was answerable
+ * only by loading the file over the top of a browser's own bank — which
+ * destroys the evidence in the act of gathering it, and risks the newer copy.
+ * This downloads the file, counts it, and changes nothing.
+ */
+driveDiag.inspectRemote = async function () {
+  toast('Reading the Drive file…', 'info', 8000);
+  let remote;
+  try { remote = await DriveSync.pull(); }
+  catch (e) { await modal({ title: 'Could not read the Drive file', body: h('p', {}, e.message) }); return; }
+  const now = new Date();
+  const rq = remote.stores.questions || [];
+  const dueOf = list => list.filter(q => q.status === 'active' && q.nextReviewAt && new Date(q.nextReviewAt) <= now).length;
+  const local = await DB.all('questions');
+  const rows = [
+    ['Saved to Drive at', fmtDate(remote.savedAt, true)],
+    ['Questions — in Drive / here', rq.length + ' / ' + local.length],
+    ['Active — in Drive / here', rq.filter(q => q.status === 'active').length + ' / ' + local.filter(q => q.status === 'active').length],
+    ['Due today — in Drive / here', dueOf(rq) + ' / ' + dueOf(local)],
+    ['Answer records — in Drive / here', (remote.stores.attempts || []).length + ' / ' + (await DB.all('attempts')).length]
+  ];
+  const same = dueOf(rq) === dueOf(local);
+  await modal({
+    title: 'What is in the Drive file', wide: true,
+    body: h('div', { class: 'stack' }, [
+      h('div', { class: 'notice ' + (same ? 'ok' : 'warn') },
+        same ? 'Drive and this browser agree on what is due. Nothing to reconcile.'
+          : 'Drive and this browser disagree. Whichever holds the work you actually did is the one to keep: use Sync now on that device, then Load from Drive on the other.'),
+      h('div', { class: 'stack' }, rows.map(([k, v]) => h('div', { class: 'row', style: 'gap:8px' }, [
+        h('span', { class: 'tiny dim', style: 'min-width:210px', text: k }), h('b', { class: 'tiny', text: v })
+      ]))),
+      h('p', { class: 'tiny dim', style: 'margin:0' }, 'Read-only — this downloaded the file to count it and changed nothing, here or in Drive.')
+    ])
+  });
 };
 
 function updateStorageBar() {
