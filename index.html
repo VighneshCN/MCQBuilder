@@ -1511,7 +1511,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.5.0', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.5.1', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -15616,6 +15616,22 @@ ROUTES.settings = async (root) => {
         h('button', { class: 'btn', onclick: () => showLicence(), text: 'Terms and licence' }),
         h('button', { class: 'btn', onclick: () => showShortcuts(), text: 'Keyboard shortcuts' })
       ]),
+      /* Two diagram pages, for the question people actually get stuck on:
+         "which copy of my work is the real one, and what is it doing right
+         now". They live outside the app on purpose — a picture of the sync
+         rules is not something to carry in a bank you take into an exam, and
+         nothing in the app depends on them being reachable. Links only: no
+         part of your bank goes with the click, the same as the support link
+         below. */
+      h('div', { class: 'field' }, [
+        h('label', { text: 'How this app handles your data' }),
+        h('div', { class: 'row wrap', style: 'gap:8px' }, [
+          h('a', { class: 'btn sm', href: DIAGRAM_SYNC, target: '_blank', rel: 'noopener noreferrer', text: 'Where your work goes' }),
+          h('a', { class: 'btn sm', href: DIAGRAM_DATA, target: '_blank', rel: 'noopener noreferrer', text: 'How it is stored' })
+        ]),
+        h('div', { class: 'tiny dim', style: 'margin-top:6px' },
+          'Flowcharts of syncing, merging and the record shapes — worth a look if two devices ever disagree. Opens outside the app; nothing from your bank goes with it.')
+      ]),
       support ? h('div', { class: 'notice small', style: 'margin:0' }, [
         h('div', { style: 'margin-bottom:8px' }, support.note || 'Something not working, or not making sense? There is a group for people using this app — ask there.'),
         h('div', { class: 'row wrap', style: 'gap:8px;align-items:center' }, [
@@ -15661,6 +15677,13 @@ ROUTES.settings = async (root) => {
     users with no idea what they may do with it. Summarised in plain language
     first, because the licence text answers a lawyer's question and the
     summary answers a student's. */
+/* Explanations of the sync and storage model, kept outside the app rather than
+   inside it: they are read once, when something is confusing, and the app has
+   no business carrying them into an exam hall. Nothing depends on them being
+   reachable — they are links, and the app is complete without them. */
+const DIAGRAM_SYNC = 'https://claude.ai/code/artifact/3ed3c4ae-1c38-4ca4-bc46-280a86c883b0';
+const DIAGRAM_DATA = 'https://claude.ai/code/artifact/b9b04ab8-52b0-4978-9265-e5b61944ef6d';
+
 const LICENCE_HOLDER = 'Vighnesh CN';
 const LICENCE_NAME = 'PolyForm Noncommercial License 1.0.0';
 const LICENCE_URL = 'https://polyformproject.org/licenses/noncommercial/1.0.0';
