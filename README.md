@@ -926,6 +926,13 @@ leaves out **My learning point**, the note field on the reveal panel. It is
 your own reflection, not curated content, and it stays in your bank even when
 the question it is attached to gets shared.
 
+**The answers arrive confirmed.** Only questions that already reach practice
+are exported, so every answer in the file is one you checked. The file records
+that, and the receiving copy ticks *"treat an answer printed in the source as
+verified"* for them — otherwise a shared bank lands with every answer needing
+confirmation again, which looks exactly like an export that lost the answer
+key. They can still clear the box and check all of them themselves.
+
 **To receive one:** drop it on Add Questions like any other file. It goes
 through the same duplicate check and the same confirmation screen, into your
 own bank, with your own Question IDs. Tick *"treat an answer printed in the

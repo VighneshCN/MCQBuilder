@@ -310,6 +310,11 @@ Automated tests cannot verify rendering or real browser storage.
       appears, refuses to continue until the question and two options are named,
       and lands the same questions once mapped
 - [ ] Re-save that file as `.xlsx` and import it — identical result
+- [ ] Share a bank, then import the file into a second course: the answers
+      arrive confirmed, the questions are practisable at once, and Source
+      details explains why the trust box is already ticked
+- [ ] Drop a shared bank and an ordinary PDF together — the box is NOT
+      pre-ticked, because one file cannot vouch for the other
 - [ ] Review queue: the line above the filters accounts for both numbers —
       how many are blocked, and how many are already in practice — and the
       total matches the count on the step tab plus the optional ones

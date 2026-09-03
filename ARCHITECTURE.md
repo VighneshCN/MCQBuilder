@@ -546,6 +546,21 @@ shared only if it is named in `shareableQuestion()`, so a personal field added
 to the record later cannot leak by being forgotten in a denylist. The tests
 assert against the *values* as well as the keys.
 
+One thing does have to travel that the per-question allowlist deliberately
+refuses: `answerVerified`. Keeping it out is right — it records who checked
+what, in a database the reader does not have — but the *fact* that a person
+checked has to reach them, because only practice-eligible questions are
+exported and every one of those had its answer confirmed. Without it the trust
+checkbox on **Source details** (off by default, correctly, since the ordinary
+import is a PDF whose printed key nobody has verified) left the whole shared
+bank unpractisable and needing an answer — which reads to the person importing
+it exactly like an export that dropped the answer key. The file therefore
+carries a single file-level `answersVerifiedBySender: true`, named apart from
+the per-question field on purpose, and `sourceDialog()` preselects the
+checkbox when — and only when — *every* file in the batch carries it, so one
+shared bank cannot vouch for the PDF dropped alongside it. It preselects a
+control the reader can clear; it never bypasses one.
+
 Case-study questions travel inside their scenario rather than loose, so the
 link between passage and questions cannot be lost, and a scenario with no
 questions is omitted entirely.

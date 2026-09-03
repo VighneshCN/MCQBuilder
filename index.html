@@ -11449,6 +11449,17 @@ async function sourceDialog(files) {
   const tmplDesc = h('div', { class: 'tiny dim', text: PARSE_TEMPLATES[0].desc });
   tmpl.addEventListener('change', () => { tmplDesc.textContent = (PARSE_TEMPLATES.find(t => t.id === tmpl.value) || {}).desc || ''; });
   const trust = h('input', { type: 'checkbox' });
+  /* Off is the right default for the ordinary case — a PDF whose printed key
+     nobody has checked. It is the wrong default for a bank shared out of
+     another copy of this app, where every question in the file reached
+     practice and so had its answer confirmed by a person: left off, the whole
+     bank lands unpractisable and needing an answer, which is indistinguishable
+     from an answer key that never travelled at all. Only when EVERY file in
+     the batch says so, so one shared bank cannot vouch for the PDF next to
+     it — and the reader can still clear it. */
+  const sharedBanks = files.filter(f => f.kind === 'json' && f.json && f.json.answersVerifiedBySender === true);
+  const allShared = sharedBanks.length === files.length;
+  if (allShared) trust.checked = true;
   const notes = h('textarea', { style: 'min-height:50px', placeholder: 'Copyright or usage note, edition, anything worth recording' });
 
   const res = await modal({
@@ -11466,6 +11477,10 @@ async function sourceDialog(files) {
       ]),
       h('div', { class: 'field' }, [h('label', { text: 'Notes' }), notes]),
       h('label', { class: 'check' }, [trust, h('span', {}, ['Treat an answer printed in the source as verified ', h('span', { class: 'dim tiny', text: '— leave off if you want to check each answer yourself' })])]),
+      allShared ? h('div', { class: 'notice ok small' }, [
+        h('b', { text: files.length === 1 ? 'This file was shared from another bank.' : 'These files were shared from other banks.' }),
+        ' Every question in ' + (files.length === 1 ? 'it' : 'them') + ' was already in practice there, which means somebody confirmed each answer — so that box is ticked for you. Clear it if you would rather check them all yourself.'
+      ]) : null,
       h('div', { class: 'card' }, [h('div', { class: 'card-b tight small muted' }, files.map(f => h('div', { class: 'row' }, [
         h('span', { class: 'docnum', text: f.ext }),
         h('span', { style: 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', title: f.filename, text: f.filename }),
@@ -14972,6 +14987,15 @@ function shareableBank(course, questions, caseStudies) {
   const out = {
     schema: 'mcq-mastery-import/1',
     sharedAt: nowISO(),
+    // Every question in this file reached practice in the sender's bank, and
+    // nothing reaches practice there without somebody confirming its answer.
+    // The per-question answerVerified deliberately does not travel — it is a
+    // record of who checked what, in a database the reader does not have —
+    // but the FACT that it was checked has to, or the reader re-confirms a
+    // thousand answers that were confirmed once already. Deliberately a
+    // separate name from the per-question field, and it only preselects a
+    // checkbox the reader can clear: the decision to trust stays theirs.
+    answersVerifiedBySender: true,
     course: { code: course.code, name: course.name, blueprint: course.blueprint },
     questions: standalone.map(shareableQuestion)
   };
@@ -15006,7 +15030,7 @@ async function exportShareableBank() {
       h('div', { class: 'notice small', style: 'margin:0' },
         'Your own progress is not in it. The file is written in the ordinary import format, which has no place to put a mastery score, an attempt count, a review date or a flag — and nothing typed into "My learning point" travels either, since that is your own note, not part of the question.'),
       h('p', { class: 'tiny dim', style: 'margin:0' },
-        'Only questions that already reach practice are included. Whoever imports it drops it on Add Questions like any other file — and if they tick “treat an answer printed in the source as verified”, it reaches practice straight away.')
+        'Only questions that already reach practice are included — so every answer in the file is one you have confirmed. The file says so, and the reader’s copy reads that: they drop it on Add Questions like any other file and it reaches practice straight away, without re-confirming ' + all.length + ' answers you have already checked. They can still choose to check them all themselves.')
     ]),
     actions: [{ label: 'Cancel', value: null }, { label: 'Download', value: 'go', kind: 'primary' }]
   });
@@ -26844,6 +26868,50 @@ test('A shared bank is a file the importer can actually read', () => {
   // A scenario nobody has written questions for is not worth sending.
   const empty = shareableBank({ code: 'CISA', name: 'T', blueprint: BP3 }, [a], cases);
   assert(!empty.caseStudies, 'an empty scenario is left out entirely');
+});
+
+test('A shared bank arrives with its answers still confirmed', async () => {
+  // The failure this pins: the answer key travelled correctly all along, but
+  // the fact that somebody had CHECKED it did not, and the trust box is off by
+  // default. Every question in a shared bank therefore landed with an
+  // unconfirmed answer — the whole bank unpractisable, which reads to the
+  // person importing it exactly like an export that dropped the answer key.
+  const a = mkQ('Which control is BEST?', ['w', 'x', 'y', 'z'], 2, { domainId: 'D1' });
+  a.answerVerified = 'verified';
+  const bank = shareableBank({ code: 'CISA', name: 'Test', blueprint: BP3 }, [a], []);
+  assert(bank.answersVerifiedBySender === true, 'the file has to say the answers were checked');
+  eq(bank.questions[0].answer, 'C', 'and carry the key itself, as a letter');
+
+  // Round trip: the file the sender writes, read back by the importer.
+  const back = jsonToCandidates(JSON.parse(JSON.stringify(bank)));
+  eq(back.candidates.length, 1);
+  eq(back.candidates[0].answerLetter, 'C', 'the key survives the round trip');
+
+  const course = makeCourse('CISA', 'Test', BP3, { id: 'rt-course', qidPrefix: 'CISA' });
+  const ctx = (trust) => ({
+    courseId: course.id, course, sourceId: 's', sourceTitle: 't', filename: 'shared.json',
+    batchId: 'b', srcModule: '', srcChapter: '', defaultDomainId: null, trustSourceAnswers: trust
+  });
+  State.courses = (State.courses || []).concat([course]);
+
+  const trusted = candidateToQuestion(back.candidates[0], ctx(true));
+  eq(trusted.options[trusted.options.findIndex(o => o.id === trusted.correctOptionId)].text, 'y',
+    'the right option is the one marked correct, not merely some option');
+  eq(trusted.answerVerified, 'verified');
+  // A parsed candidate is still 'draft' — admission is what settles a status —
+  // so the question worth asking here is the one deriveEntryStatus answers:
+  // what has this record earned on its content alone?
+  eq(deriveEntryStatus(trusted), 'active', 'nothing is left for the reader to fill in');
+  trusted.status = deriveEntryStatus(trusted);
+  assert(isPracticeEligible(trusted), 'so a shared bank is practisable the moment it lands');
+
+  // And the reader is still free to check every answer themselves: the key is
+  // read either way, only the confirmation differs.
+  const untrusted = candidateToQuestion(back.candidates[0], ctx(false));
+  assert(!!untrusted.correctOptionId, 'the key is read whatever the reader decides');
+  eq(deriveEntryStatus(untrusted), 'needs_answer', 'it just waits for them to confirm it');
+  untrusted.status = deriveEntryStatus(untrusted);
+  assert(!isPracticeEligible(untrusted), 'and stays out of practice until they do');
 });
 
 test('Dated material appears and stops appearing on the right days', () => {
