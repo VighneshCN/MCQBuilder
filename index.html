@@ -1499,6 +1499,19 @@ kbd{font-family:var(--mono);font-size:11px;background:var(--surface-3);border:1p
    than pushes the list of keys off the bottom of the dialog. */
 .ref-doc.tall{max-height:330px;overflow:auto}
 @media(max-width:720px){.ref-row,.ref-row.lines{grid-template-columns:1fr;gap:6px}}
+
+/* --- review queue bands ------------------------------------------------
+   Work that stops practice and work that merely improves it were rendered
+   identically, one card after another, so four urgent rows and two hundred
+   optional ones looked the same. */
+.qband{margin:0 0 10px;padding-top:2px}
+.qband h4{font-size:15px;letter-spacing:-.01em}
+.qband p{margin:2px 0 0;max-width:70ch}
+.qband + .card{margin-top:0}
+.chip-dot{
+  display:inline-block;width:6px;height:6px;border-radius:50%;
+  background:var(--pencil);margin-right:6px;vertical-align:middle}
+.chip[aria-pressed="true"] .chip-dot{background:currentColor}
 progress{width:100%;height:6px;appearance:none;border:0}
 progress::-webkit-progress-bar{background:var(--surface-3);border-radius:3px}
 progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
@@ -11109,7 +11122,16 @@ ROUTES.import = async (root) => {
 
 /** The source and batch registers: what has already been brought in, and how
     each import reconciled. Reference material rather than part of importing,
-    so it is its own step instead of a long tail under the drop zone. */
+    so it is its own step instead of a long tail under the drop zone.
+
+    Six numbers used to sit here across two tables — detected, in bank,
+    practice-ready, detected, imported, drafts — with nothing to say that the
+    first three describe the bank as it stands and the last three describe
+    what happened on the day. Read straight down, "in bank 1341" next to
+    "imported 1077" looks like the app contradicting itself. Each table now
+    says which question it answers, the columns are named in those terms, and
+    every count leads somewhere: the questions it counts, or the queue holding
+    them up. */
 async function renderRegisters(root, sources, batches) {
   if (!sources.length && !batches.length) {
     root.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, [
@@ -11120,44 +11142,127 @@ async function renderRegisters(root, sources, batches) {
     ])));
     return;
   }
-  
+
+  const all = await State.questions();
+
+  /** Open the bank showing exactly the questions a row is counting. Both
+      filters have existed on BankState all along; nothing on this screen used
+      them, which left the registers a dead end — numbers you could read and
+      not follow. */
+  const openInBank = (patch, list) => {
+    const onCase = list.length > 0 && list.every(isCaseQuestion);
+    Object.assign(BankState, {
+      bank: onCase ? 'case' : 'standalone',
+      q: '', status: '', domain: '', source: '', batch: '',
+      verif: '', learn: '', diff: '', caseStudy: '', page: 0, sel: new Set()
+    }, patch);
+    go('bank');
+    const elsewhere = list.filter(q => isCaseQuestion(q) !== onCase).length;
+    if (elsewhere) toast(elsewhere + ' of these are in the other bank — switch banks to see those.', 'warn', 6000);
+  };
+  const toQueue = () => { State.importStep = 'check'; go('import'); };
+  /** A number with a line under it. The line is the point: a bare "1,324" out
+      of "1,341" leaves you to do the subtraction and then wonder where the
+      difference went. */
+  const countCell = (n, note) => h('td', {}, [
+    h('div', { class: 'num', text: String(n) }),
+    note || null
+  ].filter(Boolean));
+  const cardHead = (title, blurb, action) => h('div', { class: 'card-h', style: 'align-items:flex-start;gap:12px' }, [
+    h('div', { style: 'flex:1 1 260px;min-width:0' }, [
+      h('h3', { text: title }),
+      h('div', { class: 'small muted', style: 'margin-top:4px', text: blurb })
+    ]),
+    action || null
+  ].filter(Boolean));
+  /** Headers carry the long version of what they count, so a column name can
+      stay short without becoming a riddle. */
+  const headRow = (cols) => h('thead', {}, h('tr', {}, cols.map(c =>
+    Array.isArray(c) ? h('th', { title: c[1], text: c[0] }) : h('th', { text: c }))));
+
   if (sources.length) {
-    const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [h('div', { class: 'card-h' }, [h('h3', { text: 'Source register' }), h('div', { class: 'spacer' }), h('button', { class: 'btn sm', onclick: () => exportSourceRegister(sources), text: 'Export' })])]);
+    const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
+      cardHead('Where your questions came from',
+        'One row per file you brought in. These numbers describe your bank as it stands right now.',
+        h('button', { class: 'btn sm nowrap', onclick: () => exportSourceRegister(sources), text: 'Export' }))
+    ]);
     const tb = h('tbody');
-    const all = await State.questions();
     sources.forEach(s => {
       const mine = all.filter(q => q.sourceId === s.id);
+      const ready = mine.filter(isPracticeEligible);
+      const notKept = (s.detected || 0) - mine.length;
+      const waiting = mine.length - ready.length;
       tb.appendChild(h('tr', {}, [
         h('td', {}, [h('b', { class: 'small', text: s.title }), h('div', { class: 'srcline', text: s.filename || '—' })]),
         h('td', { class: 'tiny', text: s.type }),
         h('td', { class: 'tiny nowrap', text: fmtDate(s.importedAt) }),
-        h('td', { class: 'num', text: String(s.detected || 0) }),
-        h('td', { class: 'num', text: String(mine.length) }),
-        h('td', { class: 'num', text: String(mine.filter(isPracticeEligible).length) }),
-        h('td', { class: 'srcline', text: (s.fileHash || '').slice(0, 12) })
+        countCell(s.detected || 0),
+        countCell(mine.length, notKept > 0
+          ? h('div', { class: 'tiny dim', text: notKept + ' merged or rejected' }) : null),
+        countCell(ready.length, waiting > 0
+          ? h('a', { href: '#', class: 'tiny', onclick: (e) => { e.preventDefault(); toQueue(); },
+              text: waiting + ' waiting on you →' }) : null),
+        h('td', { class: 'srcline', title: 'A fingerprint of the file itself. Bring the same file in again and the app recognises it, whatever it has been renamed to.', text: (s.fileHash || '').slice(0, 12) }),
+        h('td', {}, h('button', {
+          class: 'btn sm nowrap', onclick: () => openInBank({ source: s.id }, mine),
+          text: 'See these →'
+        }))
       ]));
     });
-    card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, ['Source', 'Type', 'Imported', 'Detected', 'In bank', 'Practice-ready', 'Hash'].map(t => h('th', { text: t })))), tb])));
+    card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [
+      headRow(['Source', 'Type', 'Imported',
+        ['Found in it', 'Questions the parser got out of this file'],
+        ['In your bank', 'How many of those are stored right now'],
+        ['Ready to practise', 'In the bank, with a checked answer — the rest are waiting in the review queue'],
+        ['Fingerprint', 'Identifies the file itself, whatever it is renamed to'], '']), tb
+    ])));
     root.appendChild(card);
   }
 
   if (batches.length) {
-    const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [h('div', { class: 'card-h' }, h('h3', { text: 'Import batches' }))]);
+    const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
+      cardHead('Every time you pressed import',
+        'One row per import. These numbers are a record of what happened on the day, so they do not change afterwards — the table above is the live picture.')
+    ]);
     const tb = h('tbody');
     batches.slice(0, 25).forEach(b => {
       const r = b.report || {};
+      const mine = all.filter(q => q.batchId === b.id);
       tb.appendChild(h('tr', {}, [
-        h('td', { class: 'docnum', text: b.id.slice(0, 8) }),
+        // The label is what a person recognises; the id is for tracing one
+        // back. It used to be the other way round, with the label three
+        // columns away from the row it names.
+        h('td', {}, [
+          h('b', { class: 'small', text: b.label || 'Untitled import' }),
+          h('div', { class: 'srcline', text: b.id.slice(0, 8) })
+        ]),
         h('td', { class: 'tiny nowrap', text: fmtDate(b.startedAt, true) }),
-        h('td', { class: 'small', text: b.label || '' }),
-        h('td', { class: 'num', text: String(r.detected || 0) }),
-        h('td', { class: 'num', text: String(r.imported || 0) }),
-        h('td', { class: 'num', text: String(r.drafts || 0) }),
-        h('td', {}, h('span', { class: 'balanced', style: 'color:' + (r.balanced ? 'var(--green)' : 'var(--pencil)'), text: r.balanced ? '✓ Reconciled' : '✕ Check' })),
-        h('td', {}, h('button', { class: 'btn sm', onclick: () => showReconciliation(b), text: 'Report' }))
+        countCell(r.detected || 0),
+        countCell(r.imported || 0),
+        countCell(r.drafts || 0),
+        h('td', {}, h('span', {
+          class: 'balanced', style: 'color:' + (r.balanced ? 'var(--green)' : 'var(--pencil)'),
+          title: r.balanced
+            ? 'Every question the parser found was accounted for — kept, merged or rejected. None went missing.'
+            : 'The numbers do not add up to what the parser found. Open the report before relying on this import.',
+          text: r.balanced ? '✓ All accounted for' : '✕ Check this'
+        })),
+        h('td', {}, h('div', { class: 'row', style: 'gap:6px;justify-content:flex-end' }, [
+          mine.length ? h('button', {
+            class: 'btn sm nowrap', onclick: () => openInBank({ batch: b.id }, mine),
+            text: 'See these →'
+          }) : null,
+          h('button', { class: 'btn sm nowrap', onclick: () => showReconciliation(b), text: 'Report' })
+        ].filter(Boolean)))
       ]));
     });
-    card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, ['Batch', 'Started', 'Label', 'Detected', 'Imported', 'Drafts', 'Reconciled', ''].map(t => h('th', { text: t })))), tb])));
+    card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [
+      headRow([['Import', 'The name you gave it, and the batch reference'], 'Started',
+        ['Found', 'Questions the parser got out of the files in this import'],
+        ['Straight into practice', 'Answer already checked and a domain set — usable the moment the import finished'],
+        ['Held for review', 'Kept in the bank, but something was missing, so they went to the review queue instead'],
+        ['Nothing missing?', 'Whether every question the parser found was accounted for'], '']), tb
+    ])));
     root.appendChild(card);
   }
 }
@@ -13317,14 +13422,26 @@ function bulkFrom(list, status) {
 }
 
 /** The checking queue itself, rendered inside Add Questions. */
+/* "Other" was two unrelated piles under one name: questions the parser could
+   not get a whole question out of (blocked from practice, somebody has to
+   finish them) and questions it read but was not confident about (already in
+   practice, worth a glance). Nothing about the word "other" told you which
+   one you were looking at, or whether it mattered. They are separate now. */
 const REVIEW_FILTER_TABS = [
   ['all', 'All'],
   ['answer_conflict', 'Answer conflicts'],
   ['possible_dup', 'Possible duplicates'],
   ['needs_answer', 'Needs answer verification'],
+  ['unread', 'Not fully read'],
   ['needs_class', 'Unclassified'],
-  ['other', 'Other']
+  ['unchecked', 'Wording unchecked']
 ];
+/* The filters naming work that is actually holding questions OUT of practice.
+   The status-named ones are checked against the gate's own list so the two
+   cannot drift; 'unread' is blocking by construction — it is defined as the
+   blocked part of the remainder. */
+const BLOCKING_FILTERS = ['unread'].concat(
+  ['answer_conflict', 'possible_dup', 'needs_answer'].filter(k => BLOCKING_STATUSES.indexOf(k) >= 0));
 // Persists across renders (like BankState) so switching tabs, or a resolve
 // action that redraws the whole queue, doesn't lose what was ticked.
 // `answers` holds the option picked for each record on screen (its own
@@ -13359,6 +13476,17 @@ async function renderReviewQueue(root) {
   const noAnswer = queue.filter(q => q.status === 'needs_answer');
   const noClass = queue.filter(q => q.status === 'needs_class');
   const rest = queue.filter(q => ['answer_conflict', 'possible_dup', 'needs_answer', 'needs_class'].indexOf(q.status) < 0);
+  // The two halves of the old "Other" pile. isBlocked is the gate's own
+  // predicate, so what lands in each is exactly what practice does and does
+  // not refuse to ask.
+  const unread = rest.filter(isBlocked);
+  const unchecked = rest.filter(q => !isBlocked(q));
+  // The queue's own headline number and the one on the step tab were counting
+  // different things — 4 against 256 — with nothing on screen to say so. The
+  // tab counts what is blocked; the queue lists everything worth a look. Both
+  // are stated, together, before anything else.
+  const blocked = queue.filter(isBlocked);
+  const optional = queue.length - blocked.length;
 
 
   if (!queue.length) {
@@ -13395,8 +13523,21 @@ async function renderReviewQueue(root) {
   // A tab a person isn't even looking at any more is not a filter worth
   // keeping — if it emptied out entirely, drop back to All rather than show
   // a picker with nothing selected under it.
-  const counts = { all: queue.length, answer_conflict: conflicts.length, possible_dup: dupes.length, needs_answer: noAnswer.length, needs_class: noClass.length, other: rest.length };
+  const counts = { all: queue.length, answer_conflict: conflicts.length, possible_dup: dupes.length, needs_answer: noAnswer.length, needs_class: noClass.length, unread: unread.length, unchecked: unchecked.length };
   if (ReviewQueueState.filter !== 'all' && !counts[ReviewQueueState.filter]) ReviewQueueState.filter = 'all';
+
+  /* The first thing on the screen, because it answers the first question the
+     screen used to raise: the step tab says 4 and this list says 256. Both are
+     true and they count different things. Say which is which. */
+  root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:12px' },
+    !blocked.length
+      ? [h('b', { text: 'Nothing here is blocking practice.' }),
+         ' All ' + queue.length + ' are already being asked — they would just work a little better with more filled in.']
+      : !optional
+        ? [h('b', { text: 'None of these ' + queue.length + ' can be practised yet.' }),
+           ' Each is waiting on a decision from you.']
+        : [h('b', { text: blocked.length + ' of these ' + queue.length + ' cannot be practised until you settle them.' }),
+           ' The other ' + optional + ' are already being asked in practice — they would just work better with more filled in, so they can wait.']));
 
   const tabsBar = h('div', { class: 'seg', style: 'margin-bottom:14px' });
   root.appendChild(tabsBar);
@@ -13407,17 +13548,27 @@ async function renderReviewQueue(root) {
     if (!list.length) return;
     // Read off the group rather than threaded through every call site: when a
     // group is all one status the bank can open filtered to it, and when it is
-    // mixed (the "other" pile) it opens unfiltered with the selection intact.
+    // mixed (the not-fully-read pile holds more than one) it opens unfiltered
+    // with the selection intact.
     const uniform = list.every(q => q.status === list[0].status) ? list[0].status : '';
+    // The note used to sit at 12px grey on the far right of the header, past
+    // the button — the one line explaining what the section is, in the last
+    // place anybody reads. It belongs under the title.
     const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
-      h('div', { class: 'card-h' }, [h('h3', { text: title }), h('span', { class: 'badge b-review', text: String(list.length) }), h('div', { class: 'spacer' }),
+      h('div', { class: 'card-h', style: 'align-items:flex-start;gap:12px' }, [
+        h('div', { style: 'flex:1 1 260px;min-width:0' }, [
+          h('div', { class: 'row', style: 'gap:8px' }, [
+            h('h3', { text: title }), h('span', { class: 'badge b-review', text: String(list.length) })
+          ]),
+          note ? h('div', { class: 'small muted', style: 'margin-top:4px', text: note }) : null
+        ].filter(Boolean)),
         // Worth offering once there are enough of them that one at a time is
         // plainly the wrong answer.
         list.length >= 5 ? h('button', {
-          class: 'btn sm', onclick: () => bulkFrom(list, uniform),
+          class: 'btn sm nowrap', onclick: () => bulkFrom(list, uniform),
           text: 'Do all ' + list.length + ' at once →'
-        }) : null,
-        h('span', { class: 'tiny dim', text: note })].filter(Boolean))
+        }) : null
+      ].filter(Boolean))
     ]);
     const b = h('div', { class: 'card-b stack' });
     list.slice(0, 40).forEach(q => b.appendChild(renderer(q)));
@@ -13469,6 +13620,38 @@ async function renderReviewQueue(root) {
     pairLine(q),
     extra || null
   ]);
+
+  /** Why this record is here, in the words of the thing still to do. The
+      status badge says "Wording unchecked" for two quite different reasons —
+      a parser that read the text with low confidence, and an option count the
+      course does not allow — and they want different actions, so the row says
+      which rather than leaving you to open it and guess. */
+  const contentReason = (q) => {
+    if (!optionCountOk(q)) return 'This course expects ' + State.course.optionCount +
+      ' options; this question has ' + (q.options || []).length + '.';
+    if ((q.options || []).length < 2) return 'Only ' + (q.options || []).length +
+      ' option was read out of the file. The rest are probably still sitting inside the question text below.';
+    if (q.status === 'draft') return 'Saved as a draft and never finished.';
+    // The ordinary case — low parser confidence — is what the section's own
+    // subtitle already says. Repeating it under all nine rows is noise, and
+    // it buries the rows where the reason is something specific.
+    return '';
+  };
+  /** For these two piles the text itself is what is under suspicion, so the
+      options are shown with it: an option that ended up glued onto the end of
+      the question is obvious side by side, and invisible from the stem alone. */
+  const optionsPreview = (q) => h('div', { class: 'stack', style: 'gap:1px;margin-top:6px' },
+    (q.options || []).slice(0, 8).map((o, i) => h('div', { class: 'tiny muted' }, [
+      h('span', { class: 'docnum dim', text: letterOf(i) + ') ' }),
+      h('span', { text: (o.text || '').slice(0, 140) + ((o.text || '').length > 140 ? '…' : '') })
+    ])));
+  const contentRow = (q, bad) => {
+    const why = contentReason(q);
+    return quickRow(q, h('div', {}, [
+      why ? h('div', { class: bad ? 'notice warn small' : 'small muted', style: 'margin-top:6px', text: why }) : null,
+      optionsPreview(q)
+    ].filter(Boolean)));
+  };
 
   /** The only section with its own card/toolbar instead of the generic
       `section` helper — it needs a checkbox + answer picker per row and a
@@ -13649,16 +13832,37 @@ async function renderReviewQueue(root) {
   function drawTabs() {
     tabsBar.textContent = '';
     REVIEW_FILTER_TABS.forEach(([key, label]) => {
+      // An empty bucket is not a filter. Selecting one already falls straight
+      // back to All, so a chip reading "(0)" was a control that could not be
+      // used, sitting next to five that could.
+      if (key !== 'all' && !counts[key]) return;
+      const blocks = BLOCKING_FILTERS.indexOf(key) >= 0;
       tabsBar.appendChild(h('button', {
         class: 'chip', 'aria-pressed': String(ReviewQueueState.filter === key),
-        onclick: () => { ReviewQueueState.filter = key; drawTabs(); drawSections(); },
-        text: label + ' (' + counts[key] + ')'
-      }));
+        title: key === 'all' ? '' : blocks ? 'These cannot be practised until they are settled' : 'These are already in practice',
+        onclick: () => { ReviewQueueState.filter = key; drawTabs(); drawSections(); }
+      }, [
+        blocks ? h('i', { class: 'chip-dot' }) : null,
+        h('span', { text: label + ' (' + counts[key] + ')' })
+      ].filter(Boolean)));
     });
   }
+  /** A band header. The sections used to run one after another with nothing
+      to say that the first three stop practice dead and the last two are
+      polish — so 243 optional rows looked exactly as urgent as 4 blocking
+      ones. */
+  const band = (title, note) => sectionsBox.appendChild(h('div', { class: 'qband' }, [
+    h('h4', { text: title }), h('p', { class: 'small muted', text: note })
+  ]));
+
   function drawSections() {
     sectionsBox.textContent = '';
     const show = (key) => ReviewQueueState.filter === 'all' || ReviewQueueState.filter === key;
+    const anyShown = (keys) => keys.some(k => show(k) && counts[k]);
+
+    if (anyShown(['answer_conflict', 'possible_dup', 'needs_answer', 'unread'])) {
+      band('Waiting on you', 'These cannot be practised until they are settled.');
+    }
 
     if (show('answer_conflict')) renderConflictsSection(sectionsBox);
 
@@ -13705,7 +13909,15 @@ async function renderReviewQueue(root) {
         h('span', { class: 'small', style: 'flex:1;text-align:left', text: o.text })
       ])))));
 
-    if (show('needs_class')) section(sectionsBox, 'Unclassified — already in practice', noClass, 'A domain turns on domain drills and weighted mocks', q => quickRow(q,
+    if (show('unread')) section(sectionsBox, 'Not fully read', unread,
+      'The parser could not get a whole question out of these. Finish one by hand, or bring the file in again in a format it reads more cleanly.',
+      q => contentRow(q, true));
+
+    if (anyShown(['needs_class', 'unchecked'])) {
+      band('Already in practice', 'These are being asked right now. Filling in what they lack turns on more of the app — nothing here is broken.');
+    }
+
+    if (show('needs_class')) section(sectionsBox, 'Unclassified', noClass, 'Already in practice. Setting a domain is what turns on domain drills and weighted mock exams.', q => quickRow(q,
       h('div', { class: 'row wrap', style: 'gap:6px' }, State.course.blueprint.map(d => h('button', {
         class: 'btn sm', onclick: async () => {
           const fresh = await Questions.get(q.uuid);
@@ -13716,7 +13928,9 @@ async function renderReviewQueue(root) {
         }, text: d.id
       })))));
 
-    if (show('other')) section(sectionsBox, 'Other review items', rest, 'Drafts and incomplete parses', q => quickRow(q));
+    if (show('unchecked')) section(sectionsBox, 'Wording nobody has checked', unchecked,
+      'Already in practice. The parser flagged these as worth reading once — most turn out to be fine.',
+      q => contentRow(q, false));
   }
 
   drawTabs();

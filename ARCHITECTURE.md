@@ -937,6 +937,15 @@ predates this or was edited outside the app. The review queue states the
 actual disagreement inline — which option each record claims is correct —
 rather than just naming the other record.
 
+The queue itself is split by `isBlocked()` — the gate's own predicate — into
+"waiting on you" and "already in practice", because `REVIEW_STATUSES` and
+`BLOCKING_STATUSES` are deliberately different sets and the screen was
+reporting both without saying so: the step tab counted 4 blocked while the
+list showed 256 worth a look. Both numbers are true, and they are now stated
+together at the top of the queue. The old catch-all "Other" bucket straddled
+that line (`parsing`/`draft` block practice, `needs_content` does not) and is
+now two, named for what is actually wrong and what it costs you.
+
 Within a batch, each processed candidate joins the live index, so a batch is
 checked against itself without a growing linear scan.
 

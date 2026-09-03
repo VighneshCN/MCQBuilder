@@ -310,6 +310,18 @@ Automated tests cannot verify rendering or real browser storage.
       appears, refuses to continue until the question and two options are named,
       and lands the same questions once mapped
 - [ ] Re-save that file as `.xlsx` and import it — identical result
+- [ ] Review queue: the line above the filters accounts for both numbers —
+      how many are blocked, and how many are already in practice — and the
+      total matches the count on the step tab plus the optional ones
+- [ ] No filter chip reads "(0)"; the ones that block practice carry a dot
+- [ ] The blocking sections sit under "Waiting on you" and the rest under
+      "Already in practice"
+- [ ] A "wording unchecked" row shows its options under the question, so an
+      option swallowed into the question text is visible without opening it
+- [ ] Sources & batches: each table says what it answers, and "See these →"
+      opens the bank filtered to exactly the questions that row counts
+- [ ] Where a source has questions short of practice-ready, "N waiting on
+      you →" goes to the review queue
 - [ ] "What should my file look like?" opens on the Excel tab with a worked
       example, and lists the headings that worked
 - [ ] Switch to "Word, PDF or plain text" and to "JSON" — each shows a worked
