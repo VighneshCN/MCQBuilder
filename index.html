@@ -1510,7 +1510,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.3.1', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.3.2', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -6077,6 +6077,15 @@ const Session = {
     const hist = await DB.byIndex('attempts', 'questionUuid', q.uuid);
     fresh.stats.mastery = masteryOf(fresh, hist).score;
     fresh.flagged = !!s.flags[q.uuid] || fresh.flagged;
+    // Answering a question changes it: its mastery, its streak, and the date
+    // it next falls due. Without stamping that, `updatedAt` still said what it
+    // said before the answer — and the merge resolves a record by comparing
+    // exactly that field. Two devices would end up with identical timestamps
+    // on two different versions of the same question, and the merge would keep
+    // whichever it happened to be holding: the answer simply never crossed.
+    // Every other write in the app stamps this; the one made most often did
+    // not.
+    fresh.updatedAt = nowISO();
     await DB.put('questions', fresh);
     State.invalidate();
     return att;
@@ -15104,10 +15113,7 @@ ROUTES.settings = async (root) => {
           class: 'btn sm primary', text: 'Sync now',
           onclick: async () => {
             const ok = await DriveSync.maybePush(true);
-            const sum = DriveSync.lastPushedSummary;
-            toast(ok
-              ? 'Synced to Drive — ' + (sum ? sum.questions + ' question(s), ' + sum.due + ' due today' : 'done') + '. Compare that against this screen.'
-              : 'Could not sync — see the status above.', ok ? 'ok' : 'bad', 7000);
+            toast(ok ? 'Synced to Drive.' : 'Could not sync — see the status above.', ok ? 'ok' : 'bad');
             go('settings');
           }
         }),
@@ -15188,54 +15194,6 @@ ROUTES.settings = async (root) => {
       ]);
       driveBlock.appendChild(setup);
     }
-  }
-
-  // Three rounds of "it says 9 here and 10 there" went by on guesswork,
-  // because nothing in the app would say what each browser actually believed.
-  // These are the exact fields the sync decisions are made from. Copy shows
-  // them as text, so two devices can be compared side by side.
-  if (DriveSync.configured || DriveSync.connected) {
-    const facts = () => ([
-      ['Build', APP.version],
-      ['This browser', (DriveSync.connected ? 'signed in' : 'signed out') + (DriveSync._pendingChange ? ', changes waiting' : ', nothing waiting')],
-      ['Last agreed with Drive', DriveSync.lastPushedAt ? fmtDate(DriveSync.lastPushedAt, true) : 'not recorded'],
-      ['Drive file changed', DriveSync.lastSyncedModifiedTime || 'not recorded'],
-      ['Unsynced since', driveDiag._dirty || 'nothing unsynced'],
-      ['Questions here', String(driveDiag._q === null ? '…' : driveDiag._q)],
-      ['Due today here', String(driveDiag._due === null ? '…' : driveDiag._due)],
-      ['Drive says its file changed', driveDiag._remote === null ? 'not checked' : (driveDiag._remote || 'could not reach Drive')]
-    ]);
-    const rows = h('div', { class: 'stack', style: 'margin-top:8px' });
-    const draw = () => {
-      rows.textContent = '';
-      facts().forEach(([k, v]) => rows.appendChild(h('div', { class: 'row', style: 'gap:8px' }, [
-        h('span', { class: 'tiny dim', style: 'min-width:170px', text: k }), h('span', { class: 'tiny', text: v })
-      ])));
-    };
-    draw();
-    driveDiag(draw);
-    db.appendChild(h('details', { style: 'margin-top:10px' }, [
-      h('summary', { class: 'tiny dim', style: 'cursor:pointer', text: 'Sync diagnostics — what this browser believes' }),
-      h('div', { class: 'stack', style: 'margin-top:6px' }, [
-        rows,
-        h('div', { class: 'row wrap', style: 'gap:8px' }, [
-          h('button', {
-            class: 'btn sm', text: 'Check Drive now',
-            onclick: async () => { await driveDiag.checkRemote(); draw(); }
-          }),
-          h('button', { class: 'btn sm', text: 'What is in the Drive file?', onclick: () => driveDiag.inspectRemote() }),
-          h('button', {
-            class: 'btn sm', text: 'Copy',
-            onclick: async () => {
-              const text = facts().map(([k, v]) => k + ': ' + v).join('\n');
-              try { await navigator.clipboard.writeText(text); toast('Copied.', 'ok'); }
-              catch (e) { await modal({ title: 'Sync diagnostics', body: h('pre', { class: 'tiny', style: 'white-space:pre-wrap', text: text }) }); }
-            }
-          })
-        ]),
-        h('p', { class: 'tiny dim', style: 'margin:0' }, '"Drive says its file changed" later than "Drive file changed" means Drive holds something this browser has not taken yet — use Load from Drive. The same two matching while this browser has changes waiting means this browser is the one that is ahead — use Sync now.')
-      ])
-    ]));
   }
 
   db.appendChild(h('div', { class: 'grid g2' }, [localBlock, driveBlock]));
@@ -17285,64 +17243,56 @@ const DriveSync = {
       if (!remoteModified || remoteModified === this.lastSyncedModifiedTime) {
         // Drive itself hasn't moved, so the routine "something changed
         // elsewhere" path below doesn't apply — but if a previous session
-        // left an edit that never actually reached Drive (offline, or the
-        // tab closed mid-push), it needs retrying now rather than sitting
-        // unsynced indefinitely while the status bar still claims "synced".
-        if (dirtySince) { this._pendingChange = true; await this.maybePush(true); }
+        // left an edit that never actually reached Drive (offline, the tab
+        // closed mid-push, or a push that reported success without carrying
+        // what it claimed), it needs sending now rather than sitting here
+        // indefinitely while the status bar claims "synced". The marker is
+        // this browser's belief; the fingerprint is what is actually here.
+        const sig = await this._localSignature();
+        const sentSig = await FileStore.meta('driveSyncedSignature');
+        const reallyBehind = sentSig ? sig !== sentSig : false;
+        if (dirtySince || reallyBehind) { this._pendingChange = true; await this.maybePush(true); }
         // Drive was reached and matches what this browser last wrote. That is
         // a sync result, not a non-event: without recording it the status
         // lines have nothing to show but a promise of a sync to come.
         else if (remoteModified) { await this._markInSync(); updateStorageBar(); }
         return;
       }
-      if (dirtySince) {
-        const remote = await this.pull();
-        const remoteCount = (remote.stores.questions || []).length;
-        const localCount = (await DB.all('questions')).length;
-        const dramaticLoss = localCount === 0 || localCount < remoteCount * 0.5;
-        for (; ;) {
-          let choice = await modal({
-            title: 'Google Drive changed elsewhere',
-            body: h('div', { class: 'stack' }, [
-              h('p', {}, 'This Drive file was updated from another device, and this browser also has changes of its own that never made it to Drive — probably closed before they could sync.'),
-              h('p', { class: 'small' }, 'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This browser holds ' + localCount + '.'),
-              h('div', { class: 'notice small' }, 'Merging keeps everything from both — nothing is discarded, and this browser is backed up first, automatically.')
-            ]),
-            actions: [
-              { label: 'Choose one side instead', value: 'choose' },
-              { label: 'Merge both', value: 'merge', kind: 'primary' }
-            ]
-          });
-          if (choice === 'choose') {
-            choice = await chooseOneSideDialog('Google Drive', 'drive', remoteCount, localCount, dramaticLoss);
-            if (!choice) continue; // "Back" really goes back now
-          }
-          if (choice === 'drive') {
-            if (await requireSafetyBackup('discarding this browser’s unsynced changes for the Drive copy', chooseOneSideDialog._skipBackup)) await this._applyRemote(remote);
-          } else if (choice === 'browser') {
-            if (await requireExternalBackup(remote, 'mcq-mastery-drive', 'the Drive copy', 'overwriting the Drive copy with this browser’s bank', chooseOneSideDialog._skipBackup)) {
-              this.allowDriveShrink('confirmed by the user, after a backup, in the Drive boot-conflict dialog');
-              await this.push();
-            }
-          } else if (choice === 'merge') {
-            if (await requireSafetyBackup('merging this browser’s unsynced changes with what is in Google Drive')) {
-              const localPayload = await FileStore.buildPayload();
-              const { merged, report } = await mergeBankPayloads(localPayload, remote);
-              await applyMergedBank(merged);
-              await this.push();
-              await showMergeReport(report, 'Merged with Google Drive', 'Both copies were combined and pushed back to Drive — this browser and Drive now match.');
-            }
-          }
-          // Escape/✕ (no Cancel button here) leaves the boot conflict
-          // unresolved for now — safe, since nothing was touched, and the
-          // same check runs again on the next boot.
-          break;
-        }
-      } else {
-        // The routine case: nothing unsynced here, so the newer Drive copy
-        // is simply loaded in, same as opening a local file that changed.
-        const remote = await this.pull();
-        await this._applyRemote(remote);
+      // Drive has moved since this browser last agreed with it. There is
+      // exactly one right answer here and it never needed asking for: merge.
+      // The merge is a union — every answer from both sides survives, keyed by
+      // session, question and timestamp, and each record resolves to whichever
+      // side touched it last — so there is nothing a person could tell it that
+      // it does not already know, and nothing to lose by not asking.
+      //
+      // It used to ask. With unsynced work here it put up a three-way dialog
+      // mid-boot; with none, it silently replaced this browser's copy with
+      // Drive's. That second path is the one that hurt: "nothing unsynced" is
+      // only ever this browser's own belief, and a push that reported success
+      // without carrying what it claimed left a browser holding newer work it
+      // had already marked as sent — then overwrote it on the next boot,
+      // quietly, in favour of the older copy. Merging cannot do that. It is
+      // also the only behaviour that makes two devices converge without
+      // somebody deciding which one to trust.
+      const remote = await this.pull();
+      const localPayload = await FileStore.buildPayload();
+      const { merged, report } = await mergeBankPayloads(localPayload, remote);
+      const before = { q: (remote.stores.questions || []).length, a: (remote.stores.attempts || []).length };
+      await applyMergedBank(merged);
+      // Push only when this browser actually contributed something Drive did
+      // not have. A merge that produced exactly what was downloaded needs no
+      // upload, and re-uploading a multi-megabyte bank for nothing is the kind
+      // of cost a phone pays for twice.
+      const contributed = dirtySince
+        || (merged.stores.questions || []).length !== before.q
+        || (merged.stores.attempts || []).length !== before.a
+        || JSON.stringify((merged.stores.questions || []).map(q => q.updatedAt).sort()) !==
+           JSON.stringify((remote.stores.questions || []).map(q => q.updatedAt).sort());
+      if (contributed) await this.push();
+      const added = (report.stores.attempts && report.stores.attempts.added) || 0;
+      const gained = (report.stores.questions && (report.stores.questions.added + report.stores.questions.updated)) || 0;
+      if (added || gained) {
+        toast('Caught up with Google Drive' + (gained ? ' — ' + gained + ' question(s) updated from elsewhere' : '') + '.', 'ok', 5000);
       }
       await this._recordSyncedStamp();
     } catch (e) { /* best-effort — this browser just stays on what it has until the next successful check */ }
@@ -17753,6 +17703,8 @@ const DriveSync = {
       // cannot be checked against the screen; one that reports what it sent
       // can be, in a glance, on the spot.
       this.lastPushedSummary = { questions: newCount, due: dueTodayIn(payload.stores.questions || []) };
+      // What went up, as this browser will recognise it later.
+      await FileStore.setMeta('driveSyncedSignature', await this._localSignature());
       await this._markInSync();
       this.problem = null;
       this._pendingChange = false; this._firstUnpushedChangeAt = null;
@@ -17801,6 +17753,29 @@ const DriveSync = {
       const j = await res.json();
       return j.modifiedTime || null;
     } catch (e) { return null; }
+  },
+
+  /**
+   * A cheap fingerprint of what this browser is holding: how many questions,
+   * how many answers, and the latest edit stamp among them. Recorded with
+   * every successful push, so "am I in sync?" can be answered by comparing
+   * facts rather than by trusting a flag.
+   *
+   * The flag was the problem. A push that reported success cleared the dirty
+   * marker whether or not it had really carried the work, and after that the
+   * browser had no way left to notice: it believed it was level, so it never
+   * pushed again and never merged. Two devices sat a question apart
+   * indefinitely, each convinced it was right. A fingerprint cannot believe
+   * anything — it either matches what went up or it does not.
+   */
+  async _localSignature() {
+    let n = 0, newest = '';
+    await DB.each('questions', q => {
+      n++;
+      const u = q.updatedAt || q.createdAt || '';
+      if (u > newest) newest = u;
+    });
+    return n + '|' + (await DB.count('attempts')) + '|' + newest;
   },
 
   /** "This browser and Drive were the same at this moment" — written down
@@ -17932,9 +17907,7 @@ const DriveSync = {
     const localDue = dueTodayIn(await DB.all('questions'));
     const ok = await confirmBox('Load the Drive copy?',
       'Drive holds ' + remoteCount + ' question(s), ' + remoteDue + ' due today, saved ' + fmtDate(remote.savedAt, true) +
-      '. This browser holds ' + localCount + ' question(s), ' + localDue + ' due today.' +
-      (remoteDue !== localDue ? ' Loading replaces this browser\u2019s copy with Drive\u2019s — including that due count, so a newer answer here would go back to being due.' : ' Loading replaces this browser\u2019s copy with Drive\u2019s.') +
-      ' A safety backup of what is in this browser is taken first, automatically.', true, 'Load');
+      '. This browser holds ' + localCount + ', ' + localDue + ' due today. Loading replaces this browser\u2019s copy with Drive\u2019s — the app already merges the two on its own, so this is only for forcing Drive\u2019s copy over the top. A safety backup is taken first, automatically.', true, 'Load');
     if (ok && (await requireSafetyBackup('loading the Drive copy over this browser’s bank'))) {
       await this._applyRemote(remote); await this._recordSyncedStamp();
     }
@@ -18197,62 +18170,6 @@ function dueTodayIn(list) {
   const now = new Date();
   return (list || []).filter(q => q.status === 'active' && q.nextReviewAt && new Date(q.nextReviewAt) <= now).length;
 }
-
-/** The numbers behind the diagnostics panel that have to be read rather than
-    remembered. Filled in asynchronously and redrawn, so opening Settings is
-    never held up by a database count or a network call. */
-function driveDiag(redraw) {
-  driveDiag._q = driveDiag._q === undefined ? null : driveDiag._q;
-  Promise.all([DB.count('questions'), FileStore.meta('driveDirtySince'), State.questions().catch(() => [])])
-    .then(([n, dirty, all]) => {
-      driveDiag._q = n;
-      driveDiag._dirty = dirty ? fmtDate(dirty, true) : '';
-      driveDiag._due = dueTodayIn(all);
-      if (redraw) redraw();
-    }).catch(() => { });
-}
-driveDiag._q = null; driveDiag._due = null; driveDiag._dirty = ''; driveDiag._remote = null;
-driveDiag.checkRemote = async function () {
-  try { driveDiag._remote = await DriveSync._fetchModifiedTime(); }
-  catch (e) { driveDiag._remote = ''; }
-};
-
-/**
- * Read the Drive file and report what is actually inside it, without applying
- * any of it. "Is my work in the file, or only on this device?" was answerable
- * only by loading the file over the top of a browser's own bank — which
- * destroys the evidence in the act of gathering it, and risks the newer copy.
- * This downloads the file, counts it, and changes nothing.
- */
-driveDiag.inspectRemote = async function () {
-  toast('Reading the Drive file…', 'info', 8000);
-  let remote;
-  try { remote = await DriveSync.pull(); }
-  catch (e) { await modal({ title: 'Could not read the Drive file', body: h('p', {}, e.message) }); return; }
-  const rq = remote.stores.questions || [];
-  const dueOf = dueTodayIn;
-  const local = await DB.all('questions');
-  const rows = [
-    ['Saved to Drive at', fmtDate(remote.savedAt, true)],
-    ['Questions — in Drive / here', rq.length + ' / ' + local.length],
-    ['Active — in Drive / here', rq.filter(q => q.status === 'active').length + ' / ' + local.filter(q => q.status === 'active').length],
-    ['Due today — in Drive / here', dueOf(rq) + ' / ' + dueOf(local)],
-    ['Answer records — in Drive / here', (remote.stores.attempts || []).length + ' / ' + (await DB.all('attempts')).length]
-  ];
-  const same = dueOf(rq) === dueOf(local);
-  await modal({
-    title: 'What is in the Drive file', wide: true,
-    body: h('div', { class: 'stack' }, [
-      h('div', { class: 'notice ' + (same ? 'ok' : 'warn') },
-        same ? 'Drive and this browser agree on what is due. Nothing to reconcile.'
-          : 'Drive and this browser disagree. Whichever holds the work you actually did is the one to keep: use Sync now on that device, then Load from Drive on the other.'),
-      h('div', { class: 'stack' }, rows.map(([k, v]) => h('div', { class: 'row', style: 'gap:8px' }, [
-        h('span', { class: 'tiny dim', style: 'min-width:210px', text: k }), h('b', { class: 'tiny', text: v })
-      ]))),
-      h('p', { class: 'tiny dim', style: 'margin:0' }, 'Read-only — this downloaded the file to count it and changed nothing, here or in Drive.')
-    ])
-  });
-};
 
 function updateStorageBar() {
   // Where the data lives has just changed, or been re-checked — exactly when
@@ -25947,6 +25864,30 @@ test('A failed sync says what happened, not what the browser called it', () => {
   assert(/their |its end/.test(describeSyncFailure(new Error('Drive returned 503'))), 'a 5xx is Google’s problem, said so');
   assert(/something odd/.test(describeSyncFailure(new Error('something odd'))),
     'and anything unrecognised is still shown rather than swallowed');
+});
+
+test('Answering a question stamps it, so a merge can tell which side is newer', async () => {
+  // mergeKeyedRows resolves a question by comparing updatedAt. Answering
+  // changed mastery, streak and the next review date but left updatedAt where
+  // it was — so two devices ended up holding different versions of the same
+  // question under identical timestamps, and a merge kept whichever it already
+  // had. The answer never crossed, however many times either side synced.
+  const all = await DB.all('questions');
+  const q = all.find(x => x.status === 'active' && x.correctOptionId) || all[0];
+  if (!q) return;                       // an empty scratch bank has nothing to prove
+  const before = q.updatedAt;
+  const session = { id: 'test-session-' + Date.now(), courseId: q.courseId, mode: 'practice', optionOrders: {}, flags: {} };
+  const rec = { at: nowISO(), selectedOptionId: (q.options[0] || {}).id, correct: false, confidence: 'unsure', ms: 1000 };
+  await Session.commit(session, q, rec);
+  const after = await DB.get('questions', q.uuid);
+  assert(after.updatedAt && after.updatedAt !== before,
+    'the record an answer changed carries a newer stamp than the one it replaced');
+  assert(Date.parse(after.updatedAt) >= Date.parse(rec.at), 'and the stamp is the moment of the answer, not an older one');
+  // Two sides of the same question, one answered: the answered one must win.
+  const mine = Object.assign({}, q, { updatedAt: before });
+  const theirs = after;
+  const merged = mergeKeyedRows([mine], [theirs], 'uuid');
+  eq(merged.rows[0].updatedAt, theirs.updatedAt, 'so the merge takes the answered side');
 });
 
 test('Work that has not reached Drive yet says so, once it is worth saying', () => {
