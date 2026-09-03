@@ -135,6 +135,7 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
 }
 [data-theme="dark"] .rail{background:linear-gradient(180deg,#0F1922 0%,#080D13 100%)}
 .brand{padding:11px 16px 10px; border-bottom:1px solid rgba(255,255,255,.09)}
+.brand-ver{font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;color:rgba(255,255,255,.42);margin-top:2px}
 .brand-mark{display:flex;align-items:center;gap:9px}
 .brand-tick{
   width:22px;height:22px;flex:none;border:1.5px solid #E98D76;border-radius:3px;
@@ -6581,7 +6582,16 @@ function renderShell() {
   rail.appendChild(h('div', { class: 'brand' }, [
     h('div', { class: 'brand-mark' }, [
       h('div', { class: 'brand-tick', text: '✓' }),
-      h('div', {}, [h('div', { class: 'brand-name', text: 'MCQ Mastery' })])
+      // Which build this is, under the name, where it is visible on a phone
+      // too — the rail's footer is hidden below 900px, so the version sat in
+      // two places a person on a phone would never pass: that footer, and a
+      // card header near the bottom of Settings. Whether an update has
+      // actually reached a device is a question that comes up the moment two
+      // devices disagree about anything.
+      h('div', {}, [
+        h('div', { class: 'brand-name', text: 'MCQ Mastery' }),
+        h('div', { class: 'brand-ver', text: 'v' + APP.version })
+      ])
     ])
   ]));
 
