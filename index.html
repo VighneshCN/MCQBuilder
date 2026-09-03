@@ -2129,6 +2129,28 @@ const REVIEW_STATUSES = ['needs_content', 'needs_answer', 'needs_class', 'possib
    the same table the gate reads, so the two can never drift. */
 const BLOCKING_STATUSES = REVIEW_STATUSES.filter(k => !(STATUS[k] && STATUS[k].practice));
 function isBlocked(q) { return BLOCKING_STATUSES.indexOf(q.status) >= 0; }
+/* Statuses that are finished with, whatever practice thinks of them. */
+const RETIRED_STATUSES = ['archived', 'merged', 'rejected'];
+/** Everything a person could still act on that practice will not ask.
+
+    isBlocked reads the status alone, and the status alone is not the gate.
+    needs_class and needs_content deliberately do NOT block practice — an
+    unfiled question is still a perfectly good question — but a record
+    carrying one of them can still be refused by isPracticeEligible for a
+    different reason, and the common one is an answer nobody has confirmed:
+    the import path files a candidate as needs_class on the strength of a
+    missing domain without ever looking at answerVerified, so "unclassified"
+    and "unconfirmed answer" arrive on the same record and only the first is
+    in the status.
+
+    Every count that means "waiting on you" reads this, so the review queue,
+    the nav badge and the source register cannot report three different
+    totals for one bank — which is exactly what they did: a source register
+    saying 17 short of practice, a step tab saying 4, and a queue filing the
+    other 13 under "already in practice". */
+function isStuck(q) {
+  return RETIRED_STATUSES.indexOf(q.status) < 0 && !isPracticeEligible(q);
+}
 const VERIF = { unverified: 'Unverified', verified: 'Verified', doubtful: 'Doubtful' };
 const DIFFICULTY = ['easy', 'medium', 'hard'];
 const CONFIDENCE = [
@@ -6941,7 +6963,7 @@ async function refreshBadges() {
   const all = await State.questions();
   // Only what is actually held back. A badge reading 400 for questions the
   // candidate can already practise is the same noise in a different place.
-  setBadge('import', all.filter(isBlocked).length);
+  setBadge('import', all.filter(isStuck).length);
   // Counted over the standalone bank only: this badge means "Spaced
   // repetition has something for you", and Spaced repetition cannot draw a
   // case-study question. Counting them made the badge promise work that the
@@ -7027,7 +7049,7 @@ ROUTES.dashboard = async (root) => {
   const guessRate = (() => { const c = attempts.filter(a => a.correct); return c.length ? c.filter(a => a.confidence === 'guessed').length / c.length : 0; })();
   const due = active.filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date());
   const never = active.filter(q => q.stats.attempts === 0);
-  const inReview = all.filter(isBlocked);
+  const inReview = all.filter(isStuck);
   const conflicts = all.filter(q => q.conflict || q.status === 'answer_conflict');
   const mastered = active.filter(q => (q.stats.mastery || 0) >= Settings.get('masteryTarget'));
 
@@ -10984,7 +11006,7 @@ ROUTES.import = async (root) => {
   const all = await State.questions();
   // Only what is genuinely stuck. Questions that are merely unfiled or whose
   // wording nobody has double-checked are already in practice.
-  const waiting = all.filter(isBlocked).length;
+  const waiting = all.filter(isStuck).length;
   const tidy = all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0).length - waiting;
 
   await band('Add Questions', 'Bring questions in, then confirm the ones the app could not be sure about', [
@@ -11191,7 +11213,14 @@ async function renderRegisters(root, sources, batches) {
       const mine = all.filter(q => q.sourceId === s.id);
       const ready = mine.filter(isPracticeEligible);
       const notKept = (s.detected || 0) - mine.length;
-      const waiting = mine.length - ready.length;
+      // "In your bank" counts every record from this file, retired ones
+      // included, so the gap between it and "ready to practise" is not all
+      // work — and pointing the whole gap at the review queue promised rows
+      // that are not in it. Each part is counted for what it is.
+      const stuck = mine.filter(isStuck);
+      const retired = mine.filter(q => RETIRED_STATUSES.indexOf(q.status) >= 0);
+      const listed = stuck.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0);
+      const unlisted = stuck.length - listed.length;
       tb.appendChild(h('tr', {}, [
         h('td', {}, [h('b', { class: 'small', text: s.title }), h('div', { class: 'srcline', text: s.filename || '—' })]),
         h('td', { class: 'tiny', text: s.type }),
@@ -11199,9 +11228,17 @@ async function renderRegisters(root, sources, batches) {
         countCell(s.detected || 0),
         countCell(mine.length, notKept > 0
           ? h('div', { class: 'tiny dim', text: notKept + ' merged or rejected' }) : null),
-        countCell(ready.length, waiting > 0
-          ? h('a', { href: '#', class: 'tiny', onclick: (e) => { e.preventDefault(); toQueue(); },
-              text: waiting + ' waiting on you →' }) : null),
+        h('td', {}, [
+          h('div', { class: 'num', text: String(ready.length) }),
+          listed.length ? h('div', {}, h('a', { href: '#', class: 'tiny', onclick: (e) => { e.preventDefault(); toQueue(); },
+            text: listed.length + ' waiting in the review queue →' })) : null,
+          retired.length ? h('div', { class: 'tiny dim', text: retired.length + ' archived, merged or rejected' }) : null,
+          // Should be nothing. A record practice refuses that the queue does
+          // not list has no screen of its own to be fixed on, so it is named
+          // here rather than left to be inferred from a subtraction.
+          unlisted ? h('div', { class: 'tiny', style: 'color:var(--pencil)',
+            text: unlisted + ' not practisable and not listed — run the integrity check' }) : null
+        ].filter(Boolean)),
         h('td', { class: 'srcline', title: 'A fingerprint of the file itself. Bring the same file in again and the app recognises it, whatever it has been renamed to.', text: (s.fileHash || '').slice(0, 12) }),
         h('td', {}, h('button', {
           class: 'btn sm nowrap', onclick: () => openInBank({ source: s.id }, mine),
@@ -11213,7 +11250,7 @@ async function renderRegisters(root, sources, batches) {
       headRow(['Source', 'Type', 'Imported',
         ['Found in it', 'Questions the parser got out of this file'],
         ['In your bank', 'How many of those are stored right now'],
-        ['Ready to practise', 'In the bank, with a checked answer — the rest are waiting in the review queue'],
+        ['Ready to practise', 'In the bank, with an answer somebody has confirmed. Anything short of that is broken out underneath.'],
         ['Fingerprint', 'Identifies the file itself, whatever it is renamed to'], '']), tb
     ])));
     root.appendChild(card);
@@ -13482,10 +13519,10 @@ async function renderReviewQueue(root) {
   const unread = rest.filter(isBlocked);
   const unchecked = rest.filter(q => !isBlocked(q));
   // The queue's own headline number and the one on the step tab were counting
-  // different things — 4 against 256 — with nothing on screen to say so. The
-  // tab counts what is blocked; the queue lists everything worth a look. Both
-  // are stated, together, before anything else.
-  const blocked = queue.filter(isBlocked);
+  // different things — 4 against 256 — with nothing on screen to say so. Both
+  // now read isStuck, the gate itself, so the queue, the step tab and the
+  // source register report one number for one bank.
+  const blocked = queue.filter(isStuck);
   const optional = queue.length - blocked.length;
 
 
@@ -13537,7 +13574,7 @@ async function renderReviewQueue(root) {
         ? [h('b', { text: 'None of these ' + queue.length + ' can be practised yet.' }),
            ' Each is waiting on a decision from you.']
         : [h('b', { text: blocked.length + ' of these ' + queue.length + ' cannot be practised until you settle them.' }),
-           ' The other ' + optional + ' are already being asked in practice — they would just work better with more filled in, so they can wait.']));
+           ' Every one is marked below. The other ' + optional + ' are already being asked in practice — they would just work better with more filled in, so they can wait.']));
 
   const tabsBar = h('div', { class: 'seg', style: 'margin-bottom:14px' });
   root.appendChild(tabsBar);
@@ -13621,6 +13658,32 @@ async function renderReviewQueue(root) {
     extra || null
   ]);
 
+  /** Why practice refuses this record, in the app's own words: entryBlockers
+      is the same list the hand-entry screen shows, so a question says the
+      same thing wherever you meet it. The conflict flag is added on top
+      because isPracticeEligible refuses on it, and entryBlockers — which
+      judges a record on its own — cannot know about a pairing. */
+  const practiceBlockers = (q) => {
+    const out = entryBlockers(q, State.course);
+    if (q.conflict) out.push('settle the disagreement with the record it conflicts with');
+    return out;
+  };
+  /** The line that stops a section headed "already in practice" from saying
+      so about a record that is not. Rendered only in those sections — in the
+      blocking ones every row would carry it, which is noise. */
+  const stuckLine = (q) => {
+    if (!isStuck(q)) return null;
+    const why = practiceBlockers(q);
+    return h('div', { class: 'notice warn small', style: 'margin-top:6px' }, [
+      h('b', { text: 'Not in practice yet.' }),
+      why.length ? ' Still to do: ' + why.join('; ') + '.'
+        : ' Something on this record stops it being asked.'
+    ]);
+  };
+  /** Whatever cannot be practised comes first: it is the part of a long
+      optional list that is not optional. */
+  const stuckFirst = (list) => list.slice().sort((a, b) => (isStuck(b) ? 1 : 0) - (isStuck(a) ? 1 : 0));
+
   /** Why this record is here, in the words of the thing still to do. The
       status badge says "Wording unchecked" for two quite different reasons —
       a parser that read the text with low confidence, and an option count the
@@ -13649,6 +13712,7 @@ async function renderReviewQueue(root) {
     const why = contentReason(q);
     return quickRow(q, h('div', {}, [
       why ? h('div', { class: bad ? 'notice warn small' : 'small muted', style: 'margin-top:6px', text: why }) : null,
+      bad ? null : stuckLine(q),
       optionsPreview(q)
     ].filter(Boolean)));
   };
@@ -13914,10 +13978,12 @@ async function renderReviewQueue(root) {
       q => contentRow(q, true));
 
     if (anyShown(['needs_class', 'unchecked'])) {
-      band('Already in practice', 'These are being asked right now. Filling in what they lack turns on more of the app — nothing here is broken.');
+      band('Already in practice',
+        'Being asked right now — filling in what they lack turns on more of the app. Any row marked “not in practice yet” is the exception: it needs something else first.');
     }
 
-    if (show('needs_class')) section(sectionsBox, 'Unclassified', noClass, 'Already in practice. Setting a domain is what turns on domain drills and weighted mock exams.', q => quickRow(q,
+    if (show('needs_class')) section(sectionsBox, 'Unclassified', stuckFirst(noClass), 'Already in practice. Setting a domain is what turns on domain drills and weighted mock exams.', q => quickRow(q,
+      h('div', {}, [stuckLine(q),
       h('div', { class: 'row wrap', style: 'gap:6px' }, State.course.blueprint.map(d => h('button', {
         class: 'btn sm', onclick: async () => {
           const fresh = await Questions.get(q.uuid);
@@ -13926,9 +13992,9 @@ async function renderReviewQueue(root) {
           await Questions.save(fresh, 'classified');
           State.invalidate(); toast('Classified as ' + d.id, 'ok'); (function(){ State.importStep='check'; return go('import'); })();
         }, text: d.id
-      })))));
+      })))].filter(Boolean))));
 
-    if (show('unchecked')) section(sectionsBox, 'Wording nobody has checked', unchecked,
+    if (show('unchecked')) section(sectionsBox, 'Wording nobody has checked', stuckFirst(unchecked),
       'Already in practice. The parser flagged these as worth reading once — most turn out to be fine.',
       q => contentRow(q, false));
   }
@@ -15597,6 +15663,15 @@ async function integrityChecks() {
   push('badAnswer', 'The marked correct answer no longer matches any option', all.filter(q => q.correctOptionId && !q.options.some(o => o.id === q.correctOptionId)).map(q => q.qid), 'Reopen the question and pick the correct option again.');
   push('fewOptions', 'Fewer than two options', all.filter(q => (q.options || []).length < 2 && q.status !== 'rejected').map(q => q.qid || q.uuid.slice(0, 8)), 'Complete the options or reject the record.');
   push('activeUnverified', 'Marked Active but the answer isn’t verified', all.filter(q => q.status === 'active' && q.answerVerified !== 'verified').map(q => q.qid), 'These are already blocked from practice; verify the answer or move them to review.');
+  // The one state with no screen of its own: practice refuses it, and the
+  // review queue — which lists by status — does not show it, so it can only
+  // be found by subtracting one count from another. Naming it here is what
+  // makes "is anything stuck where I cannot see it?" a question with an
+  // answer.
+  push('stuckUnlisted', 'Cannot be practised, and not listed in the review queue',
+    all.filter(q => RETIRED_STATUSES.indexOf(q.status) < 0 && !isPracticeEligible(q) && REVIEW_STATUSES.indexOf(q.status) < 0)
+      .map(q => (q.qid || q.uuid.slice(0, 8)) + ' (' + q.status + ')'),
+    'Open each from the Question Bank and either confirm the answer or send it back to review — until then it is neither practised nor listed.');
   push('orphanSource', 'Linked to a source that no longer exists', all.filter(q => q.sourceId && !srcIds.has(q.sourceId)).map(q => q.qid), 'Re-link it to a source, or clear the link.');
   push('orphanAttempt', 'Practice history for a question that no longer exists', attempts.filter(a => !qUuids.has(a.questionUuid)).map(a => a.qid || a.questionUuid.slice(0, 8)), 'Harmless but untidy — usually left by a partial restore.');
   push('brokenImage', 'Linked to a photo that’s gone', all.filter(q => q.imageId && !imgIds.has(q.imageId)).map(q => q.qid), 'The photo is gone — clear the link, or add it again.');
@@ -26267,6 +26342,29 @@ test('What blocks practice is written once, in the status table', () => {
   eq(BLOCKING_STATUSES.indexOf('needs_class'), -1, 'unclassified is not blocked');
   eq(BLOCKING_STATUSES.indexOf('needs_content'), -1, 'nor is unchecked wording');
   assert(BLOCKING_STATUSES.indexOf('needs_answer') >= 0, 'but no answer key still is');
+});
+
+test('"Waiting on you" means the gate, not the status', () => {
+  // The bug this pins: the import path files a candidate as needs_class on a
+  // missing domain alone, without looking at answerVerified. needs_class does
+  // not block practice, so isBlocked said no — while isPracticeEligible said
+  // the answer is unconfirmed and refused to ask it. One record, two answers,
+  // and three screens counting it differently: a source register short of
+  // practice-ready, a step badge that did not include it, and a review queue
+  // filing it under "already in practice".
+  const unconfirmed = gateQ({ domainId: null, status: 'needs_class', answerVerified: 'unverified' });
+  assert(!isPracticeEligible(unconfirmed), 'an answer nobody confirmed cannot be asked');
+  assert(isBlocked(unconfirmed) === false, 'and its status alone does not say so');
+  assert(isStuck(unconfirmed), 'so the count that means "waiting on you" has to read the gate');
+  assert(REVIEW_STATUSES.indexOf(unconfirmed.status) >= 0, 'it is listed, which is why it is findable');
+
+  // The other half of the contract: nothing that practices counts as stuck,
+  // and nothing already finished with does either.
+  assert(!isStuck(gateQ({ domainId: null, status: 'needs_class' })), 'an unfiled but answerable question is not waiting on anybody');
+  assert(!isStuck(gateQ({ status: 'needs_content' })), 'nor is unchecked wording');
+  ['archived', 'merged', 'rejected'].forEach(st =>
+    assert(!isStuck(gateQ({ status: st })), st + ' is finished with, not waiting'));
+  assert(isStuck(gateQ({ status: 'needs_answer' })), 'and a missing answer still counts');
 });
 
 test('A question nobody has filed still practises; one nobody can mark does not', () => {

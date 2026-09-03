@@ -318,10 +318,19 @@ Automated tests cannot verify rendering or real browser storage.
       "Already in practice"
 - [ ] A "wording unchecked" row shows its options under the question, so an
       option swallowed into the question text is visible without opening it
+- [ ] The count on the step tab, the nav badge, the queue's own headline and
+      the source register's "waiting in the review queue" all give the SAME
+      number for one bank — import a file whose answers you do not confirm and
+      check all four agree
+- [ ] A question with no domain AND an unconfirmed answer appears at the top of
+      Unclassified marked "Not in practice yet", not buried among the rest
+- [ ] Settings → Integrity check reports nothing under "Cannot be practised,
+      and not listed in the review queue"
 - [ ] Sources & batches: each table says what it answers, and "See these →"
       opens the bank filtered to exactly the questions that row counts
-- [ ] Where a source has questions short of practice-ready, "N waiting on
-      you →" goes to the review queue
+- [ ] Where a source has questions short of practice-ready, the breakdown
+      under the count adds up: N in the review queue, N archived/merged, and
+      nothing left over
 - [ ] "What should my file look like?" opens on the Excel tab with a worked
       example, and lists the headings that worked
 - [ ] Switch to "Word, PDF or plain text" and to "JSON" — each shows a worked

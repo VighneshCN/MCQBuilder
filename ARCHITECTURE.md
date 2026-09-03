@@ -937,14 +937,28 @@ predates this or was edited outside the app. The review queue states the
 actual disagreement inline — which option each record claims is correct —
 rather than just naming the other record.
 
-The queue itself is split by `isBlocked()` — the gate's own predicate — into
-"waiting on you" and "already in practice", because `REVIEW_STATUSES` and
-`BLOCKING_STATUSES` are deliberately different sets and the screen was
-reporting both without saying so: the step tab counted 4 blocked while the
-list showed 256 worth a look. Both numbers are true, and they are now stated
-together at the top of the queue. The old catch-all "Other" bucket straddled
-that line (`parsing`/`draft` block practice, `needs_content` does not) and is
-now two, named for what is actually wrong and what it costs you.
+The queue itself is split into "waiting on you" and "already in practice",
+because `REVIEW_STATUSES` and `BLOCKING_STATUSES` are deliberately different
+sets and the screen was reporting both without saying so: the step tab counted
+4 blocked while the list showed 256 worth a look. Both numbers are true, and
+they are now stated together at the top of the queue. The old catch-all
+"Other" bucket straddled that line (`parsing`/`draft` block practice,
+`needs_content` does not) and is now two, named for what is actually wrong.
+
+The split reads `isStuck()`, not `isBlocked()`. The difference matters:
+`isBlocked` reads the status alone, and the status alone is not the gate.
+`candidateToQuestion()` files an imported candidate as `needs_class` on a
+missing domain without ever looking at `answerVerified`, so "unclassified" and
+"answer nobody confirmed" arrive on one record and only the first reaches the
+status — `isBlocked` says no, `isPracticeEligible` refuses to ask it. Three
+screens then counted one bank three ways: a source register 17 short of
+practice-ready, a step badge of 4, and a queue filing the other 13 under
+"already in practice". Every "waiting on you" count now reads `isStuck`
+(`isPracticeEligible`, less the retired statuses), and rows it catches inside
+an optional section say what practice is still waiting for, in `entryBlockers`'
+own words. The one state with no screen of its own — not practisable and not
+in `REVIEW_STATUSES` — is an `integrityChecks()` line rather than something
+you can only find by subtracting one count from another.
 
 Within a batch, each processed candidate joins the live index, so a batch is
 checked against itself without a growing linear scan.
