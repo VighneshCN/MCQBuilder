@@ -1511,7 +1511,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.4.1', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.4.2', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1763,11 +1763,31 @@ const DB = {
    * the id inside IndexedDB, and a journal entry missing it would replay as a
    * brand new record rather than the same one.
    */
+  /* Stores whose merge rule is "whichever device touched it last wins", and
+     whose every single-record write is therefore a real edit that has to be
+     datable. Stamping them here rather than at each call site is the only way
+     this stays true: courses were merged on updatedAt and NOTHING in the app
+     ever set it, so a blueprint, a weighting or a marking rule edited on a
+     laptop compared equal to the phone's older copy and never crossed. The
+     same silence hid seven question edits until they were found one by one.
+
+     `questions` is deliberately absent: its call sites stamp themselves,
+     because one of them — recomputing derived mastery across the whole bank —
+     must NOT count as an edit, or that device would win every future merge for
+     every question at once.
+
+     Only single puts (op 'p'). A bulk write is a merge, a restore or a reload
+     applying rows from elsewhere, and those carry the stamps they arrived with. */
+  _stampedStores: ['courses', 'sources', 'batches', 'presets', 'notes', 'sessions', 'caseStudies'],
+
   async _guard(store, run, op, payload) {
     if (_writeVeto && _writeVeto(store)) {
       const err = new Error(typeof READONLY_MSG !== 'undefined' ? READONLY_MSG : 'The app is read-only.');
       err.name = 'ReadOnlyError';
       throw err;
+    }
+    if (op === 'p' && payload && typeof payload === 'object' && this._stampedStores.indexOf(store) >= 0) {
+      payload.updatedAt = nowISO();
     }
     const out = await run();
     if (_writeHook) _writeHook(store, op, payload, out);
@@ -17190,7 +17210,12 @@ const DRIVE_RESUME_FIRST_MS = 30 * 1000;      // first unattended attempt at get
 const DRIVE_RESUME_MAX_MS = 10 * 60 * 1000;   // …doubling to this, so a browser that can never renew stops hammering
 const DRIVE_RESUME_MIN_GAP_MS = 15 * 1000;    // two events arriving together are one attempt
 const DRIVE_SAFETY_TIMER_MS = 60 * 1000;      // coarse fallback if a debounced push is ever lost
-const DRIVE_TOKEN_TIMEOUT_MS = 20 * 1000;     // a sign-in request that never answers must still end
+const DRIVE_TOKEN_TIMEOUT_MS = 20 * 1000;     // an INTERACTIVE sign-in: a person may be reading Google's screen
+/* A silent renewal shows nothing and needs no thought, so it either answers
+   quickly or it has been blocked — which on Safari it always is. Waiting the
+   full interactive timeout for that verdict is where most of a slow reconnect
+   went: twenty seconds of a spinner to learn something knowable in five. */
+const DRIVE_SILENT_TOKEN_TIMEOUT_MS = 5 * 1000;
 
 /**
  * An OAuth client ID identifies this APP to Google, not any one person — it
@@ -17307,6 +17332,8 @@ const DriveSync = {
   _resumeTimer: null, _resumeDelay: null, _resuming: false, _resumeWatching: false, _lastResumeAt: 0,
   // Why this browser must not upload right now, or null when it may.
   _holdPush: null,
+  // One reconciliation at a time.
+  _catchingUp: false,
   _retrying: false, _lastRetryAt: 0,
   lastPushedAt: null, lastSyncedModifiedTime: null, problem: null, setupError: null,
   _tokenClient: null, _tokenClientId: null, _pushTimer: null, _debounceTimer: null,
@@ -17397,6 +17424,12 @@ const DriveSync = {
    * arrives at boot.
    */
   async _catchUpWithDrive() {
+    // Boot, a tab coming forward and a network returning can all arrive within
+    // a second of each other. Two catch-ups interleaving would each merge a
+    // snapshot taken before the other applied, and the second would write the
+    // first's result away again.
+    if (this._catchingUp) return;
+    this._catchingUp = true;
     const dirtySince = await FileStore.meta('driveDirtySince');
     try {
       const remoteModified = await this._fetchModifiedTime();
@@ -17440,6 +17473,8 @@ const DriveSync = {
       // browser never managed to look at. Hold until a catch-up succeeds.
       this._holdPush = 'this browser could not read Google Drive to catch up first';
       updateStorageBar();
+    } finally {
+      this._catchingUp = false;
     }
   },
 
@@ -17615,7 +17650,8 @@ const DriveSync = {
       let timer = null;
       const ok = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
       const no = (e) => { if (done) return; done = true; clearTimeout(timer); reject(e); };
-      timer = setTimeout(() => no(new Error('Google did not answer. On Safari this usually means the sign-in frame was blocked — connect again and it will ask properly.')), DRIVE_TOKEN_TIMEOUT_MS);
+      timer = setTimeout(() => no(new Error('Google did not answer. On Safari this usually means the sign-in frame was blocked — connect again and it will ask properly.')),
+        silent ? DRIVE_SILENT_TOKEN_TIMEOUT_MS : DRIVE_TOKEN_TIMEOUT_MS);
 
       this._tokenClient.callback = (resp) => {
         if (resp.error) { no(new Error(resp.error)); return; }
@@ -18812,12 +18848,12 @@ async function applyMergedBank(merged) {
   // its own record. Rows the database now holds with a newer stamp win: the
   // merge has nothing newer to say about them.
   const incoming = merged.stores.questions || [];
-  const keep = [];
-  for (const q of incoming) {
-    const live = await DB.get('questions', q.uuid);
-    if (live && (live.updatedAt || '') > (q.updatedAt || '')) continue;
-    keep.push(q);
-  }
+  // One pass over the store, not one transaction per row. A bank of 1,300
+  // questions meant 1,300 separate indexed reads here — seconds of them, on the
+  // slowest device, in the middle of a merge somebody is waiting for.
+  const liveStamps = new Map();
+  await DB.each('questions', q => { liveStamps.set(q.uuid, q.updatedAt || ''); });
+  const keep = incoming.filter(q => !((liveStamps.get(q.uuid) || '') > (q.updatedAt || '')));
   await DB.putMany('questions', keep);
 
   // putMany adds and overwrites; it cannot remove. mergeBankPayloads drops
@@ -18864,10 +18900,14 @@ async function applyTombstoneRemovals(merged) {
   const retired = new Set(((merged && merged.stores && merged.stores.tombstones) || []).map(t => t.uuid).filter(Boolean));
   if (!retired.size) return 0;
   const kept = new Set(((merged.stores.questions) || []).map(q => q.uuid));
+  // Which of the retired uuids this browser actually still holds — one pass,
+  // rather than a read per tombstone. Tombstones are never pruned, so a bank
+  // that has had a course wiped carries them for ever and this is the hot loop
+  // of every merge that follows.
+  const here = new Set();
+  await DB.each('questions', q => { if (retired.has(q.uuid) && !kept.has(q.uuid)) here.add(q.uuid); });
   let removed = 0;
-  for (const uuid of retired) {
-    if (kept.has(uuid)) continue;            // a tombstone this merge chose not to honour
-    if (!(await DB.get('questions', uuid))) continue;
+  for (const uuid of here) {
     await DB.del('questions', uuid);
     const hist = await DB.byIndex('attempts', 'questionUuid', uuid);
     for (const a of hist) if (a.id != null) await DB.del('attempts', a.id);
