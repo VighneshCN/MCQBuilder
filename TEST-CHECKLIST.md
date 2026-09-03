@@ -310,7 +310,13 @@ Automated tests cannot verify rendering or real browser storage.
       appears, refuses to continue until the question and two options are named,
       and lands the same questions once mapped
 - [ ] Re-save that file as `.xlsx` and import it — identical result
-- [ ] "See every column and key the app reads" lists the headings that worked
+- [ ] "What should my file look like?" opens on the Excel tab with a worked
+      example, and lists the headings that worked
+- [ ] Switch to "Word, PDF or plain text" and to "JSON" — each shows a worked
+      example in that format and only the fields that format can carry
+- [ ] Type a heading you already have into the search box — the field that
+      accepts it is shown, its group opened; a heading nothing accepts says so
+      and points at the mapping dialog
 
 ### Case studies
 

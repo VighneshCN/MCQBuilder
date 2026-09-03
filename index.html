@@ -1424,6 +1424,81 @@ kbd{font-family:var(--mono);font-size:11px;background:var(--surface-3);border:1p
 .scroll-y{max-height:420px;overflow:auto}
 .dl-list{display:flex;flex-direction:column;gap:8px}
 .srcline{font-family:var(--mono);font-size:11.5px;color:var(--txt-3);word-break:break-word}
+/* --- "what to put in your file" reference ------------------------------
+   See the note above showImportReference for why this screen is shaped the
+   way it is. The rows are a two-column grid rather than a table because a
+   field and the heading you type for it are not really peers, and a table
+   forced them to be — alongside a third column of em-dashes for everybody
+   not writing JSON. */
+.ref-sample{border:1px solid var(--rule);border-radius:var(--r);overflow:hidden}
+.ref-sample-h{
+  display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;
+  padding:8px 12px;border-bottom:1px solid var(--rule);background:var(--surface-2)}
+/* Deliberately looks like a spreadsheet — numbered rows, ruled cells — so
+   what to do with it is obvious before a word of the caption is read.
+
+   width:0 with min-width:100% here and on .ref-doc is load-bearing, not
+   decoration. A row of nowrap cells and a <pre> of long lines both report
+   their whole content width as their intrinsic width, and the dialog's own
+   width is min(1080px,100%) — a percentage the grid centring it cannot
+   resolve while measuring, so it measured the content instead and pushed the
+   dialog off the right of the screen. A zero width reports nothing upwards;
+   min-width:100% still fills the parent once that width is settled. */
+.ref-sheet{overflow-x:auto;background:var(--surface);width:0;min-width:100%}
+.ref-sheet table{border-collapse:collapse;font-size:12px;width:auto;min-width:100%}
+.ref-sheet th,.ref-sheet td{
+  border:1px solid var(--rule-soft);padding:6px 9px;text-align:left;vertical-align:top;
+  max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ref-sheet th{
+  font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:0;
+  text-transform:none;color:var(--txt);background:var(--surface-3);position:static}
+.ref-sheet td{color:var(--txt-2)}
+.ref-sheet tbody tr:hover{background:transparent}
+.ref-sheet .rn{
+  width:26px;text-align:center;background:var(--surface-3);color:var(--txt-3);
+  font-family:var(--mono);font-size:10.5px;padding:6px 4px}
+.ref-doc{
+  margin:0;padding:12px 14px;background:var(--surface);
+  font-family:var(--mono);font-size:12px;line-height:1.75;color:var(--txt);
+  white-space:pre-wrap;overflow-wrap:anywhere;width:0;min-width:100%}
+/* Only the label at the front of a line is what the parser reads, so only
+   the label is coloured. */
+.ref-doc mark{background:var(--blue-tint);color:var(--blue);font-weight:700;border-radius:2px;padding:0 2px}
+.ref-group{border:1px solid var(--rule-soft);border-radius:var(--r);background:var(--surface)}
+.ref-group > summary{
+  list-style:none;cursor:pointer;padding:10px 13px;
+  display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+.ref-group > summary::-webkit-details-marker{display:none}
+.ref-group > summary::before{content:'\25B8';flex:none;font-family:var(--mono);font-size:11px;color:var(--txt-3)}
+.ref-group[open] > summary::before{content:'\25BE'}
+.ref-group[open] > summary{border-bottom:1px solid var(--rule-soft)}
+/* A zero flex-basis: a flex line wraps on a child's hypothetical size, so a
+   title measured at its full width jumped below the marker instead of
+   wrapping beside it. */
+.ref-group-t{font-weight:600;font-size:14px;color:var(--txt);flex:1 1 0;min-width:0}
+.ref-rows{padding:0 13px 8px}
+.ref-row{
+  display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:4px 20px;
+  padding:10px 0;border-bottom:1px solid var(--rule-soft)}
+.ref-row:last-child{border-bottom:0}
+.ref-name{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:13.5px;font-weight:600}
+.ref-head{
+  display:inline-block;font-family:var(--mono);font-size:12.5px;color:var(--txt);
+  background:var(--surface-2);border:1px solid var(--rule);border-radius:4px;
+  padding:2px 7px;word-break:break-word}
+.ref-alt{
+  margin-top:5px;font-family:var(--mono);font-size:11.5px;line-height:1.65;
+  color:var(--txt-3);word-break:break-word}
+.ref-alt em{
+  font-family:var(--ui);font-style:normal;font-size:9.5px;font-weight:600;
+  letter-spacing:.1em;text-transform:uppercase}
+/* A line label and its one-line meaning: the label is short, so it does not
+   want half the dialog sitting between the two. */
+.ref-row.lines{grid-template-columns:minmax(0,150px) minmax(0,1fr);align-items:baseline}
+/* The JSON template runs to thirty lines. Better it scrolls in its own frame
+   than pushes the list of keys off the bottom of the dialog. */
+.ref-doc.tall{max-height:330px;overflow:auto}
+@media(max-width:720px){.ref-row,.ref-row.lines{grid-template-columns:1fr;gap:6px}}
 progress{width:100%;height:6px;appearance:none;border:0}
 progress::-webkit-progress-bar{background:var(--surface-3);border-radius:3px}
 progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
@@ -12282,20 +12357,25 @@ function downloadQuestionTemplateXLSX() { downloadXLSX('question-import-template
 function downloadCaseTemplateCSV() { downloadCSV('case-study-import-template.csv', caseTemplateRows()); }
 function downloadCaseTemplateXLSX() { downloadXLSX('case-study-import-template.xlsx', caseTemplateRows(), 'Case studies'); }
 
+/** The JSON template, written out once so the file somebody downloads and
+    the worked example the reference panel shows are the same document. */
+const SAMPLE_JSON = {
+  schema: 'mcq-mastery-import/1',
+  questions: [{
+    stem: 'Which control BEST reduces the risk of unauthorised changes reaching production?',
+    options: [
+      { letter: 'A', text: 'Post-implementation review', rationale: 'Detective, and after the fact — the change has already reached production.' },
+      { letter: 'B', text: 'Segregation of development and production access', rationale: 'Preventive: the change cannot reach production in the first place.' },
+      { letter: 'C', text: 'Annual user access recertification', rationale: 'Right control, wrong frequency — a year is a long time for an unauthorised change to sit.' },
+      { letter: 'D', text: 'Change advisory board minutes', rationale: 'Evidence that a decision was taken, not a control that enforces it.' }
+    ],
+    answer: 'B', explanation: 'Preventive segregation stops the change reaching production; the others detect after the event.',
+    domain: 'D3', topic: 'Change control', module: 'Module 3', difficulty: 'medium', tags: ['change management']
+  }]
+};
+
 function downloadQuestionTemplateJSON() {
-  const json = JSON.stringify({
-    schema: 'mcq-mastery-import/1', questions: [{
-      stem: 'Which control BEST reduces the risk of unauthorised changes reaching production?',
-      options: [
-        { letter: 'A', text: 'Post-implementation review', rationale: 'Detective, and after the fact — the change has already reached production.' },
-        { letter: 'B', text: 'Segregation of development and production access', rationale: 'Preventive: the change cannot reach production in the first place.' },
-        { letter: 'C', text: 'Annual user access recertification', rationale: 'Right control, wrong frequency — a year is a long time for an unauthorised change to sit.' },
-        { letter: 'D', text: 'Change advisory board minutes', rationale: 'Evidence that a decision was taken, not a control that enforces it.' }
-      ],
-      answer: 'B', explanation: 'Preventive segregation stops the change reaching production; the others detect after the event.',
-      domain: 'D3', topic: 'Change control', module: 'Module 3', difficulty: 'medium', tags: ['change management']
-    }]
-  }, null, 2);
+  const json = JSON.stringify(SAMPLE_JSON, null, 2);
   download('question-import-template.json', new Blob([json], { type: 'application/json' }));
   toast('Template downloaded', 'ok');
 }
@@ -12399,44 +12479,324 @@ function downloadCaseSheetDOCX() {
 
 /** Kept for anything still asking for both at once. */
 
-/** Every column heading and JSON key the parser actually reads, rendered from
-    the table it reads them with. Nothing here is written twice. */
+/* ---------- what to put in your file ----------
+   This is the screen somebody opens BEFORE they know what the app wants, so
+   it is built to be read rather than consulted. Three things make that work:
+
+   · a worked example of a file that imports cleanly comes first, because
+     "show me one" answers the question faster than any table of headings;
+   · each format gets its own tab. Mixing them is what made the old panel
+     unreadable — somebody holding a spreadsheet had to read past the rules
+     for PDFs, and past a column of em-dashes meant for people writing JSON,
+     to reach anything that applied to them;
+   · one heading to TYPE per field, stated plainly, with the other spellings
+     kept underneath as a quiet "also accepted" for the person who already
+     has a file and only wants to know whether their column is recognised.
+
+   It is still rendered from IMPORT_FIELDS, and the document labels are each
+   tested against the parser's own regex before they are shown, so this panel
+   cannot advertise a column or a line the app does not actually read.      */
+
+/** Which fields belong together, and what to call the group in the words of
+    somebody filling in a spreadsheet rather than the words of the parser.
+    Presentation only — nothing reads this but the panel below. A field named
+    in no group still appears, under "Anything else", so a new entry in
+    IMPORT_FIELDS cannot quietly go missing from this screen. */
+const IMPORT_FIELD_GROUPS = [
+  {
+    title: 'The question and its options', open: true,
+    blurb: 'A question and at least two options. That is the whole requirement — everything below this group is optional.',
+    fields: ['stem', 'a', 'b', 'c', 'd', 'e']
+  },
+  {
+    title: 'The answer, and why it is the answer', open: true,
+    blurb: 'A question with no answer is still kept: it waits in review, and cannot be practised until you set one.',
+    fields: ['answer', 'explanation']
+  },
+  {
+    title: 'Where the question belongs',
+    blurb: 'What the question is filed under — and what the app works out your weak areas from.',
+    fields: ['domain', 'topic', 'subtopic', 'module', 'chapter', 'section']
+  },
+  {
+    title: 'How hard it is, and what it is worth',
+    blurb: 'Leave these out and every question is medium difficulty, worth the course’s own rate.',
+    fields: ['difficulty', 'tags', 'marks']
+  },
+  {
+    title: 'Why each option is right or wrong',
+    blurb: 'A line for each option. Worth more at revision time than one explanation, because it names the misconception behind the option you actually picked.',
+    fields: ['whyA', 'whyB', 'whyC', 'whyD', 'whyE']
+  },
+  {
+    title: 'Case studies — several questions on one passage',
+    blurb: 'Only for files carrying scenarios. Rows sharing one case reference become one case study; leave these out entirely for ordinary questions.',
+    fields: ['caseRef', 'caseTitle', 'caseText']
+  },
+  {
+    title: 'Finding the question again in the original',
+    blurb: 'Bookkeeping. None of it affects practice — it is there so a question can be traced back to the book or paper it came from.',
+    fields: ['originalNumber', 'externalId', 'learningPoint', 'lockOptionOrder']
+  }
+];
+
+/** Every label a line in a .pdf, .docx or .txt may start with, each one
+    tested against the very regex parseText matches it with. A label this app
+    would not actually read therefore cannot appear on the screen promising
+    that it will. */
+function documentLineLabels() {
+  const ok = (rx, sample) => rx.test(sample);
+  return {
+    question: [
+      ['Q1.', 'The question. Number them 1, 2, 3… down the file.', ok(RX.qStart, 'Q1. text')],
+      ['A)', 'One option per line, A) through H).', ok(RX.option, 'A) text')],
+      ['Answer:', 'The letter, or the full text of the right option.', ok(RX.answer, 'Answer: B')],
+      ['Explanation:', 'Why that option is the right one.', ok(RX.explanation, 'Explanation: text')]
+    ].filter(r => r[2]),
+    meta: ['Domain:', 'Topic:', 'Sub topic:', 'Module:', 'Chapter:', 'Section:', 'Difficulty:', 'Tags:', 'Marks:']
+      .filter(l => ok(RX.meta, l + ' value')),
+    scenario: [
+      ['CASE: CS-1', 'Opens a scenario. The reference is yours to pick; it only has to be unique inside this file.', ok(RX.caseStart, 'CASE: CS-1')],
+      ['TITLE:', 'Names it.', ok(RX.caseTitleLine, 'TITLE: text')],
+      ['SCENARIO:', 'The passage starts on the next line.', ok(RX.scenarioOpen, 'SCENARIO:')],
+      ['END SCENARIO', 'And stops here. Without this line there is no telling where the passage ends and the first question begins.', ok(RX.scenarioClose, 'END SCENARIO')]
+    ].filter(r => r[2])
+  };
+}
+
 function showImportReference() {
-  const tb = h('tbody');
-  IMPORT_FIELDS.forEach(x => {
-    tb.appendChild(h('tr', {}, [
-      h('td', {}, [
-        h('b', { class: 'small', text: x.label }),
-        x.need ? h('span', { class: 'badge ' + (x.need === 'required' ? 'b-conflict' : 'b-review'), style: 'margin-left:6px', text: x.need }) : null,
-        x.note ? h('div', { class: 'tiny dim', text: x.note }) : null
-      ].filter(Boolean)),
-      h('td', { class: 'srcline', text: x.cols.join('  ·  ') }),
-      h('td', { class: 'srcline', text: x.json && x.json.length ? x.json.join('  ·  ') : '—' })
-    ]));
-  });
-  modal({
-    title: 'Every column and key the app reads', wide: true,
-    body: h('div', { class: 'stack' }, [
-      h('p', { class: 'small muted', style: 'margin:0' },
-        'Spreadsheet headings are matched without regard to case, and dashes and underscores count as spaces — so “Question_Text”, “question text” and “QUESTION TEXT” are the same heading. A column the app does not recognise is never silently guessed at: it asks you which column is which instead.'),
-      h('div', { class: 'notice small' },
-        'Options can also arrive as a JSON array under “options” or “choices” — plain strings, or objects with text and optionally letter. The answer may be a letter, the full text of the right option, or a zero-based “correctIndex”.'),
-      h('div', { class: 'notice small' }, [
-        h('b', { text: 'A .pdf, .docx or .txt has no columns.' }),
-        h('span', { text: ' It is read as plain text instead, so the layout carries the fields: ' }),
-        h('code', { class: 'srcline', text: 'Q1.' }), h('span', { text: ' the question, ' }),
-        h('code', { class: 'srcline', text: 'A)' }), h('span', { text: ' each option, then ' }),
-        h('code', { class: 'srcline', text: 'Answer:' }), h('span', { text: ' and ' }),
-        h('code', { class: 'srcline', text: 'Explanation:' }),
-        h('span', { text: '. Domain, Topic, Module, Difficulty, Tags and Marks are written the same way, one per line. A scenario is opened with ' }),
-        h('code', { class: 'srcline', text: 'CASE: CS-1' }), h('span', { text: ' and its passage sits between ' }),
-        h('code', { class: 'srcline', text: 'SCENARIO:' }), h('span', { text: ' and ' }),
-        h('code', { class: 'srcline', text: 'END SCENARIO' }),
-        h('span', { text: '. The two .docx sheets above are already in that shape.' })
+  const byKey = {};
+  IMPORT_FIELDS.forEach(x => { byKey[x.f] = x; });
+  // A field belonging to no group is still shown — see IMPORT_FIELD_GROUPS.
+  const claimed = {};
+  IMPORT_FIELD_GROUPS.forEach(g => g.fields.forEach(f => { claimed[f] = 1; }));
+  const orphans = IMPORT_FIELDS.filter(x => !claimed[x.f]).map(x => x.f);
+  const GROUPS = IMPORT_FIELD_GROUPS.concat(orphans.length
+    ? [{ title: 'Anything else', blurb: '', fields: orphans }] : []);
+
+  const TABS = [
+    { k: 'sheet', label: 'Excel or CSV' },
+    { k: 'doc', label: 'Word, PDF or plain text' },
+    { k: 'json', label: 'JSON' }
+  ];
+  const state = { tab: 'sheet', q: '' };
+  const tabsBar = h('div', { class: 'seg' });
+  const panel = h('div', { class: 'stack' });
+
+  /* ---- the worked examples ---- */
+
+  /** The sample rendered as the thing it is: a sheet with numbered rows, the
+      headings sitting in row 1 where they have to sit. */
+  function sheetExample(rows, caption) {
+    const cell = (t) => String(t == null ? '' : t);
+    return h('div', { class: 'ref-sample' }, [
+      h('div', { class: 'ref-sample-h' }, [
+        h('b', { class: 'small', text: 'A file that imports cleanly' }),
+        h('span', { class: 'tiny dim', text: caption })
       ]),
-      h('div', { class: 'tbl-wrap' }, h('table', {}, [
-        h('thead', {}, h('tr', {}, ['Field', 'Spreadsheet heading', 'JSON key'].map(t => h('th', { text: t })))), tb
+      h('div', { class: 'ref-sheet' }, h('table', {}, [
+        h('thead', {}, h('tr', {}, [h('th', { class: 'rn', text: '1' })].concat(
+          rows[0].map(t => h('th', { title: cell(t), text: cell(t) }))))),
+        h('tbody', {}, rows.slice(1).map((r, i) => h('tr', {}, [h('td', { class: 'rn', text: String(i + 2) })].concat(
+          r.map(c => h('td', { title: cell(c), text: cell(c) }))))))
       ]))
+    ]);
+  }
+
+  /* A line's leading label is the only part the parser looks at, so it is the
+     only part shown in colour. Bounded to a short run of letters so a stem
+     that happens to contain a colon is not lit up as if it were a label. */
+  const LABEL_HEAD = /^(Q\d{1,4}\.|[A-H]\)|[A-Za-z][A-Za-z ]{0,18}:|END SCENARIO)/;
+  function codeExample(lines, caption, label, tall) {
+    const pre = h('pre', { class: 'ref-doc' + (tall ? ' tall' : '') });
+    lines.forEach(l => {
+      const m = label ? LABEL_HEAD.exec(l) : null;
+      if (m) {
+        pre.appendChild(h('mark', { text: m[1] }));
+        pre.appendChild(document.createTextNode(l.slice(m[1].length) + '\n'));
+      } else pre.appendChild(document.createTextNode(l + '\n'));
+    });
+    return h('div', { class: 'ref-sample' }, [
+      h('div', { class: 'ref-sample-h' }, [
+        h('b', { class: 'small', text: 'A file that imports cleanly' }),
+        h('span', { class: 'tiny dim', text: caption })
+      ]), pre
+    ]);
+  }
+
+  /* ---- the field list ---- */
+
+  const keysFor = (x) => state.tab === 'json' ? (x.json || []) : (x.cols || []);
+  const norm = (s) => String(s).toLowerCase().replace(/[_\-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const matches = (x) => {
+    const q = norm(state.q);
+    return !q || norm(x.label + ' ' + (x.note || '') + ' ' + keysFor(x).join(' ')).indexOf(q) >= 0;
+  };
+
+  /** One field, one row: what it is on the left, what to type on the right.
+      The first spelling is the one to use; the rest are listed small, because
+      being told six names for a column when you need one is the fastest way
+      to make a person think all six are required. */
+  function fieldRow(x) {
+    const keys = keysFor(x);
+    return h('div', { class: 'ref-row' }, [
+      h('div', {}, [
+        h('div', { class: 'ref-name' }, [
+          h('span', { text: x.label }),
+          x.need === 'required' ? h('span', { class: 'badge b-conflict', text: 'must have' })
+            : x.need ? h('span', { class: 'badge b-review', text: 'worth having' }) : null
+        ].filter(Boolean)),
+        x.note ? h('div', { class: 'tiny muted', style: 'margin-top:4px', text: x.note }) : null
+      ].filter(Boolean)),
+      h('div', {}, [
+        h('code', { class: 'ref-head', text: keys[0] }),
+        keys.length > 1 ? h('div', { class: 'ref-alt' }, [
+          h('em', { text: 'also accepted ' }), keys.slice(1).join('  ·  ')
+        ]) : null
+      ].filter(Boolean))
+    ]);
+  }
+
+  /** A collapsible group of rows. Anything a search actually matched is
+      opened — hiding the hit behind a closed summary would defeat the search. */
+  function group(title, blurb, open, rows, count) {
+    const n = count === undefined ? rows.length : count;
+    const d = h('details', { class: 'ref-group', open: open });
+    d.appendChild(h('summary', {}, [
+      h('span', { class: 'ref-group-t', text: title }),
+      n ? h('span', { class: 'tiny dim', text: n + (n === 1 ? ' entry' : ' entries') }) : null
+    ].filter(Boolean)));
+    const b = h('div', { class: 'ref-rows' });
+    if (blurb) b.appendChild(h('p', { class: 'small muted', style: 'margin:10px 0 2px', text: blurb }));
+    rows.forEach(r => b.appendChild(r));
+    d.appendChild(b);
+    return d;
+  }
+
+  function fieldList() {
+    const searching = !!norm(state.q);
+    const box = h('div', { class: 'stack', style: 'gap:9px' });
+    let found = 0;
+    GROUPS.forEach(g => {
+      const fields = g.fields.map(f => byKey[f]).filter(x => x && keysFor(x).length && matches(x));
+      if (!fields.length) return;
+      found += fields.length;
+      box.appendChild(group(g.title, g.blurb, !!g.open || searching, fields.map(fieldRow)));
+    });
+    // The reassurance matters most exactly here, when somebody has searched
+    // for their own column heading and not found it.
+    if (!found) box.appendChild(h('div', { class: 'notice small warn' }, [
+      h('b', { text: 'Nothing here is called that.' }),
+      ' Which is not a problem: the app never guesses at a heading it does not know. It will show you the columns your file actually has, with a few of your own rows under each, and ask which is which before it reads anything.'
+    ]));
+    return box;
+  }
+
+  const search = h('input', {
+    type: 'search', placeholder: 'Search — try “rationale”, “level”, “points”',
+    style: 'max-width:330px',
+    oninput: (e) => { state.q = e.target.value; redrawList(); }
+  });
+  const listBox = h('div');
+  const redrawList = () => { listBox.textContent = ''; listBox.appendChild(fieldList()); };
+  const searchRow = (lead) => h('div', { class: 'row wrap', style: 'gap:10px' }, [
+    h('span', { class: 'small muted', text: lead }), search
+  ]);
+
+  /* ---- the three tabs ---- */
+
+  function sheetTab() {
+    return [
+      sheetExample(questionTemplateRows(), 'Row 1 is the headings. Every row under it is one question. Scrolls sideways.'),
+      group('If your questions share a scenario, a case-study sheet looks like this',
+        'The passage goes in the first row of the group only — the app reads it for every row sharing that case reference.',
+        false, [sheetExample(caseTemplateRows(), 'Three questions, one scenario, one case reference. Scrolls sideways.')], 0),
+      h('div', { class: 'notice small' }, [
+        h('b', { text: 'Headings are matched loosely.' }),
+        ' Capitals, dashes and underscores make no difference, so “Question_Text”, “question text” and “QUESTION TEXT” are all the same heading. Order them however you like, and leave out any column you do not have. A heading the app does not recognise is never guessed at: it shows you the columns it found and asks which is which.'
+      ]),
+      searchRow('Already have a column and want to know if it is read?'),
+      listBox
+    ];
+  }
+
+  function docTab() {
+    const L = documentLineLabels();
+    const lineRow = (label, desc) => h('div', { class: 'ref-row lines' }, [
+      h('div', {}, h('code', { class: 'ref-head', text: label })),
+      h('div', { class: 'small muted', text: desc })
+    ]);
+    const passage = SAMPLE_CASE.text.split('\n')[0].slice(0, 150).replace(/\s+\S*$/, '') + ' …';
+    return [
+      h('div', { class: 'notice small' }, [
+        h('b', { text: 'A document has no columns.' }),
+        ' It is read as plain text, so the layout does the job the headings do in a spreadsheet: every line starts with a label, and the label is all the app looks at.'
+      ]),
+      codeExample(['Domain: ' + SAMPLE_Q.domain, 'Module: ' + SAMPLE_Q.module, 'Topic: ' + SAMPLE_Q.topic, '']
+        .concat(sheetQuestionLines(SAMPLE_Q, 1, SAMPLE_Q.domain)),
+        'One question. Leave a blank line, then write the next.', true),
+      group('The lines every question is made of', '', true,
+        L.question.map(r => lineRow(r[0], r[1]))),
+      group('Lines you can add to say where a question belongs',
+        'Each applies to the question it sits in. Put them at the top of the file instead, above the first question, and they apply to every question below.',
+        false, [h('div', { class: 'row wrap', style: 'gap:7px;margin:10px 0 6px' },
+          L.meta.map(l => h('code', { class: 'ref-head', text: l })))], L.meta.length),
+      group('Case studies — several questions on one passage', '', false,
+        L.scenario.map(r => lineRow(r[0], r[1])).concat([
+          codeExample(['CASE: ' + SAMPLE_CASE.ref, 'TITLE: ' + SAMPLE_CASE.title, 'DOMAIN: ' + SAMPLE_CASE.domain,
+            'SCENARIO:', passage, 'END SCENARIO', '']
+            .concat(sheetQuestionLines(SAMPLE_CASE.questions[0], 1, SAMPLE_CASE.domain)),
+            'The passage is written once; every question under it belongs to it.', true)
+        ]), L.scenario.length),
+      h('div', { class: 'notice small' }, [
+        h('b', { text: 'Two things a document cannot carry.' }),
+        ' A separate rationale for each option, and the bookkeeping columns under “Finding the question again in the original”. Use a spreadsheet if you need either. Everything above a line reading ',
+        h('code', { class: 'srcline', text: 'MCQ MASTERY — QUESTION SHEET' }),
+        ' is ignored on import, which is how the two Word sheets keep their own instructions inside the file.'
+      ])
+    ];
+  }
+
+  function jsonTab() {
+    return [
+      h('div', { class: 'notice small' }, [
+        h('b', { text: 'One object per question.' }),
+        ' The file can be a bare array of them, or an object with a “questions” array — and a “caseStudies” array beside it for scenarios.'
+      ]),
+      codeExample(JSON.stringify(SAMPLE_JSON, null, 2).split('\n'), 'The downloadable JSON template, in full.', false, true),
+      h('div', { class: 'notice small' }, [
+        h('b', { text: 'Options and the answer are read by shape, not only by name.' }),
+        ' Options sit under “options” or “choices”, either as plain strings or as objects with text and, if you like, letter and rationale. The answer may be a letter, the full text of the right option, or a zero-based “correctIndex”.'
+      ]),
+      searchRow('Looking for a particular key?'),
+      listBox
+    ];
+  }
+
+  function draw() {
+    tabsBar.textContent = '';
+    TABS.forEach(t => tabsBar.appendChild(h('button', {
+      class: 'btn' + (state.tab === t.k ? ' primary' : ''),
+      onclick: () => { state.tab = t.k; state.q = ''; search.value = ''; draw(); },
+      text: t.label
+    })));
+    panel.textContent = '';
+    redrawList();
+    (state.tab === 'sheet' ? sheetTab() : state.tab === 'doc' ? docTab() : jsonTab())
+      .forEach(n => panel.appendChild(n));
+  }
+  draw();
+
+  modal({
+    title: 'What to put in your file', wide: true,
+    body: h('div', { class: 'stack' }, [
+      h('p', { class: 'small muted', style: 'margin:0' }, [
+        'Every import needs the same two things: ',
+        h('b', { text: 'the question, and at least two options.' }),
+        ' Everything else here is optional — add what your file already has, and skip the rest.'
+      ]),
+      tabsBar,
+      panel
     ])
   });
 }
@@ -12463,7 +12823,7 @@ function templateCard() {
   });
   rows.appendChild(grid);
   rows.appendChild(h('div', { class: 'row', style: 'margin-top:2px' },
-    h('button', { class: 'btn sm ghost', onclick: () => showImportReference(), text: 'See every column and key the app reads →' })));
+    h('button', { class: 'btn sm ghost', onclick: () => showImportReference(), text: 'What should my file look like? →' })));
   return h('div', { class: 'card', style: 'margin-top:16px' }, [
     h('div', { class: 'card-h' }, h('h3', { text: 'Start from a template' })),
     rows

@@ -325,9 +325,13 @@ right shape. Two kinds — questions and case studies — each in four formats:
 
 The `.csv` and the `.xlsx` are the same rows written twice, so they import
 identically; pick whichever you would rather edit in. Hovering a format says
-what it is for. Next to them, **"See every column and key the app reads"**
-lists every accepted heading and JSON key — generated from the parser's own
-table, so it cannot advertise a column the app then ignores.
+what it is for. Next to them, **"What should my file look like?"** opens a
+worked example of a file that imports cleanly — a tab each for spreadsheets,
+documents and JSON — followed by every accepted heading and key, grouped so
+the three that are actually required are not lost among the thirty that are
+not, and searchable if you already have a column and want to know whether it
+is read. All of it is generated from the parser's own table, so it cannot
+advertise a column the app then ignores.
 
 ### Protected PDFs
 

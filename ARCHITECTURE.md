@@ -959,9 +959,16 @@ file(s) → readFile() → extractor (docx/xlsx/pdf/csv/json/txt)
 `IMPORT_FIELDS` is the single description of every importable field: its name,
 whether it is required, its spreadsheet headings and its JSON keys.
 `COLUMN_ALIASES` is derived from it, `jsonToCandidates()` reads through it
-(`JSON_ALIASES` / `jsonPick`), and the reference panel on Add Questions is
-rendered from it. The app therefore cannot advertise a column it does not read,
-or read one it does not advertise. The case fields (`caseRef`, `caseTitle`,
+(`JSON_ALIASES` / `jsonPick`), and the reference panel on Add Questions
+(`showImportReference()`) is rendered from it. The app therefore cannot
+advertise a column it does not read, or read one it does not advertise. That
+panel groups the fields for reading (`IMPORT_FIELD_GROUPS` — presentation
+only, and anything it fails to name still appears under "Anything else"), and
+splits by file format, because the three formats share a field table but not a
+syntax. Its document tab goes one step further: every line label it shows is
+tested against the `RX` rule `parseText()` matches it with before it is
+rendered, so a label the parser would not read cannot appear on the screen
+that promises it will. The case fields (`caseRef`, `caseTitle`,
 `caseText`) are marked `caseField` and excluded from `JSON_ALIASES`, because
 inside a *question* object `title` and `text` mean something else.
 
