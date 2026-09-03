@@ -15100,7 +15100,17 @@ ROUTES.settings = async (root) => {
     driveBlock.appendChild(h('details', { style: 'margin-top:8px' }, [
       h('summary', { class: 'small', style: 'cursor:pointer', text: 'More — sync, load, disconnect' }),
       h('div', { class: 'row wrap', style: 'gap:8px;margin-top:10px' }, [
-        h('button', { class: 'btn sm primary', onclick: async () => { const ok = await DriveSync.maybePush(true); toast(ok ? 'Synced to Drive.' : 'Could not sync — see the status above.', ok ? 'ok' : 'bad'); go('settings'); }, text: 'Sync now' }),
+        h('button', {
+          class: 'btn sm primary', text: 'Sync now',
+          onclick: async () => {
+            const ok = await DriveSync.maybePush(true);
+            const sum = DriveSync.lastPushedSummary;
+            toast(ok
+              ? 'Synced to Drive — ' + (sum ? sum.questions + ' question(s), ' + sum.due + ' due today' : 'done') + '. Compare that against this screen.'
+              : 'Could not sync — see the status above.', ok ? 'ok' : 'bad', 7000);
+            go('settings');
+          }
+        }),
         h('button', { class: 'btn sm', onclick: async () => { await DriveSync.pullNow(); go('settings'); }, text: 'Load from Drive' }),
         h('button', { class: 'btn sm danger', onclick: async () => { await driveDisconnectFlow(); go('settings'); }, text: 'Disconnect' })
       ])
@@ -17739,6 +17749,10 @@ const DriveSync = {
       if (this._handleAuthFailure(res)) return false;
       if (!res.ok) throw new Error('Drive returned ' + res.status);
       const meta = await res.json().catch(() => null);
+      // What this upload actually contained. A sync that reports only "done"
+      // cannot be checked against the screen; one that reports what it sent
+      // can be, in a glance, on the spot.
+      this.lastPushedSummary = { questions: newCount, due: dueTodayIn(payload.stores.questions || []) };
       await this._markInSync();
       this.problem = null;
       this._pendingChange = false; this._firstUnpushedChangeAt = null;
@@ -17910,8 +17924,17 @@ const DriveSync = {
     catch (e) { toast('Could not reach Google Drive: ' + e.message, 'bad'); return; }
     const localCount = (await DB.all('questions')).length;
     const remoteCount = (remote.stores.questions || []).length;
+    // The due counts are the pair worth showing: two devices disagreeing about
+    // what is due is the disagreement people actually notice, and seeing both
+    // numbers BEFORE the copy is applied says which device is behind — while
+    // there is still a choice about whether to apply it at all.
+    const remoteDue = dueTodayIn(remote.stores.questions || []);
+    const localDue = dueTodayIn(await DB.all('questions'));
     const ok = await confirmBox('Load the Drive copy?',
-      'Drive holds ' + remoteCount + ' question(s), saved ' + fmtDate(remote.savedAt, true) + '. This replaces what is in this browser (' + localCount + ' question(s)) with that copy. A safety backup of what is in this browser is taken first, automatically.', true, 'Load');
+      'Drive holds ' + remoteCount + ' question(s), ' + remoteDue + ' due today, saved ' + fmtDate(remote.savedAt, true) +
+      '. This browser holds ' + localCount + ' question(s), ' + localDue + ' due today.' +
+      (remoteDue !== localDue ? ' Loading replaces this browser\u2019s copy with Drive\u2019s — including that due count, so a newer answer here would go back to being due.' : ' Loading replaces this browser\u2019s copy with Drive\u2019s.') +
+      ' A safety backup of what is in this browser is taken first, automatically.', true, 'Load');
     if (ok && (await requireSafetyBackup('loading the Drive copy over this browser’s bank'))) {
       await this._applyRemote(remote); await this._recordSyncedStamp();
     }
@@ -18167,6 +18190,14 @@ async function requireNoteBackup(rec) {
 }
 
 /* ---------- storage status bar ---------- */
+/** Due today, counted over a plain list of question records — the same rule
+    the dashboard uses, so a number reported about a transfer can be compared
+    against the number on screen without translating between two definitions. */
+function dueTodayIn(list) {
+  const now = new Date();
+  return (list || []).filter(q => q.status === 'active' && q.nextReviewAt && new Date(q.nextReviewAt) <= now).length;
+}
+
 /** The numbers behind the diagnostics panel that have to be read rather than
     remembered. Filled in asynchronously and redrawn, so opening Settings is
     never held up by a database count or a network call. */
@@ -18176,8 +18207,7 @@ function driveDiag(redraw) {
     .then(([n, dirty, all]) => {
       driveDiag._q = n;
       driveDiag._dirty = dirty ? fmtDate(dirty, true) : '';
-      const now = new Date();
-      driveDiag._due = (all || []).filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= now && q.status === 'active').length;
+      driveDiag._due = dueTodayIn(all);
       if (redraw) redraw();
     }).catch(() => { });
 }
@@ -18199,9 +18229,8 @@ driveDiag.inspectRemote = async function () {
   let remote;
   try { remote = await DriveSync.pull(); }
   catch (e) { await modal({ title: 'Could not read the Drive file', body: h('p', {}, e.message) }); return; }
-  const now = new Date();
   const rq = remote.stores.questions || [];
-  const dueOf = list => list.filter(q => q.status === 'active' && q.nextReviewAt && new Date(q.nextReviewAt) <= now).length;
+  const dueOf = dueTodayIn;
   const local = await DB.all('questions');
   const rows = [
     ['Saved to Drive at', fmtDate(remote.savedAt, true)],
