@@ -1511,7 +1511,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.5.1', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.5.2', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -17407,9 +17407,11 @@ const DriveSync = {
   _holdPush: null,
   // One reconciliation at a time.
   _catchingUp: false,
+  // A Google sign-in in flight — nothing automatic may talk to Google meanwhile.
+  _tokenPending: null,
   _retrying: false, _lastRetryAt: 0,
   lastPushedAt: null, lastSyncedModifiedTime: null, problem: null, setupError: null,
-  _tokenClient: null, _tokenClientId: null, _pushTimer: null, _debounceTimer: null,
+  _pushTimer: null, _debounceTimer: null,
   _pushing: false, _pendingChange: false, _firstUnpushedChangeAt: null,
   _remoteQuestionCount: 0, _driveShrinkOk: null,
 
@@ -17659,6 +17661,8 @@ const DriveSync = {
    */
   async tryResume() {
     if (!this.configured || this.connected || this._resuming) return false;
+    // Somebody is mid sign-in, or mid connect. Leave Google alone.
+    if (this._tokenPending || this._connecting) return false;
     // A local folder took over as the active backend — Drive is not this
     // bank's home any more and must not quietly reclaim it.
     if (FileStore.connected) return false;
@@ -17698,18 +17702,18 @@ const DriveSync = {
   /** silent=true never shows UI and rejects quietly if a token cannot be had
       without one; silent=false may show Google's account/consent popup. */
   _requestToken(silent) {
-    return new Promise((resolve, reject) => {
+    // Never two at once. A silent attempt while somebody is looking at Google's
+    // account chooser is not merely wasteful — it is the thing that closed it.
+    if (silent && this._tokenPending) return Promise.reject(new Error('a sign-in is already in progress'));
+    const p = new Promise((resolve, reject) => {
       const clientId = effectiveDriveClientId();
       if (!clientId) { reject(new Error('No Google OAuth client ID set — see Settings → "Where your data lives".')); return; }
-      // Rebuild if this is the first request, or if the effective client ID
-      // has changed since the cached one was built (Settings edited, or the
-      // deployer's default filled in, without a full page reload in
-      // between) — otherwise a corrected ID would silently keep sending the
-      // stale one Google already rejected.
-      if (!this._tokenClient || this._tokenClientId !== clientId) {
-        this._tokenClient = google.accounts.oauth2.initTokenClient({ client_id: clientId, scope: DRIVE_SCOPE, callback: () => { } });
-        this._tokenClientId = clientId;
-      }
+      // A FRESH client per request. One shared client meant each request
+      // reassigned the previous one's callback — so a silent retry fired by the
+      // tab regaining focus (which is exactly what happens when Google's own
+      // popup opens) took over the interactive sign-in already in flight, and
+      // the popup closed by itself before anybody could pick an account.
+      const client = google.accounts.oauth2.initTokenClient({ client_id: clientId, scope: DRIVE_SCOPE, callback: () => { } });
       // Google Identity settles this by invoking one of the two callbacks
       // below. When the hidden accounts.google.com frame is blocked outright —
       // Safari's tracking protection, most commonly — it can invoke neither,
@@ -17726,13 +17730,13 @@ const DriveSync = {
       timer = setTimeout(() => no(new Error('Google did not answer. On Safari this usually means the sign-in frame was blocked — connect again and it will ask properly.')),
         silent ? DRIVE_SILENT_TOKEN_TIMEOUT_MS : DRIVE_TOKEN_TIMEOUT_MS);
 
-      this._tokenClient.callback = (resp) => {
+      client.callback = (resp) => {
         if (resp.error) { no(new Error(resp.error)); return; }
         this.accessToken = resp.access_token;
         this.tokenExpiresAt = Date.now() + ((resp.expires_in || 3600) * 1000) - 60000;
         ok(resp);
       };
-      this._tokenClient.error_callback = (err) => no(new Error((err && err.type) || 'could not get permission'));
+      client.error_callback = (err) => no(new Error((err && err.type) || 'could not get permission'));
       // prompt:'none' is the only genuinely silent request Google offers — no
       // screens at all, an error instead when interaction would be needed.
       // This used to send prompt:'' , which means "ask only the first time":
@@ -17742,8 +17746,12 @@ const DriveSync = {
       // picking one did nothing — a window opened without a user's gesture has
       // no working way back to the page that opened it. Automatic attempts
       // must fail quietly; only the button a person presses may open anything.
-      this._tokenClient.requestAccessToken(silent ? { prompt: 'none' } : {});
+      client.requestAccessToken(silent ? { prompt: 'none' } : {});
     });
+    this._tokenPending = p;
+    const clear = () => { if (this._tokenPending === p) this._tokenPending = null; };
+    p.then(clear, clear);
+    return p;
   },
 
   /** A 401 or 403 from Drive means the token is no longer good — revoked in
@@ -17786,6 +17794,12 @@ const DriveSync = {
       in driveConnectFlow(), the same split FileStore.connectFolder() and
       connectFlow() already use. */
   async connect() {
+    if (this._connecting) return;
+    this._connecting = true;
+    try { return await this._connect(); } finally { this._connecting = false; }
+  },
+
+  async _connect() {
     const clientId = effectiveDriveClientId();
     if (!clientId) {
       await modal({ title: 'Add a Google OAuth client ID first', body: h('p', {}, 'Settings → "Where your data lives" has the one-time setup steps — about ten minutes, free, and only you can do it (it needs your own Google account).') });
@@ -19358,6 +19372,25 @@ async function driveConnectFlow() {
     if (!ok) return;
     await FileStore.flushNow();
     await FileStore.forget();
+    updateStorageBar();
+  } else if (FileStore.needsReconnect) {
+    // A folder the app can no longer reach puts the whole app in read-only —
+    // and read-only refuses the writes that SETTING UP DRIVE needs, so
+    // connecting failed with the folder's own error reported under Drive:
+    // "the Drive file itself didn't set up: the app is read-only because it
+    // cannot reach your data file". Connecting Drive is a decision to stop
+    // using that folder, so ask, then let it go — which is also what clears
+    // the read-only state.
+    const ok = await modal({
+      title: 'The folder cannot be reached — use Google Drive instead?',
+      body: h('div', { class: 'stack' }, [
+        h('p', {}, 'This browser lost access to the folder it was saving to, which is why the app is read-only. Connecting Google Drive stops trying to use that folder.'),
+        h('div', { class: 'notice small' }, 'Your file stays where it is and keeps everything saved up to its last write — this only stops the app writing to it. Everything in this browser goes to Drive.')
+      ]),
+      actions: [{ label: 'Cancel', value: false }, { label: 'Use Google Drive', value: true, kind: 'primary' }]
+    });
+    if (!ok) return;
+    await FileStore.forget();     // unreachable, so there is nothing to flush
     updateStorageBar();
   }
   await DriveSync.connect();
