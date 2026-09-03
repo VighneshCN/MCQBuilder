@@ -1510,7 +1510,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.3.3', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.3.4', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -15570,19 +15570,26 @@ ROUTES.settings = async (root) => {
       ]) : null
     ].filter(Boolean))
   ]));
+  /* Three developer's tools used to sit here behind the word "advanced": an
+     integrity check, the built-in test suite, and a recompute of derived
+     fields. None of them answers a question a person studying for an exam has,
+     two of them write to the bank, and one of those wrote a fabricated answer
+     into somebody's real history when it was pressed. They are still in the
+     app, reachable at #tools for when there is a reason to run one — which
+     there almost never is, and never without being asked to. What stays here
+     is what a person might genuinely want: the record of what happened to
+     their data, and the one deliberate way to remove it. */
+  const showTools = typeof location !== 'undefined' && location.hash === '#tools';
   grid2.appendChild(h('div', { class: 'card' }, [
     h('div', { class: 'card-h' }, h('h3', { text: 'Maintenance' })),
     h('div', { class: 'card-b' }, [
-      h('details', {}, [
-        h('summary', { class: 'small', style: 'cursor:pointer' }, 'Data tools and diagnostics (advanced)'),
-        h('div', { class: 'stack', style: 'margin-top:10px' }, [
-      h('button', { class: 'btn', onclick: () => runIntegrity(), text: 'Run integrity check' }),
-      h('button', { class: 'btn', onclick: () => runSelfTests(), text: 'Run built-in tests' }),
-      h('button', { class: 'btn', onclick: () => recomputeAll(), text: 'Recompute mastery and fingerprints' }),
+      h('div', { class: 'stack' }, [
+      showTools ? h('button', { class: 'btn', onclick: () => runIntegrity(), text: 'Run integrity check' }) : null,
+      showTools ? h('button', { class: 'btn', onclick: () => runSelfTests(), text: 'Run built-in tests' }) : null,
+      showTools ? h('button', { class: 'btn', onclick: () => recomputeAll(), text: 'Recompute mastery and fingerprints' }) : null,
       h('button', { class: 'btn', onclick: () => showAudit(), text: 'View audit trail' }),
       h('button', { class: 'btn danger', onclick: () => wipeCourse(), text: 'Delete this course\u2019s questions' })
-        ])
-      ]),
+      ].filter(Boolean)),
       h('div', { class: 'small muted', style: 'margin-top:10px', text: 'Everything lives in this browser (and your file, if connected) by default. Nothing is sent anywhere unless you turn on external OCR or Google Drive above, both off by default.' })
     ])
   ]));
