@@ -4997,8 +4997,15 @@ function masteryOf(q, attempts) {
   return { score: Math.round(score), parts };
 }
 
-/** Transparent interval ladder; every branch is named in the UI. */
-function scheduleNext(correct, confidence, srStage, cfg) {
+/** Transparent interval ladder; every branch is named in the UI.
+
+    `from` is the moment the interval runs from — the answer's own timestamp,
+    not the clock. Live that is the same thing, but a replay is not: when a
+    merge rebuilds a question's schedule from the answers both devices now
+    hold, "n days from now" gives two devices two different review dates for
+    an identical history, which is exactly the disagreement the rebuild exists
+    to end. Dated from the answer, the replay is a pure function of the log. */
+function scheduleNext(correct, confidence, srStage, cfg, from) {
   const I = cfg || Settings.get('srIntervals');
   let days, reason, stage = srStage || 0;
   if (!correct) { days = I.wrong; stage = 0; reason = 'Incorrect → back to ' + days + ' day'; }
@@ -5018,7 +5025,7 @@ function scheduleNext(correct, confidence, srStage, cfg) {
     days = stage <= 1 ? I.highConf : (ladder[Math.min(stage - 1, ladder.length - 1)]);
     reason = 'Confident and correct → extended to ' + days + ' days';
   }
-  return { days, stage, at: addDays(days), reason };
+  return { days, stage, at: addDays(days, from), reason };
 }
 
 /** Apply an attempt to the question's rolling statistics. */
@@ -5033,7 +5040,10 @@ function applyAttempt(q, att) {
   s.avgMs = s.attempts === 1 ? att.ms : Math.round((s.avgMs * (s.attempts - 1) + att.ms) / s.attempts);
   s.confidence = confWeight(att.confidence);
   if (att.scheduleSR !== false) {
-    const sch = scheduleNext(att.correct, att.confidence, q.srStage);
+    // The question's own course decides the ladder, not whichever course
+    // happens to be open — a merge replays questions from every course.
+    const sch = scheduleNext(att.correct, att.confidence, q.srStage,
+      Settings.get('srIntervals', q.courseId), att.ts);
     q.srStage = sch.stage; q.nextReviewAt = sch.at; q.srReason = sch.reason;
   }
   // Answering changes the record — mastery, streak, the date it next falls
@@ -5052,8 +5062,20 @@ function rebuildQuestionStats(q, hist) {
   const blank = blankQuestion(q.courseId);
   q.stats = blank.stats;
   q.srStage = 0; q.nextReviewAt = null; q.srReason = null;
-  (hist || []).slice().sort((a, b) => new Date(a.ts) - new Date(b.ts)).forEach(a => applyAttempt(q, a));
-  q.stats.mastery = masteryOf(q, hist || []).score;
+  // Sorted by the answer's own timestamp, and tie-broken on content so two
+  // devices replaying the same unioned log walk it in the same order — a
+  // union arrives in whatever order each device appended, and array order is
+  // not a fact about the history.
+  const ordered = (hist || []).slice().sort((a, b) => {
+    const d = new Date(a.ts || 0) - new Date(b.ts || 0);
+    if (d) return d;
+    return String(a.sessionId || '').localeCompare(String(b.sessionId || ''))
+      || (a.ms || 0) - (b.ms || 0)
+      || String(a.confidence || '').localeCompare(String(b.confidence || ''))
+      || (a.correct ? 1 : 0) - (b.correct ? 1 : 0);
+  });
+  ordered.forEach(a => applyAttempt(q, a));
+  q.stats.mastery = masteryOf(q, ordered).score;
   return q;
 }
 
@@ -18351,7 +18373,21 @@ const DriveSync = {
       const u = q.updatedAt || q.createdAt || '';
       if (u > newest) newest = u;
     });
-    return n + '|' + (await DB.count('attempts')) + '|' + newest;
+    // Settings count too. They were invisible to every "am I in sync?" test,
+    // so a device whose exam date, mock length or review ladder differed from
+    // Drive's reported itself perfectly in sync and never pushed the
+    // difference — and the Last-mile and Due counts computed from those
+    // settings quietly disagreed across devices while both status lines said
+    // everything was fine. Device-local keys are excluded, because they are
+    // meant to differ.
+    let sn = 0, snewest = '';
+    await DB.each('settings', r => {
+      if (isDeviceLocalSetting(r.k)) return;
+      sn++;
+      const u = r.updatedAt || '';
+      if (u > snewest) snewest = u;
+    });
+    return n + '|' + (await DB.count('attempts')) + '|' + newest + '|' + sn + '|' + snewest;
   },
 
   /** The same fingerprint, taken from a payload rather than from the database.
@@ -18364,7 +18400,11 @@ const DriveSync = {
     const qs = (stores && stores.questions) || [];
     let newest = '';
     qs.forEach(q => { const u = q.updatedAt || q.createdAt || ''; if (u > newest) newest = u; });
-    return qs.length + '|' + (((stores && stores.attempts) || []).length) + '|' + newest;
+    const ss = ((stores && stores.settings) || []).filter(r => !isDeviceLocalSetting(r.k));
+    let snewest = '';
+    ss.forEach(r => { const u = r.updatedAt || ''; if (u > snewest) snewest = u; });
+    return qs.length + '|' + (((stores && stores.attempts) || []).length) + '|' + newest
+      + '|' + ss.length + '|' + snewest;
   },
 
   /** "This browser and Drive were the same at this moment" — written down
@@ -19004,9 +19044,32 @@ async function reconnectFlow() {
    - images: keyed union — captured once, essentially never edited after.
    ========================================================================== */
 
+/** JSON with the keys in a fixed order, so two devices that hold the same row
+    produce the same string for it whatever order their databases happen to
+    return the fields in. Only used to break a tie, never stored. */
+function stableStringify(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v === undefined ? null : v);
+  if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+  return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
+}
+
 /** Generic keyed-store merge: newest `updatedAt`/`createdAt` wins per key,
-    every key unique to one side is carried over untouched. Ties (including
-    both sides missing a timestamp) keep the local row. */
+    every key unique to one side is carried over untouched.
+ *
+ * Ties keep the local row — with one exception that matters. When NEITHER
+ * side has a timestamp at all, "keep local" is not a tie-break, it is a
+ * refusal: each device keeps its own row, so the two never converge and the
+ * difference is permanent in both directions. That is not hypothetical — every
+ * settings row written before stamping existed is exactly this shape, so a
+ * masteryTarget, an examDate or an srIntervals ladder set on either device
+ * before the upgrade could never reach the other, and the review dates and
+ * Last-mile counts computed from them stayed quietly different for ever.
+ * Undated rows are therefore resolved by their own content, which both devices
+ * compute identically, so both land on the same row and stay there. A tie
+ * between two real timestamps still keeps local: same-millisecond edits on two
+ * devices are as close to simultaneous as this can measure, and picking by
+ * content there would silently overwrite a genuine edit.
+ */
 function mergeKeyedRows(localRows, remoteRows, keyField) {
   const byKey = new Map((localRows || []).map(r => [r[keyField], r]));
   let added = 0, updated = 0;
@@ -19015,9 +19078,19 @@ function mergeKeyedRows(localRows, remoteRows, keyField) {
     const k = r[keyField];
     const mine = byKey.get(k);
     if (!mine) { byKey.set(k, r); added++; touchedKeys.push(k); return; }
-    const mineT = Date.parse(mine.updatedAt || mine.createdAt || 0) || 0;
-    const theirT = Date.parse(r.updatedAt || r.createdAt || 0) || 0;
-    if (theirT > mineT) { byKey.set(k, r); updated++; touchedKeys.push(k); }
+    // Undated has to mean undated. `Date.parse(0)` is not 0 — it reads "0" as
+    // the year 2000 — so a row with no stamp at all used to arrive here
+    // carrying a real-looking timestamp, and two undated rows compared equal
+    // by accident rather than by rule.
+    const mineStamp = mine.updatedAt || mine.createdAt || '';
+    const theirStamp = r.updatedAt || r.createdAt || '';
+    const mineT = mineStamp ? (Date.parse(mineStamp) || 0) : 0;
+    const theirT = theirStamp ? (Date.parse(theirStamp) || 0) : 0;
+    if (theirT > mineT) { byKey.set(k, r); updated++; touchedKeys.push(k); return; }
+    if (theirT === 0 && mineT === 0) {
+      const a = stableStringify(mine), b = stableStringify(r);
+      if (b > a) { byKey.set(k, r); updated++; touchedKeys.push(k); }
+    }
   });
   return { rows: Array.from(byKey.values()), added, updated, touchedKeys };
 }
@@ -19172,24 +19245,44 @@ async function mergeBankPayloads(localPayload, remotePayload) {
     merge actually touched against the rest of its course, so a new
     disagreement the merge surfaced lands in the review queue rather than
     silently resolving itself. */
+/** The stores whose rows carry an `updatedAt` and are keyed by something
+    meaningful — the ones where "the copy already in this database is newer
+    than the copy the merge is about to write" is a question worth asking. The
+    append-only logs and the id watermark are not here: they merge by content
+    and by maximum, and neither can be clobbered by a write. */
+const MERGE_STAMP_GUARDED = ['questions', 'courses', 'sources', 'batches', 'presets', 'notes', 'sessions', 'caseStudies', 'settings'];
+
 async function applyMergedBank(merged, report) {
-  for (const s of BACKUP_STORES) {
-    if (s === 'questions') continue;
-    await DB.putMany(s, merged.stores[s] || []);
-  }
   // A merge starts by serialising the bank, then spends the length of a pull
   // and a merge — twenty seconds on a phone — before writing the result back.
-  // Anything answered in that window was overwritten by the pre-pull copy of
+  // Anything written in that window was overwritten by the pre-pull copy of
   // its own record. Rows the database now holds with a newer stamp win: the
   // merge has nothing newer to say about them.
-  const incoming = merged.stores.questions || [];
-  // One pass over the store, not one transaction per row. A bank of 1,300
-  // questions meant 1,300 separate indexed reads here — seconds of them, on the
-  // slowest device, in the middle of a merge somebody is waiting for.
-  const liveStamps = new Map();
-  await DB.each('questions', q => { liveStamps.set(q.uuid, q.updatedAt || ''); });
-  const keep = incoming.filter(q => !((liveStamps.get(q.uuid) || '') > (q.updatedAt || '')));
-  await DB.putMany('questions', keep);
+  //
+  // This guard used to protect `questions` alone, which covered the answer
+  // somebody gave mid-merge and nothing else: a session saved in that same
+  // window — the one the person is sitting in front of — was reverted to its
+  // pre-pull state, and so was a setting changed, a note added or a course
+  // renamed. The window is the same window; the rule is the same rule.
+  for (const s of BACKUP_STORES) {
+    const incoming = merged.stores[s] || [];
+    if (MERGE_STAMP_GUARDED.indexOf(s) < 0) { await DB.putMany(s, incoming); continue; }
+    // One pass over the store, not one transaction per row. A bank of 1,300
+    // questions meant 1,300 separate indexed reads here — seconds of them, on
+    // the slowest device, in the middle of a merge somebody is waiting for.
+    const kp = STORES[s].keyPath;
+    const liveStamps = new Map();
+    await DB.each(s, r => { liveStamps.set(r[kp], r.updatedAt || ''); });
+    await DB.putMany(s, incoming.filter(r => !((liveStamps.get(r[kp]) || '') > (r.updatedAt || ''))));
+  }
+
+  // Settings live in memory once read, and were read at boot — before this
+  // merge existed. Everything downstream asks that cache, not the database:
+  // the review ladder this rebuild is about to replay answers through, the
+  // mastery target the Last-mile count is defined against. Without this
+  // reload a device that had "just resynced" spent the rest of its session
+  // rendering the merged bank through its own pre-merge settings.
+  await Settings.load();
 
   // putMany adds and overwrites; it cannot remove. mergeBankPayloads drops
   // questions and attempts named by a tombstone from either side — a course
@@ -23625,13 +23718,24 @@ test('mergeKeyedRows keeps every exclusive row and lets the newer one win on a s
   eq(shared.v, 'remote-shared-newer', 'the newer updatedAt must win on a shared key');
   assert(r.touchedKeys.indexOf('shared') >= 0 && r.touchedKeys.indexOf('b') >= 0, 'touchedKeys must list every row that came from remote');
 });
-test('mergeKeyedRows keeps the local row on a tie or when neither side has a timestamp', () => {
-  const r1 = mergeKeyedRows([{ id: 'x', v: 'local' }], [{ id: 'x', v: 'remote' }], 'id');
-  eq(r1.rows[0].v, 'local', 'with no updatedAt/createdAt on either side, local must win rather than picking arbitrarily');
+test('mergeKeyedRows keeps local on a real tie, but makes two undated rows converge', () => {
+  // Neither side dated: "keep local" here is not a tie-break, it is a refusal
+  // — each device keeps its own row and the difference is permanent in both
+  // directions. Every settings row written before stamping existed is this
+  // shape. Resolved by content instead, both devices land on the same row.
+  const A = [{ id: 'x', v: 'alpha' }], B = [{ id: 'x', v: 'beta' }];
+  const ab = mergeKeyedRows(A, B, 'id').rows[0].v;
+  const ba = mergeKeyedRows(B, A, 'id').rows[0].v;
+  eq(ab, ba, 'two undated rows must resolve to the SAME row whichever device does the merging');
+  // Undated is undated: Date.parse(0) reads as the year 2000, which used to
+  // give a stampless row a real-looking timestamp.
+  const stamped = [{ id: 'y', updatedAt: '2026-01-01T00:00:00Z', v: 'stamped' }];
+  eq(mergeKeyedRows([{ id: 'y', v: 'undated' }], stamped, 'id').rows[0].v, 'stamped', 'a stamped row beats an undated one');
+  eq(mergeKeyedRows(stamped, [{ id: 'y', v: 'undated' }], 'id').rows[0].v, 'stamped', 'and beats it from the other side too');
   const r2 = mergeKeyedRows(
     [{ id: 'x', updatedAt: '2026-01-01T00:00:00Z', v: 'local' }],
     [{ id: 'x', updatedAt: '2026-01-01T00:00:00Z', v: 'remote' }], 'id');
-  eq(r2.rows[0].v, 'local', 'an exact tie must keep the local row');
+  eq(r2.rows[0].v, 'local', 'an exact tie between two REAL timestamps still keeps the local row');
 });
 test('mergeAppendOnlyRows dedupes by content, not by the meaningless auto-increment key', () => {
   const local = [{ id: 1, sessionId: 's1', questionUuid: 'q1', ts: 't1' }, { id: 2, sessionId: 's1', questionUuid: 'q2', ts: 't2' }];
@@ -26735,6 +26839,17 @@ test('After a merge, both devices count the same answers the same way', () => {
   eq(laptop.srStage, phone.srStage);
   eq(laptop.stats.attempts, 3, 'counted over the union, not over either half');
   eq(laptop.stats.lastResult, 'incorrect', 'and the latest answer is the one that counts, whichever device gave it');
+  // The schedule has to come out of the log, not out of the clock. "One day
+  // from now" would give two devices two different review dates for an
+  // identical history — and would quietly postpone an overdue question every
+  // time a merge ran.
+  eq(String(laptop.nextReviewAt).slice(0, 10), '2026-09-04',
+    'the review date runs one day from the wrong answer itself, not one day from whenever the merge happened');
+  const shuffled = [phoneSaw[0], laptopSaw[1], laptopSaw[0]];
+  const other = blank(); rebuildQuestionStats(other, shuffled);
+  eq(JSON.stringify([other.stats, other.srStage, other.nextReviewAt]),
+    JSON.stringify([laptop.stats, laptop.srStage, laptop.nextReviewAt]),
+    'and the order the union happens to arrive in must not change the result');
   eq(laptop.updatedAt, stamp,
     'the rebuild must not stamp the record — it is arithmetic over facts both devices hold, and stamping would win every future merge');
 });
@@ -26847,7 +26962,7 @@ test('A push records what it uploaded, not what the database says afterwards', (
   const sigSent = DriveSync._signatureOf(sent);
   assert(sigSent !== DriveSync._signatureOf(afterwards), 'a write made during the upload must change the fingerprint');
   eq(sigSent, '1|1|2026-01-01T00:00:00.000Z', 'and the recorded one describes the payload that actually went up');
-  eq(DriveSync._signatureOf({}), '0|0|', 'an empty payload has an empty fingerprint rather than throwing');
+  eq(DriveSync._signatureOf({}), '0|0||0|', 'an empty payload has an empty fingerprint rather than throwing');
 });
 
 test('An automatic merge only stops for the one thing that can remove work', () => {
