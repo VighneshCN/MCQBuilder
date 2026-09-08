@@ -2274,14 +2274,28 @@ function optionCountOk(q) {
     ever carries both. */
 function isCaseQuestion(q) { return !!(q && (q.caseStudyId || q.caseRef)); }
 
+/** What "Incorrect & guessed" actually draws on, stated once.
+ *
+ * The card's badge used to be two filters added together — incorrect plus
+ * guessed — so every question that was both was counted twice, and the
+ * flagged and low-confidence questions the mode genuinely includes were not
+ * counted at all. The badge could therefore say more than the mode would
+ * offer, or less, and it doubled any real difference between two devices. */
+function isRedoEligible(q) {
+  const st = (q && q.stats) || {};
+  return st.incorrect > 0 || st.guessedCorrect > 0 || !!q.flagged
+    || (st.attempts > 0 && (st.confidence || 1) < 0.5);
+}
+
 /** A question may only enter a test session if it is Active and answer-verified. */
 function isPracticeEligible(q) {
   // Read from the status table rather than naming one status, so whether a
   // status blocks practice is stated once, where the status is defined.
   const st = STATUS[q.status];
+  const opts = q.options || [];
   return !!(st && st.practice) && q.answerVerified === 'verified' && !q.conflict &&
-    !!q.correctOptionId && q.options.length >= 2 &&
-    q.options.some(o => o.id === q.correctOptionId) &&
+    !!q.correctOptionId && opts.length >= 2 &&
+    opts.some(o => o.id === q.correctOptionId) &&
     optionCountOk(q);
 }
 function markFor(q) {
@@ -7562,7 +7576,7 @@ ROUTES.practice = async (root, preselect) => {
   // Worked out once for the whole grid rather than per card.
   const lockCtx = {
     due: due.length,
-    redo: applyFilters(pool, { incorrect: true }).length + applyFilters(pool, { guessed: true }).length,
+    redo: pool.filter(isRedoEligible).length,
     lastmile: lastMilePick(pool, 0, Settings.get('masteryTarget')).available,
     domainsLocked: !!featureLock('domains', pool),
     minSample: Settings.get('weakMinSample'),
@@ -7579,7 +7593,7 @@ ROUTES.practice = async (root, preselect) => {
     if (!info.caseBank && !pool.length) return;
     let count = null;
     if (m === 'spaced') count = due.length;
-    if (m === 'redo') count = applyFilters(pool, { incorrect: true }).length + applyFilters(pool, { guessed: true }).length;
+    if (m === 'redo') count = pool.filter(isRedoEligible).length;
     if (m === 'lastmile') count = lastMilePick(pool, 0, Settings.get('masteryTarget')).available;
     if (info.caseBank) count = casePool.length;
     const lock = modeLock(m, lockCtx);
@@ -8110,7 +8124,7 @@ async function configureMode(mode, preset) {
     if (cfg.redo) {
       // union of incorrect / guessed / low confidence / flagged
       const base = applyFilters(pool, f);
-      const keep = base.filter(q => q.stats.incorrect > 0 || q.stats.guessedCorrect > 0 || q.flagged || (q.stats.attempts > 0 && (q.stats.confidence || 1) < 0.5));
+      const keep = base.filter(isRedoEligible);
       if (!keep.length) { toast('Nothing to redo yet — no incorrect, guessed or flagged questions.', 'warn', 4200); return; }
       cfg.filters = Object.assign({}, f, { explicitUuids: keep.map(q => q.uuid) });
       const s = await Session.create(mode, Object.assign({}, cfg, { filters: { ...f } }));
@@ -9765,6 +9779,21 @@ async function openQuestion(uuidStr) {
     .sort((a, b) => new Date(b.ts) - new Date(a.ts));
   const source = q.sourceId ? await DB.get('sources', q.sourceId) : null;
   const m = masteryOf(q, attempts);
+  // This screen computes mastery from the answer log; every count on the
+  // Practice screen reads the copy stored on the question. Those are the same
+  // number unless the stored one is stale — which is exactly what a merge used
+  // to leave behind — and then one screen contradicts another with no way for
+  // anybody to tell which is right. The log is the source of truth, so put the
+  // stored copy back in line with it. Unstamped: it is arithmetic over facts
+  // already held, not an edit, and stamping would hand this device every
+  // future merge.
+  if (q.stats && q.stats.mastery !== m.score) {
+    const stamp = q.updatedAt;
+    q.stats.mastery = m.score;
+    q.updatedAt = stamp;
+    await DB.put('questions', q);
+    State.invalidate();
+  }
 
   const caseRec = q.caseStudyId ? await CaseStudies.get(q.caseStudyId) : null;
   const body = h('div', { class: 'stack' });
@@ -18780,9 +18809,16 @@ async function requireNoteBackup(rec) {
 /** Due today, counted over a plain list of question records — the same rule
     the dashboard uses, so a number reported about a transfer can be compared
     against the number on screen without translating between two definitions. */
+/** How many questions are due right now — counted by the same rule the
+    Practice screen uses. It used to test `status === 'active'` instead, which
+    is a different question: a question can be active and still unaskable
+    (its answer unverified, a conflict open, an option count the course
+    rejects). The two numbers then disagreed by a fixed amount and the sync
+    summary quietly reported a figure no screen in the app would ever show.
+    Still bank-wide rather than per-course, because a sync is. */
 function dueTodayIn(list) {
   const now = new Date();
-  return (list || []).filter(q => q.status === 'active' && q.nextReviewAt && new Date(q.nextReviewAt) <= now).length;
+  return (list || []).filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= now && isPracticeEligible(q)).length;
 }
 
 function updateStorageBar() {
