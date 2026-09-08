@@ -1235,6 +1235,21 @@ be open, and `rebuildQuestionStats` orders the log deterministically, because a
 union arrives in whatever order each device appended and array order is not a
 fact about the history.
 
+Fixing the merge was not enough on its own, because nothing recomputes a
+counter that no new answer touches: a bank already merged under the old code
+kept its wrong numbers indefinitely, which is why two devices holding an
+identical answer log could still show 24 and 41 last-mile questions after the
+merge itself was correct. `repairDerivedStats()` recomputes every question's
+counters, mastery and review date from its own answer log, and
+`repairDerivedStatsOnce()` runs it at boot once per `DERIVED_STATS_REPAIR`
+version — the marker lives in `fsmeta`, which is never synced, so each device
+repairs itself. That is safe precisely because the replay is deterministic:
+two devices holding the same answers reach the same numbers without either
+telling the other anything, and the rows are written unstamped so the repair
+never wins a merge it has no business winning. Pressing "Run integrity check"
+does the same recompute, since a derived value that is wrong and a derived
+value that is fixed are the same step.
+
 The mid-merge write guard covers every stamped store rather than `questions`
 alone. A merge serialises the bank and then spends up to twenty seconds pulling
 and merging; anything written in that window was reverted to its pre-pull copy.

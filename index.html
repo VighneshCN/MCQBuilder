@@ -1524,7 +1524,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.0', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.1', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -15257,8 +15257,16 @@ async function integrityChecks() {
 
 async function runIntegrity() {
   toast('Running integrity check…');
+  // Derived counters are recomputed rather than merely reported: they are
+  // arithmetic over the answer log, so "wrong" and "fixed" are the same step.
+  const recounted = await repairDerivedStats();
   const issues = await integrityChecks();
   const body = h('div', { class: 'stack' });
+  if (recounted) {
+    body.appendChild(h('div', { class: 'notice ok' },
+      'Recalculated the practice counts for ' + recounted + ' question(s) from the answer history. ' +
+      'Those counts are derived, so this is a repair, not a change to anything you recorded.'));
+  }
   if (!issues.length) body.appendChild(h('div', { class: 'notice ok' }, 'All checks passed. No duplicate IDs, missing answers, orphaned references or invalid classifications.'));
   issues.forEach(i => {
     body.appendChild(h('div', { class: 'notice warn' }, [
@@ -16318,6 +16326,75 @@ async function purgeSelfTestArtifacts() {
   await audit('repair', 'system', '', null, { removedAttempts: bogus.length, questionsRebuilt: fixed }, 'self-test artefacts');
   setTimeout(() => toast('Removed ' + bogus.length + ' answer(s) written by the built-in tests, and rebuilt ' +
     fixed + ' question(s) from the history that remains.', 'ok', 9000), 1200);
+}
+
+/* Bumped whenever the way a counter is derived from the answer log changes,
+   which makes every browser recompute once on its next start. */
+const DERIVED_STATS_REPAIR = 1;
+
+/**
+ * Recompute every question's rolling counters, mastery and review date from
+ * its own answer log.
+ *
+ * Everything on the Practice screen except Eligible is derived: attempts,
+ * incorrect, guessedCorrect, wrongStreak, lastResult, mastery, nextReviewAt.
+ * They are maintained incrementally as answers arrive and stored on the
+ * question — so a merge that took one side's question row whole left counters
+ * describing only half the history, on both devices, permanently. v1.6.0
+ * stopped that happening, but only for merges from then on: a bank that had
+ * already been merged under the old code kept its wrong numbers for ever,
+ * because nothing recomputes a counter that no new answer touches. That is why
+ * two devices holding an identical answer log could still show 24 and 41.
+ *
+ * The log is the source of truth and the replay is deterministic — dated from
+ * the answers themselves, ordered by content — so two devices that hold the
+ * same answers reach the same numbers, without either having to tell the other
+ * anything. That is also why the repaired rows are written WITHOUT a stamp:
+ * this is arithmetic over facts both devices already hold, not an edit, and
+ * stamping it would hand this device every future merge.
+ */
+async function repairDerivedStats(opts) {
+  const apply = !(opts && opts.apply === false);
+  const byQ = new Map();
+  await DB.each('attempts', a => {
+    if (!a || !a.questionUuid) return;
+    if (!byQ.has(a.questionUuid)) byQ.set(a.questionUuid, []);
+    byQ.get(a.questionUuid).push(a);
+  });
+  const changed = [];
+  await DB.each('questions', q => {
+    const hist = byQ.get(q.uuid) || [];
+    // A question with no answers and no counters has nothing to recompute;
+    // one with counters but no answers has counters that are simply wrong.
+    if (!hist.length && !(q.stats && q.stats.attempts)) return;
+    const before = JSON.stringify([q.stats, q.srStage || 0, q.nextReviewAt || null]);
+    let probe;
+    try { probe = JSON.parse(JSON.stringify(q)); } catch (e) { return; }
+    rebuildQuestionStats(probe, hist);
+    if (JSON.stringify([probe.stats, probe.srStage || 0, probe.nextReviewAt || null]) === before) return;
+    probe.updatedAt = q.updatedAt;
+    changed.push(probe);
+  });
+  if (apply && changed.length) {
+    await DB.putMany('questions', changed);
+    State.invalidate();
+  }
+  return changed.length;
+}
+
+/** Once per browser, per repair version. The marker lives in fsmeta, which is
+    never synced — each device repairs itself, which is the whole point. */
+async function repairDerivedStatsOnce() {
+  let done;
+  try { done = Number(await FileStore.meta('derivedStatsRepair') || 0); } catch (e) { return; }
+  if (done >= DERIVED_STATS_REPAIR) return;
+  let n = 0;
+  try { n = await repairDerivedStats(); } catch (e) { return; }
+  await FileStore.setMeta('derivedStatsRepair', DERIVED_STATS_REPAIR);
+  if (!n) return;
+  await audit('repair', 'system', '', null, { questionsRebuilt: n }, 'derived practice counters');
+  setTimeout(() => toast('Recalculated the practice counts for ' + n + ' question(s) from your answer history — ' +
+    'earlier merges had left them counting only part of it.', 'ok', 9000), 1400);
 }
 
 /**
@@ -27418,6 +27495,10 @@ async function boot() {
   // left inside the synced settings store into this browser's own storage.
   await migrateDriveClientIdOutOfSync();
   await purgeSelfTestArtifacts();
+  // Counters left wrong by a merge that happened before v1.6.0 are repaired
+  // here rather than by any later merge: nothing recomputes a counter that no
+  // new answer touches, so without this the wrong numbers were permanent.
+  await repairDerivedStatsOnce();
   applyTheme();
   State.courses = await DB.all('courses');
   const wanted = Settings.get('activeCourseId');
