@@ -1417,6 +1417,12 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
    HTML collapses — so a breakdown OF the drafts total rendered flush with it and
    read as separate buckets alongside it. Somebody counted 17 answer conflicts as
    17 questions left out of an import that had, in fact, left nothing out. */
+/* The worked sheet in the import help: a spreadsheet shown as one, so the
+   shape reads at a glance rather than being described. Narrow, monospaced
+   cells with the full text on hover — legibility of the LAYOUT is the job. */
+.sample-sheet{font-size:12px}
+.sample-sheet th{white-space:nowrap;font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase}
+.sample-sheet td{max-width:220px;vertical-align:top}
 .recon td.sub{padding-left:30px;position:relative;color:var(--txt-2)}
 .recon td.sub::before{content:"\2514";position:absolute;left:14px;color:var(--txt-3)}
 .recon tr.sub-row .amt{color:var(--txt-2)}
@@ -1518,7 +1524,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.5.4', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.5.5', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -12485,8 +12491,32 @@ function downloadCaseSheetDOCX() {
 
 /** Kept for anything still asking for both at once. */
 
-/** Every column heading and JSON key the parser actually reads, rendered from
-    the table it reads them with. Nothing here is written twice. */
+/* This dialog used to open with a three-column reference listing every accepted
+   synonym for every field — a spec for somebody writing an importer, handed to
+   somebody with a spreadsheet open. It is the same information either way; what
+   changed is the order. A filled-in sheet first, because that is what the
+   question actually is ("what should mine look like?"), then the way to get one
+   ready-made, then the plain-text shape for documents, and only then the
+   synonyms — which matter when a file has FAILED to import, not before.
+
+   Everything here is rendered from the same tables the parser reads and the
+   templates are built from, so the help cannot drift from the behaviour. */
+
+/** A few cells of a row, shown as a spreadsheet rather than described as one.
+    Long cells are clipped with their full text on hover — the shape is the
+    point, not the prose. */
+function sampleSheetTable(rows, limitCols) {
+  const head = rows[0].slice(0, limitCols);
+  const body = rows.slice(1).map(r => r.slice(0, limitCols));
+  return h('div', { class: 'tbl-wrap' }, h('table', { class: 'sample-sheet' }, [
+    h('thead', {}, h('tr', {}, head.map(t => h('th', { text: t })))),
+    h('tbody', {}, body.map(r => h('tr', {}, r.map(c => {
+      const text = String(c == null ? '' : c);
+      return h('td', { title: text, text: text.length > 44 ? text.slice(0, 42) + '\u2026' : text });
+    }))))
+  ]));
+}
+
 function showImportReference() {
   const tb = h('tbody');
   IMPORT_FIELDS.forEach(x => {
@@ -12496,33 +12526,70 @@ function showImportReference() {
         x.need ? h('span', { class: 'badge ' + (x.need === 'required' ? 'b-conflict' : 'b-review'), style: 'margin-left:6px', text: x.need }) : null,
         x.note ? h('div', { class: 'tiny dim', text: x.note }) : null
       ].filter(Boolean)),
-      h('td', { class: 'srcline', text: x.cols.join('  ·  ') }),
-      h('td', { class: 'srcline', text: x.json && x.json.length ? x.json.join('  ·  ') : '—' })
+      h('td', { class: 'srcline', text: x.cols.join('  \u00b7  ') }),
+      h('td', { class: 'srcline', text: x.json && x.json.length ? x.json.join('  \u00b7  ') : '\u2014' })
     ]));
   });
+
+  const required = IMPORT_FIELDS.filter(x => x.need === 'required').map(x => x.label);
+
+  // The plain-text shape, built from the same function that writes the .docx
+  // template, so a document sheet and this example can never disagree.
+  const textShape = ['MCQ MASTERY \u2014 QUESTION SHEET',
+    'Domain: ' + SAMPLE_Q.domain, 'Module: ' + SAMPLE_Q.module, 'Topic: ' + SAMPLE_Q.topic, '']
+    .concat(sheetQuestionLines(SAMPLE_Q, 1, SAMPLE_Q.domain)).join('\n');
+
   modal({
-    title: 'Every column and key the app reads', wide: true,
+    title: 'What your file should look like', wide: true,
     body: h('div', { class: 'stack' }, [
-      h('p', { class: 'small muted', style: 'margin:0' },
-        'Spreadsheet headings are matched without regard to case, and dashes and underscores count as spaces — so “Question_Text”, “question text” and “QUESTION TEXT” are the same heading. A column the app does not recognise is never silently guessed at: it asks you which column is which instead.'),
-      h('div', { class: 'notice small' },
-        'Options can also arrive as a JSON array under “options” or “choices” — plain strings, or objects with text and optionally letter. The answer may be a letter, the full text of the right option, or a zero-based “correctIndex”.'),
-      h('div', { class: 'notice small' }, [
-        h('b', { text: 'A .pdf, .docx or .txt has no columns.' }),
-        h('span', { text: ' It is read as plain text instead, so the layout carries the fields: ' }),
-        h('code', { class: 'srcline', text: 'Q1.' }), h('span', { text: ' the question, ' }),
-        h('code', { class: 'srcline', text: 'A)' }), h('span', { text: ' each option, then ' }),
-        h('code', { class: 'srcline', text: 'Answer:' }), h('span', { text: ' and ' }),
-        h('code', { class: 'srcline', text: 'Explanation:' }),
-        h('span', { text: '. Domain, Topic, Module, Difficulty, Tags and Marks are written the same way, one per line. A scenario is opened with ' }),
-        h('code', { class: 'srcline', text: 'CASE: CS-1' }), h('span', { text: ' and its passage sits between ' }),
-        h('code', { class: 'srcline', text: 'SCENARIO:' }), h('span', { text: ' and ' }),
-        h('code', { class: 'srcline', text: 'END SCENARIO' }),
-        h('span', { text: '. The two .docx sheets above are already in that shape.' })
+
+      h('div', {}, [
+        h('div', { class: 'eyebrow', style: 'margin-bottom:6px' }, 'A spreadsheet, filled in'),
+        sampleSheetTable(questionTemplateRows(), 7),
+        h('div', { class: 'tiny dim', style: 'margin-top:6px' },
+          'One question per row. Only ' + required.join(', ') + ' are required \u2014 everything else improves the question but nothing breaks without it. There are more columns than fit here (Why A\u2013D, Domain, Topic, Module, Difficulty, Tags); the template has them all.')
       ]),
-      h('div', { class: 'tbl-wrap' }, h('table', {}, [
-        h('thead', {}, h('tr', {}, ['Field', 'Spreadsheet heading', 'JSON key'].map(t => h('th', { text: t })))), tb
-      ]))
+
+      h('div', { class: 'notice small' }, [
+        h('b', { text: 'Headings are matched loosely. ' }),
+        h('span', { text: 'Case is ignored, and dashes and underscores count as spaces \u2014 \u201cQuestion_Text\u201d, \u201cquestion text\u201d and \u201cQUESTION TEXT\u201d are the same heading. A column it does not recognise is never guessed at: it asks you which is which.' })
+      ]),
+
+      h('div', {}, [
+        h('div', { class: 'eyebrow', style: 'margin-bottom:6px' }, 'Or start from one that is already right'),
+        h('div', { class: 'row wrap', style: 'gap:8px' }, [
+          h('button', { class: 'btn sm', onclick: () => downloadQuestionTemplateXLSX(), text: 'Questions \u00b7 .xlsx' }),
+          h('button', { class: 'btn sm', onclick: () => downloadQuestionTemplateCSV(), text: '.csv' }),
+          h('button', { class: 'btn sm', onclick: () => downloadQuestionTemplateJSON(), text: '.json' }),
+          h('button', { class: 'btn sm', onclick: () => downloadQuestionSheetDOCX(), text: '.docx \u2014 for PDF' })
+        ]),
+        h('div', { class: 'row wrap', style: 'gap:8px;margin-top:6px' }, [
+          h('button', { class: 'btn sm', onclick: () => downloadCaseTemplateXLSX(), text: 'Case studies \u00b7 .xlsx' }),
+          h('button', { class: 'btn sm', onclick: () => downloadCaseTemplateCSV(), text: '.csv' }),
+          h('button', { class: 'btn sm', onclick: () => downloadCaseTemplateJSON(), text: '.json' }),
+          h('button', { class: 'btn sm', onclick: () => downloadCaseSheetDOCX(), text: '.docx \u2014 for PDF' })
+        ])
+      ]),
+
+      h('details', {}, [
+        h('summary', { class: 'small', style: 'cursor:pointer' }, 'A .pdf, .docx or .txt instead \u2014 the layout carries the fields'),
+        h('div', { class: 'stack', style: 'margin-top:8px' }, [
+          h('div', { class: 'tiny dim' },
+            'No columns, so the labels do the work. Keep them exactly as written. Domain, Topic, Module, Difficulty, Tags and Marks go one per line. A scenario opens with CASE: CS-1 and its passage sits between SCENARIO: and END SCENARIO.'),
+          h('pre', { class: 'srcline', style: 'white-space:pre-wrap;background:var(--surface-2);padding:10px;border-radius:4px;margin:0;font-size:12px', text: textShape })
+        ])
+      ]),
+
+      h('details', {}, [
+        h('summary', { class: 'small', style: 'cursor:pointer' }, 'Other headings that also work \u2014 and the JSON keys'),
+        h('div', { class: 'stack', style: 'margin-top:8px' }, [
+          h('div', { class: 'tiny dim' },
+            'Worth opening when a file did not import as you expected: this is every heading and key the parser accepts. Options can also arrive as a JSON array under \u201coptions\u201d or \u201cchoices\u201d \u2014 plain strings, or objects with text and optionally letter. The answer may be a letter, the full text of the right option, or a zero-based \u201ccorrectIndex\u201d.'),
+          h('div', { class: 'tbl-wrap' }, h('table', {}, [
+            h('thead', {}, h('tr', {}, ['Field', 'Spreadsheet heading', 'JSON key'].map(t => h('th', { text: t })))), tb
+          ]))
+        ])
+      ])
     ])
   });
 }
