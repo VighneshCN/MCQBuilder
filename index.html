@@ -1524,7 +1524,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.6.1', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.0', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -6163,6 +6163,15 @@ const Session = {
         ? (rec.marks != null ? rec.marks : marksOf(q, s.courseId))
         : -round2((rec.marks != null ? rec.marks : marksOf(q, s.courseId)) * (Number(Settings.get('negativeFraction', s.courseId)) || 0))
     };
+    // One answer, one attempt — whatever route got here. Finishing a session
+    // that another device already finished, or a re-run of a commit loop, used
+    // to append a second identical row: the counters, the mastery score and the
+    // review date all counted that sitting twice, and only a merge with another
+    // device would ever have shown it. Identity is the same content key the
+    // merge dedupes on (session + question + the moment it was answered).
+    const twin = (await DB.byIndex('attempts', 'sessionId', s.id))
+      .find(a => a.questionUuid === q.uuid && a.ts === att.ts);
+    if (twin) return twin;
     await DB.put('attempts', att);
     const fresh = await Questions.get(q.uuid);
     applyAttempt(fresh, att);
@@ -15360,7 +15369,7 @@ ROUTES.settings = async (root) => {
             go('settings');
           }
         }),
-        h('button', { class: 'btn sm', onclick: async () => { await DriveSync.pullNow(); go('settings'); }, text: 'Load from Drive' }),
+        h('button', { class: 'btn sm', onclick: async () => { await DriveSync.pullNow(); go('settings'); }, text: 'Catch up from Drive' }),
         h('button', { class: 'btn sm danger', onclick: async () => { await driveDisconnectFlow(); go('settings'); }, text: 'Disconnect' })
       ])
     ]));
@@ -17676,7 +17685,7 @@ const DriveSync = {
    * minutes into a session has exactly the same catching up to do as one that
    * arrives at boot.
    */
-  async _catchUpWithDrive() {
+  async _catchUpWithDrive(force) {
     // Boot, a tab coming forward and a network returning can all arrive within
     // a second of each other. Two catch-ups interleaving would each merge a
     // snapshot taken before the other applied, and the second would write the
@@ -17686,7 +17695,10 @@ const DriveSync = {
     const dirtySince = await FileStore.meta('driveDirtySince');
     try {
       const remoteModified = await this._fetchModifiedTime();
-      if (!remoteModified || remoteModified === this.lastSyncedModifiedTime) {
+      // `force` is the manual "catch up now" button: merge whether or not
+      // Drive's stamp has moved, because the person pressing it is telling us
+      // this browser's belief about that stamp is what they doubt.
+      if (!force && (!remoteModified || remoteModified === this.lastSyncedModifiedTime)) {
         // Drive itself hasn't moved, so the routine "something changed
         // elsewhere" path below doesn't apply — but if a previous session
         // left an edit that never actually reached Drive (offline, the tab
@@ -18494,61 +18506,21 @@ const DriveSync = {
     } catch (e) { return false; }
   },
 
-  async _applyRemote(payload) {
-    const names = syncStores();
-    // Keep this machine's own settings across a wholesale adopt. The merge path
-    // already refuses to import them; this path replaced the store outright, so
-    // taking Drive's copy handed a phone the laptop's vendored OCR path (which
-    // breaks OCR there), its appearance, its selected course, and an
-    // acknowledgement about a different device's storage.
-    const mine = new Map((await DB.all('settings')).filter(r => isDeviceLocalSetting(r.k)).map(r => [r.k, r]));
-    for (const s of names) {
-      let rows = Array.isArray(payload.stores[s]) ? payload.stores[s] : [];
-      if (s === 'settings') {
-        rows = rows.filter(r => !isDeviceLocalSetting(r.k)).concat(Array.from(mine.values()));
-      }
-      await DB.clearRaw(s);
-      if (rows.length) await DB.putManyRaw(s, rows);
-    }
-    FileStore._cache = null;
-    State.invalidate();
-    this._pendingChange = false; this._firstUnpushedChangeAt = null;
-    this._remoteQuestionCount = (payload.stores.questions || []).length;
-    await FileStore.setMeta('driveQuestionCount', this._remoteQuestionCount);
-    await FileStore.delMeta('driveDirtySince');
-    // This browser now holds exactly what Drive holds — as level as a push.
-    await this._markInSync();
-    // The stores under the app have just been replaced wholesale, so which
-    // course is selected has to be decided again — without this, a browser
-    // that had no course stays on the onboarding screen with the whole bank
-    // already loaded behind it.
-    const has = await adoptCourses();
-    toast('Loaded the Drive copy.', 'ok');
-    if (typeof State !== 'undefined') await go(has ? (State.view === 'onboarding' ? 'dashboard' : (State.view || 'dashboard')) : 'onboarding');
-  },
-
-  /** A manual pull, for "I answered questions on my phone, catch this
-      browser up" — offered from Settings, always asks first since it can
-      discard unsynced local changes. Boot-time catching-up happens on its
-      own now (see init()); this is for forcing it early. */
+  /** "I answered questions on my phone, catch this browser up now." The same
+      reconciliation the app runs on its own, asked for early — nothing more.
+   *
+   * It used to REPLACE this browser's bank with Drive's: every answer here
+   * that Drive had not seen was destroyed, along with any shareable setting
+   * this browser held and Drive did not, behind a confirmation and a safety
+   * backup. There is no version of "catch me up" that needs that. The merge
+   * keeps both sides' work and is what every other path already does, so this
+   * button now does it too — no dialog, because there is nothing left to
+   * warn about, and no way left to lose an answer by pressing it.
+   */
   async pullNow() {
-    let remote;
-    try { remote = await this.pull(); }
-    catch (e) { toast('Could not reach Google Drive: ' + e.message, 'bad'); return; }
-    const localCount = (await DB.all('questions')).length;
-    const remoteCount = (remote.stores.questions || []).length;
-    // The due counts are the pair worth showing: two devices disagreeing about
-    // what is due is the disagreement people actually notice, and seeing both
-    // numbers BEFORE the copy is applied says which device is behind — while
-    // there is still a choice about whether to apply it at all.
-    const remoteDue = dueTodayIn(remote.stores.questions || []);
-    const localDue = dueTodayIn(await DB.all('questions'));
-    const ok = await confirmBox('Load the Drive copy?',
-      'Drive holds ' + remoteCount + ' question(s), ' + remoteDue + ' due today, saved ' + fmtDate(remote.savedAt, true) +
-      '. This browser holds ' + localCount + ', ' + localDue + ' due today. Loading replaces this browser\u2019s copy with Drive\u2019s — the app already merges the two on its own, so this is only for forcing Drive\u2019s copy over the top. A safety backup is taken first, automatically.', true, 'Load');
-    if (ok && (await requireSafetyBackup('loading the Drive copy over this browser’s bank'))) {
-      await this._applyRemote(remote); await this._recordSyncedStamp();
-    }
+    if (!this.connected) { toast('Sign in to Google Drive first.', 'bad'); return; }
+    await this._catchUpWithDrive(true);
+    if (!this._holdPush) toast('Up to date with Google Drive.', 'ok');
   },
 
   /** A one-off "sync with Drive" while a local folder stays the persistent
@@ -19095,6 +19067,52 @@ function mergeKeyedRows(localRows, remoteRows, keyField) {
   return { rows: Array.from(byKey.values()), added, updated, touchedKeys };
 }
 
+/**
+ * Sessions, which plain newest-wins gets wrong in two ways that cost answers.
+ *
+ * A finished session is finished. Whole-row newest-wins let a device still
+ * holding its own half-answered copy carry a later stamp — one more save, one
+ * more merge — and revert a session another device had already completed. That
+ * device then "finishes" it a second time, and because its own copy says none
+ * of the responses were committed, every answer is written to the attempts log
+ * again: one sitting counted twice, in the counters, in the mastery score and
+ * in the review schedule.
+ *
+ * And a sitting picked up on a second device is one sitting. Taking the winning
+ * row whole discards the other side's answers to questions it happens not to
+ * hold, so the responses map, the flags and the committed markers are unioned
+ * — per question, latest answer wins, and "committed anywhere" means committed,
+ * because an attempt for it already exists in the log both devices now share.
+ */
+function mergeSessionRows(localRows, remoteRows) {
+  const terminal = st => st === 'complete' || st === 'abandoned';
+  const stampOf = r => { const t = r.updatedAt || r.startedAt || ''; return t ? (Date.parse(t) || 0) : 0; };
+  const byId = new Map((localRows || []).map(r => [r.id, r]));
+  let added = 0, updated = 0;
+  (remoteRows || []).forEach(their => {
+    const mine = byId.get(their.id);
+    if (!mine) { byId.set(their.id, their); added++; return; }
+    let base = mine, other = their, took = false;
+    if (terminal(their.status) !== terminal(mine.status)) {
+      if (terminal(their.status)) { base = their; other = mine; took = true; }
+    } else if (stampOf(their) > stampOf(mine)) { base = their; other = mine; took = true; }
+    const out = Object.assign({}, base);
+    out.responses = Object.assign({}, other.responses || {}, base.responses || {});
+    Object.keys(other.responses || {}).forEach(k => {
+      const a = (other.responses || {})[k], b = (base.responses || {})[k];
+      if (!b) { out.responses[k] = a; return; }
+      const keep = (String(a.at || '') > String(b.at || '')) ? a : b;
+      // Committed anywhere is committed everywhere: the attempt it produced is
+      // in the log both sides now hold, and re-committing would double it.
+      out.responses[k] = Object.assign({}, keep, { committed: !!(a.committed || b.committed) });
+    });
+    out.flags = Object.assign({}, other.flags || {}, base.flags || {});
+    byId.set(their.id, out);
+    if (took || JSON.stringify(out) !== JSON.stringify(mine)) updated++;
+  });
+  return { rows: Array.from(byId.values()), added, updated };
+}
+
 /** Keyed union with no time comparison — for stores where "newest wins"
     makes no sense (a retirement is never un-retired; a captured image is
     never re-captured under the same id). */
@@ -19205,7 +19223,9 @@ async function mergeBankPayloads(localPayload, remotePayload) {
   report.stores.courses = { added: courseR.added, updated: courseR.updated,
     tombstoned: courseR.rows.length - merged.stores.courses.length };
   COURSE_SCOPED.forEach(s => {
-    const r = mergeKeyedRows(localPayload.stores[s] || [], remotePayload.stores[s] || [], 'id');
+    const r = s === 'sessions'
+      ? mergeSessionRows(localPayload.stores.sessions || [], remotePayload.stores.sessions || [])
+      : mergeKeyedRows(localPayload.stores[s] || [], remotePayload.stores[s] || [], 'id');
     merged.stores[s] = r.rows.filter(row => !dropped(row));
     report.stores[s] = { added: r.added, updated: r.updated, tombstoned: r.rows.length - merged.stores[s].length };
   });
@@ -19353,9 +19373,9 @@ async function applyMergedBank(merged, report) {
     for (const courseId of byCourse.keys()) await rescanCourseForPairs(courseId);
   }
   // A merge can bring in courses this browser has never seen — the whole point
-  // of merging with a Drive file written elsewhere. Same reasoning as
-  // _applyRemote: without re-adopting, an install with no course of its own
-  // stays on the onboarding screen holding somebody's entire bank.
+  // of merging with a Drive file written elsewhere. Without re-adopting, an
+  // install with no course of its own stays on the onboarding screen holding
+  // somebody's entire bank.
   await adoptCourses();
 }
 
@@ -23737,6 +23757,28 @@ test('mergeKeyedRows keeps local on a real tie, but makes two undated rows conve
     [{ id: 'x', updatedAt: '2026-01-01T00:00:00Z', v: 'remote' }], 'id');
   eq(r2.rows[0].v, 'local', 'an exact tie between two REAL timestamps still keeps the local row');
 });
+test('a finished session cannot be un-finished by a device still holding its own copy', () => {
+  // The device that finished it has moved on; the one that did not carries a
+  // later stamp because it saved once more. Newest-wins would revert the
+  // sitting to active, and finishing it again would write every answer to the
+  // attempts log a second time.
+  const done = { id: 's1', courseId: 'c', status: 'complete', updatedAt: '2026-09-01T10:00:00Z',
+    responses: { q1: { at: '2026-09-01T09:00:00Z', committed: true }, q2: { at: '2026-09-01T09:05:00Z', committed: true } }, flags: { q2: true } };
+  const stale = { id: 's1', courseId: 'c', status: 'active', updatedAt: '2026-09-01T11:00:00Z',
+    responses: { q1: { at: '2026-09-01T09:00:00Z', committed: false } }, flags: {} };
+  const r = mergeSessionRows([stale], [done]);
+  eq(r.rows[0].status, 'complete', 'the finished copy wins however recently the unfinished one was saved');
+  assert(r.rows[0].responses.q1.committed, 'and an answer already committed anywhere stays committed, so it is never counted twice');
+  const back = mergeSessionRows([done], [stale]);
+  eq(back.rows[0].status, 'complete', 'and it wins from the other side too');
+});
+test('a sitting continued on a second device keeps both devices\u2019 answers', () => {
+  const phone = { id: 's2', status: 'active', updatedAt: '2026-09-01T10:00:00Z', responses: { q1: { at: '2026-09-01T09:00:00Z' } }, flags: { q1: true } };
+  const laptop = { id: 's2', status: 'active', updatedAt: '2026-09-01T12:00:00Z', responses: { q2: { at: '2026-09-01T11:00:00Z' } }, flags: {} };
+  const r = mergeSessionRows([phone], [laptop]);
+  eq(Object.keys(r.rows[0].responses).sort().join(','), 'q1,q2', 'taking the winning row whole used to discard the other side\u2019s answers');
+  assert(r.rows[0].flags.q1, 'and its flags with them');
+});
 test('mergeAppendOnlyRows dedupes by content, not by the meaningless auto-increment key', () => {
   const local = [{ id: 1, sessionId: 's1', questionUuid: 'q1', ts: 't1' }, { id: 2, sessionId: 's1', questionUuid: 'q2', ts: 't2' }];
   // id 2 on the remote side is a completely different real attempt that
@@ -26624,8 +26666,8 @@ test('A first run is never a wall for somebody who already has a bank', async ()
 });
 
 test('Data arriving from elsewhere brings its courses with it', async () => {
-  // _applyRemote and applyMergedBank replace the stores underneath a running
-  // app. Without re-adopting, State.course goes on pointing where it pointed
+  // applyMergedBank replaces the stores underneath a running app. Without
+  // re-adopting, State.course goes on pointing where it pointed
   // before — which on an install that had none means the person keeps seeing
   // "add your first course" with their whole bank already in the database.
   const saved = { c: State.course, list: State.courses.slice() };
