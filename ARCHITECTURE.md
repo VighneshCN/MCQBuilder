@@ -1062,9 +1062,19 @@ changes that never reached Drive (tracked as a `driveDirtySince` flag in
 `fsmeta`, set the moment a write is pending and cleared on a successful
 push) — a genuine conflict, not routine catching-up, mirroring how the
 local folder only asks when a file changed under it *and* something was
-still unsaved. A manual "Load from Drive" and "Sync now" remain in Settings
-for forcing either direction early, and "Sync with Drive" (below) offers a
-one-off merge without switching away from a connected local folder.
+still unsaved. A manual "Catch up from Drive" and "Sync now" remain in
+Settings for forcing either direction early, and "Sync with Drive" (below)
+offers a one-off merge without switching away from a connected local folder.
+
+"Catch up from Drive" used to be "Load from Drive", and it *replaced* this
+browser's bank with Drive's: every answer here that Drive had not seen was
+destroyed, along with any shareable setting this browser held and Drive did
+not. It sat behind a confirmation and a forced safety backup, but no version
+of "catch this browser up" needs to discard anything, and the merge — which
+every other path already runs — keeps both sides. The button now forces that
+same reconciliation, and the wholesale-replace path (`_applyRemote`) is gone
+rather than hidden, so there is no route left through the app that can lose an
+answer to a sync.
 
 Every one of these reconciliation choices backs up whichever side is at
 risk before it acts — not just a note saying nothing was deleted. Discarding
@@ -1213,6 +1223,58 @@ version check. And a merge that changes the bank now repaints the current view,
 because boot fires the catch-up without awaiting it and nothing downstream
 re-rendered — a screen opened before the merge landed kept showing pre-merge
 counts until the person navigated.
+
+Two devices that merge the same data have to end up with the same numbers, and
+several things stood in the way of that. The schedule replay was the worst of
+them: `scheduleNext()` dated the next review "n days from now", so rebuilding a
+question's ladder from the merged history gave each device a different date for
+an identical log — and quietly postponed a genuinely overdue question every
+time a merge ran. It dates from the answer's own timestamp now, takes the
+ladder from the question's own course rather than whichever course happens to
+be open, and `rebuildQuestionStats` orders the log deterministically, because a
+union arrives in whatever order each device appended and array order is not a
+fact about the history.
+
+The mid-merge write guard covers every stamped store rather than `questions`
+alone. A merge serialises the bank and then spends up to twenty seconds pulling
+and merging; anything written in that window was reverted to its pre-pull copy.
+Answers were protected. The session the person was sitting in, a setting they
+changed, a note they added and a course they renamed were not.
+
+Settings are reloaded into `Settings.cache` after a merge (they are read once,
+at boot, and everything downstream asks the cache — including the review ladder
+the replay runs through and the mastery target Last-mile is counted against),
+they count towards the sync fingerprint (they were invisible to every "am I in
+sync?" test, so a device whose exam date or ladder differed reported itself
+level and never pushed the difference), and two *undated* rows now converge
+instead of each device keeping its own: on a row neither side has stamped,
+"keep local" is a refusal rather than a tie-break, and every settings row
+written before stamping existed is that shape. Undated rows are resolved by
+their own content, which both devices compute identically. A tie between two
+real timestamps still keeps local. (Undated has to mean undated, too:
+`Date.parse(0)` reads as the year 2000, so a stampless row used to arrive
+carrying a real-looking timestamp.)
+
+Sessions no longer merge as a whole row on newest-wins, which got a sitting
+wrong twice over. A finished session could be *un*-finished — the device still
+holding its own half-answered copy carries a later stamp after one more save —
+and then "finished" a second time, and because its copy said none of the
+responses were committed, every answer was written to the attempts log again:
+one sitting counted twice in the counters, the mastery score and the review
+date. Terminal status now wins from either side, responses and flags are
+unioned per question with the latest answer winning, and "committed anywhere"
+means committed. `Session.commit()` also refuses to write an attempt that
+already exists, keyed on the same content the merge dedupes on.
+
+And the numbers on the Practice screen mean one thing each. "Incorrect &
+guessed" was two filters added together, so a question that was both counted
+twice while the flagged and low-confidence questions the mode genuinely
+includes were not counted at all; badge, lock and mode now share
+`isRedoEligible()`. `dueTodayIn()` counts by `isPracticeEligible` rather than
+`status === 'active'`, so the sync summary no longer reports a figure no screen
+would show. And the question detail screen, which computes mastery from the log
+while every practice count reads the copy stored on the question, puts the
+stored copy back in line when they disagree.
 
 The clock those status lines quote had to be made to mean what people read into
 it. `driveLastSyncedAt` was only ever written by `push()`, so it recorded the

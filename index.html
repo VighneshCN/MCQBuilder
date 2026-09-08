@@ -26259,7 +26259,7 @@ test('The storage bar asks where the bank lives, not whether a token is live', (
     const waiting = D.status();
     assert(waiting && waiting.label.length, 'configured but token-less is still Drive');
     assert(waiting.label.indexOf('In this browser only') < 0, 'and never claims the bank is unsaved');
-    assert(/reconnect|offline/i.test(waiting.label), 'saying which of the two it is: ' + waiting.label);
+    assert(/signed out|sign in|reconnect|offline/i.test(waiting.label), 'saying which of the two it is: ' + waiting.label);
     D.connected = true;
     assert(/Drive/.test(D.status().label), 'a live connection is Drive too');
     // A real setup failure still wins over the waiting state.
@@ -26985,17 +26985,22 @@ test('A bank file may be gzipped or plain, and is told apart by its own bytes', 
   // Drive has no cheap append, so every sync is the whole bank. Compressed, a
   // phone finishes it; uncompressed it drops one. Reading has to accept both,
   // for ever — a file written by any version must stay readable.
-  const payload = { app: 'mcq-mastery', schema: APP.schema, savedAt: nowISO(), stores: { questions: [{ uuid: 'a' }] } };
+  // Sized like a bank, not like a line: gzip's own header costs about twenty
+  // bytes, so a hundred-byte payload comes out LARGER and the size claim below
+  // would be false about the format rather than about the app.
+  const many = [];
+  for (let i = 0; i < 200; i++) many.push({ uuid: 'u' + i, stem: 'Which control is preventive?', options: [{ id: 'a', text: 'Log review' }, { id: 'b', text: 'Segregation of duties' }] });
+  const payload = { app: 'mcq-mastery', schema: APP.schema, savedAt: nowISO(), stores: { questions: many } };
   const text = JSON.stringify(payload);
   const plain = await readBankBytes(new TextEncoder().encode(text).buffer);
-  eq(plain.stores.questions.length, 1, 'plain JSON still reads');
+  eq(plain.stores.questions.length, many.length, 'plain JSON still reads');
   if (typeof self.CompressionStream === 'function') {
     const gz = await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
     const bytes = new Uint8Array(gz);
     eq(bytes[0], 0x1f, 'gzip announces itself in its first two bytes'); eq(bytes[1], 0x8b);
     assert(gz.byteLength < text.length, 'and it is smaller than what went in');
     const back = await readBankBytes(gz);
-    eq(back.stores.questions.length, 1, 'and it reads back identically');
+    eq(back.stores.questions.length, many.length, 'and it reads back identically');
     eq(back.savedAt, payload.savedAt);
   }
   let threw = false;
@@ -27039,7 +27044,13 @@ test('A push records what it uploaded, not what the database says afterwards', (
   const afterwards = { questions: [{ uuid: 'a', updatedAt: '2026-09-09T00:00:00.000Z' }], attempts: [{}, {}] };
   const sigSent = DriveSync._signatureOf(sent);
   assert(sigSent !== DriveSync._signatureOf(afterwards), 'a write made during the upload must change the fingerprint');
-  eq(sigSent, '1|1|2026-01-01T00:00:00.000Z', 'and the recorded one describes the payload that actually went up');
+  eq(sigSent, '1|1|2026-01-01T00:00:00.000Z|0|', 'and the recorded one describes the payload that actually went up');
+  // Settings are part of it too: a device whose exam date or review ladder
+  // differed from Drive's used to report itself perfectly in sync.
+  const withSetting = Object.assign({}, sent, { settings: [{ k: 'masteryTarget', v: 80, updatedAt: '2026-02-02T00:00:00.000Z' }] });
+  assert(DriveSync._signatureOf(withSetting) !== sigSent, 'a shareable setting changes the fingerprint');
+  const deviceOnly = Object.assign({}, sent, { settings: [{ k: 'theme', v: 'dark', updatedAt: '2026-02-02T00:00:00.000Z' }] });
+  eq(DriveSync._signatureOf(deviceOnly), sigSent, 'a device-local one does not — it is meant to differ');
   eq(DriveSync._signatureOf({}), '0|0||0|', 'an empty payload has an empty fingerprint rather than throwing');
 });
 
@@ -27243,23 +27254,25 @@ test('A reconnect only skips the merge question when it is genuinely settled', (
   assert(!driveSyncSettled(null), 'nor does it throw on nothing');
 });
 
-test('Merging is the primary action wherever the two copies meet', () => {
-  // Merge is the only non-destructive answer, so it is what a person should
-  // land on by default and what a mis-tap should reach. The layout that puts
-  // it there is CSS; what is asserted here is that it is marked primary and
-  // that the destructive routes never are.
-  const dialogs = [
-    { name: 'Drive already has a bank', src: DriveSync._reconcileOnConnect.toString() },
-    { name: 'Drive changed elsewhere', src: DriveSync.init.toString() }
+test('Merging is what happens wherever the two copies meet — not a question', () => {
+  // Connecting Drive IS the decision: one bank, in both places. The app used
+  // to ask which copy to keep afterwards, with a destructive route sitting
+  // next to the safe one; now every path that meets a second copy merges, and
+  // the only thing that stops to ask is a deletion, which is the only thing
+  // that can take work away.
+  const paths = [
+    { name: 'connecting to a Drive file that already has a bank', src: DriveSync._reconcileOnConnect.toString() },
+    { name: 'catching up when Drive moved elsewhere', src: DriveSync._catchUpWithDrive.toString() },
+    { name: 'the manual catch-up button', src: DriveSync.pullNow.toString() }
   ];
-  dialogs.forEach(d => {
-    const i = d.src.indexOf("value: 'merge'");
-    assert(i > 0, d.name + ' offers a merge');
-    assert(d.src.slice(i, i + 60).indexOf("kind: 'primary'") > 0, d.name + ': merge is the primary action');
-    // and the escape hatch is not dressed up as the safe one
-    const c = d.src.indexOf("value: 'choose'");
-    if (c > 0) assert(d.src.slice(c, c + 60).indexOf("kind: 'primary'") < 0, d.name + ': choosing one side is never primary');
+  paths.forEach(d => {
+    assert(/_mergeInRemote|_catchUpWithDrive/.test(d.src), d.name + ' must reconcile by merging');
+    assert(d.src.indexOf("value: 'choose'") < 0, d.name + ' must not offer to keep one copy and discard the other');
   });
+  assert(typeof DriveSync._applyRemote !== 'function',
+    'the wholesale "replace this browser with Drive" path is gone, not merely unlinked from a button');
+  const merge = DriveSync._mergeInRemote.toString();
+  assert(merge.indexOf('Apply the deletion') > 0, 'a deletion arriving from elsewhere is still the one thing that asks first');
 });
 
 test('Every disconnected state offers a way out, on every browser', () => {
