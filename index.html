@@ -1413,6 +1413,13 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 .recon td{padding:6px 10px}
 .recon tr.total td{border-top:2px solid var(--txt);font-weight:600;background:var(--surface-2)}
 .recon .amt{font-family:var(--mono);text-align:right;font-variant-numeric:tabular-nums}
+/* The "of which" rows were indented with leading spaces in a text node, which
+   HTML collapses — so a breakdown OF the drafts total rendered flush with it and
+   read as separate buckets alongside it. Somebody counted 17 answer conflicts as
+   17 questions left out of an import that had, in fact, left nothing out. */
+.recon td.sub{padding-left:30px;position:relative;color:var(--txt-2)}
+.recon td.sub::before{content:"\2514";position:absolute;left:14px;color:var(--txt-3)}
+.recon tr.sub-row .amt{color:var(--txt-2)}
 .balanced{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
 .conf{display:inline-block;width:34px;height:5px;border-radius:3px;background:var(--surface-3);overflow:hidden;vertical-align:middle}
 .conf > i{display:block;height:100%}
@@ -1511,7 +1518,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.5.2', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.5.3', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -11079,7 +11086,7 @@ async function renderRegisters(root, sources, batches) {
         h('td', { class: 'num', text: String(r.imported || 0) }),
         h('td', { class: 'num', text: String(r.drafts || 0) }),
         h('td', {}, h('span', { class: 'balanced', style: 'color:' + (r.balanced ? 'var(--green)' : 'var(--pencil)'), text: r.balanced ? '✓ Reconciled' : '✕ Check' })),
-        h('td', {}, h('button', { class: 'btn sm', onclick: () => showReconciliation(b), text: 'Report' }))
+        h('td', {}, h('button', { class: 'btn sm', onclick: () => { showReconciliation(b); }, text: 'Report' }))
       ]));
     });
     card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, ['Batch', 'Started', 'Label', 'Detected', 'Imported', 'Drafts', 'Reconciled', ''].map(t => h('th', { text: t })))), tb])));
@@ -12036,8 +12043,21 @@ async function admitBatch() {
 // and the CSV export so the two can never itemise differently.
 const RECONCILIATION_NAMED_STATUSES = ['needs_answer', 'parsing', 'possible_dup', 'answer_conflict', 'active'];
 
-function showReconciliation(batch) {
+async function showReconciliation(batch) {
   const r = batch.report || {};
+  /* Where this batch's questions stand TODAY, counted now. The table below is a
+     record of the import as it finished and is never recomputed — which is
+     right for an audit trail and wrong for anybody comparing it against the
+     review queue, where the same questions have since been verified, classified
+     and resolved. Showing both, and saying which is which, is the difference
+     between "the numbers disagree" and "here is what you have done since". */
+  let live = null;
+  try {
+    const rows = await DB.byIndex('questions', 'batchId', batch.id);
+    const now = {};
+    rows.forEach(q => { now[q.status] = (now[q.status] || 0) + 1; });
+    live = { total: rows.length, byStatus: now };
+  } catch (e) { live = null; }
   const tbl = h('table', { class: 'recon' });
   const tb = h('tbody');
   const row = (label, v, note) => tb.appendChild(h('tr', {}, [h('td', { text: label }), h('td', { class: 'amt', text: String(v || 0) }), h('td', { class: 'tiny dim', text: note || '' })]));
@@ -12045,9 +12065,12 @@ function showReconciliation(batch) {
   tb.appendChild(h('tr', {}, [h('td', { colspan: '3', class: 'eyebrow', style: 'padding-top:12px' }, 'Accounted for as')]));
   row('Admitted as Active', r.imported, 'Verified answer, classified, in the practice pool');
   row('Admitted as drafts / review items', r.drafts, 'In the bank and visible, but out of every test session');
-  row('  of which — needs answer verification', r.incomplete, '');
-  row('  of which — possible duplicate', r.possibleDup, '');
-  row('  of which — answer conflict', r.conflicts, '');
+  const sub = (label, v) => tb.appendChild(h('tr', { class: 'sub-row' }, [
+    h('td', { class: 'sub', text: label }), h('td', { class: 'amt', text: String(v || 0) }), h('td', {})
+  ]));
+  sub('of which — needs answer verification', r.incomplete);
+  sub('of which — possible duplicate', r.possibleDup);
+  sub('of which — answer conflict', r.conflicts);
   // byStatus covers every non-active status, so anything left over after the
   // three named lines above gets its own row too — the "of which" rows always
   // sum to the drafts total above them, nothing is silently folded in.
@@ -12055,7 +12078,7 @@ function showReconciliation(batch) {
     Object.keys(r.byStatus)
       .filter(k => RECONCILIATION_NAMED_STATUSES.indexOf(k) < 0)
       .sort((a, b) => r.byStatus[b] - r.byStatus[a])
-      .forEach(k => row('  of which — ' + ((STATUS[k] || {}).label || k).toLowerCase(), r.byStatus[k], ''));
+      .forEach(k => sub('of which — ' + ((STATUS[k] || {}).label || k).toLowerCase(), r.byStatus[k]));
   } else if (r.drafts > r.incomplete + r.possibleDup + r.conflicts) {
     tb.appendChild(h('tr', {}, [h('td', { colspan: '3', class: 'tiny dim', style: 'padding:4px 0 0 12px' },
       'This import ran before per-status breakdowns were recorded, so the remaining ' +
@@ -12067,14 +12090,49 @@ function showReconciliation(batch) {
   row('Unresolved text blocks (not question candidates)', r.unresolved, 'Reported separately — never counted as questions');
   tbl.appendChild(tb);
 
+  /* The same questions, counted now. Two columns of the same thing, side by
+     side, so "these numbers do not agree" resolves itself into "this is what I
+     have done since" without anybody having to work it out. */
+  const liveBlock = () => {
+    if (!live) return null;
+    const stillOpen = live.total - (live.byStatus.active || 0);
+    const wasOpen = (r.drafts || 0);
+    const rows = Object.keys(live.byStatus).sort((a, b) => live.byStatus[b] - live.byStatus[a]);
+    const t = h('table', { class: 'recon' });
+    const body = h('tbody');
+    rows.forEach(k => body.appendChild(h('tr', {}, [
+      h('td', { text: (STATUS[k] || {}).label || k }),
+      h('td', { class: 'amt', text: String(live.byStatus[k]) }),
+      h('td', { class: 'tiny dim', text: k === 'active' ? 'in the practice pool' : 'still in the review queue' })
+    ])));
+    body.appendChild(h('tr', { class: 'total' }, [
+      h('td', { text: 'These questions today' }), h('td', { class: 'amt', text: String(live.total) }), h('td', {})
+    ]));
+    t.appendChild(body);
+    const moved = wasOpen - stillOpen;
+    return h('details', { style: 'margin-top:4px' }, [
+      h('summary', { class: 'small', style: 'cursor:pointer' },
+        'Where these questions stand today' + (moved > 0 ? ' — ' + moved + ' cleared since the import' : '')),
+      h('div', { class: 'stack', style: 'margin-top:8px' }, [
+        h('div', { class: 'tiny dim' },
+          'Counted now, from the bank. The report above is what the import found; this is what you have since done with it — which is why the review queue rarely matches it.'),
+        t
+      ])
+    ]);
+  };
+
   modal({
     title: 'Import reconciliation · batch ' + batch.id.slice(0, 8), wide: true,
     body: h('div', { class: 'stack' }, [
+      h('div', { class: 'tiny dim' },
+        'As recorded when this import finished' + (batch.finishedAt ? ' on ' + fmtDate(batch.finishedAt, true) : '') +
+        '. It is a record of that moment and never changes — the review queue moves on as you work, so the two are meant to differ.'),
       h('div', { class: 'notice ' + (r.balanced ? 'ok' : 'bad') },
         r.balanced
           ? 'Reconciled. Detected candidates equal imported + drafts + merged + rejected, so no candidate has gone missing.'
           : 'Out of balance by ' + Math.abs((r.detected || 0) - (r.accounted || 0)) + '. Check the batch before relying on it.'),
       tbl,
+      liveBlock(),
       h('div', { class: 'small muted' }, 'Sources in this batch: ' + (r.sources || []).map(s => s.title + ' (' + s.detected + ')').join(' · ')),
       h('div', { class: 'row' }, [h('button', { class: 'btn sm', onclick: () => exportReconciliation(batch), text: 'Export this report' })])
     ])
