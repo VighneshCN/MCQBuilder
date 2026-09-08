@@ -1524,7 +1524,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.5.5', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.6.0', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -17442,6 +17442,8 @@ const DRIVE_TOKEN_TIMEOUT_MS = 20 * 1000;     // an INTERACTIVE sign-in: a perso
    full interactive timeout for that verdict is where most of a slow reconnect
    went: twenty seconds of a spinner to learn something knowable in five. */
 const DRIVE_SILENT_TOKEN_TIMEOUT_MS = 5 * 1000;
+const DRIVE_REMOTE_WATCH_MS = 45 * 1000;      // how often a connected tab asks whether Drive has moved
+const DRIVE_REMOTE_CHECK_MIN_MS = 15 * 1000;  // …and the floor between checks however many events fire
 
 /**
  * An OAuth client ID identifies this APP to Google, not any one person — it
@@ -17562,6 +17564,7 @@ const DriveSync = {
   _catchingUp: false,
   // A Google sign-in in flight — nothing automatic may talk to Google meanwhile.
   _tokenPending: null,
+  _watchTimer: null, _lastRemoteCheck: 0,
   _retrying: false, _lastRetryAt: 0,
   lastPushedAt: null, lastSyncedModifiedTime: null, problem: null, setupError: null,
   _pushTimer: null, _debounceTimer: null,
@@ -17762,7 +17765,14 @@ const DriveSync = {
       || (merged.stores.attempts || []).length !== (remote.stores.attempts || []).length
       || JSON.stringify((merged.stores.questions || []).map(q => q.updatedAt).sort()) !==
          JSON.stringify((remote.stores.questions || []).map(q => q.updatedAt).sort());
-    await applyMergedBank(merged);
+    await applyMergedBank(merged, report);
+    /* The screen was painted before this merge existed. Boot fires the Drive
+       catch-up without waiting for it and draws the dashboard immediately, and
+       nothing in the merge path re-renders — so a phone opened at 12:23 showed
+       counts from before the laptop's 12:21 sync, indefinitely, until the person
+       navigated somewhere. Repaint what they are looking at. */
+    State.invalidate();
+    if (typeof go === 'function' && State.view) { await go(State.view); }
     const gained = (report.stores.questions && (report.stores.questions.added + report.stores.questions.updated)) || 0;
     const answers = (report.stores.attempts && report.stores.attempts.added) || 0;
     if (gained || answers) {
@@ -18084,6 +18094,7 @@ const DriveSync = {
     clearTimeout(this._debounceTimer);
     clearTimeout(this._resumeTimer); this._resumeDelay = null;
     if (this._pushTimer) { clearInterval(this._pushTimer); this._pushTimer = null; }
+    if (this._watchTimer) { clearInterval(this._watchTimer); this._watchTimer = null; }
     this.connected = false; this.configured = false; this.accessToken = null; this.fileId = null; this.problem = null; this.setupError = null;
     this._pendingChange = false; this._firstUnpushedChangeAt = null; this.lastSyncedModifiedTime = null;
     this._remoteQuestionCount = 0; this._driveShrinkOk = null; this.lastPushedAt = null;
@@ -18132,6 +18143,30 @@ const DriveSync = {
   _startTimer() {
     if (this._pushTimer) return;
     this._pushTimer = setInterval(() => this.maybePush(), DRIVE_SAFETY_TIMER_MS);
+    /* And a watcher. Until now a connected tab NEVER read Drive again: the only
+       automatic catch-up ran at boot and from tryResume(), which returns
+       immediately while connected — so two devices left open all day pushed over
+       each other and neither ever saw the other's work. The folder backend has
+       had a 30-second watcher all along; Drive had a push timer and nothing
+       else. This is the cheap half of a sync: a metadata call for one field, not
+       the file. */
+    if (!this._watchTimer) {
+      this._watchTimer = setInterval(() => { this.checkRemote(); }, DRIVE_REMOTE_WATCH_MS);
+    }
+  },
+
+  /** Has Drive moved under us? Costs one small request; merges only if it has.
+      Runs on a timer while connected, and whenever the tab comes back to the
+      front — the moment somebody is most likely to be switching devices. */
+  async checkRemote() {
+    if (!this.connected || this._catchingUp || this._pushing || this._holdPush) return false;
+    if (Date.now() - (this._lastRemoteCheck || 0) < DRIVE_REMOTE_CHECK_MIN_MS) return false;
+    this._lastRemoteCheck = Date.now();
+    let remoteModified = null;
+    try { remoteModified = await this._fetchModifiedTime(); } catch (e) { return false; }
+    if (!remoteModified || remoteModified === this.lastSyncedModifiedTime) return false;
+    await this._catchUpWithDrive();
+    return true;
   },
 
   /** Push if there is something unpushed, or always on force (session end,
@@ -18161,6 +18196,16 @@ const DriveSync = {
     this._pushing = true;
     this._lastPayloadBytes = 0;   // a size from the previous push must never be reported against this one
     try {
+      /* Drive is a whole-file replace with no version check, so a push made
+         while the file has moved under us silently destroys whatever the other
+         device put there. Catching up first costs one metadata call and turns
+         the overwrite into a merge. */
+      const remoteNow = await this._fetchModifiedTime();
+      if (remoteNow && this.lastSyncedModifiedTime && remoteNow !== this.lastSyncedModifiedTime) {
+        this._pushing = false;
+        await this._catchUpWithDrive();
+        return this._holdPush ? false : await this.push();
+      }
       const payload = await FileStore.buildPayload();
       const newCount = (payload.stores.questions || []).length;
       const refuse = this.driveLossCheck(newCount);
@@ -18511,7 +18556,7 @@ const DriveSync = {
       if (!(await requireSafetyBackup('merging this browser’s bank with Google Drive'))) return;
       const localPayload = await FileStore.buildPayload();
       const { merged, report } = await mergeBankPayloads(localPayload, remote);
-      await applyMergedBank(merged);
+      await applyMergedBank(merged, report);
       await FileStore.flushNow();
       const pushOk = await this.push();
       await showMergeReport(report, 'Synced with Google Drive', pushOk
@@ -19107,7 +19152,7 @@ async function mergeBankPayloads(localPayload, remotePayload) {
     merge actually touched against the rest of its course, so a new
     disagreement the merge surfaced lands in the review queue rather than
     silently resolving itself. */
-async function applyMergedBank(merged) {
+async function applyMergedBank(merged, report) {
   for (const s of BACKUP_STORES) {
     if (s === 'questions') continue;
     await DB.putMany(s, merged.stores[s] || []);
@@ -19149,22 +19194,45 @@ async function applyMergedBank(merged) {
   // without a stamp: this is arithmetic over existing facts, not an edit, and
   // stamping it would hand this device every future merge.
   const touched = new Set(merged.touchedQuestionUuids || []);
-  if (touched.size) {
+
+  /* Every figure on the Practice screen except Eligible is derived from the
+     rolling counters on the question — attempts, incorrect, guessedCorrect,
+     wrongStreak, lastResult — and from the review date, and all of those are
+     maintained INCREMENTALLY by applyAttempt as you answer. A merge unions the
+     answers, so the log converges; then it takes one side's question row whole,
+     so the counters derived from that log do not. The winner's counters describe
+     only the half of the history that one device happened to see, and no later
+     answer ever repairs them: they simply carry on from a wrong starting point,
+     on both devices, for ever.
+     v1.5.0 rebuilt one field of the six (mastery) and only for rows the remote
+     side won. This rebuilds all of them, from the merged answers, for every
+     question whose answer history the merge actually changed — which is the set
+     that can be wrong, and no larger.
+     rebuildQuestionStats replays applyAttempt, which stamps updatedAt; that
+     stamp is restored afterwards, because this is arithmetic over facts both
+     devices already hold, not an edit — stamping it would hand this device every
+     future merge for every question at once. */
+  const changedHistory = new Set(touched);
+  const addedAttempts = (report && report.stores && report.stores.attempts && report.stores.attempts.added) || 0;
+  if (addedAttempts) (merged.stores.attempts || []).forEach(a => { if (a && a.questionUuid) changedHistory.add(a.questionUuid); });
+  if (changedHistory.size) {
     const byQ = new Map();
     await DB.each('attempts', a => {
-      if (!touched.has(a.questionUuid)) return;
+      if (!changedHistory.has(a.questionUuid)) return;
       if (!byQ.has(a.questionUuid)) byQ.set(a.questionUuid, []);
       byQ.get(a.questionUuid).push(a);
     });
-    const rescored = [];
-    for (const uuid of touched) {
+    const rebuilt = [];
+    for (const uuid of changedHistory) {
       const q = await DB.get('questions', uuid);
       if (!q) continue;
-      const hist = byQ.get(uuid) || [];
-      const score = masteryOf(q, hist).score;
-      if (q.stats && q.stats.mastery !== score) { q.stats.mastery = score; rescored.push(q); }
+      const before = JSON.stringify([q.stats, q.srStage, q.nextReviewAt]);
+      const stamp = q.updatedAt;
+      rebuildQuestionStats(q, byQ.get(uuid) || []);
+      q.updatedAt = stamp;
+      if (JSON.stringify([q.stats, q.srStage, q.nextReviewAt]) !== before) rebuilt.push(q);
     }
-    if (rescored.length) await DB.putMany('questions', rescored);
+    if (rebuilt.length) await DB.putMany('questions', rebuilt);
   }
   if (touched.size) {
     const byCourse = new Map();
@@ -19405,7 +19473,7 @@ async function connectFlow() {
       }
       const localPayload = await FileStore.buildPayload();
       const { merged, report } = await mergeBankPayloads(localPayload, existing.payload);
-      await applyMergedBank(merged);
+      await applyMergedBank(merged, report);
       FileStore._diskQuestionCount = existing.count;
       await FileStore.flushNow();
       await showMergeReport(report, 'Merged with your file', 'Both copies were combined and written to the file \u2014 this browser and the file now match.');
@@ -26617,6 +26685,40 @@ test('A deletion made on another device actually deletes, and can then be pushed
   }
 });
 
+test('After a merge, both devices count the same answers the same way', () => {
+  // Every Practice figure except Eligible comes from the rolling counters on a
+  // question — attempts, incorrect, guessedCorrect, wrongStreak, lastResult —
+  // and from the review date. applyAttempt maintains them incrementally as you
+  // answer. A merge unions the ANSWERS but takes one side's question row whole,
+  // so the counters describe only the half of the history that device saw, and
+  // nothing later repairs them. Two devices then disagree about how many are due
+  // and what belongs in last-mile revision, for ever, off identical data.
+  const blank = () => Object.assign(blankQuestion('test-course'), { uuid: 'u1', updatedAt: '2026-01-01T00:00:00Z' });
+  const laptopSaw = [
+    { ts: '2026-09-01T10:00:00Z', correct: false, confidence: 'unsure', ms: 9000 },
+    { ts: '2026-09-02T10:00:00Z', correct: true, confidence: 'sure', ms: 5000 }
+  ];
+  const phoneSaw = [{ ts: '2026-09-03T10:00:00Z', correct: false, confidence: 'guessed', ms: 7000 }];
+  const union = laptopSaw.concat(phoneSaw);
+
+  const laptop = blank(); laptopSaw.forEach(a => applyAttempt(laptop, a));
+  const phone = blank(); phoneSaw.forEach(a => applyAttempt(phone, a));
+  assert(laptop.stats.attempts !== phone.stats.attempts, 'the two devices really do start out disagreeing');
+  assert(laptop.stats.lastResult !== phone.stats.lastResult, 'and disagree about the thing last-mile revision reads');
+
+  const stamp = laptop.updatedAt;
+  rebuildQuestionStats(laptop, union); laptop.updatedAt = stamp;
+  rebuildQuestionStats(phone, union); phone.updatedAt = stamp;
+
+  eq(JSON.stringify(laptop.stats), JSON.stringify(phone.stats), 'replaying the merged answers makes every counter agree');
+  eq(laptop.nextReviewAt, phone.nextReviewAt, 'and the review date with them');
+  eq(laptop.srStage, phone.srStage);
+  eq(laptop.stats.attempts, 3, 'counted over the union, not over either half');
+  eq(laptop.stats.lastResult, 'incorrect', 'and the latest answer is the one that counts, whichever device gave it');
+  eq(laptop.updatedAt, stamp,
+    'the rebuild must not stamp the record — it is arithmetic over facts both devices hold, and stamping would win every future merge');
+});
+
 test('A deleted course stays deleted, and takes only its own things with it', async () => {
   // Tombstoning the questions alone left the course row, its sessions, notes,
   // sources and case studies on any device that had not caught up — which
@@ -27139,7 +27241,13 @@ async function boot() {
     // is exactly what that browser refuses — but it costs one blocked call and
     // it does recover the ordinary case of a network drop or a laptop lid,
     // without anybody having to notice a status bar.
-    if (document.visibilityState === 'visible' && typeof DriveSync !== 'undefined') DriveSync.retryQuietly();
+    if (document.visibilityState === 'visible' && typeof DriveSync !== 'undefined') {
+      // Signed out: try to get back in. Signed in: ask whether Drive has moved
+      // while this tab sat in the background — which is exactly what has
+      // happened when somebody picks a laptop up after using their phone.
+      DriveSync.retryQuietly();
+      DriveSync.checkRemote();
+    }
   });
   // A blocked write should read as an explanation, not as a stack trace —
   // and any other DB failure (storage full, the shared connection closed

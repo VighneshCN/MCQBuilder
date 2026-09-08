@@ -1190,6 +1190,30 @@ carries a number calculated on half of it. Written without a stamp — arithmeti
 over existing facts is not an edit, and stamping it would hand that device every
 future merge.
 
+Everything on the Practice screen except Eligible is derived from the rolling
+counters on a question — `attempts`, `incorrect`, `guessedCorrect`,
+`wrongStreak`, `lastResult` — and from `nextReviewAt`, all maintained
+incrementally by `applyAttempt` as answers arrive. A merge unions the attempts
+but takes one side's question row whole, so the log converges while the counters
+derived from it do not: the winner's counters describe only the half of the
+history that device saw, and no later answer repairs them. `applyMergedBank`
+therefore replays `rebuildQuestionStats` over the merged answers for every
+question whose history the merge changed, restoring `updatedAt` afterwards —
+arithmetic over facts both devices already hold is not an edit, and stamping it
+would hand that device every future merge at once.
+
+A connected tab also watches Drive rather than only pushing to it
+(`checkRemote()`, a metadata call every 45s and whenever the tab returns to the
+front). Before this, `_catchUpWithDrive()` ran only at boot and from
+`tryResume()`, which returns immediately while connected — so two devices left
+open all day pushed over each other and neither ever read the other's work. For
+the same reason `push()` re-checks `modifiedTime` first and catches up instead of
+overwriting when Drive has moved: the upload is a whole-file replace with no
+version check. And a merge that changes the bank now repaints the current view,
+because boot fires the catch-up without awaiting it and nothing downstream
+re-rendered — a screen opened before the merge landed kept showing pre-merge
+counts until the person navigated.
+
 A push is one whole-file `PATCH`, so on a bank of any size it is a long
 request and a phone's wandering signal ends it. `push()` retries the network
 class of failure once, 2.5s later, reusing the body it already serialised —
