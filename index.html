@@ -1518,7 +1518,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.5.3', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.5.4', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -9714,6 +9714,18 @@ async function openQuestion(uuidStr) {
   if (!q) { toast('That question no longer exists', 'bad'); return; }
   const attempts = (await DB.byIndex('attempts', 'questionUuid', uuidStr)).sort((a, b) => new Date(b.ts) - new Date(a.ts));
   const versions = (await DB.byIndex('questionVersions', 'questionUuid', uuidStr)).sort((a, b) => b.version - a.version);
+  /* What has been DONE to this record, as opposed to what it has been changed
+     to. Every verify, reject, archive, merge, restore and repair already writes
+     an audit row keyed by the question — and none of it was visible anywhere
+     except a global trail behind a developer's flag, so "was this verified
+     before and did it come back?" was a question the app held the answer to and
+     would not tell anybody. Keyed by qid or uuid because both are used as the
+     entity id depending on which path wrote the row. */
+  const trail = (await DB.byIndex('audit', 'entityId', q.qid || '__none__'))
+    .concat(await DB.byIndex('audit', 'entityId', uuidStr))
+    .concat(await DB.byIndex('audit', 'entityId', uuidStr.slice(0, 8)))
+    .filter((a, i, all) => all.findIndex(x => x.ts === a.ts && x.action === a.action) === i)
+    .sort((a, b) => new Date(b.ts) - new Date(a.ts));
   const source = q.sourceId ? await DB.get('sources', q.sourceId) : null;
   const m = masteryOf(q, attempts);
 
@@ -9721,7 +9733,7 @@ async function openQuestion(uuidStr) {
   const body = h('div', { class: 'stack' });
   const tabs = h('div', { class: 'btn-group', style: 'margin-bottom:12px' });
   const pane = h('div', { class: 'stack' });
-  const TABS = [['content', 'Content'], ['class', 'Classification'], ['source', 'Provenance'], ['history', 'Attempts'], ['mastery', 'Mastery'], ['versions', 'Versions']];
+  const TABS = [['content', 'Content'], ['class', 'Classification'], ['source', 'Provenance'], ['history', 'Attempts'], ['mastery', 'Mastery'], ['versions', 'Versions'], ['trail', 'History']];
   let tab = 'content';
   TABS.forEach(([k, label]) => tabs.appendChild(h('button', { 'aria-pressed': String(tab === k), onclick: (e) => { tab = k; $$('button', tabs).forEach(b => b.setAttribute('aria-pressed', 'false')); e.currentTarget.setAttribute('aria-pressed', 'true'); drawPane(); }, text: label })));
   body.appendChild(h('div', { class: 'row wrap' }, [
@@ -9979,6 +9991,22 @@ async function openQuestion(uuidStr) {
         ]));
       });
       if (q.nextReviewAt) pane.appendChild(h('div', { class: 'notice' }, 'Next review ' + fmtDate(q.nextReviewAt) + (q.srReason ? ' — ' + q.srReason : '')));
+    }
+    if (tab === 'trail') {
+      pane.appendChild(h('p', { class: 'tiny dim', style: 'margin-top:0' },
+        'Everything the app has done to this record, newest first. A status that came back — verified once, then in the review queue again — shows here as two entries rather than a mystery.'));
+      if (!trail.length) {
+        pane.appendChild(h('p', { class: 'muted', text: 'Nothing recorded beyond its import. It has not been verified, rejected, archived, merged or repaired since.' }));
+      }
+      trail.forEach(a => pane.appendChild(h('div', { class: 'notice', style: 'margin-bottom:6px' }, [
+        h('div', { class: 'row' }, [
+          h('span', { class: 'badge b-info', text: a.action }),
+          h('span', { class: 'small', style: 'flex:1', text: a.note || '' }),
+          h('span', { class: 'tiny dim', text: fmtDate(a.ts, true) })
+        ]),
+        (a.prev || a.next) ? h('div', { class: 'srcline tiny', style: 'margin-top:4px' },
+          (a.prev ? JSON.stringify(a.prev) + '  \u2192  ' : '') + (a.next ? JSON.stringify(a.next) : '')) : null
+      ].filter(Boolean))));
     }
     if (tab === 'versions') {
       if (!versions.length) pane.appendChild(h('p', { class: 'muted', text: 'No earlier version. This record has not been materially changed since it was admitted.' }));
