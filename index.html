@@ -1524,7 +1524,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.6.0', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.6.1', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -15322,7 +15322,7 @@ ROUTES.settings = async (root) => {
     driveBlock.appendChild(h(DriveSync.problem ? 'div' : 'p',
       DriveSync.problem ? { class: 'notice warn small' } : { class: 'tiny dim' },
       DriveSync.problem ? DriveSync.problem
-        : DriveSync.lastPushedAt ? 'Last synced ' + fmtDate(DriveSync.lastPushedAt, true)
+        : DriveSync.lastPushedAt ? 'In sync with Drive as of ' + fmtDate(DriveSync.lastPushedAt, true)
           // A bank already on Drive is not waiting for a first sync, and saying
           // so next to a "Sync now" button read as something being stuck.
           : DriveSync.everSynced() ? 'Connected — this bank is already on Drive. The next change pushes on its own.'
@@ -15354,7 +15354,7 @@ ROUTES.settings = async (root) => {
         : (typeof navigator !== 'undefined' && navigator.onLine === false)
           ? 'Offline — nothing is lost; it syncs when you are back on a connection.'
           : 'Signed out of Google in this browser. Safari cannot keep a Google sign-in across a reload, so this is normal there. The app keeps trying quietly — when it cannot get back in without asking, one tap does it.'));
-    driveBlock.appendChild(h('p', { class: 'tiny dim' }, DriveSync.lastPushedAt ? 'Last synced ' + fmtDate(DriveSync.lastPushedAt, true) : 'Nothing recorded yet for this browser.'));
+    driveBlock.appendChild(h('p', { class: 'tiny dim' }, DriveSync.lastPushedAt ? 'Last in sync with Drive ' + fmtDate(DriveSync.lastPushedAt, true) : 'Nothing recorded yet for this browser.'));
     driveBlock.appendChild(h('button', { class: 'btn primary', onclick: () => driveConnectFlow(), text: 'Sign in to Google again' }));
     driveBlock.appendChild(h('details', { style: 'margin-top:8px' }, [
       h('summary', { class: 'small', style: 'cursor:pointer', text: 'More — disconnect' }),
@@ -17698,6 +17698,11 @@ const DriveSync = {
       // reads "behind" and uploads the whole bank again, every time.
       if (!contributed) await FileStore.setMeta('driveSyncedSignature', await this._localSignature());
       await this._recordSyncedStamp();
+      // Taking another device's work in is the sync that matters most to the
+      // person reading the status line, and it was the one that never moved
+      // the clock: push() marks it, a merge that only downloaded did not.
+      await this._markInSync();
+      updateStorageBar();
     } catch (e) {
       // Could not read Drive, or could not merge it. Whatever is here has NOT
       // been reconciled, so pushing it would overwrite a Drive copy this
@@ -18164,7 +18169,18 @@ const DriveSync = {
     this._lastRemoteCheck = Date.now();
     let remoteModified = null;
     try { remoteModified = await this._fetchModifiedTime(); } catch (e) { return false; }
-    if (!remoteModified || remoteModified === this.lastSyncedModifiedTime) return false;
+    if (!remoteModified) return false;
+    if (remoteModified === this.lastSyncedModifiedTime) {
+      // Drive has not moved since this browser last reconciled with it, and
+      // there is nothing here waiting to go up: the two genuinely agree, right
+      // now. Record the moment. Without this the only timestamp any status
+      // line had was the last UPLOAD, so a laptop that had merged nothing for
+      // hours still read "Drive synced 12:21" — which a person reasonably
+      // takes to mean "everything from my other devices is in here", when it
+      // only ever meant "this browser sent something at 12:21".
+      if (!this._pendingChange) { await this._markInSync(); updateStorageBar(); }
+      return false;
+    }
     await this._catchUpWithDrive();
     return true;
   },
@@ -18594,7 +18610,11 @@ const DriveSync = {
     }
     if (this.problem) return { tone: 'bad', label: this.problem };
     if (this._pendingChange) return { tone: 'ok', label: 'Drive: syncing…' };
-    if (this.lastPushedAt) return { tone: 'ok', label: 'Drive synced ' + fmtDate(this.lastPushedAt, true) };
+    // "Drive synced 12:21" reads as "this browser and Drive were one at 12:21".
+    // Now it is one: the stamp moves on an upload, on a merge that brought
+    // another device's work in, and on every poll that finds Drive unmoved —
+    // so the words can say what the person actually wants to know.
+    if (this.lastPushedAt) return { tone: 'ok', label: 'Drive: in sync as of ' + fmtDate(this.lastPushedAt, true) };
     // "syncing…" here said the same thing as the line above it while meaning
     // the opposite — nothing is pending; this browser simply has not checked
     // yet in this session. Say that instead of borrowing the busy word.

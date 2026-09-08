@@ -1214,6 +1214,16 @@ because boot fires the catch-up without awaiting it and nothing downstream
 re-rendered — a screen opened before the merge landed kept showing pre-merge
 counts until the person navigated.
 
+The clock those status lines quote had to be made to mean what people read into
+it. `driveLastSyncedAt` was only ever written by `push()`, so it recorded the
+last *upload* — and "Drive synced 12:21" is read as "this browser and Drive are
+one", which is precisely the claim it could not support: a laptop that had
+uploaded at 12:21 and pulled nothing since showed exactly that line while a
+phone's answers sat unmerged. It is now written wherever this browser is
+genuinely level with Drive — after an upload, after a merge that only
+downloaded, and on every watcher poll that finds Drive unmoved with nothing
+pending here — and the sidebar says "in sync as of" rather than "synced".
+
 A push is one whole-file `PATCH`, so on a bank of any size it is a long
 request and a phone's wandering signal ends it. `push()` retries the network
 class of failure once, 2.5s later, reusing the body it already serialised —
