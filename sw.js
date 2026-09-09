@@ -29,6 +29,11 @@
 
 const CACHE = 'mcq-mastery-shell-v1';
 
+// The one string that says a page is THIS app and not whatever else answered
+// on this port. It lives in index.html's <title>, which is the first thing
+// that would differ if the file had been replaced by something else.
+const SHELL_MARK = '<title>MCQ Mastery';
+
 self.addEventListener('install', (e) => {
   e.waitUntil((async () => {
     // Warm the cache on the very first visit. Without this the app only
@@ -74,10 +79,22 @@ self.addEventListener('fetch', (e) => {
       // Only a real answer is worth keeping. Caching a 404 or a 500 would
       // pin a broken page in place for every later offline load.
       if (fresh && fresh.ok && fresh.status === 200 && fresh.type !== 'opaque') {
-        const cache = await caches.open(CACHE);
-        // Not awaited: the response should go back now, and a slow disk
-        // write must not hold up the page.
-        cache.put(req, fresh.clone()).catch(() => { });
+        // A 200 is not enough for the SHELL. This worker's scope is the whole
+        // origin and it outlives the server that registered it, so anything
+        // else that later answers on this port — another project on 8080, a
+        // different local server — comes through here too. Cached, that page
+        // becomes what opens on a train, from inside an app that can no
+        // longer be opened to switch this off. So a navigation only replaces
+        // the shell if the page is still this app. Both clones are taken
+        // before anything reads a body, and neither is awaited: the response
+        // goes back now, and neither the check nor a slow disk write may
+        // hold up the page.
+        const copy = fresh.clone();
+        const keep = req.mode === 'navigate'
+          ? fresh.clone().text().then(t => t.indexOf(SHELL_MARK) >= 0, () => false)
+          : Promise.resolve(true);
+        keep.then(ok => ok && caches.open(CACHE).then(c => c.put(req, copy)))
+          .catch(() => { });
       }
       return fresh;
     } catch (err) {

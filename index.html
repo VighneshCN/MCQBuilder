@@ -1531,7 +1531,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.5', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.6', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -10326,7 +10326,7 @@ ROUTES.bank = async (root) => {
       const q = await Questions.get(u);
       if (!q.correctOptionId) continue;
       q.answerVerified = 'verified'; q.verifiedAt = nowISO(); q.verifyNote = 'Bulk verification';
-      if (q.status === 'needs_answer' || q.status === 'draft') q.status = q.domainId ? 'active' : 'needs_class';
+      if (q.status === 'needs_answer' || q.status === 'draft') q.status = deriveEntryStatus(q);
       q.updatedAt = nowISO();
       await DB.put('questions', q);
       await audit('verify', 'question', q.qid, null, { answerVerified: 'verified' }, 'bulk');
@@ -10361,7 +10361,7 @@ ROUTES.bank = async (root) => {
       if (mod.value.trim()) q.srcModule = mod.value.trim();
       // Setting difficulty in bulk is a person judging it, same as anywhere else.
       if (diff.value) { q.difficulty = diff.value; q.difficultyVerified = 'verified'; }
-      if (q.status === 'needs_class' && q.domainId) q.status = q.answerVerified === 'verified' ? 'active' : 'needs_answer';
+      if (q.status === 'needs_class' && q.domainId) q.status = deriveEntryStatus(q);
       q.updatedAt = nowISO();
       await DB.put('questions', q);
       await audit('classify', 'question', q.qid, prev, { domainId: q.domainId, topic: q.topic }, 'bulk');
@@ -13608,7 +13608,11 @@ function pickImage() {
       input.remove();
       resolve(file);
     };
-    const input = h('input', { type: 'file', accept: 'image/*', multiple: true, capture: 'environment', class: 'hidden', onchange: e => finish(Array.from(e.target.files)) });
+    // No `capture` attribute: with it, iOS Safari and Android Chrome open the
+    // camera directly and offer no way to pick an existing screenshot, which
+    // is half of what this entry point promises. Without it the phone's own
+    // chooser offers camera or library from the one button; desktop ignores it.
+    const input = h('input', { type: 'file', accept: 'image/*', multiple: true, class: 'hidden', onchange: e => finish(Array.from(e.target.files)) });
     // No 'change' event fires at all when the picker is dismissed without
     // choosing a file — cancelling is a completely ordinary thing to do,
     // and without this the whole workflow just silently sat there with no
@@ -13827,7 +13831,8 @@ async function readOcrEnvFile() {
   try {
     fh = await FileStore.dirHandle.getFileHandle(OCR_ENV_FILE, { create: false });
   } catch (e) {
-    return null; // NotFoundError (no such file) and permission errors alike: just unavailable
+    if (e && e.name === 'NotFoundError') return null; // no such file: just unavailable
+    throw e; // a lapsed permission or anything else is reported by the caller, not blamed on the file
   }
   const file = await fh.getFile();
   if (!file.size) return null;
@@ -13881,6 +13886,14 @@ async function runExternalOCR(canvas, textArea, statusEl) {
   }
   if (!FileStore.dirHandle) {
     statusEl.textContent = 'External OCR needs a connected folder (Settings → Where your data lives) holding ' + OCR_ENV_FILE + '.';
+    return;
+  }
+  // A remembered folder comes back from a reload with permission lapsed
+  // ('prompt'); init() keeps the handle but cannot ask. This click is the
+  // user gesture requestPermission() needs, so ask here instead of letting
+  // the read fail and blaming the file for it.
+  if ((await FileStore.perm(FileStore.dirHandle, true)) !== 'granted') {
+    statusEl.textContent = 'Your browser needs permission for ' + (FileStore.locationName || 'your folder') + ' again before ' + OCR_ENV_FILE + ' can be read — reconnect it from Settings → Where your data lives.';
     return;
   }
   if (textArea.value.trim() && !await confirmBox('Replace the current text?', 'Running external OCR will overwrite what is already in the box — including anything you typed or corrected by hand.', false, 'Run OCR')) return;
@@ -14058,7 +14071,11 @@ async function renderReviewQueue(root) {
       h('div', { class: 'card-h' }, [h('h3', { text: title }), h('span', { class: 'badge b-review', text: String(list.length) }), h('div', { class: 'spacer' }),
         // Worth offering once there are enough of them that one at a time is
         // plainly the wrong answer.
-        list.length >= 5 ? h('button', {
+        // Never for duplicates: the bank's bulk tools set status but leave
+        // dupWith alone, so an Activate or Archive there is re-derived back
+        // to possible_dup by the next save or rescan. Compare and Keep
+        // separate are the only actions that settle a pairing.
+        list.length >= 5 && uniform !== 'possible_dup' ? h('button', {
           class: 'btn sm', onclick: () => bulkFrom(list, uniform),
           text: 'Do all ' + list.length + ' at once →'
         }) : null,
@@ -14341,7 +14358,7 @@ async function renderReviewQueue(root) {
         class: 'method-row', style: q.correctOptionId === o.id ? 'background:var(--green-tint)' : '', onclick: async () => {
           const fresh = await Questions.get(q.uuid);
           fresh.correctOptionId = o.id; fresh.answerVerified = 'verified'; fresh.verifiedAt = nowISO();
-          fresh.status = fresh.domainId ? 'active' : 'needs_class';
+          fresh.status = deriveEntryStatus(fresh);
           await Questions.save(fresh, 'answer verified');
           await audit('verify', 'question', fresh.qid, null, { correctOptionId: o.id }, 'Answer set and verified in review queue');
           State.invalidate(); toast(fresh.qid + ' verified', 'ok'); go('import');
@@ -14356,7 +14373,7 @@ async function renderReviewQueue(root) {
         class: 'btn sm', onclick: async () => {
           const fresh = await Questions.get(q.uuid);
           fresh.domainId = d.id; fresh.classVerified = 'verified';
-          fresh.status = fresh.answerVerified === 'verified' ? 'active' : 'needs_answer';
+          fresh.status = deriveEntryStatus(fresh);
           await Questions.save(fresh, 'classified');
           State.invalidate(); toast('Classified as ' + d.id, 'ok'); (function(){ State.importStep='check'; return go('import'); })();
         }, text: d.id
@@ -14372,7 +14389,11 @@ async function renderReviewQueue(root) {
 async function reviewDuplicate(q) {
   const fresh = await Questions.get(q.uuid);
   if (!fresh) { toast('That question no longer exists', 'bad'); return; }
-  const bank = (await State.questions()).filter(x => x.uuid !== fresh.uuid && x.status !== 'merged' && x.status !== 'rejected');
+  // Same partition rule as recheckQuestion and detectDuplicates use via
+  // comparablePair: a case-study twin with identical wording is legitimate,
+  // and must never be offered as the record to merge into or to dismiss
+  // against — neither side can absorb the other.
+  const bank = (await State.questions()).filter(x => x.uuid !== fresh.uuid && x.status !== 'merged' && x.status !== 'rejected' && comparablePair(fresh, x));
   const index = buildIndex(bank);
   const dismissed = new Set(fresh.dismissedPairs || []);
   const pool = candidatesFor(fresh, index, fresh.uuid);
@@ -14413,6 +14434,17 @@ async function reviewDuplicate(q) {
       // confirmation Archive already has.
       const ok = await confirmBox('Reject this question?', 'It leaves the bank, but the record and its Question ID are retained — you can bring it back from the Question Bank by changing its status.');
       if (!ok) { State.importStep = 'check'; go('import'); return; }
+      // This record is leaving the live pool, exactly as a merged one does —
+      // anything still naming it as a duplicate or conflict partner would
+      // otherwise sit in the queue pointing at a rejected record, and out of
+      // practice, until someone opened Compare on it too.
+      for (const u of (fresh.conflictWith || []).concat(fresh.dupWith || [])) {
+        const other = await Questions.get(u);
+        if (!other) continue;
+        const kind = (other.conflictWith || []).indexOf(fresh.uuid) >= 0 ? 'conflict' : 'dup';
+        if (unflagPairSide(other, fresh.uuid, kind)) { normalizePairState(other); other.updatedAt = nowISO(); await DB.put('questions', other); }
+      }
+      fresh.conflictWith = []; fresh.dupWith = [];
       fresh.status = 'rejected'; fresh.updatedAt = nowISO(); await DB.put('questions', fresh); await audit('reject', 'question', fresh.qid, null, null, 'Rejected as duplicate'); toast('Rejected');
     }
     else {
@@ -14451,7 +14483,8 @@ ROUTES.analytics = async (root) => {
   const all = everything.filter(inBank);
   const active = all.filter(isPracticeEligible);
   const byUuid = new Map(everything.map(q => [q.uuid, q]));
-  let attempts = await DB.byIndex('attempts', 'courseId', State.course.id);
+  const allAttempts = await DB.byIndex('attempts', 'courseId', State.course.id);
+  let attempts = allAttempts;
   if (AnaState.days) { const cut = Date.now() - AnaState.days * 86400000; attempts = attempts.filter(a => new Date(a.ts).getTime() >= cut); }
   if (AnaState.bank !== 'all') {
     // An attempt whose question has since been deleted cannot be placed in
@@ -14483,22 +14516,31 @@ ROUTES.analytics = async (root) => {
   }
 
   // headline distinction between the four accuracy measures
+  // A first attempt is the earliest ever, not the earliest inside the period:
+  // under "Last 7 days" the tile counts only questions genuinely met for the
+  // first time in those days, so it agrees with the table's all-time column.
   const firstMap = new Map();
-  attempts.slice().sort((a, b) => new Date(a.ts) - new Date(b.ts)).forEach(a => { if (!firstMap.has(a.questionUuid)) firstMap.set(a.questionUuid, a); });
-  const firstArr = Array.from(firstMap.values());
+  allAttempts.slice().sort((a, b) => new Date(a.ts) - new Date(b.ts)).forEach(a => { if (!firstMap.has(a.questionUuid)) firstMap.set(a.questionUuid, a); });
+  const inView = new Set(attempts.map(a => a.id));
+  const firstArr = Array.from(firstMap.values()).filter(a => inView.has(a.id));
   const recent = attempts.slice().sort((a, b) => new Date(b.ts) - new Date(a.ts)).slice(0, 100);
   const mastered = active.filter(q => (q.stats.mastery || 0) >= Settings.get('masteryTarget')).length;
-  const seen = new Set(attempts.map(a => a.questionUuid)).size;
+  // Coverage is measured against the active pool, so only count attempts on
+  // questions still in it — a merged, archived or doubtful question keeps
+  // its attempts but has left the denominator. Same definition as the
+  // dashboard's readiness "seen", so the two screens agree.
+  const activeIds = new Set(active.map(q => q.uuid));
+  const seen = new Set(attempts.map(a => a.questionUuid).filter(u => activeIds.has(u))).size;
 
   const tiles = h('div', { class: 'grid g4', style: 'margin-bottom:16px' });
   const t = (k, v, sub) => tiles.appendChild(h('div', { class: 'tile' }, [h('span', { class: 'eyebrow', text: k }), h('b', { text: v }), h('div', { class: 'sub', text: sub })]));
   t('First-attempt accuracy', pct(firstArr.filter(a => a.correct).length, firstArr.length), 'The honest measure of what you knew');
   t('Overall accuracy', pct(attempts.filter(a => a.correct).length, attempts.length), 'Every attempt, including repeats');
   t('Recent accuracy', pct(recent.filter(a => a.correct).length, recent.length), 'Last ' + recent.length + ' attempts');
-  t('Mastered', pct(mastered, active.length), mastered + ' of ' + active.length + ' active questions');
+  t('Mastered', pct(mastered, active.length), mastered + ' of ' + active.length + ' active questions' + (AnaState.days ? ' (all time)' : ''));
   root.appendChild(tiles);
   root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:16px' },
-    'Coverage is separate from accuracy: you have seen ' + seen + ' of ' + active.length + ' active questions (' + pct(seen, active.length) + '). Repeating the same questions raises accuracy but not coverage.'));
+    'Coverage is separate from accuracy: you have seen ' + seen + ' of ' + active.length + ' active questions' + (AnaState.days ? ' in the last ' + AnaState.days + ' days' : '') + ' (' + pct(seen, active.length) + '). Repeating the same questions raises accuracy but not coverage.'));
 
   const tabs = h('div', { class: 'btn-group', style: 'margin-bottom:14px' });
   [['domain', 'Domain'], ['topic', 'Topic'], ['module', 'Source module'], ['source', 'Source'], ['difficulty', 'Difficulty'], ['mistake', 'Mistake'], ['mode', 'Mode'], ['time', 'Time'], ['confidence', 'Confidence']]
@@ -14705,7 +14747,7 @@ ROUTES.analytics = async (root) => {
 
   const keyFn = {
     domain: q => q.domainId || null,
-    topic: q => q.topic || '(no topic)',
+    topic: q => q.topic || State.domainName(q.domainId),
     module: q => q.srcModule || '(no module)',
     source: q => q.sourceId,
     difficulty: q => q.difficulty
@@ -14725,7 +14767,9 @@ ROUTES.analytics = async (root) => {
     const g = attByKey.get(k); g.n++; if (a.correct) g.c++; if (a.correct && a.confidence === 'guessed') g.g++; g.ms += a.ms || 0;
   });
 
-  card.appendChild(h('div', { class: 'card-h' }, [h('h3', { text: 'By ' + AnaState.by }), h('div', { class: 'spacer' }), h('span', { class: 'tiny dim', text: 'weak = below expectation on the evidence available' })]));
+  card.appendChild(h('div', { class: 'card-h' }, [h('h3', { text: 'By ' + AnaState.by }), h('div', { class: 'spacer' }), h('span', { class: 'tiny dim', text: AnaState.days
+    ? 'Accuracy, Guessed and Avg time: last ' + AnaState.days + ' days · Coverage, First-attempt and Weakness: all time'
+    : 'weak = below expectation on the evidence available' })]));
   groups.sort((a, b) => (b.total - a.total)).forEach(g => {
     const per = attByKey.get(g.key) || { n: 0, c: 0, g: 0, ms: 0 };
     const w = weaknessScore(g, Settings.get('weakMinSample'));
@@ -14777,20 +14821,34 @@ async function safetyBackup(reason) {
     // Prefer the connected folder: a download can be silently blocked or
     // land somewhere the person will not find again.
     if (FileStore.connected && FileStore.dirHandle) {
-      const fh = await FileStore.dirHandle.getFileHandle(name, { create: true });
-      const w = await fh.createWritable();
-      await w.write(blob);
-      await w.close();
-      const back = await (await fh.getFile());
-      if (!back || back.size !== blob.size) throw new Error('The backup file did not write correctly.');
-      await Settings.set('lastBackupAt', nowISO());
-      await audit('backup', 'system', '', null, { scope: 'all', reason: reason, file: name, counts: manifest.counts }, 'Safety backup before a destructive action');
-      return { ok: true, where: 'folder', name: name, size: blob.size };
+      try {
+        const fh = await FileStore.dirHandle.getFileHandle(name, { create: true });
+        const w = await fh.createWritable();
+        await w.write(blob);
+        await w.close();
+        const back = await (await fh.getFile());
+        if (!back || back.size !== blob.size) throw new Error('The backup file did not write correctly.');
+        await Settings.set('lastBackupAt', nowISO());
+        await audit('backup', 'system', '', null, { scope: 'all', reason: reason, file: name, counts: manifest.counts }, 'Safety backup before a destructive action');
+        return { ok: true, where: 'folder', name: name, size: blob.size };
+      } catch (e) {
+        // The folder is connected but would not take the file (unplugged,
+        // full, locked, or it read back short). Same answer as the Backup
+        // button: a download is still a way back, and the dialog already
+        // tells the person to check their downloads folder before going on.
+      }
     }
 
     download(name, blob);
-    await Settings.set('lastBackupAt', nowISO());
-    await audit('backup', 'system', '', null, { scope: 'all', reason: reason, file: name, counts: manifest.counts }, 'Safety backup before a destructive action').catch(e => { if (e.name !== 'ReadOnlyError') throw e; });
+    // The zip has already left for Downloads; what follows is bookkeeping.
+    // While the app is read-only — the very state whose recovery dialog runs
+    // this — both writes are vetoed, and reporting that as a failed backup
+    // would tell the person the file sitting in their downloads folder does
+    // not exist.
+    try {
+      await Settings.set('lastBackupAt', nowISO());
+      await audit('backup', 'system', '', null, { scope: 'all', reason: reason, file: name, counts: manifest.counts }, 'Safety backup before a destructive action');
+    } catch (e) { /* read-only: the download already happened */ }
     return { ok: true, where: 'download', name: name, size: blob.size };
   } catch (e) {
     return { ok: false, error: e.message || String(e) };
@@ -14834,12 +14892,24 @@ async function requireSafetyBackup(reason, skip) {
 async function buildBackup(scope) {
   const entries = [];
   const counts = {}, checks = {};
+  // A course-scoped backup keeps the course's own questions, then only the
+  // versions, images and per-course settings those questions and that course
+  // own. BACKUP_STORES lists questions before questionVersions, settings and
+  // images, so the sets below are complete by the time they are consulted.
+  const keptUuids = new Set(), keptImages = new Set();
   for (const name of BACKUP_STORES) {
     let rows = await DB.all(name);
     if (scope === 'course' && State.course) {
-      if (name === 'courses') rows = rows.filter(r => r.id === State.course.id);
-      else if (name === 'idRegister') rows = rows.filter(r => r.courseId === State.course.id);
-      else if (['questions', 'sources', 'batches', 'attempts', 'sessions', 'presets'].indexOf(name) >= 0) rows = rows.filter(r => r.courseId === State.course.id);
+      const cid = State.course.id;
+      if (name === 'courses') rows = rows.filter(r => r.id === cid);
+      else if (name === 'idRegister') rows = rows.filter(r => r.courseId === cid);
+      // The same list the merge engine retires with a course, so a store
+      // added there is scoped here too — notes and case studies were not.
+      else if (['questions', 'attempts'].concat(COURSE_SCOPED).indexOf(name) >= 0) rows = rows.filter(r => r.courseId === cid);
+      else if (name === 'questionVersions') rows = rows.filter(r => keptUuids.has(r.questionUuid));
+      else if (name === 'images') rows = rows.filter(r => keptImages.has(r.id));
+      else if (name === 'settings') rows = rows.filter(r => String(r.k).indexOf('@') < 0 || String(r.k).endsWith('@' + cid));
+      if (name === 'questions') rows.forEach(q => { keptUuids.add(q.uuid); if (q.imageId) keptImages.add(q.imageId); });
     }
     const json = JSON.stringify(rows);
     counts[name] = rows.length;
@@ -15050,7 +15120,12 @@ async function doBackup(scope) {
   toast('Packaging backup…');
   try {
     const { blob, manifest } = await buildBackup(scope);
-    const name = APP.name.toLowerCase().replace(/\s+/g, '-') + '-backup-' + (scope === 'course' ? State.course.code.toLowerCase() + '-' : '') + todayKey() + '.zip';
+    // Second resolution, the same stamp safetyBackup() already uses. With a
+    // day-resolution name, createWritable() truncated the morning's backup
+    // when an afternoon one was taken — the exact copy "a dated backup also
+    // protects you from a bad import" promised.
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const name = APP.name.toLowerCase().replace(/\s+/g, '-') + '-backup-' + (scope === 'course' ? State.course.code.toLowerCase() + '-' : '') + stamp + '.zip';
 
     // Prefer the connected folder, same as the automatic safety backup —
     // a browser download can land somewhere the person will not find again.
@@ -15216,9 +15291,17 @@ async function restoreFlow(file) {
   const report = { added: 0, updated: 0, reIded: 0, skipped: 0, stores: {} };
   const APPEND_ONLY_STORES = ['attempts', 'questionVersions', 'audit'];
   try {
+    // Settings that describe THIS machine (DEVICE_LOCAL_SETTINGS) stay with
+    // it, exactly as both sync paths already insist: a laptop's OCR path,
+    // theme or offline flag restored onto a phone is the leak they filter —
+    // and the safety backup taken a moment ago stamped lastBackupAt, which
+    // the backup's older row would otherwise put straight back.
+    const keepLocal = mode === 'replace' ? (await DB.all('settings')).filter(r => isDeviceLocalSetting(r.k)) : [];
     if (mode === 'replace') for (const s of BACKUP_STORES) await DB.clear(s);
     for (const s of BACKUP_STORES) {
-      const rows = payload[s] || [];
+      const rows = (mode === 'replace' && s === 'settings')
+        ? (payload[s] || []).filter(r => !isDeviceLocalSetting(r.k)).concat(keepLocal)
+        : (payload[s] || []);
       if (s === 'questions') continue;
       if (mode === 'merge' && s === 'settings') { report.stores[s] = 0; continue; }
       if (mode === 'merge' && APPEND_ONLY_STORES.indexOf(s) >= 0) {
@@ -15239,6 +15322,19 @@ async function restoreFlow(file) {
         const r = mergeIdRegisterRows(await DB.all(s), rows);
         await DB.putMany(s, r.rows);
         report.stores[s] = r.rows.length;
+        continue;
+      }
+      if (mode === 'merge' && MERGE_STAMP_GUARDED.indexOf(s) >= 0) {
+        // Same rule applyMergedBank applies: a row edited here since the
+        // backup was taken is newer than the backup's copy of it, and the
+        // backup has nothing newer to say. Questions are the documented
+        // exception and are handled separately below.
+        const kp = STORES[s].keyPath;
+        const liveStamps = new Map();
+        await DB.each(s, r => { liveStamps.set(r[kp], r.updatedAt || ''); });
+        const keep = rows.filter(r => !((liveStamps.get(r[kp]) || '') > (r.updatedAt || '')));
+        await DB.putMany(s, keep);
+        report.stores[s] = keep.length;
         continue;
       }
       await DB.putMany(s, rows);
@@ -16060,7 +16156,7 @@ async function integrityChecks() {
 
   const seenQid = new Map(), dupQid = [];
   all.forEach(q => { if (!q.qid) return; if (seenQid.has(q.qid)) dupQid.push(q); else seenQid.set(q.qid, q); });
-  push('dupQid', 'Two questions share the same Question ID', dupQid.map(q => q.qid + ' (' + q.uuid.slice(0, 8) + ')'), 'Open one of them from Question detail and give it a new ID.');
+  push('dupQid', 'Two questions share the same Question ID', dupQid.map(q => q.qid + ' (' + q.uuid.slice(0, 8) + ')'), 'Both were admitted on different devices before they synced. The next sync with Drive or a folder file gives the later one a new ID and keeps the old one as an alias; a merge-mode Restore from a backup does the same.');
   push('noAnswer', 'Missing correct answer', all.filter(q => !q.correctOptionId && q.status !== 'rejected' && q.status !== 'merged').map(q => q.qid || q.uuid.slice(0, 8)), 'Set the answer on the Needs Checking screen.');
   push('badAnswer', 'The marked correct answer no longer matches any option', all.filter(q => q.correctOptionId && !q.options.some(o => o.id === q.correctOptionId)).map(q => q.qid), 'Reopen the question and pick the correct option again.');
   push('fewOptions', 'Fewer than two options', all.filter(q => (q.options || []).length < 2 && q.status !== 'rejected').map(q => q.qid || q.uuid.slice(0, 8)), 'Complete the options or reject the record.');
@@ -16191,9 +16287,20 @@ ROUTES.settings = async (root) => {
     ]);
     localBlock.appendChild(localMore);
   } else if (FileStore.needsReconnect) {
+    // Same decision the storage bar makes: a file that is gone or was
+    // rewritten outside the app needs the recovery dialog, which asks which
+    // copy to keep behind a backup gate. A bare reconnect here reloaded
+    // whatever was on disk over this browser's bank with no such gate, or
+    // "reconnected" to a file that was not there.
+    const st = FileStore.status();
+    const fixable = st.key === 'missing' || st.key === 'changed';
     localBlock.appendChild(h('div', { class: 'eyebrow' }, 'Local folder'));
-    localBlock.appendChild(h('div', { class: 'notice bad small' }, 'Read-only — cannot reach the file it was saving to. Nothing has been lost; your file still holds everything saved up to the last write.'));
-    localBlock.appendChild(h('button', { class: 'btn primary', onclick: () => reconnectFlow().then(() => go('settings')), text: 'Reconnect' }));
+    localBlock.appendChild(h('div', { class: 'notice bad small' }, fixable
+      ? st.label + '. This browser still holds your full bank; the app has stopped writing until you choose which copy to keep.'
+      : 'Read-only — cannot reach the file it was saving to. Nothing has been lost; your file still holds everything saved up to the last write.'));
+    localBlock.appendChild(fixable
+      ? h('button', { class: 'btn primary', onclick: () => recoveryFlow(FileStore.problem), text: 'Fix this' })
+      : h('button', { class: 'btn primary', onclick: () => reconnectFlow().then(() => go('settings')), text: 'Reconnect' }));
   } else {
     localBlock.appendChild(h('div', { class: 'eyebrow' }, 'Local folder'));
     localBlock.appendChild(h('p', { class: 'small muted' }, activeMode === 'drive'
@@ -17112,6 +17219,7 @@ async function deleteCourseForever(course) {
   for (const q of qs) {
     if (q.qid) await DB.put('tombstones', { qid: q.qid, uuid: q.uuid, retiredAt: nowISO(), reason: 'course deleted' });
     await DB.del('questions', q.uuid);
+    for (const v of await DB.byIndex('questionVersions', 'questionUuid', q.uuid)) await DB.del('questionVersions', v.id);
   }
   await reapOrphanImages(qs.map(q => q.imageId));
   for (const a of atts) await DB.del('attempts', a.id);
@@ -17131,6 +17239,7 @@ async function deleteCourseForever(course) {
     else await NotesStore.remove(n);
   }
   for (const c of cases) await DB.del('caseStudies', c.id);
+  await pruneOrphanImages();
   await DB.del('idRegister', course.id);
   await DB.del('courses', course.id);
   await Settings.clearCourse(course.id);
@@ -17168,6 +17277,9 @@ async function purgeSelfTestArtifacts() {
   // repairing again on every boot rewrites the question, which pushes, which
   // gives the other device something to merge back. One pass, recorded.
   if (await FileStore.meta('selfTestPurgeDone')) return;
+  // Nothing below can be written while read-only; the flag stays unset, so
+  // the purge simply runs on the next writable boot instead of breaking this one.
+  if (FileStore.isReadOnly()) return;
   let bogus;
   try { bogus = (await DB.all('attempts')).filter(a => typeof a.sessionId === 'string' && a.sessionId.indexOf('test-session-') === 0); }
   catch (e) { return; }
@@ -17376,13 +17488,24 @@ async function wipeCourse() {
   for (const q of all) {
     if (q.qid) await DB.put('tombstones', { qid: q.qid, uuid: q.uuid, retiredAt: nowISO(), reason: 'course wipe' });
     await DB.del('questions', q.uuid);
+    for (const v of await DB.byIndex('questionVersions', 'questionUuid', q.uuid)) await DB.del('questionVersions', v.id);
   }
   await reapOrphanImages(all.map(q => q.imageId));
   for (const a of await DB.byIndex('attempts', 'courseId', State.course.id)) await DB.del('attempts', a.id);
-  for (const s of await DB.byIndex('sessions', 'courseId', State.course.id)) await DB.del('sessions', s.id);
+  // Tombstoned like the questions, or a device that still holds them pushes
+  // them back on the next merge — sessions whose questions no longer exist,
+  // on every device, for ever.
+  for (const s of await DB.byIndex('sessions', 'courseId', State.course.id)) {
+    await DB.put('tombstones', rowTombstone(s.id, 'course wipe'));
+    await DB.del('sessions', s.id);
+  }
   // A scenario with every one of its questions gone is not a case study any
   // more, just an orphan passage the integrity check would flag forever.
-  for (const c of cases) await DB.del('caseStudies', c.id);
+  for (const c of cases) {
+    await DB.put('tombstones', rowTombstone(c.id, 'course wipe'));
+    await DB.del('caseStudies', c.id);
+  }
+  await pruneOrphanImages();
   await audit('delete', 'course-data', State.course.id, { questions: all.length, caseStudies: cases.length }, null, 'Course questions deleted after a safety backup; IDs tombstoned');
   State.invalidate();
   if (FileStore.connected) await FileStore.flushNow('snapshot');
@@ -17546,8 +17669,30 @@ function retiredNoteIds(tombstones) {
   });
   return out;
 }
+/* One row of a course-scoped store (a session, a case study) deleted on
+   purpose. Its uuid field carries the row id, so the merge drops it through
+   the same set that drops a retired question — no question shares an id with
+   it, and a build that predates this sees a uuid no question has and ignores it. */
+const ROW_TOMBSTONE = 'ROW:';
+function rowTombstone(id, reason) {
+  return { qid: ROW_TOMBSTONE + id, uuid: id, retiredAt: nowISO(), reason: reason || 'row deleted' };
+}
 /** Every store filed under a course, and the field naming it. */
 const COURSE_SCOPED = ['sources', 'batches', 'presets', 'notes', 'sessions', 'caseStudies'];
+
+/** Drop stored source images no question refers to any more — left behind by
+    a wiped or deleted course, a discarded import batch, or a deletion honoured
+    from another device. An image an open import batch still holds is not an
+    orphan yet. Returns how many were removed. */
+async function pruneOrphanImages() {
+  const used = new Set();
+  await DB.each('questions', q => { if (q.imageId) used.add(q.imageId); });
+  if (State.staging) State.staging.items.forEach(it => { if (it.q && it.q.imageId) used.add(it.q.imageId); });
+  const gone = [];
+  await DB.each('images', img => { if (!used.has(img.id)) gone.push(img.id); });
+  for (const id of gone) await DB.del('images', id);
+  return gone.length;
+}
 
 function browserIsOnlyCopy() {
   if (FileStore.connected) return false;
@@ -17754,7 +17899,6 @@ const FileStore = {
   _journalBytes: 0,
   _lastQuestionCount: 0,
   _diskQuestionCount: 0,   // what the file on disk actually holds
-  _lastGoodText: null,     // previous verified snapshot, kept for rollback
   _lastSize: 0,            // bytes of the last snapshot, drives the cadence
   _shrinkOk: null,         // one-shot consent for a deliberate reduction
   _stamp: null,          // size + lastModified of the file as we last wrote it
@@ -17896,14 +18040,18 @@ const FileStore = {
     if (!fh) return 'missing';
     const file = await fh.getFile();
     if (!file.size) return 'empty';
-    const text = await file.text();
-    this._lastGoodText = text;
-    this._lastSize = text.length;
+    // "gzip or JSON, decided by reading it" — the same two shapes the copy of
+    // this file on Drive can arrive in, so one fetched from there and dropped
+    // in this folder opens instead of being called broken.
     let payload;
-    try { payload = JSON.parse(text); }
+    try { payload = await readBankBytes(await file.arrayBuffer()); }
     catch (e) { throw new Error('Your data file is not valid JSON. It may have been edited or truncated. Restore a backup, or move the file aside and reconnect to start a fresh one.'); }
     if (!payload || !payload.stores) throw new Error('That file is not an MCQ Mastery data file.');
     if ((payload.schema || 1) > APP.schema) throw new Error('That file was written by a newer version of the app. Update the app before opening it.');
+    // Kept as JSON text: the rollback copy at flush time is written back
+    // verbatim, and the snapshot cadence wants the bank's real size, not a
+    // compressed one.
+    this._lastSize = JSON.stringify(payload).length;
 
     // Arm the loss guard from the FILE, before a single store is touched. The
     // rebuild below clears each store before refilling it, so anything that
@@ -18259,11 +18407,21 @@ const FileStore = {
 
       // Keep the previous good version alongside, so there is always one
       // generation to fall back on even if this write turns out wrong.
-      if (this._lastGoodText) {
+      // The bytes come straight from the file being replaced, copied handle to
+      // handle: flush() has just verified that file against our stamp, so it
+      // IS the last good snapshot, and a thirty-megabyte bank no longer has to
+      // be held as a thirty-megabyte string until the tab closes.
+      // Only refresh it when the last write verified — after a failed verify
+      // the data file is the suspect one, and the generation already sitting
+      // in BACKUP_FILE is the one worth keeping.
+      if (this._stamp) {
         try {
-          const bh = await this.dirHandle.getFileHandle(BACKUP_FILE, { create: true });
-          const wb = await bh.createWritable();
-          await wb.write(this._lastGoodText); await wb.close();
+          const prev = await real.getFile();
+          if (prev.size) {
+            const bh = await this.dirHandle.getFileHandle(BACKUP_FILE, { create: true });
+            const wb = await bh.createWritable();
+            await wb.write(prev); await wb.close();
+          }
         } catch (e) { /* a missing rollback copy must not stop the real save */ }
       }
 
@@ -18295,7 +18453,6 @@ const FileStore = {
       }
     }
 
-    this._lastGoodText = text;
     this._lastSize = text.length;
     this._diskQuestionCount = qCount;
     this._lastQuestionCount = qCount;
@@ -18489,6 +18646,11 @@ const DRIVE_TOKEN_TIMEOUT_MS = 20 * 1000;     // an INTERACTIVE sign-in: a perso
 const DRIVE_SILENT_TOKEN_TIMEOUT_MS = 5 * 1000;
 const DRIVE_REMOTE_WATCH_MS = 45 * 1000;      // how often a connected tab asks whether Drive has moved
 const DRIVE_REMOTE_CHECK_MIN_MS = 15 * 1000;  // …and the floor between checks however many events fire
+/* The one hold another attempt can lift by itself: this browser failed to READ
+   Drive. Named, so the place that sets it and the retry in checkRemote() cannot
+   drift apart — the other hold, a deletion waiting to be applied, must never be
+   retried on a timer, because retrying it re-asks the person the same question. */
+const DRIVE_HOLD_UNREAD = 'this browser could not read Google Drive to catch up first';
 
 /**
  * An OAuth client ID identifies this APP to Google, not any one person — it
@@ -18728,7 +18890,11 @@ const DriveSync = {
         // browser is reconciled, so any hold from a previous attempt is over.
         // Clearing it only inside the merge branch left a held browser waiting
         // for ANOTHER device to touch the file before it could sync again.
-        this._holdPush = null;
+        // …but only when Drive actually answered. _fetchModifiedTime() swallows
+        // every error and returns null, so a null stamp here is a failed read,
+        // not an unmoved file — and clearing the hold on it, then pushing below,
+        // is the exact overwrite the hold exists to prevent.
+        if (remoteModified) this._holdPush = null;
         const sig = await this._localSignature();
         const sentSig = await FileStore.meta('driveSyncedSignature');
         const reallyBehind = sentSig ? sig !== sentSig : false;
@@ -18765,7 +18931,7 @@ const DriveSync = {
       // Could not read Drive, or could not merge it. Whatever is here has NOT
       // been reconciled, so pushing it would overwrite a Drive copy this
       // browser never managed to look at. Hold until a catch-up succeeds.
-      this._holdPush = 'this browser could not read Google Drive to catch up first';
+      this._holdPush = DRIVE_HOLD_UNREAD;
       updateStorageBar();
     } finally {
       this._catchingUp = false;
@@ -19049,7 +19215,16 @@ const DriveSync = {
     this.accessToken = null;
     this.tokenExpiresAt = 0;
     this.connected = false;
-    this.problem = 'Google sign-in is no longer valid — reconnect from the sidebar.';
+    // 401 means the token is dead. 403 does not: Drive also returns it when
+    // the account is out of storage, when the file has been made read-only,
+    // and when Google is rate-limiting — none of which a re-sign-in fixes.
+    // Saying "reconnect" for those sent somebody round the same loop: sign
+    // in, push, 403, sign in. describeSyncFailure's 403 wording never gets a
+    // chance to run because this intercepts the response first, so the
+    // explanation has to live here.
+    this.problem = res.status === 403
+      ? 'Google refused the upload (403) — your Drive may be full, the file made read-only, or this app’s permission withdrawn. Check your Drive storage first; if it looks fine, reconnect from the sidebar.'
+      : 'Google sign-in is no longer valid — reconnect from the sidebar.';
     updateStorageBar();
     return true;
   },
@@ -19321,9 +19496,16 @@ const DriveSync = {
       Runs on a timer while connected, and whenever the tab comes back to the
       front — the moment somebody is most likely to be switching devices. */
   async checkRemote() {
-    if (!this.connected || this._catchingUp || this._pushing || this._holdPush) return false;
+    if (!this.connected || this._catchingUp || this._pushing) return false;
+    // A deletion waiting to be applied stays held: re-running the catch-up would
+    // put the same modal up every 45 seconds. A failed read is the opposite —
+    // another attempt is the only thing that lifts it, and nothing else in the
+    // app makes one, so one dropped download used to stop this browser syncing
+    // for the rest of the session, with the risk bar's "Sync now" refusing too.
+    if (this._holdPush && this._holdPush !== DRIVE_HOLD_UNREAD) return false;
     if (Date.now() - (this._lastRemoteCheck || 0) < DRIVE_REMOTE_CHECK_MIN_MS) return false;
     this._lastRemoteCheck = Date.now();
+    if (this._holdPush === DRIVE_HOLD_UNREAD) { await this._catchUpWithDrive(); return true; }
     let remoteModified = null;
     try { remoteModified = await this._fetchModifiedTime(); } catch (e) { return false; }
     if (!remoteModified) return false;
@@ -20358,11 +20540,12 @@ function mergeIdRegisterRows(localRows, remoteRows) {
     if (!mine) { byId.set(r.courseId, Object.assign({ lastSeq: 0, allocations: [] }, r)); touched++; return; }
     const merged = Object.assign({}, mine);
     merged.lastSeq = Math.max(mine.lastSeq || 0, r.lastSeq || 0);
+    merged.lastCaseSeq = Math.max(mine.lastCaseSeq || 0, r.lastCaseSeq || 0);
     const allocMap = new Map((mine.allocations || []).map(a => [allocKey(a), a]));
     let allocGrew = false;
     (r.allocations || []).forEach(a => { if (!allocMap.has(allocKey(a))) { allocMap.set(allocKey(a), a); allocGrew = true; } });
     merged.allocations = Array.from(allocMap.values()).sort((x, y) => new Date(x.ts) - new Date(y.ts)).slice(-500);
-    if (merged.lastSeq !== mine.lastSeq || allocGrew) touched++;
+    if (merged.lastSeq !== mine.lastSeq || merged.lastCaseSeq !== (mine.lastCaseSeq || 0) || allocGrew) touched++;
     byId.set(r.courseId, merged);
   });
   return { rows: Array.from(byId.values()), touched };
@@ -20441,7 +20624,7 @@ async function mergeBankPayloads(localPayload, remotePayload) {
   // handed the deleting device its own course back on the next merge.
   const retiredCourses = retiredCourseIds(merged.stores.tombstones);
   const retiredNotes = retiredNoteIds(merged.stores.tombstones);
-  const dropped = row => row && retiredCourses.has(row.courseId);
+  const dropped = row => row && (retiredCourses.has(row.courseId) || retiredUuids.has(row.id));
   const courseR = mergeKeyedRows(localPayload.stores.courses || [], remotePayload.stores.courses || [], 'id');
   merged.stores.courses = courseR.rows.filter(c => !retiredCourses.has(c.id));
   report.stores.courses = { added: courseR.added, updated: courseR.updated,
@@ -20496,6 +20679,51 @@ async function mergeBankPayloads(localPayload, remotePayload) {
   const ir = mergeIdRegisterRows(localPayload.stores.idRegister || [], remotePayload.stores.idRegister || []);
   merged.stores.idRegister = ir.rows;
   report.stores.idRegister = { touched: ir.touched };
+
+  // Two devices that both admitted before syncing each handed the same
+  // "permanent" Question ID to a different question — the register only
+  // serialises within one tab. The register merge above stops it happening
+  // again but leaves the pairs already issued, on every device, for ever.
+  // Do what restore does for the same collision: the row created later gives
+  // the ID up (kept as an alias, so it still finds by search) and takes the
+  // next one off the merged register. Loser and new number are both derived
+  // from facts the two devices share, so whichever merges first they land on
+  // the same answer; the re-issued row is stamped now so the rename wins on
+  // the other side instead of tying and staying different there.
+  const regByCourse = new Map(merged.stores.idRegister.map(r => [r.courseId, r]));
+  const seqSeen = new Map();
+  const qidGroups = new Map();
+  merged.stores.questions.forEach(q => {
+    if (!q.qid) return;
+    const s = IdRegister.seqOf(q.qid);
+    if (s > (seqSeen.get(q.courseId) || 0)) seqSeen.set(q.courseId, s);
+    if (!qidGroups.has(q.qid)) qidGroups.set(q.qid, []);
+    qidGroups.get(q.qid).push(q);
+  });
+  let reIded = 0;
+  const reIdedAt = nowISO();
+  qidGroups.forEach((rows, qid) => {
+    if (rows.length < 2) return;
+    rows.sort((a, b) => {
+      const x = a.createdAt || '', y = b.createdAt || '';
+      return x < y ? -1 : x > y ? 1 : (a.uuid < b.uuid ? -1 : 1);
+    });
+    rows.slice(1).forEach(q => {
+      let reg = regByCourse.get(q.courseId);
+      if (!reg) { reg = { courseId: q.courseId, lastSeq: 0, allocations: [] }; regByCourse.set(q.courseId, reg); merged.stores.idRegister.push(reg); }
+      // A payload from an older version can carry no register at all; never
+      // let a low watermark re-issue an ID that is already in the bank.
+      if ((seqSeen.get(q.courseId) || 0) > (reg.lastSeq || 0)) reg.lastSeq = seqSeen.get(q.courseId);
+      const fresh = qid.replace(/-Q-\d+$/, '') + '-Q-' + pad(++reg.lastSeq, 6);
+      reg.allocations.push({ ts: reIdedAt, from: fresh, to: fresh, count: 1, note: 'merge collision for ' + qid });
+      if (reg.allocations.length > 500) reg.allocations = reg.allocations.slice(-500);
+      const out = Object.assign({}, q, { qid: fresh, aliasQids: Array.from(new Set((q.aliasQids || []).concat([qid]))), updatedAt: reIdedAt });
+      merged.stores.questions[merged.stores.questions.indexOf(q)] = out;
+      if (merged.touchedQuestionUuids.indexOf(out.uuid) < 0) merged.touchedQuestionUuids.push(out.uuid);
+      reIded++;
+    });
+  });
+  report.stores.questions.reIded = reIded;
 
   const imr = mergeKeyedRowsUnionOnly(localPayload.stores.images || [], remotePayload.stores.images || [], 'id');
   // A photo is only ever reached through a question's imageId. One that no
@@ -20578,6 +20806,10 @@ async function applyMergedBank(merged, report) {
   // deleted is worse than one that never happened: it comes back on every
   // device, and the person has to do it again and watch it fail again.
   await applyTombstoneRemovals(merged);
+  // Images are merged as a plain union (captured once, never edited), so a
+  // deletion pruned on one device came back from the other side's copy on the
+  // next merge. Prune again here, after the retired questions are gone.
+  await pruneOrphanImages();
 
   // applyTombstoneRemovals arms the shrink guards from what IT removed here.
   // That misses the mirror case: the tombstones are already applied in this
@@ -20741,6 +20973,14 @@ async function applyTombstoneRemovals(merged) {
     if (await DB.get('notes', noteId)) await DB.del('notes', noteId);
   }
 
+  // A session or case study tombstoned elsewhere (a course wipe) goes the same
+  // way; putMany could not have removed it either.
+  let rowsGone = 0;
+  if (retired.size) for (const store of ['sessions', 'caseStudies']) {
+    const gone = [];
+    await DB.each(store, r => { if (r && retired.has(r.id)) gone.push(r.id); });
+    for (const id of gone) { await DB.del(store, id); rowsGone++; }
+  }
   if (!retired.size && !coursesGone) return 0;
   if (!retired.size) {
     FileStore.allowShrink('merge honoured a course deleted on another device');
@@ -20760,6 +21000,7 @@ async function applyTombstoneRemovals(merged) {
     await DB.del('questions', uuid);
     const hist = await DB.byIndex('attempts', 'questionUuid', uuid);
     for (const a of hist) if (a.id != null) await DB.del('attempts', a.id);
+    for (const v of await DB.byIndex('questionVersions', 'questionUuid', uuid)) if (v.id != null) await DB.del('questionVersions', v.id);
     removed++;
   }
   await reapOrphanImages(heldImages);
@@ -20767,7 +21008,7 @@ async function applyTombstoneRemovals(merged) {
   // bank collapses unexpectedly and wrong here: this shrank because somebody
   // deleted a course on purpose, on another device, and that is exactly what
   // has to reach Drive.
-  if (removed || coursesGone) {
+  if (removed || coursesGone || rowsGone) {
     const why = 'merge honoured ' + (coursesGone ? coursesGone + ' course deletion(s) and ' : '') + removed + ' question deletion(s) made on another device';
     FileStore.allowShrink(why);
     if (typeof DriveSync !== 'undefined') DriveSync.allowDriveShrink(why);
@@ -20956,7 +21197,11 @@ async function connectFlow() {
       actions: [{ label: 'Cancel', value: false }, { label: 'Continue', value: true, kind: 'danger' }]
     });
     if (!proceed) { await FileStore.forget(); updateStorageBar(); return; }
-    download('mcq-mastery-unreadable-file-' + todayKey() + '.txt', new Blob([existing.rawText || ''], { type: 'text/plain' }));
+    // The bytes, not a UTF-8 decoding of them. A file unreadable because it is
+    // not text at all comes back from file.text() as replacement-character
+    // soup, which is not the "copy of exactly what's there now" promised.
+    if (existing.blob) download('mcq-mastery-unreadable-file-' + todayKey() + '.bin', existing.blob);
+    else download('mcq-mastery-unreadable-file-' + todayKey() + '.txt', new Blob([existing.rawText || ''], { type: 'text/plain' }));
     FileStore.allowShrink('confirmed by the user, overwriting an unreadable file in the connected folder');
     await FileStore.flushNow();
     toast('Your file now holds this browser\u2019s bank. A copy of what was there before is in your downloads.', 'ok');
@@ -20991,17 +21236,20 @@ FileStore.loadFromDiskPreview = async function () {
   if (!file.size) return { status: 'empty', count: 0, payload: null };
   const rawText = await file.text();
   try {
-    const payload = JSON.parse(rawText);
-    if (!payload || !payload.stores) return { status: 'unreadable', count: 0, payload: null, rawText };
+    const payload = await readBankBytes(await file.arrayBuffer());
+    if (!payload || !payload.stores) return { status: 'unreadable', count: 0, payload: null, rawText, blob: file };
     const count = (payload.stores.questions || []).length;
-    return count ? { status: 'has-data', count, payload } : { status: 'empty', count: 0, payload: null };
+    // A caller that decides not to overwrite this file still wants the exact
+    // bytes on hand — has-data is the common case a "grab the old copy first"
+    // download acts on, not only the unreadable one.
+    return count ? { status: 'has-data', count, payload, blob: file } : { status: 'empty', count: 0, payload: null };
   } catch (e) {
     // Bytes are there but not valid JSON — a half-synced cloud-drive
     // conflict, a truncated write, a manual edit gone wrong. This is not
     // the same as an empty folder and must never be treated as one: an
     // empty folder is safe to write into silently, but something
     // unreadable might be a real bank the student can't afford to lose.
-    return { status: 'unreadable', count: 0, payload: null, rawText };
+    return { status: 'unreadable', count: 0, payload: null, rawText, blob: file };
   }
 };
 
@@ -23499,6 +23747,11 @@ async function runKBC(questions) {
   }
 
   function draw() {
+    // reveal()'s 1.9s advance timer is not owned by teardown(). Quitting
+    // inside that beat would otherwise rebuild the whole score engine on a
+    // detached stage — audio.bed() takes the shared context and a fresh
+    // master, and nothing left on screen can mute or stop it.
+    if (!document.body.contains(host)) return;
     picked = -1; locked = false; hidden = [];
     host.classList.remove('suspense', 'armed', 'air-cut', 'reveal-right', 'reveal-wrong',
       'milestone', 'offair', 'lifeline-fifty', 'lifeline-audience', 'lifeline-phone');
@@ -23769,6 +24022,7 @@ async function runKBC(questions) {
   }
 
   function reveal(sel) {
+    if (!document.body.contains(host)) return;
     const q = ladder[rung];
     host.classList.remove('suspense');
     const correctIx = q.options.findIndex(o => o.id === q.correctId);
@@ -23909,6 +24163,10 @@ async function runKBC(questions) {
       amount = secured(); title = 'That is the end of the road';
       sub = amount ? 'You keep what you banked.' : 'Nothing banked — the first safe rung was still ahead.';
     }
+    // The one question a loss can teach from. Only on 'lost': the win path has
+    // already stepped rung past the end of the ladder, and a walk-away never
+    // answered anything.
+    const missed = how === 'lost' ? ladder[rung] : null;
     host.textContent = '';
     host.appendChild(h('div', { class: 'game-screen' }, [
       h('h1', { class: 'game-title', text: title }),
@@ -23919,6 +24177,17 @@ async function runKBC(questions) {
         h('div', { class: 'kbc-cheque-amt', text: kbcMoney(amount) }),
         h('div', { class: 'kbc-cheque-sig', text: 'Not legal tender. Obviously.' })
       ]),
+      missed ? h('div', { class: 'stack', style: 'gap:8px;max-width:560px;margin:0 auto 16px;text-align:left' }, [
+        h('div', { class: 'notice small' }, missed.stem),
+        h('div', { class: 'small' }, [h('b', { text: 'The answer was: ' }), h('span', { text: missed.correctText })]),
+        missed.explanation
+          ? h('div', {}, [
+            h('div', { class: 'eyebrow', style: 'margin-bottom:4px', text: 'Why' }),
+            h('div', { class: 'small', style: 'line-height:1.5', text: missed.explanation })
+          ])
+          : h('div', { class: 'tiny dim', text: 'This question carries no explanation.' }),
+        missed.qid ? h('div', { class: 'tiny dim', text: missed.qid }) : null
+      ]) : null,
       h('div', { class: 'row', style: 'gap:10px;justify-content:center;flex-wrap:wrap' }, [
         h('button', { class: 'btn primary', onclick: start, text: 'Play again' }),
         h('button', { class: 'btn ghost', onclick: () => go('games'), text: 'Back to games' })
@@ -24334,6 +24603,7 @@ test('Grading during practice writes to the question and is never asked again', 
     await Session.answer(s, graded, graded.options[1].id, { ms: 900, confidence: 'knew', difficulty: 'easy' });
     eq((await DB.get('questions', q.uuid)).difficulty, 'hard', 'an already-graded question keeps its grade');
   } finally {
+    for (const a of await DB.byIndex('attempts', 'questionUuid', q.uuid)) if (a.id != null) await DB.del('attempts', a.id);
     await DB.del('questions', q.uuid); await DB.del('sessions', s.id);
   }
 });
@@ -24351,6 +24621,7 @@ test('Answering without grading leaves the question ungraded and unchanged', asy
     eq(after.difficulty, 'medium', 'the default is untouched');
     assert(difficultyUngraded(after), 'and it stays ungraded, so it can be asked again later');
   } finally {
+    for (const a of await DB.byIndex('attempts', 'questionUuid', q.uuid)) if (a.id != null) await DB.del('attempts', a.id);
     await DB.del('questions', q.uuid); await DB.del('sessions', s.id);
   }
 });
@@ -24367,8 +24638,13 @@ test('A rubbish difficulty value is refused rather than stored', async () => {
     eq(after.difficulty, 'medium', 'an unknown value must not reach the record');
     assert(difficultyUngraded(after), 'and must not count as having graded it');
   } finally {
+    for (const a of await DB.byIndex('attempts', 'questionUuid', q.uuid)) if (a.id != null) await DB.del('attempts', a.id);
     await DB.del('questions', q.uuid); await DB.del('sessions', s.id);
   }
+});
+test('The grading tests leave no answer history behind in the real bank', async () => {
+  const stray = (await DB.all('attempts')).filter(a => typeof a.courseId === 'string' && a.courseId.indexOf('test-diff-') === 0);
+  eq(stray.length, 0, 'running the built-in tests must not write attempts into the bank');
 });
 test('One answer changes exactly one question, so the runner refreshes one record', async () => {
   const cid = 'test-refresh-' + Date.now();
@@ -24787,6 +25063,29 @@ test('An option-count mismatch routes to needs_content, not active', () => {
     eq(ok.status, 'active', 'a question meeting the rule must still reach Active as before');
   } finally { State.courses = prev; }
 });
+test('Quick-verifying a wrong-count question lands in review, never Active', () => {
+  const prev = State.courses;
+  try {
+    State.courses = [{ id: 'oc-course', code: 'OC', optionCount: 4, enforceOptionCount: true }];
+    const q = mkQ('x', ['a', 'b', 'c', 'd', 'e'], null, { courseId: 'oc-course', status: 'needs_answer', domainId: 'D1' });
+    q.correctOptionId = q.options[0].id; q.answerVerified = 'verified'; q.verifiedAt = nowISO();
+    q.status = deriveEntryStatus(q);
+    eq(q.status, 'needs_content', 'five options on a four-option course is content review, not Active');
+    assert(REVIEW_STATUSES.indexOf(q.status) >= 0, 'so it stays findable in the review queue');
+    assert(!isPracticeEligible(q), 'and is held out of practice');
+    const c = mkQ('y', ['a', 'b', 'c', 'd', 'e'], 0, { courseId: 'oc-course', status: 'needs_class', answerVerified: 'verified' });
+    c.domainId = 'D1'; c.classVerified = 'verified'; c.status = deriveEntryStatus(c);
+    eq(c.status, 'needs_content', 'classifying does not promote a wrong-count question either');
+  } finally { State.courses = prev; }
+});
+test('A status written over a live duplicate pairing does not survive a recheck', () => {
+  const a = mkQ('x', ['a', 'b', 'c', 'd'], 0, { status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  a.conflictWith = []; a.dupWith = ['some-partner-uuid'];
+  normalizePairState(a);
+  eq(a.status, 'possible_dup', 'bulk Activate cannot settle a duplicate — only clearing dupWith can');
+  a.status = 'archived'; normalizePairState(a);
+  eq(a.status, 'possible_dup', 'bulk Archive cannot either');
+});
 
 /* ---- parsing ---- */
 test('Numbered stems with lettered options parse', () => {
@@ -25106,17 +25405,47 @@ test('File payload round-trips questions and attempts including their keys', asy
   const q = mkQ('sync round trip', ['a', 'b'], 0);
   await DB.put('questions', q);
   await DB.put('attempts', { id: 99123, questionUuid: q.uuid, courseId: 'test-course', correct: true, ts: nowISO() });
+  try {
+    FileStore._cache = null;
+    FileStore._dirtyStores = new Set();
+    const payload = await FileStore.buildPayload();
+    const back = JSON.parse(JSON.stringify(payload));
 
-  FileStore._cache = null;
-  FileStore._dirtyStores = new Set();
-  const payload = await FileStore.buildPayload();
-  const back = JSON.parse(JSON.stringify(payload));
-
-  eq(back.app, 'mcq-mastery', 'payload should identify the app');
-  eq(back.schema, APP.schema, 'payload should carry the schema version');
-  assert((back.stores.questions || []).some(x => x.uuid === q.uuid), 'the question must survive the round trip');
-  // autoIncrement stores keep the key inside the record, so ids must survive
-  assert((back.stores.attempts || []).some(x => x.id === 99123), 'the attempt must keep its id');
+    eq(back.app, 'mcq-mastery', 'payload should identify the app');
+    eq(back.schema, APP.schema, 'payload should carry the schema version');
+    assert((back.stores.questions || []).some(x => x.uuid === q.uuid), 'the question must survive the round trip');
+    // autoIncrement stores keep the key inside the record, so ids must survive
+    assert((back.stores.attempts || []).some(x => x.id === 99123), 'the attempt must keep its id');
+  } finally {
+    // Scratch rows in the live bank: they would otherwise be flushed to the
+    // data file and pushed to Drive, one more of them on every run.
+    await DB.del('questions', q.uuid);
+    await DB.del('attempts', 99123);
+  }
+});
+test('First-attempt accuracy under a period window counts genuine first attempts only', async () => {
+  // ROUTES.analytics renders per-course tiles unconditionally, which a fresh
+  // headless run never has selected. Give mkQ's default courseId ('test-course')
+  // a real course to belong to, so State.course.id resolves the same rows.
+  const was = { course: State.course, courses: State.courses, days: AnaState.days };
+  const q = mkQ('first attempt window', ['a', 'b'], 0);
+  try {
+    State.course = makeCourse('OC', 'Analytics test course', CISA_BLUEPRINT, { id: 'test-course' });
+    State.courses = [State.course];
+    await DB.put('questions', q);
+    const old = new Date(Date.now() - 20 * 86400000).toISOString();
+    await DB.put('attempts', { id: 99131, questionUuid: q.uuid, courseId: State.course.id, correct: false, ts: old });
+    await DB.put('attempts', { id: 99132, questionUuid: q.uuid, courseId: State.course.id, correct: true, ts: nowISO() });
+    AnaState.days = 7;
+    const root = h('div');
+    await ROUTES.analytics(root);
+    const tile = Array.prototype.slice.call(root.querySelectorAll('.tile')).find(t => t.textContent.indexOf('First-attempt accuracy') >= 0);
+    assert(tile, 'the first-attempt tile must render');
+    assert(tile.querySelector('b').textContent !== '100%', 'a repeat inside the window must not be counted as a first attempt');
+  } finally {
+    await DB.del('attempts', 99131); await DB.del('attempts', 99132); await DB.del('questions', q.uuid);
+    AnaState.days = was.days; State.course = was.course; State.courses = was.courses;
+  }
 });
 
 test('Read-only blocks writes but never blocks reconnecting', async () => {
@@ -25186,7 +25515,7 @@ test('Read-only still lets this device record its own theme, course and backup t
 test('Practice settings are per course, app preferences are shared', async () => {
   const A = { id: 'course-A', code: 'AAA', defaults: { mockCount: 150 } };
   const B = { id: 'course-B', code: 'BBB', defaults: { mockCount: 200 } };
-  const was = { course: State.course, courses: State.courses };
+  const was = { course: State.course, courses: State.courses, shuffle: Settings.get('shuffleOptions') };
   try {
     State.courses = [A, B];
 
@@ -25211,6 +25540,21 @@ test('Practice settings are per course, app preferences are shared', async () =>
     eq(Settings.get('mockCount'), 150, 'clearing a course falls back to its default again');
   } finally {
     State.course = was.course; State.courses = was.courses;
+    // A person's own preference must come back exactly as it was.
+    if (Settings.get('shuffleOptions') !== was.shuffle) await Settings.set('shuffleOptions', was.shuffle);
+  }
+});
+test('The per-course settings test leaves the shuffle preference where it found it', async () => {
+  const was = Settings.get('shuffleOptions');
+  try {
+    await Settings.set('shuffleOptions', false);
+    const t = TESTS.find(x => x.name === 'Practice settings are per course, app preferences are shared');
+    await t.fn();
+    eq(Settings.get('shuffleOptions'), false, 'running the suite must not turn shuffling back on');
+    const row = await DB.get('settings', 'shuffleOptions');
+    eq(row && row.v, false, 'and the stored row must agree');
+  } finally {
+    if (Settings.get('shuffleOptions') !== was) await Settings.set('shuffleOptions', was);
   }
 });
 
@@ -25301,7 +25645,10 @@ test('Replaying a journal survives a half-written final line', async () => {
     eq(applied, 2, 'both complete entries should replay, and the torn one should stop it cleanly');
     const back = await DB.get('questions', q.uuid);
     assert(back && back.stem === 'replay me', 'the journalled question should be back in the store');
-  } finally { FileStore.dirHandle = was; }
+  } finally {
+    FileStore.dirHandle = was;
+    await DB.del('questions', q.uuid);
+  }
 });
 
 test('A second journal append does not read its own UTF-8 write as an outside edit', async () => {
@@ -25460,12 +25807,12 @@ test('A file deleted while the app was closed is not resurrected on next launch'
 });
 
 test('A load that fails leaves the app read-only, so the next answer cannot overwrite the file', async () => {
-  const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, p: FileStore.problem, t: FileStore.tier, e: FileStore.everConnected, n: FileStore.needsReconnect, g: FileStore._lastGoodText, z: FileStore._lastSize };
+  const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, p: FileStore.problem, t: FileStore.tier, e: FileStore.everConnected, n: FileStore.needsReconnect, z: FileStore._lastSize };
   try {
     FileStore.tier = 'folder'; FileStore.everConnected = true; FileStore._stamp = null;
     FileStore.connected = true; FileStore.needsReconnect = false; FileStore.problem = null;
     const text = JSON.stringify({ app: 'mcq-mastery', schema: APP.schema + 1, stores: {} });
-    FileStore.dirHandle = { getFileHandle: async () => ({ getFile: async () => ({ size: text.length, lastModified: 1, text: async () => text }) }) };
+    FileStore.dirHandle = { getFileHandle: async () => ({ getFile: async () => ({ size: text.length, lastModified: 1, text: async () => text, arrayBuffer: async () => new TextEncoder().encode(text).buffer }) }) };
     let threw = false;
     try { await FileStore.loadFromDisk(); } catch (e) { threw = true; }
     assert(threw, 'a file from a newer app version must not load');
@@ -25474,7 +25821,7 @@ test('A load that fails leaves the app read-only, so the next answer cannot over
   } finally {
     FileStore.connected = was.c; FileStore.dirHandle = was.d; FileStore._stamp = was.s;
     FileStore.problem = was.p; FileStore.tier = was.t; FileStore.everConnected = was.e;
-    FileStore.needsReconnect = was.n; FileStore._lastGoodText = was.g; FileStore._lastSize = was.z;
+    FileStore.needsReconnect = was.n; FileStore._lastSize = was.z;
   }
 });
 
@@ -25503,12 +25850,62 @@ test('Reconnecting mid-session never reloads a file this tab is already ahead of
   }
 });
 
+test('A safety backup falls back to a download rather than reporting failure', async () => {
+  const was = { c: FileStore.connected, d: FileStore.dirHandle, t: FileStore.tier, e: FileStore.everConnected };
+  const realDownload = self.download, realToast = self.toast;
+  const savedBackup = Settings.get('lastBackupAt');
+  let got = null;
+  try {
+    FileStore.tier = 'folder'; FileStore.everConnected = true; FileStore.connected = true;
+    FileStore.dirHandle = { getFileHandle: async () => { const e = new Error('The device is not connected'); e.name = 'NotFoundError'; throw e; } };
+    self.download = (n, b) => { got = { n: n, b: b }; };
+    self.toast = () => { };
+    const res = await safetyBackup('test: folder write fails');
+    assert(res.ok, 'a folder that cannot be written must not sink the safety backup — got ' + JSON.stringify(res));
+    eq(res.where, 'download', 'the backup must have gone to a download instead');
+    assert(got && got.b && got.b.size === res.size, 'the downloaded blob must be the backup that was reported');
+    assert(/^mcq-mastery-safety-backup-.*\.zip$/.test(got.n), 'the download keeps the safety-backup file name');
+  } finally {
+    FileStore.connected = was.c; FileStore.dirHandle = was.d;
+    FileStore.tier = was.t; FileStore.everConnected = was.e;
+    self.download = realDownload; self.toast = realToast;
+    await Settings.set('lastBackupAt', savedBackup);
+  }
+});
+test('External OCR reports a lapsed folder permission instead of blaming the env file', async () => {
+  const was = { d: FileStore.dirHandle, x: Settings.get('externalOcrEnabled') };
+  try {
+    await Settings.set('externalOcrEnabled', true);
+    FileStore.dirHandle = {
+      queryPermission: async () => 'prompt',
+      requestPermission: async () => 'prompt',
+      getFileHandle: async () => { const e = new Error('nope'); e.name = 'NotAllowedError'; throw e; }
+    };
+    let threw = null;
+    try { await readOcrEnvFile(); } catch (e) { threw = e; }
+    assert(threw && threw.name === 'NotAllowedError', 'a permission error must propagate, not read as a missing file');
+    const statusEl = h('div');
+    await runExternalOCR(h('canvas'), h('textarea'), statusEl);
+    assert(/permission/i.test(statusEl.textContent), 'the student must be told to reconnect the folder');
+    assert(!/ENDPOINT=/.test(statusEl.textContent), 'a lapsed permission must not be reported as a bad env file');
+  } finally {
+    FileStore.dirHandle = was.d;
+    await Settings.set('externalOcrEnabled', was.x);
+  }
+});
 test('Once a file is known to exist, the write path never creates it', async () => {
-  const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, p: FileStore.problem, t: FileStore.tier, e: FileStore.everConnected, q: FileStore._lastQuestionCount };
+  const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, p: FileStore.problem, t: FileStore.tier, e: FileStore.everConnected, q: FileStore._lastQuestionCount, dq: FileStore._diskQuestionCount, sh: FileStore._shrinkOk };
   try {
     FileStore.tier = 'folder'; FileStore.everConnected = true; FileStore.connected = true;
     FileStore._stamp = { size: 10, lastModified: 1 };   // we believe a file is there
     FileStore._lastQuestionCount = 0;
+    // The payload below is deliberately empty, and the loss guard reads
+    // _diskQuestionCount, not _lastQuestionCount. On a browser with a real
+    // folder connected that field holds the file's true count, so the write
+    // would be refused as a loss before the path under test is reached — and
+    // the person running the tests would be shown a save-blocked alarm about
+    // a save nobody asked for. Zero what lossCheck actually reads.
+    FileStore._diskQuestionCount = 0;
     const asked = [];
     FileStore.dirHandle = {
       getFileHandle: async (name, opts) => {
@@ -25529,8 +25926,39 @@ test('Once a file is known to exist, the write path never creates it', async () 
   } finally {
     FileStore.connected = was.c; FileStore.dirHandle = was.d; FileStore._stamp = was.s;
     FileStore.problem = was.p; FileStore.tier = was.t; FileStore.everConnected = was.e;
-    FileStore._lastQuestionCount = was.q; FileStore._cache = null;
+    FileStore._lastQuestionCount = was.q; FileStore._diskQuestionCount = was.dq;
+    FileStore._shrinkOk = was.sh; FileStore._cache = null;
     FileStore.needsReconnect = false; FileStore._recovering = false;
+  }
+});
+test('The rollback copy is taken from the file on disk, not from a copy held in RAM', async () => {
+  const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, t: FileStore.tier,
+    e: FileStore.everConnected, dq: FileStore._diskQuestionCount, q: FileStore._lastQuestionCount, sz: FileStore._lastSize };
+  try {
+    FileStore.tier = 'folder'; FileStore.everConnected = true; FileStore.connected = true;
+    FileStore._diskQuestionCount = 0; FileStore._lastQuestionCount = 0;
+    FileStore._stamp = { size: 9, lastModified: 1 };        // the last write verified
+    const previous = JSON.stringify({ savedAt: 'older', stores: { questions: [] } });
+    const files = {}; files[DATA_FILE] = previous;
+    FileStore.dirHandle = {
+      getFileHandle: async (name) => ({
+        createWritable: async () => ({
+          write: async (d) => { files[name] = (d && d.__text !== undefined) ? d.__text : d; },
+          close: async () => { }
+        }),
+        getFile: async () => ({ __text: files[name], size: (files[name] || '').length, lastModified: 2, text: async () => files[name] })
+      })
+    };
+    FileStore._cache = { questions: [] }; FileStore._dirtyStores = new Set();
+    eq(await FileStore._writeSnapshot(), true, 'the snapshot itself must succeed');
+    eq(files[BACKUP_FILE], previous, 'the rollback copy must be the bytes the data file held before this write');
+    assert(files[DATA_FILE] !== previous, 'and the data file must now hold the new snapshot');
+    eq(FileStore._lastGoodText, undefined, 'no whole serialised bank may be parked on FileStore afterwards');
+  } finally {
+    FileStore.connected = was.c; FileStore.dirHandle = was.d; FileStore._stamp = was.s;
+    FileStore.tier = was.t; FileStore.everConnected = was.e;
+    FileStore._diskQuestionCount = was.dq; FileStore._lastQuestionCount = was.q;
+    FileStore._lastSize = was.sz; FileStore._cache = null;
   }
 });
 
@@ -25558,17 +25986,24 @@ test('An empty or badly shrunken bank cannot overwrite a full file', () => {
     assert(!FileStore.lossCheck(0), 'a first save to an empty folder must not be blocked');
   } finally { FileStore._diskQuestionCount = was.d; FileStore._shrinkOk = was.s; }
 });
+test('The write-path test neutralises the counter the loss guard actually reads', () => {
+  const t = TESTS.find(x => x.name === 'Once a file is known to exist, the write path never creates it');
+  assert(t, 'the write-path test must still exist');
+  const src = t.fn.toString();
+  assert(/_diskQuestionCount\s*=\s*0/.test(src), 'lossCheck reads _diskQuestionCount, so the test must zero that field, not only _lastQuestionCount');
+  assert(/_diskQuestionCount\s*=\s*was\./.test(src), 'and must put the real count back afterwards');
+});
 
 test('A load that dies half-way still arms the loss guard', async () => {
   const was = { d: FileStore._diskQuestionCount, q: FileStore._lastQuestionCount, s: FileStore._shrinkOk,
-                dir: FileStore.dirHandle, fh: FileStore.fileHandle, lg: FileStore._lastGoodText,
+                dir: FileStore.dirHandle, fh: FileStore.fileHandle,
                 sz: FileStore._lastSize, st: FileStore._stamp };
   const realClear = DB.clearRaw, realPutMany = DB.putManyRaw;
   try {
     FileStore._diskQuestionCount = 0; FileStore._shrinkOk = null; FileStore.fileHandle = null;
     const text = JSON.stringify({ app: 'mcq-mastery', schema: APP.schema, savedAt: '2026-01-01T00:00:00.000Z',
       stores: { questions: [{ uuid: 'a' }, { uuid: 'b' }] } });
-    FileStore.dirHandle = { getFileHandle: async () => ({ getFile: async () => ({ size: text.length, lastModified: 1, text: async () => text }) }) };
+    FileStore.dirHandle = { getFileHandle: async () => ({ getFile: async () => ({ size: text.length, lastModified: 1, text: async () => text, arrayBuffer: async () => new TextEncoder().encode(text).buffer }) }) };
     DB.clearRaw = async () => { };
     DB.putManyRaw = async () => { throw new Error('quota'); };
     let threw = false;
@@ -25579,7 +26014,7 @@ test('A load that dies half-way still arms the loss guard', async () => {
   } finally {
     DB.clearRaw = realClear; DB.putManyRaw = realPutMany;
     FileStore._diskQuestionCount = was.d; FileStore._lastQuestionCount = was.q; FileStore._shrinkOk = was.s;
-    FileStore.dirHandle = was.dir; FileStore.fileHandle = was.fh; FileStore._lastGoodText = was.lg;
+    FileStore.dirHandle = was.dir; FileStore.fileHandle = was.fh;
     FileStore._lastSize = was.sz; FileStore._stamp = was.st;
   }
 });
@@ -25715,6 +26150,31 @@ test('mergeIdRegisterRows never lets the Question ID watermark move backwards', 
   const remote2 = [{ courseId: 'c2', lastSeq: 75, allocations: [] }];
   const r2 = mergeIdRegisterRows(local2, remote2);
   eq(r2.rows[0].lastSeq, 75, 'a higher remote watermark must be adopted, or a later next() could re-issue an id already used on Drive');
+  const local3 = [{ courseId: 'c3', lastSeq: 10, lastCaseSeq: 1, allocations: [] }];
+  const remote3 = [{ courseId: 'c3', lastSeq: 10, lastCaseSeq: 3, allocations: [] }];
+  const r3 = mergeIdRegisterRows(local3, remote3);
+  eq(r3.rows[0].lastCaseSeq, 3, 'the case-study watermark must move forward too, or nextCase() re-issues a CS id the other device already used');
+  const r4 = mergeIdRegisterRows(remote3, local3);
+  eq(r4.rows[0].lastCaseSeq, 3, 'and it must never move backwards when the lower value is the incoming side');
+  const r5 = mergeIdRegisterRows([{ courseId: 'c4', lastSeq: 0, lastCaseSeq: 5, allocations: [] }], [{ courseId: 'c4', lastSeq: 0, allocations: [] }]);
+  eq(r5.rows[0].lastCaseSeq, 5, 'a remote row written by an older version must not roll it back');
+});
+test('A Question ID issued on two devices before they synced is re-issued once by the merge', async () => {
+  const mk = (u, at) => ({ uuid: u, qid: 'CISA-Q-000101', courseId: 'c1', createdAt: at, updatedAt: at, aliasQids: [] });
+  const stores = q => ({ questions: [q], courses: [{ id: 'c1', qidPrefix: 'CISA' }], sources: [], batches: [], attempts: [], sessions: [], settings: [], audit: [], images: [], idRegister: [{ courseId: 'c1', lastSeq: 101, allocations: [] }], tombstones: [], presets: [], notes: [], caseStudies: [], questionVersions: [] });
+  const a = { savedAt: '2026-01-01T00:00:00Z', stores: stores(mk('uuid-a', '2026-01-01T10:00:00Z')) };
+  const b = { savedAt: '2026-01-01T00:00:00Z', stores: stores(mk('uuid-b', '2026-01-01T12:00:00Z')) };
+  const runs = [await mergeBankPayloads(a, b), await mergeBankPayloads(b, a)];
+  for (const r of runs) {
+    eq(r.merged.stores.questions.map(q => q.qid).sort().join(','), 'CISA-Q-000101,CISA-Q-000102', 'exactly one of the pair must take the next free ID');
+    const moved = r.merged.stores.questions.find(q => q.qid === 'CISA-Q-000102');
+    eq(moved.uuid, 'uuid-b', 'the later-created row gives up the ID, whichever side it came from');
+    eq(moved.aliasQids[0], 'CISA-Q-000101', 'the old ID stays searchable as an alias');
+    assert(moved.updatedAt > '2026-01-01T12:00:00Z', 'the re-issued row must carry a fresh stamp');
+    eq(r.merged.stores.idRegister[0].lastSeq, 102, 'the watermark must move past the re-issued ID');
+    eq(r.report.stores.questions.reIded, 1);
+    assert(r.merged.touchedQuestionUuids.indexOf('uuid-b') >= 0, 'the renamed row must be re-checked like any other touched row');
+  }
 });
 test('mergeBankPayloads merges questions, and settings key-by-key except the device-local ones', () => {
   const local = {
@@ -25798,7 +26258,7 @@ test('A merge-restore must not leave the backup\'s counters standing over a unio
 });
 
 test('The shrink consent is one-shot, not a standing permission', async () => {
-  const was = { d: FileStore._diskQuestionCount, s: FileStore._shrinkOk, c: FileStore.connected, dir: FileStore.dirHandle, st: FileStore._stamp, lg: FileStore._lastGoodText };
+  const was = { d: FileStore._diskQuestionCount, s: FileStore._shrinkOk, c: FileStore.connected, dir: FileStore.dirHandle, st: FileStore._stamp };
   // This is the real _writeSnapshot(), so its tail retires the REAL pending
   // write queue on its way out: the journal entries waiting for the folder,
   // the dirty flag every forced flush is guarded by, and the journal position
@@ -25813,7 +26273,6 @@ test('The shrink consent is one-shot, not a standing permission', async () => {
   };
   try {
     FileStore._diskQuestionCount = 100;
-    FileStore._lastGoodText = null;
     FileStore._stamp = null;
     FileStore.connected = true;
     FileStore.allowShrink('deliberate');
@@ -25836,7 +26295,7 @@ test('The shrink consent is one-shot, not a standing permission', async () => {
   } finally {
     FileStore._diskQuestionCount = was.d; FileStore._shrinkOk = was.s;
     FileStore.connected = was.c; FileStore.dirHandle = was.dir;
-    FileStore._stamp = was.st; FileStore._lastGoodText = was.lg; FileStore._cache = null;
+    FileStore._stamp = was.st; FileStore._cache = null;
     FileStore.dirty = q.dirty; FileStore._journal = q.journal; FileStore._journalBytes = q.jb;
     FileStore._journalStamp = q.js; FileStore.needSnapshot = q.need; FileStore.problem = q.prob;
     FileStore.lastSavedAt = q.saved; FileStore.lastSnapshotAt = q.snap;
@@ -25847,7 +26306,7 @@ test('The shrink consent is one-shot, not a standing permission', async () => {
 
 test('Running the write tests leaves the real pending queue alone', async () => {
   const F = FileStore;
-  const was = { c: F.connected, dir: F.dirHandle, dirty: F.dirty, j: F._journal, jb: F._journalBytes, js: F._journalStamp, ns: F.needSnapshot, p: F.problem, sa: F.lastSavedAt, sn: F.lastSnapshotAt, ls: F._lastSize, lq: F._lastQuestionCount, dq: F._diskQuestionCount, sk: F._shrinkOk, st: F._stamp, lg: F._lastGoodText };
+  const was = { c: F.connected, dir: F.dirHandle, dirty: F.dirty, j: F._journal, jb: F._journalBytes, js: F._journalStamp, ns: F.needSnapshot, p: F.problem, sa: F.lastSavedAt, sn: F.lastSnapshotAt, ls: F._lastSize, lq: F._lastQuestionCount, dq: F._diskQuestionCount, sk: F._shrinkOk, st: F._stamp };
   try {
     F.connected = true; F.dirty = true; F.needSnapshot = true;
     F._journal = [{ o: 'p', s: 'questions', v: { uuid: 'answered-just-now' } }];
@@ -25863,7 +26322,7 @@ test('Running the write tests leaves the real pending queue alone', async () => 
     F.connected = was.c; F.dirHandle = was.dir; F.dirty = was.dirty; F._journal = was.j;
     F._journalBytes = was.jb; F._journalStamp = was.js; F.needSnapshot = was.ns; F.problem = was.p;
     F.lastSavedAt = was.sa; F.lastSnapshotAt = was.sn; F._lastSize = was.ls; F._lastQuestionCount = was.lq;
-    F._diskQuestionCount = was.dq; F._shrinkOk = was.sk; F._stamp = was.st; F._lastGoodText = was.lg; F._cache = null;
+    F._diskQuestionCount = was.dq; F._shrinkOk = was.sk; F._stamp = was.st; F._cache = null;
   }
 });
 
@@ -26274,6 +26733,33 @@ test('A game that is not on the course cannot be launched by a stale link', asyn
     await launchGame('kbc');
     assert(!document.querySelector('.game-root.kbc'), 'no game was mounted');
   } finally { State.course = prevCourse; }
+});
+test('KBC never rebuilds its stage once the player has left', async () => {
+  const view = $('#view'), keep = Array.prototype.slice.call(view.childNodes);
+  const prevView = State.view;
+  const qs = [];
+  for (let i = 0; i < KBC_PRIZES.length * 2; i++) qs.push(toGameQuestion(mkQ('Q' + i, ['a', 'b', 'c', 'd'], 0)));
+  try {
+    await runKBC(qs);
+    const host = $('#kbc');
+    assert(host, 'the game mounted');
+    host.remove();                 // exactly what Quit -> go('games') does
+    // menu() (run inside runKBC, before any Play/Take the seat click) already
+    // left its own screen in host — the guard's job is to add nothing further
+    // once detached, not to have found host pre-emptively empty.
+    const before = host.childNodes.length;
+    window.__kbc.start();          // stands in for the deferred draw()
+    eq(host.querySelector('.kbc-stage'), null, 'no stage is built on a detached host');
+    eq(host.childNodes.length, before, 'and nothing at all is drawn into it');
+  } finally {
+    view.textContent = ''; keep.forEach(n => view.appendChild(n)); State.view = prevView;
+  }
+});
+test('A game question carries the explanation and qid a reveal needs', () => {
+  const g = toGameQuestion(mkQ('Stem', ['a', 'b', 'c', 'd'], 2, { explanation: 'Because the control is preventive.', qid: 'Q-0001' }));
+  eq(g.explanation, 'Because the control is preventive.', 'the examiner note reaches the game');
+  eq(g.qid, 'Q-0001', 'and so does the qid the end screen prints');
+  eq(g.correctText, 'c');
 });
 
 test('Only active, verified questions can enter a session', () => {
@@ -27426,6 +27912,18 @@ test('Duplicate detection is partitioned, and still works inside each bank', asy
   const across = detectDuplicates([cse2], [cse]).get(cse2.uuid);
   assert(across && across.cls === 'definite', 'but an identical question under another scenario must be — that is a real duplicate');
 });
+test('The review-queue Compare pool is partitioned like detection is', async () => {
+  const opts = ['Segregation of duties', 'Log review', 'Annual recertification', 'Change minutes'];
+  const cse = mkQ('Which control BEST prevents unauthorised production changes?', opts, 0, { status: 'possible_dup', answerVerified: 'verified', domainId: 'D1', caseStudyId: 'case-1', caseSeq: 1 });
+  const cse2 = mkQ('Which control best prevents an unauthorised change reaching production?', opts, 0, { status: 'active', answerVerified: 'verified', domainId: 'D1', caseStudyId: 'case-2', caseSeq: 1 });
+  const std = mkQ('Which control BEST prevents unauthorised production changes?', opts, 0, { status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  await recomputeFingerprint(cse); await recomputeFingerprint(cse2); await recomputeFingerprint(std);
+  // Mirror of reviewDuplicate's pool construction, with the fix applied.
+  const bank = [std, cse2].filter(x => x.uuid !== cse.uuid && x.status !== 'merged' && x.status !== 'rejected' && comparablePair(cse, x));
+  const pool = candidatesFor(cse, buildIndex(bank), cse.uuid);
+  assert(!pool.some(o => o.uuid === std.uuid), 'the identical standalone never enters the Compare pool');
+  assert(pool.some(o => o.uuid === cse2.uuid), 'the paraphrased case question still does');
+});
 
 /* ---- hand entry ---- */
 test('A hand-written question earns exactly the status its content deserves', () => {
@@ -28402,6 +28900,15 @@ test('The offline switch is honest about where it cannot work', () => {
       await Settings.set('offlineEnabled', was);
     }
   })();
+});
+test('The offline shell can tell this app from whatever else is on this port', () => {
+  // sw.js overwrites the cached shell only when the page it just fetched
+  // still contains this string. The string is asserted here as well as in
+  // sw.js: change the title and the worker would quietly stop recognising
+  // its own app.
+  const SHELL_MARK = '<title>MCQ Mastery';
+  eq(('<title>' + document.title).indexOf(SHELL_MARK), 0, 'the document title still begins the way sw.js expects');
+  assert(document.title.length > 11, 'and the marker is a prefix of a real title, not the whole of it');
 });
 
 test('Offline "Ready" is only ever said when the shell is really cached', () => {
@@ -29448,6 +29955,22 @@ test('A deletion made on another device actually deletes, and can then be pushed
   }
 });
 
+test('A source image outlives its questions only while one still points at it', async () => {
+  const imgId = 'selftest-img-' + Date.now();
+  const quuid = 'selftest-imgq-' + Date.now();
+  try {
+    await DB.putRaw('images', { id: imgId, dataUrl: 'data:image/jpeg;base64,AA==', hash: 'selftest', capturedAt: nowISO(), filename: 'selftest', ocrText: '', sizeKB: 1 });
+    await DB.putRaw('questions', { uuid: quuid, qid: 'ZZZ-Q-999998', courseId: 'selftest-course', status: 'active', stem: 'scratch', options: [], stats: {}, imageId: imgId, updatedAt: nowISO() });
+    await pruneOrphanImages();
+    assert(await DB.get('images', imgId), 'an image a question still points at is kept');
+    await DB.delRaw('questions', quuid);
+    assert((await pruneOrphanImages()) >= 1, 'once its last question is gone the image is counted as pruned');
+    eq(await DB.get('images', imgId), undefined, 'and is actually gone from the images store');
+  } finally {
+    await DB.delRaw('questions', quuid); await DB.delRaw('images', imgId);
+  }
+});
+
 test('A merge that shrinks only because this browser held the tombstones can still be saved', async () => {
   const was = { f: FileStore._shrinkOk, d: DriveSync._driveShrinkOk, c: State.course, list: State.courses.slice() };
   const savedActive = Settings.get('activeCourseId');
@@ -29562,6 +30085,24 @@ test('A deleted course stays deleted, and takes only its own things with it', as
   eq(ct.uuid, undefined, 'it carries no question uuid, so older builds ignore it');
   eq(retiredCourseIds([ct, { qid: 'CISA-Q-1', uuid: 'u' }]).size, 1, 'and only course tombstones are read as courses');
 });
+test('A course wipe takes its sessions and case studies with it across devices', async () => {
+  const stores = extra => Object.assign({ courses: [], sources: [], batches: [], attempts: [], sessions: [], audit: [], images: [], idRegister: [], tombstones: [], presets: [], notes: [], caseStudies: [], questionVersions: [], questions: [], settings: [] }, extra || {});
+  const behind = { savedAt: '2026-01-01T00:00:00Z', stores: stores({
+    courses: [{ id: 'c', code: 'C' }],
+    questions: [{ uuid: 'q1', qid: 'C-Q-000001', courseId: 'c', updatedAt: '2026-01-01T00:00:00Z' }],
+    sessions: [{ id: 's1', courseId: 'c', questionUuids: ['q1'], status: 'complete' }],
+    caseStudies: [{ id: 'cs1', courseId: 'c', title: 'orphan' }] }) };
+  const wiped = { savedAt: '2026-02-01T00:00:00Z', stores: stores({
+    courses: [{ id: 'c', code: 'C' }],
+    tombstones: [{ qid: 'C-Q-000001', uuid: 'q1', retiredAt: '2026-02-01T00:00:00Z', reason: 'course wipe' }, rowTombstone('s1', 'course wipe'), rowTombstone('cs1', 'course wipe')] }) };
+  const out = await mergeBankPayloads(behind, wiped);
+  eq(out.merged.stores.courses.length, 1, 'the course itself stays — only its contents were wiped');
+  eq(out.merged.stores.questions.length, 0, 'the wiped questions do not come back');
+  eq(out.merged.stores.sessions.length, 0, 'nor the sessions the other device still held');
+  eq(out.merged.stores.caseStudies.length, 0, 'nor the case studies');
+  const twice = await mergeBankPayloads(out.merged, wiped);
+  eq(twice.merged.stores.caseStudies.length, 0, 'and merging again finds nothing to resurrect');
+});
 
 test('A note removed on one device does not come back from the other', async () => {
   const stores = extra => Object.assign({
@@ -29604,6 +30145,20 @@ test('A bank file may be gzipped or plain, and is told apart by its own bytes', 
   let threw = false;
   try { await readBankBytes(new TextEncoder().encode('nonsense').buffer); } catch (e) { threw = /did not look like/.test(e.message); }
   assert(threw, 'and something that is neither is refused by name');
+});
+test('A bank file taken from Drive is adopted by folder-connect, not called unreadable', async () => {
+  if (typeof self.CompressionStream !== 'function') return 'skipped — this browser cannot compress';
+  const was = { dir: FileStore.dirHandle, fh: FileStore.fileHandle };
+  try {
+    const payload = { app: 'mcq-mastery', schema: APP.schema, savedAt: nowISO(), stores: { questions: [{ uuid: 'u1' }, { uuid: 'u2' }] } };
+    const gz = await new Response(new Blob([JSON.stringify(payload)]).stream().pipeThrough(new CompressionStream('gzip'))).blob();
+    FileStore.fileHandle = null;
+    FileStore.dirHandle = { getFileHandle: async () => ({ getFile: async () => gz }) };
+    const seen = await FileStore.loadFromDiskPreview();
+    eq(seen.status, 'has-data', 'the gzip Drive writes is a bank file, not an unreadable one');
+    eq(seen.count, 2, 'and its questions are counted before anything is allowed to overwrite them');
+    assert(seen.blob, 'and the raw bytes travel with it, so an unreadable file is saved off byte-for-byte');
+  } finally { FileStore.dirHandle = was.dir; FileStore.fileHandle = was.fh; }
 });
 
 test('A deletion is counted as a deletion, not netted against what arrived', async () => {
@@ -29818,6 +30373,41 @@ test('A lapsed Drive sign-in retries itself instead of waiting to be noticed', a
     D.connected = saved.c; D.configured = saved.g;
     D._resumeTimer = saved.t; D._resumeDelay = saved.d; D._lastResumeAt = saved.l;
     FileStore.connected = savedFs;
+  }
+});
+
+test('A catch-up that could not read Drive is retried, not held for the session', async () => {
+  const D = DriveSync;
+  const saved = { c: D.connected, h: D._holdPush, l: D._lastRemoteCheck, u: D._catchUpWithDrive, f: D._fetchModifiedTime };
+  try {
+    let caught = 0;
+    D.connected = true; D._catchingUp = false; D._pushing = false;
+    D._catchUpWithDrive = async () => { caught++; };
+    D._fetchModifiedTime = async () => { throw new Error('the guard must answer before the network'); };
+    D._holdPush = DRIVE_HOLD_UNREAD; D._lastRemoteCheck = 0;
+    eq(await D.checkRemote(), true, 'a browser that could not read Drive tries again by itself');
+    eq(caught, 1, 'and the retry is the ordinary catch-up');
+    D._holdPush = 'a deletion from another device is waiting to be applied'; D._lastRemoteCheck = 0;
+    eq(await D.checkRemote(), false, 'a deletion waiting to be applied is never re-asked on a timer');
+    eq(caught, 1, 'so no second modal');
+  } finally {
+    D.connected = saved.c; D._holdPush = saved.h; D._lastRemoteCheck = saved.l;
+    D._catchUpWithDrive = saved.u; D._fetchModifiedTime = saved.f;
+  }
+});
+
+test('A 403 from Drive is not blamed on the sign-in', () => {
+  const D = DriveSync;
+  const saved = { t: D.accessToken, e: D.tokenExpiresAt, c: D.connected, p: D.problem };
+  try {
+    assert(D._handleAuthFailure({ status: 403 }), '403 is still handled');
+    assert(/full|read-only/.test(D.problem), D.problem);
+    assert(!/sign-in is no longer valid/.test(D.problem), 'a full Drive must not be reported as a dead sign-in: ' + D.problem);
+    assert(D._handleAuthFailure({ status: 401 }), '401 is handled');
+    assert(/sign-in is no longer valid/.test(D.problem), D.problem);
+  } finally {
+    D.accessToken = saved.t; D.tokenExpiresAt = saved.e;
+    D.connected = saved.c; D.problem = saved.p;
   }
 });
 
@@ -30104,6 +30694,35 @@ test('Every disconnected state offers a way out, on every browser', () => {
   }
 });
 
+test('Settings offers the recovery dialog, not a bare Reconnect, when the file is gone or was rewritten', async () => {
+  const was = { t: FileStore.tier, c: FileStore.connected, n: FileStore.needsReconnect, p: FileStore.problem, e: FileStore.everConnected,
+    course: State.course, courses: State.courses };
+  const root = h('div');
+  try {
+    // ROUTES.settings renders per-course cards unconditionally (State.course.code
+    // and friends), which a fresh headless run never has selected.
+    State.course = makeCourse('ZTEST', 'Settings test course', CISA_BLUEPRINT, {});
+    State.courses = [State.course];
+    FileStore.tier = 'folder'; FileStore.everConnected = true; FileStore.connected = false; FileStore.needsReconnect = true;
+    for (const p of ['missing', 'changed']) {
+      FileStore.problem = p;
+      root.textContent = '';
+      await ROUTES.settings(root);
+      const labels = Array.prototype.map.call(root.querySelectorAll('button'), b => b.textContent);
+      assert(labels.some(t => /fix this/i.test(t)), p + ': the same button the storage bar offers: ' + labels.join('/'));
+      assert(!labels.some(t => t === 'Reconnect'), p + ': not a reconnect that skips the backup gate');
+      assert(!/your file still holds everything/i.test(root.textContent), p + ': must not claim the file is intact');
+    }
+    FileStore.problem = null;
+    root.textContent = '';
+    await ROUTES.settings(root);
+    assert(Array.prototype.some.call(root.querySelectorAll('button'), b => b.textContent === 'Reconnect'), 'a lapsed permission still gets Reconnect');
+  } finally {
+    FileStore.tier = was.t; FileStore.connected = was.c; FileStore.needsReconnect = was.n; FileStore.problem = was.p; FileStore.everConnected = was.e;
+    State.course = was.course; State.courses = was.courses;
+  }
+});
+
 test('Nothing is said about durability until it changes the answer', () => {
   // An empty bank has nothing to lose, and a bank behind a file loses nothing
   // to eviction — boot reloads it from disk. Saying anything in either case
@@ -30142,6 +30761,76 @@ test('A granted promise is not oversold', () => {
   assert(/[Cc]learing your browsing data/.test(g.note), g.note);
 });
 
+test('A course-only backup carries nothing filed under another course', async () => {
+  const stamp = 'test-scope-' + Date.now();
+  const mine = stamp + '-A', other = stamp + '-B';
+  const was = { course: State.course, courses: State.courses };
+  try {
+    await DB.put('courses', { id: mine, code: 'SCA', name: 'A' });
+    await DB.put('courses', { id: other, code: 'SCB', name: 'B' });
+    await DB.put('notes', { id: stamp + '-n1', courseId: mine, text: 'keep' });
+    await DB.put('notes', { id: stamp + '-n2', courseId: other, text: 'drop' });
+    await DB.put('caseStudies', { id: stamp + '-c1', courseId: mine, title: 'keep' });
+    await DB.put('caseStudies', { id: stamp + '-c2', courseId: other, title: 'drop' });
+    await DB.put('settings', { k: courseKey('mockCount', other), v: 5, updatedAt: nowISO() });
+    State.courses = await DB.all('courses');
+    State.course = State.courses.find(c => c.id === mine);
+    const out = await buildBackup('course');
+    eq(out.manifest.scope, 'course');
+    eq(out.manifest.courseId, mine);
+    const zip = await unzip(await out.blob.arrayBuffer());
+    const notes = JSON.parse(await zip.text('data/notes.json'));
+    const cases = JSON.parse(await zip.text('data/caseStudies.json'));
+    const settings = JSON.parse(await zip.text('data/settings.json'));
+    assert(notes.some(n => n.id === stamp + '-n1') && !notes.some(n => n.courseId === other), 'notes of the other course must not be in a course-only backup');
+    assert(cases.some(c => c.id === stamp + '-c1') && !cases.some(c => c.courseId === other), 'case studies of the other course must not be in a course-only backup');
+    assert(!settings.some(r => r.k === courseKey('mockCount', other)), 'the other course’s settings must not travel either');
+  } finally {
+    for (const pair of [['notes', stamp + '-n1'], ['notes', stamp + '-n2'], ['caseStudies', stamp + '-c1'], ['caseStudies', stamp + '-c2'], ['settings', courseKey('mockCount', other)], ['courses', mine], ['courses', other]]) {
+      try { await DB.del(pair[0], pair[1]); } catch (e) { }
+    }
+    State.course = was.course; State.courses = was.courses;
+  }
+});
+
+test('Analytics says which columns the period select governs', async () => {
+  // ROUTES.analytics renders per-course tiles unconditionally, which a fresh
+  // headless run never has selected.
+  const root = h('div');
+  const was = { days: AnaState.days, course: State.course, courses: State.courses };
+  AnaState.days = 30;
+  try {
+    State.course = makeCourse('OC2', 'Analytics label test course', CISA_BLUEPRINT, {});
+    State.courses = [State.course];
+    await ROUTES.analytics(root);
+    if (!/No .*attempts in this period/.test(root.textContent)) {
+      assert(/Coverage, First-attempt and Weakness: all time/.test(root.textContent), 'the all-time columns are named on the card');
+      assert(/in the last 30 days \(/.test(root.textContent), 'the coverage notice names the period');
+    }
+  } finally { AnaState.days = was.days; State.course = was.course; State.courses = was.courses; }
+});
+
+test('A backup is a package the restore path can read back', async () => {
+  // The only disaster-recovery route, and its two halves sit hundreds of lines
+  // apart: buildBackup() writes the package, restoreFlow() reads it. Nothing
+  // else holds them to the same file names or to the same text the checksum is
+  // taken over, and a break is silent both ways — the restore either finds no
+  // data at all, or calls a perfectly good backup damaged and edited.
+  const out = await buildBackup('all');   // read-only: DB.all, then zip
+  const zip = await unzip(await out.blob.arrayBuffer());
+  eq(out.manifest.schemaVersion, APP.schema, 'a backup must claim the schema it was made from');
+  for (const s of BACKUP_STORES) {
+    const t = await zip.text('data/' + s + '.json');     // the exact name restoreFlow asks for
+    assert(t != null, s + ' must be in the package under the name the restore reads');
+    const rows = JSON.parse(t);
+    eq(rows.length, out.manifest.counts[s], s + ' count must match the manifest');
+    // Hashed the way restoreFlow hashes it — over the re-serialised rows, not
+    // over the file text — or a good backup is reported as damaged.
+    eq(await sha256(JSON.stringify(rows)), out.manifest.checksums[s],
+      'the manifest checksum must match what the restore recomputes: ' + s);
+  }
+});
+
 test('The bundle is a real zip that a zip reader can read back', async () => {
   // zipFiles is shared with the backups, so this is really a check that the
   // entry list is well formed — a name wrong here produces a file that opens
@@ -30160,6 +30849,10 @@ test('The bundle is a real zip that a zip reader can read back', async () => {
   // And the list the exporter actually uses names the app itself as required.
   const required = LOCAL_BUNDLE.filter(f => f.required).map(f => f.url);
   eq(required.join(','), 'index.html', 'only the page itself is indispensable');
+});
+test('The suite leaves nothing of its own in the bank', async () => {
+  const left = (await DB.all('questions')).filter(x => String(x.courseId || '').indexOf('test-') === 0 || String(x.courseId || '').indexOf('selftest-') === 0);
+  eq(left.length, 0, 'a test wrote a question and did not remove it: ' + left.map(x => x.qid || x.stem).join('; '));
 });
 
 /* ============================================================================
@@ -30215,7 +30908,12 @@ async function boot() {
   State.courses = await DB.all('courses');
   const wanted = Settings.get('activeCourseId');
   State.course = State.courses.find(c => c.id === wanted && !c.archived) || State.courses.find(c => !c.archived) || State.courses[0] || null;
-  if (State.course && State.course.id !== wanted) await Settings.set('activeCourseId', State.course.id);
+  // Device-local bookkeeping only. On a read-only boot (folder permission not
+  // yet re-granted, or the file gone) the guarded write is refused; the shell
+  // must still render, because the top bar is the only way to reconnect.
+  if (State.course && State.course.id !== wanted) {
+    try { await Settings.set('activeCourseId', State.course.id); } catch (e) { /* remembered on the next writable boot */ }
+  }
   if (!HAS_CS) setTimeout(() => toast('This browser has no Compression Streams, so .docx, .xlsx and ZIP backups will not work. Use a current Chrome, Edge, Safari or Firefox.', 'warn', 9000), 900);
 
   renderShell();
