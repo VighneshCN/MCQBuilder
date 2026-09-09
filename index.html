@@ -1442,7 +1442,6 @@ mark.dif{background:var(--amber-tint);color:var(--amber);border-radius:2px;paddi
 .imgstage canvas{touch-action:none}
 kbd{font-family:var(--mono);font-size:11px;background:var(--surface-3);border:1px solid var(--rule);border-bottom-width:2px;border-radius:4px;padding:1px 5px}
 .scroll-y{max-height:420px;overflow:auto}
-.dl-list{display:flex;flex-direction:column;gap:8px}
 .srcline{font-family:var(--mono);font-size:11.5px;color:var(--txt-3);word-break:break-word}
 progress{width:100%;height:6px;appearance:none;border:0}
 progress::-webkit-progress-bar{background:var(--surface-3);border-radius:3px}
@@ -1531,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.6', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.7', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1846,6 +1845,8 @@ const DB = {
   },
 
   byIndex(store, index, value) { return this._p(this.tx(store).objectStore(store).index(index).getAll(value)); },
+  /** Count the records under one index key without reading a single one. */
+  countBy(store, index, value) { return this._p(this.tx(store).objectStore(store).index(index).count(value)); },
   /** Stream a store/index without materialising everything at once. */
   each(store, fn, index, range) {
     return new Promise((res, rej) => {
@@ -2263,7 +2264,7 @@ function blankQuestion(courseId) {
     verifiedAt: null, verifyNote: '', conflict: false,
     dupOf: null, canonicalUuid: null, aliasQids: [], mergedFrom: [],
     conflictWith: [], dupWith: [], dismissedPairs: [],
-    fingerprint: '', normStem: '', tokens: [],
+    fingerprint: '', tokens: [],
     stats: {
       attempts: 0, correct: 0, incorrect: 0, guessedCorrect: 0,
       firstResult: null, lastResult: null, lastAttemptAt: null,
@@ -2519,8 +2520,11 @@ const STOPWORDS = new Set(('a an the of to in for on with and or is are was were
   'as at by from it its into their there than then when what who whom whose how why does do did not no nor but if ' +
   'should would could may might can will shall your you we they he she i').split(' '));
 
-/** Strip numbering, option labels, headers/footers and cosmetic punctuation. */
-function normText(s) {
+/** Strip numbering, option labels, headers/footers and cosmetic punctuation.
+    A stem carries its question number and an answer line its option label,
+    so those are shed; an option's OWN text may legitimately begin with
+    "1 - 3 years" or "C: drive", so normOptText keeps them. */
+function normText(s, isOption) {
   let t = String(s || '');
   if (t.normalize) t = t.normalize('NFKC');
   t = t.toLowerCase()
@@ -2528,10 +2532,11 @@ function normText(s) {
     .replace(/[\u201C\u201D\u2033]/g, '"')
     .replace(/[\u2010-\u2015\u2212]/g, '-')
     .replace(/\u00a0/g, ' ')
-    .replace(/\u2026/g, '...')
+    .replace(/\u2026/g, '...');
+  if (!isOption) t = t
     .replace(/^\s*(q(uestion)?\s*[.\-:)]?\s*)?\d{1,4}\s*[.)\-:]\s+/i, '')  // leading question number
-    .replace(/^\s*[\(\[]?[a-h][\)\].:]\s+/i, '')                            // leading option label
-    .replace(/page\s+\d+\s+of\s+\d+/g, ' ')
+    .replace(/^\s*[\(\[]?[a-h][\)\].:]\s+/i, '');                           // leading option label
+  t = t.replace(/page\s+\d+\s+of\s+\d+/g, ' ')
     .replace(/[\u2022\u25cf\u25aa\u00b7]/g, ' ')
     // Everything that is not a letter, digit, whitespace or per-cent sign is
     // cosmetic for comparison purposes and becomes a space. This is what makes
@@ -2541,16 +2546,19 @@ function normText(s) {
     .trim();
   return t;
 }
+function normOptText(s) { return normText(s, true); }
 function tokens(s) {
   return normText(s).split(' ').filter(w => w.length > 1 && !STOPWORDS.has(w));
 }
 function contentKey(q) {
   const stem = normText(q.stem);
-  const opts = (q.options || []).map(o => normText(o.text)).filter(Boolean).sort().join('|');
+  const opts = (q.options || []).map(o => normOptText(o.text)).filter(Boolean).sort().join('|');
   return stem + '||' + opts;
 }
 async function recomputeFingerprint(q) {
-  q.normStem = normText(q.stem);
+  // `normStem` was a lower-cased copy of the stem that nothing ever read;
+  // records written before it was dropped shed it on their next save.
+  delete q.normStem;
   q.tokens = Array.from(new Set(tokens(q.stem))).slice(0, 60);
   q.fingerprint = await sha256(contentKey(q));
   return q.fingerprint;
@@ -2569,9 +2577,11 @@ function shingles(str, n) {
   for (let i = 0; i + n <= t.length; i++) out.add(t.substr(i, n));
   return out;
 }
-function optionOverlap(a, b) {
-  const A = (a.options || []).map(o => normText(o.text)).filter(Boolean);
-  const B = (b.options || []).map(o => normText(o.text)).filter(Boolean);
+/** Normalised option texts, computed once per question and cached by simParts(). */
+function optionTexts(q) {
+  return (q.options || []).map(o => normOptText(o.text)).filter(Boolean);
+}
+function optionOverlap(A, B) {
   if (!A.length || !B.length) return 0;
   let hit = 0;
   A.forEach(x => { if (B.indexOf(x) >= 0) hit++; });
@@ -2579,32 +2589,38 @@ function optionOverlap(a, b) {
 }
 function correctTextOf(q) {
   const o = (q.options || []).find(x => x.id === q.correctOptionId);
-  return o ? normText(o.text) : '';
+  return o ? normOptText(o.text) : '';
 }
 /** Weighted composite score in [0,1] with an inspectable breakdown. */
 /* Comparing two questions needs token sets, character shingles and a content
    key for each. Rebuilding those inside every comparison meant recomputing
    the same question's data hundreds of times per import. They are cached on
-   the question instead, and thrown away whenever any question is written, so
-   an edit can never be compared against stale text.
+   the question instead, keyed by the exact text it was built from, so an
+   edit can never be compared against stale text while a write that only
+   touches pairing state (conflictWith, dupWith, status) keeps every cache.
    The cache is non-enumerable, so it never reaches the data file. */
-let SIM_GEN = 0;
-function bumpSimGen() { SIM_GEN++; }
+function simKey(q) {
+  return [q.stem, q.correctOptionId,
+    (q.options || []).map(o => o.id + '=' + o.text).join(''),
+    (q.tags || []).join('')].join(' ');
+}
 
 function simParts(q) {
-  if (q.__sim && q.__simGen === SIM_GEN) return q.__sim;
+  const key = simKey(q);
+  if (q.__sim && q.__simKey === key) return q.__sim;
   const ansText = correctTextOf(q);
   const parts = {
     tok: new Set(tokens(q.stem)),
     shg: shingles(q.stem, 5),
     ckey: contentKey(q),
+    opts: optionTexts(q),
     ansText: ansText,
     ansTok: ansText ? new Set(tokens(ansText)) : null,
     tags: new Set(q.tags || [])
   };
   try {
     Object.defineProperty(q, '__sim', { value: parts, writable: true, enumerable: false, configurable: true });
-    Object.defineProperty(q, '__simGen', { value: SIM_GEN, writable: true, enumerable: false, configurable: true });
+    Object.defineProperty(q, '__simKey', { value: key, writable: true, enumerable: false, configurable: true });
   } catch (e) { /* frozen object: fall back to recomputing each time */ }
   return parts;
 }
@@ -2613,7 +2629,7 @@ function similarity(a, b) {
   const A = simParts(a), B = simParts(b);
   const stemTok = jaccard(A.tok, B.tok);
   const stemChr = jaccard(A.shg, B.shg);
-  const opts = optionOverlap(a, b);
+  const opts = optionOverlap(A.opts, B.opts);
   const ans = (A.ansText && B.ansText) ? (A.ansText === B.ansText ? 1 : jaccard(A.ansTok, B.ansTok)) : 0;
   const dom = (a.domainId && b.domainId) ? (a.domainId === b.domainId ? 1 : 0) : 0.5;
   const kw = jaccard(A.tags, B.tags);
@@ -2765,8 +2781,9 @@ function detectDuplicates(candidates, bank) {
    ever benched the newer record, leaving its older, equally-wrong partner
    sitting in Active. ARCHITECTURE.md promises both sides are held out of
    practice; recheckQuestion() is what actually makes that true, called
-   after every save, admission, merge and unmerge, on both sides of any pair
-   it finds — not just the record that happened to trigger it. */
+   after every save, merge and unmerge, and on admission for every candidate
+   that carried a staging verdict, on both sides of any pair it finds — not
+   just the record that happened to trigger it. */
 
 /** Add otherUuid to q's pairing list. Pure list mutation — does not touch
     status or the conflict flag, so it is safe to call from anywhere without
@@ -2897,8 +2914,11 @@ async function recheckQuestion(q, opts) {
 
 /** Full-bank sweep — for data imported before this feature existed, or after
     edits made outside the normal save path (a restore, a manual DB edit).
-    Always persists q: normalizePairState can correct a record even when its
-    pairing lists themselves did not change. */
+    Persists q whenever anything about it moved — its pairings, its status,
+    or the bare conflict flag, which normalizePairState can correct even when
+    the lists and status did not change. Untouched records are left alone so
+    a sweep never bumps updatedAt bank-wide (that would make this copy win
+    every later newest-wins merge). */
 async function rescanCourseForPairs(courseId, onProgress) {
   const all = await Questions.byCourse(courseId);
   const live = all.filter(x => x.status !== 'merged' && x.status !== 'rejected');
@@ -2906,9 +2926,9 @@ async function rescanCourseForPairs(courseId, onProgress) {
   const byUuid = new Map(live.map(x => [x.uuid, x]));
   let newConflicts = 0, newDups = 0, cleared = 0, checked = 0;
   for (const q of live) {
-    const before = q.status;
+    const before = q.status, beforeConflict = !!q.conflict;
     const r = await recheckQuestion(q, { bank: live, index, byUuid });
-    if (r.changed || q.status !== before) {
+    if (r.changed || q.status !== before || !!q.conflict !== beforeConflict) {
       q.updatedAt = nowISO();
       await DB.put('questions', q);
       newConflicts += r.newConflicts.length;
@@ -2947,7 +2967,15 @@ async function repairOrphanedConflicts(courseId) {
   const liveByUuid = new Map(live.map(q => [q.uuid, q]));
   let becameConflict = 0, cleared = 0, doubtful = 0;
   for (const q of orphans) {
-    const fromMerge = (q.mergedFrom || []).length > 0;
+    // Only a merge whose absorbed record actually gave a different answer
+    // can be the disagreement behind this flag. A record that merely absorbed
+    // an agreeing duplicate, and was orphaned later by a rejected or deleted
+    // partner, has nothing to confirm. The absorbed record's snapshot is
+    // already stored by mergeQuestions, so read the answer from it.
+    const fromMerge = (q.mergedFrom || []).some(m => {
+      const s = m.snapshot ? correctTextOf(m.snapshot) : '';
+      return !!s && s !== correctTextOf(q);
+    });
     // Cleared first so the recheck re-derives from scratch rather than
     // diffing against the very list that is already wrong.
     q.conflictWith = [];
@@ -2960,7 +2988,10 @@ async function repairOrphanedConflicts(courseId) {
       // actually be acted on.
       q.conflict = false;
       q.answerVerified = 'doubtful';
-      q.status = 'needs_answer';
+      // A possible-duplicate pairing the recheck just found keeps the status
+      // it set: that review comes first, and normalizePairState would put it
+      // back on the next save anyway. The doubt itself survives either way.
+      if (!(q.dupWith || []).length) q.status = 'needs_answer';
       q.verifyNote = MERGE_DISAGREE_NOTE;
       doubtful++;
     } else cleared++;
@@ -3002,7 +3033,7 @@ async function resolveConflictGroup(choices) {
   }
   if (!recs.length) return null;
   const uuids = new Set(recs.map(r => r.uuid));
-  const textOf = (r) => normText((r.options.find(o => o.id === r.correctOptionId) || {}).text || '');
+  const textOf = (r) => normOptText((r.options.find(o => o.id === r.correctOptionId) || {}).text || '');
 
   // Only pairs that STILL disagree need dismissing. Where the chosen answers
   // now match, the pairing simply stops being a conflict on its own — and
@@ -3089,11 +3120,21 @@ async function dismissConflictPair(uuid, partnerUuid) {
 }
 
 /** Word-level diff used by the side-by-side duplicate reviewer. */
-function diffWords(a, b) {
-  const A = String(a || '').split(/(\s+)/), B = String(b || '').split(/(\s+)/);
+function diffWords(a, b, coarse) {
+  // Word by word normally; sentence by sentence when the texts are too
+  // long for the word-level table (see the cap below).
+  const sep = coarse ? /([.?!]\s+|\n+)/ : /(\s+)/;
+  const A = String(a || '').split(sep), B = String(b || '').split(sep);
   const n = A.length, m = B.length;
-  // LCS table capped for safety on very long stems
-  if (n * m > 400000) return { a: [{ t: a, s: 'same' }], b: [{ t: b, s: 'same' }] };
+  // LCS table capped for safety on very long stems. Never report the texts
+  // as identical just because they were too long to compare: retry sentence
+  // by sentence, and failing even that mark the whole text as differing
+  // unless it really is the same string.
+  if (n * m > 400000) {
+    if (!coarse) return diffWords(a, b, true);
+    const s = a === b ? 'same' : 'diff';
+    return { a: [{ t: a, s }], b: [{ t: b, s }] };
+  }
   const dp = [];
   for (let i = 0; i <= n; i++) dp.push(new Uint16Array(m + 1));
   for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
@@ -3313,6 +3354,11 @@ async function zipFiles(entries) {
   // entries: [{name, data:(string|Uint8Array)}]
   const enc = new TextEncoder();
   const chunks = [], central = [];
+  // DOS date/time (local, 2-second resolution) so extracted files carry the
+  // time the archive was written rather than a constant 1 January 2000.
+  const now = new Date();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
   let offset = 0;
   for (const e of entries) {
     const nameB = enc.encode(e.name);
@@ -3324,7 +3370,7 @@ async function zipFiles(entries) {
     const lh = new Uint8Array(30 + nameB.length);
     const ldv = new DataView(lh.buffer);
     ldv.setUint32(0, 0x04034b50, true); ldv.setUint16(4, 20, true); ldv.setUint16(6, 0, true);
-    ldv.setUint16(8, method, true); ldv.setUint16(10, 0, true); ldv.setUint16(12, 0x2821, true);
+    ldv.setUint16(8, method, true); ldv.setUint16(10, dosTime, true); ldv.setUint16(12, dosDate, true);
     ldv.setUint32(14, crc, true); ldv.setUint32(18, comp.length, true); ldv.setUint32(22, dataB.length, true);
     ldv.setUint16(26, nameB.length, true); ldv.setUint16(28, 0, true);
     lh.set(nameB, 30);
@@ -3332,7 +3378,7 @@ async function zipFiles(entries) {
     const cd = new Uint8Array(46 + nameB.length);
     const cdv = new DataView(cd.buffer);
     cdv.setUint32(0, 0x02014b50, true); cdv.setUint16(4, 20, true); cdv.setUint16(6, 20, true);
-    cdv.setUint16(8, 0, true); cdv.setUint16(10, method, true); cdv.setUint16(12, 0, true); cdv.setUint16(14, 0x2821, true);
+    cdv.setUint16(8, 0, true); cdv.setUint16(10, method, true); cdv.setUint16(12, dosTime, true); cdv.setUint16(14, dosDate, true);
     cdv.setUint32(16, crc, true); cdv.setUint32(20, comp.length, true); cdv.setUint32(24, dataB.length, true);
     cdv.setUint16(28, nameB.length, true); cdv.setUint32(42, offset, true);
     cd.set(nameB, 46);
@@ -3643,7 +3689,15 @@ async function xlsxToRows(arrayBuffer) {
   return rows;
 }
 function colIndex(ref) { let n = 0; for (let i = 0; i < ref.length; i++) n = n * 26 + (ref.charCodeAt(i) - 64); return Math.max(0, n - 1); }
-function decodeXmlEnt(s) { return String(s).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d)); }
+/** One pass, so '&amp;lt;' (a cell that shows the text "&lt;") comes back as
+    '&lt;' and is never decoded a second time. */
+function decodeXmlEnt(s) {
+  return String(s).replace(/&(?:#x([0-9a-fA-F]+)|#(\d+)|(lt|gt|quot|apos|amp));/g, (m, hx, dec, name) => {
+    if (name) return { lt: '<', gt: '>', quot: '"', apos: "'", amp: '&' }[name];
+    const cp = hx ? parseInt(hx, 16) : +dec;
+    return cp <= 0x10FFFF ? String.fromCodePoint(cp) : m;
+  });
+}
 
 /* ---------- PDF standard security ----------
    Most "encrypted" PDFs are not locked to anybody. Study material, bank
@@ -4106,15 +4160,22 @@ async function pdfToText(arrayBuffer) {
   });
   const text = out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   if (!text) throw new Error('No extractable text layer. This is probably a scanned PDF — use Add from Image instead, or copy the questions into the Question sheet template under “Start from a template” and export that to PDF.');
-  // A from-scratch decoder cannot resolve every PDF structure (linearized
-  // files, compressed object streams, predictor-filtered or hint streams
-  // sitting alongside real content streams, two-byte fonts with no
-  // /ToUnicode map). When
-  // it has clearly failed, garbled bytes must never be presented as a
-  // successful import — fail with a concrete next step instead.
+  // Nothing above reads a font's /Encoding or /Differences, so text is only
+  // recovered where the string bytes ARE the characters (WinAnsi / ASCII
+  // simple fonts) or where a two-byte Type0/Identity-H font carries an
+  // embedded /ToUnicode CMap this decoder can resolve. A font with no
+  // /ToUnicode — a bare Identity-H font, or a subset font remapped through a
+  // private /Differences table — has no lookup here to turn its codes back
+  // into real characters. Content streams are always found by scanning (one
+  // can never sit inside a compressed object stream, ISO 32000-1 §7.5.7, and
+  // linearization only reorders offsets) — but a Page or Font dictionary
+  // packed into one is invisible to the same scan, which can silently break
+  // /ToUnicode resolution for an otherwise-readable font. When decoding has
+  // clearly failed, garbled bytes must never be presented as a successful
+  // import — fail with a concrete next step instead.
   const printable = (text.match(/[ -~\n\t]/g) || []).length;
   if (printable / text.length < 0.85 || text.replace(/\s/g, '').length < 30) {
-    throw new Error('This PDF\'s text layer could not be read reliably (its internal structure — a compressed object layout, or a font with no character map — defeats this app\'s built-in decoder). The dependable way round it: download the Question sheet or Case study sheet template under “Start from a template”, paste the text into it, and save that as PDF. Opening the original in Word or Google Docs and saving as .docx also works, as does Add from Image, page by page.');
+    throw new Error('This PDF\'s text layer could not be read reliably (this app\'s built-in decoder has no way to turn some of its glyph numbers back into text — most often because a font here has no usable character map). The dependable way round it: download the Question sheet or Case study sheet template under “Start from a template”, paste the text into it, and save that as PDF. Opening the original in Word or Google Docs and saving as .docx also works, as does Add from Image, page by page.');
   }
   return text;
 }
@@ -5499,13 +5560,11 @@ function applyAttempt(q, att) {
   s.lastAttemptAt = att.ts;
   s.avgMs = s.attempts === 1 ? att.ms : Math.round((s.avgMs * (s.attempts - 1) + att.ms) / s.attempts);
   s.confidence = confWeight(att.confidence);
-  if (att.scheduleSR !== false) {
-    // The question's own course decides the ladder, not whichever course
-    // happens to be open — a merge replays questions from every course.
-    const sch = scheduleNext(att.correct, att.confidence, q.srStage,
-      Settings.get('srIntervals', q.courseId), att.ts);
-    q.srStage = sch.stage; q.nextReviewAt = sch.at; q.srReason = sch.reason;
-  }
+  // The question's own course decides the ladder, not whichever course
+  // happens to be open — a merge replays questions from every course.
+  const sch = scheduleNext(att.correct, att.confidence, q.srStage,
+    Settings.get('srIntervals', q.courseId), att.ts);
+  q.srStage = sch.stage; q.nextReviewAt = sch.at; q.srReason = sch.reason;
   // Answering changes the record — mastery, streak, the date it next falls
   // due — so it is an edit, and the merge decides which of two devices holds
   // the newer version of a question by reading exactly this field. Without it,
@@ -6599,8 +6658,7 @@ const Session = {
       startedAt: nowISO(), endedAt: null, status: 'active',
       timeLimitMs: mode === 'mock' ? (config.minutes || Settings.get('mockMinutes')) * 60000 : null,
       elapsedMs: 0, lastTickAt: Date.now(),
-      selectionNotes: notes, shortfalls, composition,
-      poolSize: filtered.length, eligibleTotal: pool0.length
+      selectionNotes: notes, shortfalls, composition
     };
     await DB.put('sessions', s);
     await audit('create', 'session', s.id, null, { mode, count: ordered.length, caseQuestions: caseQuestions.length, seed }, '');
@@ -10575,6 +10633,9 @@ async function openQuestion(uuidStr) {
         ]));
       });
       if (source) rows.appendChild(h('div', { class: 'small muted' }, 'File hash: ' + h('span', { class: 'srcline' }).textContent + (source.fileHash || '').slice(0, 24) + '…'));
+      // The photo the question was transcribed from is kept for exactly this
+      // screen; until now it was only ever shown mid-practice.
+      if (q.imageId) rows.appendChild(h('div', { id: 'qimg-detail', class: 'imgstage' }));
       if (q.aliasQids && q.aliasQids.length) rows.appendChild(h('div', { class: 'notice' }, 'Also known as: ' + q.aliasQids.join(', ')));
       if (q.mergedFrom && q.mergedFrom.length) {
         rows.appendChild(h('div', { class: 'notice' }, [
@@ -10612,6 +10673,7 @@ async function openQuestion(uuidStr) {
         ]));
       }
       pane.appendChild(rows);
+      if (q.imageId) loadImageInto('#qimg-detail', q.imageId);
     }
     if (tab === 'history') {
       if (!attempts.length) pane.appendChild(h('div', { class: 'empty' }, [h('h3', { text: 'Never attempted' }), h('p', { class: 'muted', text: 'This question has no attempt history yet.' })]));
@@ -10756,12 +10818,12 @@ async function openQuestion(uuidStr) {
     // resolving from here appear to do nothing, however many times it was run.
     let resolveNote = '';
     if (res === 'save-resolve' && fresh.correctOptionId) {
-      const chosenText = normText((fresh.options.find(o => o.id === fresh.correctOptionId) || {}).text || '');
+      const chosenText = normOptText((fresh.options.find(o => o.id === fresh.correctOptionId) || {}).text || '');
       const choices = [{ uuid: fresh.uuid, optionId: fresh.correctOptionId }];
       for (const u of (fresh.conflictWith || [])) {
         const p = await Questions.get(u);
         if (!p) continue;
-        const match = (p.options || []).find(o => normText(o.text) === chosenText);
+        const match = (p.options || []).find(o => normOptText(o.text) === chosenText);
         const optionId = match ? match.id : p.correctOptionId;
         if (optionId) choices.push({ uuid: p.uuid, optionId });
       }
@@ -13431,9 +13493,15 @@ async function transcribeImages(files) {
 
 /** null = cancelled (stop the run), undefined = skipped (no text), else the parsed .txt file. */
 async function transcribeOne(file, index, total) {
-  let img = await loadImage(file);
+  let img;
+  // A decode failure (HEIC from an Android gallery, a truncated JPEG) is an
+  // image problem, not a save problem — the global unhandledrejection
+  // handler would otherwise report it as "Something didn’t save … back up
+  // and reload". Say what happened and let the student pick again.
+  try { img = await loadImage(file); }
+  catch (e) { toast(e.message + ' Try a JPEG or PNG of it instead.', 'bad', 6000); return; }
   const origImg = img;
-  const st = { rotate: 0, contrast: 100, grayscale: false, crop: null, scale: 1 };
+  const st = { rotate: 0, contrast: 100, grayscale: false, crop: null };
   const canvas = h('canvas');
   const stage = h('div', { class: 'imgstage' }, canvas);
   const ctx = canvas.getContext('2d');
@@ -13589,7 +13657,6 @@ async function transcribeOne(file, index, total) {
   const name = (total > 1 ? String(index + 1).padStart(2, '0') + ' ' : '') + (file.name || 'image') + '.txt';
   const f = new File([blob], name, { type: 'text/plain' });
   const parsedF = await readFile(f);
-  parsedF.sourceType = 'image';
   parsedF.imageId = imageId;
   // Not written yet: admitBatch() writes it in the same pass as the questions
   // that name it, so a cancelled Source details or a discarded batch leaves no
@@ -14523,7 +14590,12 @@ ROUTES.analytics = async (root) => {
   allAttempts.slice().sort((a, b) => new Date(a.ts) - new Date(b.ts)).forEach(a => { if (!firstMap.has(a.questionUuid)) firstMap.set(a.questionUuid, a); });
   const inView = new Set(attempts.map(a => a.id));
   const firstArr = Array.from(firstMap.values()).filter(a => inView.has(a.id));
-  const recent = attempts.slice().sort((a, b) => new Date(b.ts) - new Date(a.ts)).slice(0, 100);
+  const newestFirst = attempts.slice().sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  const recent = newestFirst.slice(0, 100);
+  // The same figure for the attempts before these, so the tile says which way
+  // the number is moving instead of leaving that to memory across re-renders
+  // of the period select. Only said on a real sample, never on a handful.
+  const prior = newestFirst.slice(100, 200);
   const mastered = active.filter(q => (q.stats.mastery || 0) >= Settings.get('masteryTarget')).length;
   // Coverage is measured against the active pool, so only count attempts on
   // questions still in it — a merged, archived or doubtful question keeps
@@ -14536,7 +14608,8 @@ ROUTES.analytics = async (root) => {
   const t = (k, v, sub) => tiles.appendChild(h('div', { class: 'tile' }, [h('span', { class: 'eyebrow', text: k }), h('b', { text: v }), h('div', { class: 'sub', text: sub })]));
   t('First-attempt accuracy', pct(firstArr.filter(a => a.correct).length, firstArr.length), 'The honest measure of what you knew');
   t('Overall accuracy', pct(attempts.filter(a => a.correct).length, attempts.length), 'Every attempt, including repeats');
-  t('Recent accuracy', pct(recent.filter(a => a.correct).length, recent.length), 'Last ' + recent.length + ' attempts');
+  t('Recent accuracy', pct(recent.filter(a => a.correct).length, recent.length), 'Last ' + recent.length + ' attempts' +
+    (prior.length >= 30 ? ' · was ' + pct(prior.filter(a => a.correct).length, prior.length) + ' over the ' + prior.length + ' before' : ''));
   t('Mastered', pct(mastered, active.length), mastered + ' of ' + active.length + ' active questions' + (AnaState.days ? ' (all time)' : ''));
   root.appendChild(tiles);
   root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:16px' },
@@ -14553,10 +14626,15 @@ ROUTES.analytics = async (root) => {
 
   if (AnaState.by === 'mistake') {
     const m = new Map();
-    attempts.filter(a => !a.correct).forEach(a => { const k = a.mistake || 'unclassified'; m.set(k, (m.get(k) || 0) + 1); });
+    // A timed mock deliberately asks nothing, so its misses carry no cause;
+    // say so rather than filing them with the ones that were asked and skipped.
+    attempts.filter(a => !a.correct).forEach(a => {
+      const k = a.mistake || (MODES[a.mode] && !MODES[a.mode].confidence ? 'notasked' : 'unclassified');
+      m.set(k, (m.get(k) || 0) + 1);
+    });
     const total = Array.from(m.values()).reduce((a, b) => a + b, 0);
     rows = Array.from(m.entries()).sort((a, b) => b[1] - a[1]).map(([k, v]) => ({
-      key: (MISTAKES.find(x => x[0] === k) || [, 'Unclassified'])[1], n: v, share: v / total
+      key: k === 'notasked' ? 'Not asked (timed mock)' : (MISTAKES.find(x => x[0] === k) || [, 'Skipped'])[1], n: v, share: v / total
     }));
     card.appendChild(h('div', { class: 'card-h' }, [h('h3', { text: 'Why answers went wrong' }), h('div', { class: 'spacer' }),
       // This screen is where somebody is standing when they want the whole lot
@@ -14787,7 +14865,7 @@ ROUTES.analytics = async (root) => {
     ]));
   });
   card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [
-    h('thead', {}, h('tr', {}, ['Group', 'Questions', 'Coverage', 'First-attempt', '', 'Accuracy', 'Guessed', 'Avg time', 'Weakness'].map(x => h('th', { text: x })))), tb
+    h('thead', {}, h('tr', {}, ['Group', 'Questions', 'Coverage', 'First-attempt', '', 'Accuracy', 'Guessed-correct', 'Avg time', 'Weakness'].map(x => h('th', { text: x })))), tb
   ])));
   root.appendChild(card);
 };
@@ -15038,9 +15116,9 @@ ROUTES.backup = async (root) => {
 
   if (!lastBackup && counts.questions > 0) {
     root.appendChild(h('div', { class: 'notice warn', style: 'margin-bottom:14px' },
-      FileStore.connected
-        ? 'This bank has never been exported. Your live data file already protects you from losing the browser copy, but it is a single file — a dated backup also protects you from a bad import or an accidental deletion.'
-        : 'This bank has never been backed up, and everything lives in this browser profile — clearing site data would take it with it. Take a full backup now, or connect a data folder in Settings.'));
+      !browserIsOnlyCopy()
+        ? 'This bank has never been exported. Your live copy ' + (FileStore.connected ? 'in your data folder' : 'on Google Drive') + ' already protects you from losing the browser copy, but it is a single file — a dated backup also protects you from a bad import or an accidental deletion.'
+        : 'This bank has never been backed up, and everything lives in this browser profile — clearing site data would take it with it. Take a full backup now, or ' + (FileStore.tier === 'manual' ? 'connect Google Drive' : 'connect a data folder or Google Drive') + ' in Settings.'));
   }
 
   root.appendChild(h('div', { class: 'grid g2' }, [
@@ -15155,6 +15233,7 @@ async function doBackup(scope) {
 
 async function pickRestore() {
   if ('showOpenFilePicker' in window) {
+    let file;
     try {
       const opts = {
         types: [{ description: 'Backup or import file', accept: { 'application/zip': ['.zip'], 'application/json': ['.json'] } }],
@@ -15162,12 +15241,17 @@ async function pickRestore() {
       };
       if (FileStore.connected && FileStore.dirHandle) opts.startIn = FileStore.dirHandle;
       const [handle] = await window.showOpenFilePicker(opts);
-      const file = await handle.getFile();
-      await restoreFlow(file);
+      file = await handle.getFile();
     } catch (e) {
       if (e && e.name === 'AbortError') return;   // person cancelled the picker
-      pickRestoreLegacy();
+      pickRestoreLegacy();                         // picker unavailable or blocked — fall back
+      return;
     }
+    // Deliberately outside the try: a failure inside the restore is not a
+    // picker failure. It must surface (the global unhandledrejection toast,
+    // same as the legacy path) rather than open a second file dialog after
+    // the restore already ran.
+    await restoreFlow(file);
     return;
   }
   pickRestoreLegacy();
@@ -15254,7 +15338,9 @@ async function restoreFlow(file) {
     title: 'Restore preview', wide: true, sticky: true,
     body: h('div', { class: 'stack' }, [
       h('div', { class: 'notice' }, 'Backup made ' + fmtDate(manifest.createdAt, true) + ' · covers ' + (manifest.scope === 'course' ? 'this course only' : 'everything')),
-      manifest._badChecksums && manifest._badChecksums.length ? h('div', { class: 'notice bad' }, 'Part of this backup looks damaged or edited (' + manifest._badChecksums.join(', ') + '). Restoring it is not recommended.') : h('div', { class: 'notice ok' }, 'This backup checks out — nothing looks damaged or edited.'),
+      manifest._badChecksums && manifest._badChecksums.length ? h('div', { class: 'notice bad' }, 'Part of this backup looks damaged or edited (' + manifest._badChecksums.join(', ') + '). Restoring it is not recommended.')
+        : manifest._badChecksums && manifest.checksums && Object.keys(manifest.checksums).length ? h('div', { class: 'notice ok' }, 'This backup checks out — nothing looks damaged or edited.')
+        : h('div', { class: 'notice' }, 'This file carries no checksums, so it could not be checked for damage or edits.'),
       uuidClash || qidClash ? h('div', { class: 'notice warn' }, [
         h('b', { text: 'Some records already exist here' }),
         h('div', { class: 'small' }, uuidClash + ' question(s) in the backup are the same question as one already here — on merge, the backup’s version replaces what’s here for those. ' +
@@ -15272,7 +15358,7 @@ async function restoreFlow(file) {
 
   if (mode === 'replace') {
     const ok = await confirmBox('Replace all local data?',
-      'Every question, attempt and session in this browser will be deleted and replaced by the backup. A verified safety backup of the current state is taken first, and the restore is abandoned if that backup cannot be made.', true, 'Replace');
+      'Every question, attempt and session in this browser will be deleted and replaced by the backup. A verified safety backup of the current state is taken first; if it cannot be made you will be told, and asked again, before anything is replaced.', true, 'Replace');
     if (!ok) return;
     if (!await requireSafetyBackup('restore (replace) from ' + file.name)) { toast('Restore cancelled — nothing was changed', 'ok'); return; }
     // Replacing the bank is a deliberate shrink; whichever backend is
@@ -15288,94 +15374,9 @@ async function restoreFlow(file) {
     if (!await requireSafetyBackup('restore (merge) from ' + file.name)) { toast('Restore cancelled — nothing was changed', 'ok'); return; }
   }
 
-  const report = { added: 0, updated: 0, reIded: 0, skipped: 0, stores: {} };
-  const APPEND_ONLY_STORES = ['attempts', 'questionVersions', 'audit'];
+  let report;
   try {
-    // Settings that describe THIS machine (DEVICE_LOCAL_SETTINGS) stay with
-    // it, exactly as both sync paths already insist: a laptop's OCR path,
-    // theme or offline flag restored onto a phone is the leak they filter —
-    // and the safety backup taken a moment ago stamped lastBackupAt, which
-    // the backup's older row would otherwise put straight back.
-    const keepLocal = mode === 'replace' ? (await DB.all('settings')).filter(r => isDeviceLocalSetting(r.k)) : [];
-    if (mode === 'replace') for (const s of BACKUP_STORES) await DB.clear(s);
-    for (const s of BACKUP_STORES) {
-      const rows = (mode === 'replace' && s === 'settings')
-        ? (payload[s] || []).filter(r => !isDeviceLocalSetting(r.k)).concat(keepLocal)
-        : (payload[s] || []);
-      if (s === 'questions') continue;
-      if (mode === 'merge' && s === 'settings') { report.stores[s] = 0; continue; }
-      if (mode === 'merge' && APPEND_ONLY_STORES.indexOf(s) >= 0) {
-        // A raw DB.putMany() here would write every incoming row back under
-        // its original auto-increment key — on merge, that key comes from
-        // a different IndexedDB entirely and can collide with an unrelated
-        // local row that happens to share the same number. Same class of
-        // bug the connect/switch merge engine was built to avoid; reuse it.
-        const r = mergeAppendOnlyRows(s, await DB.all(s), rows);
-        await DB.putMany(s, r.rows);
-        report.stores[s] = r.added;
-        continue;
-      }
-      if (mode === 'merge' && s === 'idRegister') {
-        // Never "whichever side's backup happened to have" for this one —
-        // overwriting it could roll the Question ID watermark backwards
-        // and let an id already used since the backup be issued again.
-        const r = mergeIdRegisterRows(await DB.all(s), rows);
-        await DB.putMany(s, r.rows);
-        report.stores[s] = r.rows.length;
-        continue;
-      }
-      if (mode === 'merge' && MERGE_STAMP_GUARDED.indexOf(s) >= 0) {
-        // Same rule applyMergedBank applies: a row edited here since the
-        // backup was taken is newer than the backup's copy of it, and the
-        // backup has nothing newer to say. Questions are the documented
-        // exception and are handled separately below.
-        const kp = STORES[s].keyPath;
-        const liveStamps = new Map();
-        await DB.each(s, r => { liveStamps.set(r[kp], r.updatedAt || ''); });
-        const keep = rows.filter(r => !((liveStamps.get(r[kp]) || '') > (r.updatedAt || '')));
-        await DB.putMany(s, keep);
-        report.stores[s] = keep.length;
-        continue;
-      }
-      await DB.putMany(s, rows);
-      report.stores[s] = rows.length;
-    }
-    // questions last, with identifier protection
-    const freshCurrent = mode === 'replace' ? [] : await DB.all('questions');
-    const curUuid = new Map(freshCurrent.map(q => [q.uuid, q]));
-    const curQid = new Map(freshCurrent.filter(q => q.qid).map(q => [q.qid, q]));
-    const maxSeqByCourse = new Map();
-    const out = [];
-    for (const q of incomingQ) {
-      const clashUuid = curUuid.get(q.uuid);
-      if (clashUuid) { out.push(Object.assign({}, clashUuid, q)); report.updated++; }
-      else if (q.qid && curQid.has(q.qid)) {
-        const ids = await IdRegister.next(q.courseId, 1, { note: 'restore collision for ' + q.qid });
-        const old = q.qid;
-        q.aliasQids = Array.from(new Set((q.aliasQids || []).concat([old])));
-        q.qid = ids[0];
-        out.push(q); report.reIded++;
-        await audit('restore', 'question', q.qid, { qid: old }, { qid: q.qid }, 'Question ID collision on restore — new ID issued, old ID kept as alias');
-      } else { out.push(q); report.added++; }
-      const seq = IdRegister.seqOf(q.qid);
-      if (seq > (maxSeqByCourse.get(q.courseId) || 0)) maxSeqByCourse.set(q.courseId, seq);
-    }
-    // Restoring is a deliberate statement about what this bank should be, made
-    // now. Written with the stamps the backup file happened to carry, the very
-    // next merge with Drive compared those old stamps against the copies the
-    // restore was meant to replace and put the old ones straight back.
-    const restoredAt = nowISO();
-    // …and a restore is also a statement that these questions are BACK, which
-    // is a different claim from "recently edited". A tombstone written by the
-    // wipe this backup was taken before still sits on every other device, and
-    // the union in mergeBankPayloads has no way to tell that this restore came
-    // after it — so the restore was undone by the next sync, on every device,
-    // with no control anywhere that clears a tombstone. This stamp is that way.
-    out.forEach(q => { q.updatedAt = restoredAt; q.restoredAt = restoredAt; });
-    await DB.putMany('questions', out);
-    for (const [cid, seq] of maxSeqByCourse) await IdRegister.reserveUpTo(cid, seq);
-    report.stores.questions = out.length;
-    await audit('restore', 'system', '', null, report, mode);
+    report = await applyRestore(payload, mode);
   } catch (e) {
     await modal({ title: 'Restore failed part way', body: h('p', {}, e.message + ' — reload the app and check the Question Bank before continuing. If a safety backup was taken, it is in your downloads folder.') });
     return;
@@ -15406,6 +15407,102 @@ async function restoreFlow(file) {
   });
   renderShell();
   go('dashboard');
+}
+
+/** The write phase of a restore — everything between the confirmations and
+    the "Restore complete" screen. No modals, no navigation: it returns the
+    report or throws, so the built-in tests can drive it exactly the way
+    restoreFlow does. */
+async function applyRestore(payload, mode) {
+  const incomingQ = payload.questions || [];
+  const report = { added: 0, updated: 0, reIded: 0, skipped: 0, stores: {} };
+  const APPEND_ONLY_STORES = ['attempts', 'questionVersions', 'audit'];
+  // Settings that describe THIS machine (DEVICE_LOCAL_SETTINGS) stay with
+  // it, exactly as both sync paths already insist: a laptop's OCR path,
+  // theme or offline flag restored onto a phone is the leak they filter —
+  // and the safety backup taken a moment ago stamped lastBackupAt, which
+  // the backup's older row would otherwise put straight back.
+  const keepLocal = mode === 'replace' ? (await DB.all('settings')).filter(r => isDeviceLocalSetting(r.k)) : [];
+  if (mode === 'replace') for (const s of BACKUP_STORES) await DB.clear(s);
+  for (const s of BACKUP_STORES) {
+    const rows = (mode === 'replace' && s === 'settings')
+      ? (payload[s] || []).filter(r => !isDeviceLocalSetting(r.k)).concat(keepLocal)
+      : (payload[s] || []);
+    if (s === 'questions') continue;
+    if (mode === 'merge' && s === 'settings') { report.stores[s] = 0; continue; }
+    if (mode === 'merge' && APPEND_ONLY_STORES.indexOf(s) >= 0) {
+      // A raw DB.putMany() here would write every incoming row back under
+      // its original auto-increment key — on merge, that key comes from
+      // a different IndexedDB entirely and can collide with an unrelated
+      // local row that happens to share the same number. Same class of
+      // bug the connect/switch merge engine was built to avoid; reuse it.
+      const r = mergeAppendOnlyRows(s, await DB.all(s), rows);
+      await DB.putMany(s, r.rows);
+      report.stores[s] = r.added;
+      continue;
+    }
+    if (mode === 'merge' && s === 'idRegister') {
+      // Never "whichever side's backup happened to have" for this one —
+      // overwriting it could roll the Question ID watermark backwards
+      // and let an id already used since the backup be issued again.
+      const r = mergeIdRegisterRows(await DB.all(s), rows);
+      await DB.putMany(s, r.rows);
+      report.stores[s] = r.rows.length;
+      continue;
+    }
+    if (mode === 'merge' && MERGE_STAMP_GUARDED.indexOf(s) >= 0) {
+      // Same rule applyMergedBank applies: a row edited here since the
+      // backup was taken is newer than the backup's copy of it, and the
+      // backup has nothing newer to say. Questions are the documented
+      // exception and are handled separately below.
+      const kp = STORES[s].keyPath;
+      const liveStamps = new Map();
+      await DB.each(s, r => { liveStamps.set(r[kp], r.updatedAt || ''); });
+      const keep = rows.filter(r => !((liveStamps.get(r[kp]) || '') > (r.updatedAt || '')));
+      await DB.putMany(s, keep);
+      report.stores[s] = keep.length;
+      continue;
+    }
+    await DB.putMany(s, rows);
+    report.stores[s] = rows.length;
+  }
+  // questions last, with identifier protection
+  const freshCurrent = mode === 'replace' ? [] : await DB.all('questions');
+  const curUuid = new Map(freshCurrent.map(q => [q.uuid, q]));
+  const curQid = new Map(freshCurrent.filter(q => q.qid).map(q => [q.qid, q]));
+  const maxSeqByCourse = new Map();
+  const out = [];
+  for (const q of incomingQ) {
+    const clashUuid = curUuid.get(q.uuid);
+    if (clashUuid) { out.push(Object.assign({}, clashUuid, q)); report.updated++; }
+    else if (q.qid && curQid.has(q.qid)) {
+      const ids = await IdRegister.next(q.courseId, 1, { note: 'restore collision for ' + q.qid });
+      const old = q.qid;
+      q.aliasQids = Array.from(new Set((q.aliasQids || []).concat([old])));
+      q.qid = ids[0];
+      out.push(q); report.reIded++;
+      await audit('restore', 'question', q.qid, { qid: old }, { qid: q.qid }, 'Question ID collision on restore — new ID issued, old ID kept as alias');
+    } else { out.push(q); report.added++; }
+    const seq = IdRegister.seqOf(q.qid);
+    if (seq > (maxSeqByCourse.get(q.courseId) || 0)) maxSeqByCourse.set(q.courseId, seq);
+  }
+  // Restoring is a deliberate statement about what this bank should be, made
+  // now. Written with the stamps the backup file happened to carry, the very
+  // next merge with Drive compared those old stamps against the copies the
+  // restore was meant to replace and put the old ones straight back.
+  const restoredAt = nowISO();
+  // …and a restore is also a statement that these questions are BACK, which
+  // is a different claim from "recently edited". A tombstone written by the
+  // wipe this backup was taken before still sits on every other device, and
+  // the union in mergeBankPayloads has no way to tell that this restore came
+  // after it — so the restore was undone by the next sync, on every device,
+  // with no control anywhere that clears a tombstone. This stamp is that way.
+  out.forEach(q => { q.updatedAt = restoredAt; q.restoredAt = restoredAt; });
+  await DB.putMany('questions', out);
+  for (const [cid, seq] of maxSeqByCourse) await IdRegister.reserveUpTo(cid, seq);
+  report.stores.questions = out.length;
+  await audit('restore', 'system', '', null, report, mode);
+  return report;
 }
 
 /* ---------- exports ---------- */
@@ -15524,8 +15621,8 @@ async function exportQuestionsJSON() {
 }
 async function exportProgress() {
   const attempts = await DB.byIndex('attempts', 'courseId', State.course.id);
-  const rows = [['Attempt timestamp', 'Question ID', 'Session', 'Mode', 'Correct', 'Confidence', 'Mistake category', 'Time (ms)', 'Question version']];
-  attempts.forEach(a => rows.push([a.ts, a.qid || '', a.sessionId, a.mode, a.correct ? 'Y' : 'N', a.confidence || '', a.mistake || '', a.ms || 0, a.questionVersion || 1]));
+  const rows = [['Attempt timestamp', 'Question ID', 'Session', 'Mode', 'Correct', 'Confidence', 'Mistake category', 'Time (ms)', 'Question version', 'Marks', 'Awarded']];
+  attempts.forEach(a => rows.push([a.ts, a.qid || '', a.sessionId, a.mode, a.correct ? 'Y' : 'N', a.confidence || '', a.mistake || '', a.ms || 0, a.questionVersion || 1, a.marks != null ? a.marks : '', a.awarded != null ? a.awarded : '']));
   download(State.course.code + '-progress-' + todayKey() + '.csv', new Blob([toCSV(rows)], { type: 'text/csv' }));
   toast('Progress exported', 'ok');
 }
@@ -15576,8 +15673,11 @@ async function exportPrintable() {
   // Printing a case-study question on its own produces a page of "in the
   // context of the above" with no above. Each scenario is printed once, with
   // its questions under it, in the order they were written.
-  const standalone = all.filter(q => !isCaseQuestion(q));
   const caseRecords = await CaseStudies.byCourse(State.course.id);
+  const caseIds = new Set(caseRecords.map(c => c.id));
+  // A question whose scenario is gone has no section to sit under; it prints
+  // with the standalone bank rather than off the page — as shareableBank does.
+  const standalone = all.filter(q => !isCaseQuestion(q) || !caseIds.has(q.caseStudyId));
   const caseParts = caseRecords.map(cs => {
     const mine = all.filter(q => q.caseStudyId === cs.id).sort((a, b) => (a.caseSeq || 0) - (b.caseSeq || 0));
     if (!mine.length) return '';
@@ -15697,7 +15797,9 @@ async function exportErrorNotebook() {
   }
 
   const entry = (q) => notebookEntry(q, attempts, letterFor);
-  const standalone = chosen.filter(q => !isCaseQuestion(q));
+  const caseRecords = await CaseStudies.byCourse(State.course.id);
+  const caseIds = new Set(caseRecords.map(c => c.id));
+  const standalone = chosen.filter(q => !isCaseQuestion(q) || !caseIds.has(q.caseStudyId));
   // Grouped by domain, in blueprint order, so it reads like a revision book
   // rather than like the order the bank happened to be imported in.
   const domains = State.course.blueprint.concat([{ id: null, name: 'Unmapped' }]);
@@ -15708,7 +15810,6 @@ async function exportErrorNotebook() {
       ' <small>' + mine.length + ' question(s)</small></h1>' + mine.map(entry).join('');
   }).filter(Boolean).join('\n');
 
-  const caseRecords = await CaseStudies.byCourse(State.course.id);
   const caseParts = caseRecords.map(cs => {
     const mine = chosen.filter(q => q.caseStudyId === cs.id).sort((a, b) => (a.caseSeq || 0) - (b.caseSeq || 0));
     if (!mine.length) return '';
@@ -15732,8 +15833,8 @@ async function exportErrorNotebook() {
 /* ---------- offline ----------
    The worker itself is in sw.js, which has to be a separate file — see the
    note at the top of it. Everything here is the app's side: register it,
-   report honestly on what state it is in, and make both "update" and "turn
-   it off entirely" reachable from Settings. A worker nobody can turn off
+   report honestly on what state it is in, and make "turn it off entirely"
+   reachable from Settings. A worker nobody can turn off
    from inside the app is a worker that needs browser devtools to fix, which
    is not a thing to ask of somebody three days from an exam.               */
 const OFFLINE_OK = typeof navigator !== 'undefined' && 'serviceWorker' in navigator &&
@@ -15777,8 +15878,11 @@ async function offlineState() {
 async function turnOffOffline() {
   await Settings.set('offlineEnabled', false);
   try {
-    const regs = await navigator.serviceWorker.getRegistrations();
-    await Promise.all(regs.map(r => r.unregister()));
+    // Singular on purpose: getRegistration() is the worker controlling this
+    // page. The plural form is every worker on the origin, which on
+    // username.github.io means other projects' workers too.
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (reg) await reg.unregister();
   } catch (e) { }
   try {
     // The cache is this origin's, so the page can empty it directly; there is
@@ -16163,7 +16267,7 @@ async function integrityChecks() {
   push('activeUnverified', 'Marked Active but the answer isn’t verified', all.filter(q => q.status === 'active' && q.answerVerified !== 'verified').map(q => q.qid), 'These are already blocked from practice; verify the answer or move them to review.');
   push('orphanSource', 'Linked to a source that no longer exists', all.filter(q => q.sourceId && !srcIds.has(q.sourceId)).map(q => q.qid), 'Re-link it to a source, or clear the link.');
   push('orphanAttempt', 'Practice history for a question that no longer exists', attempts.filter(a => !qUuids.has(a.questionUuid)).map(a => a.qid || a.questionUuid.slice(0, 8)), 'Harmless but untidy — usually left by a partial restore.');
-  push('brokenImage', 'Linked to a photo that’s gone', all.filter(q => q.imageId && !imgIds.has(q.imageId)).map(q => q.qid), 'The photo is gone — clear the link, or add it again.');
+  push('brokenImage', 'Linked to a photo that’s gone', all.filter(q => q.imageId && !imgIds.has(q.imageId)).map(q => q.qid), 'The photo is gone. Running the integrity check (Settings) clears the link.');
   const uuidSeen = new Set(), dupUuid = [];
   all.forEach(q => { if (uuidSeen.has(q.uuid)) dupUuid.push(q.uuid); uuidSeen.add(q.uuid); });
   push('dupUuid', 'Two records share the same internal identity', dupUuid, 'This should not normally happen. The safest next step is restoring from a recent backup (Backup & Restore).');
@@ -16180,17 +16284,42 @@ async function integrityChecks() {
   return issues;
 }
 
+// A link to a photo that no longer exists cannot be cleared by hand — nothing
+// edits imageId — so the check clears it. Unstamped, like the mastery write in
+// Question detail: dropping a dangling reference is not an edit, and stamping
+// would hand this device the next merge. Images travel by keyed union, so a
+// photo missing here after a sync is missing everywhere.
+async function repairBrokenImageLinks() {
+  const imgIds = new Set((await DB.all('images')).map(i => i.id));
+  let n = 0;
+  for (const q of await DB.all('questions')) {
+    if (!q.imageId || imgIds.has(q.imageId)) continue;
+    const stamp = q.updatedAt;
+    q.imageId = null;
+    q.updatedAt = stamp;
+    await DB.put('questions', q);
+    n++;
+  }
+  if (n) State.invalidate();
+  return n;
+}
+
 async function runIntegrity() {
   toast('Running integrity check…');
   // Derived counters are recomputed rather than merely reported: they are
   // arithmetic over the answer log, so "wrong" and "fixed" are the same step.
   const recounted = await repairDerivedStats();
+  const unlinked = await repairBrokenImageLinks();
   const issues = await integrityChecks();
   const body = h('div', { class: 'stack' });
   if (recounted) {
     body.appendChild(h('div', { class: 'notice ok' },
       'Recalculated the practice counts for ' + recounted + ' question(s) from the answer history. ' +
       'Those counts are derived, so this is a repair, not a change to anything you recorded.'));
+  }
+  if (unlinked) {
+    body.appendChild(h('div', { class: 'notice ok' },
+      'Cleared the link to a missing photo on ' + unlinked + ' question(s). The question text and answer are untouched.'));
   }
   if (!issues.length) body.appendChild(h('div', { class: 'notice ok' }, 'All checks passed. No duplicate IDs, missing answers, orphaned references or invalid classifications.'));
   issues.forEach(i => {
@@ -16484,9 +16613,8 @@ ROUTES.settings = async (root) => {
   ]);
   const cb = h('div', { class: 'card-b stack' });
   
-  const allQ = await DB.all('questions');
   const courseRow = async (c, isArchivedRow) => {
-    const mine = allQ.filter(q => q.courseId === c.id);
+    const mine = await DB.countBy('questions', 'courseId', c.id);
     const reg = await DB.get('idRegister', c.id);
     return h('div', { class: 'notice' }, [
       h('div', { class: 'row wrap' }, [
@@ -16498,7 +16626,7 @@ ROUTES.settings = async (root) => {
         isArchivedRow ? null : (c.id === State.course.id ? h('span', { class: 'badge b-active', text: 'Selected' }) : h('button', { class: 'btn sm', onclick: async () => { await State.setCourse(c.id); renderShell(); go('settings'); }, text: 'Select' })),
         h('button', { class: 'btn sm', onclick: () => courseDialog(c), text: 'Edit' })
       ]),
-      h('div', { class: 'small muted', style: 'margin-top:4px', text: mine.length + ' question(s) · ' + c.blueprint.length + ' domain(s) · weights ' + c.blueprint.map(d => d.weight + '%').join(' / ') + ' (total ' + c.blueprint.reduce((s, d) => s + (+d.weight || 0), 0) + '%)' })
+      h('div', { class: 'small muted', style: 'margin-top:4px', text: mine + ' question(s) · ' + c.blueprint.length + ' domain(s) · weights ' + c.blueprint.map(d => d.weight + '%').join(' / ') + ' (total ' + c.blueprint.reduce((s, d) => s + (+d.weight || 0), 0) + '%)' })
     ]);
   };
   const activeCourses = State.courses.filter(c => !c.archived);
@@ -16522,7 +16650,7 @@ ROUTES.settings = async (root) => {
   const grid = h('div', { class: 'grid g2' });
   const numField = (label, key, min, max, note) => h('div', { class: 'field' }, [
     h('label', { text: label }),
-    h('input', { type: 'number', min: String(min), max: String(max), value: String(Settings.get(key)), onchange: async e => { await Settings.set(key, clamp(parseInt(e.target.value, 10) || min, min, max)); toast('Saved'); } }),
+    h('input', { type: 'number', min: String(min), max: String(max), value: String(Settings.get(key)), onchange: async e => { const v = clamp(parseInt(e.target.value, 10) || min, min, max); await Settings.set(key, v); e.target.value = String(v); toast('Saved'); } }),
     note ? h('div', { class: 'tiny dim', text: note }) : null
   ]);
   const decField = (label, key, min, max, step, note) => h('div', { class: 'field' }, [
@@ -16532,7 +16660,8 @@ ROUTES.settings = async (root) => {
       value: String(Settings.get(key)),
       onchange: async e => {
         const v = clamp(parseFloat(e.target.value), min, max);
-        await Settings.set(key, isFinite(v) ? v : min); toast('Saved');
+        const saved = isFinite(v) ? v : min;
+        await Settings.set(key, saved); e.target.value = String(saved); toast('Saved');
       }
     }),
     note ? h('div', { class: 'tiny dim', text: note }) : null
@@ -16654,18 +16783,6 @@ ROUTES.settings = async (root) => {
       !st.on ? 'Off. The app needs the network to open.'
         : st.ready ? 'Ready. This app will open with no connection.'
           : 'Switched on, but not stored yet — reload the page once. If it stays like this, check that sw.js is in the same folder as index.html.'));
-    if (st.on) {
-      offlineBody.appendChild(h('div', { class: 'row', style: 'gap:8px' }, [
-        h('button', {
-          class: 'btn sm', text: 'Check for an update', onclick: async () => {
-            try { const reg = await navigator.serviceWorker.getRegistration(); if (reg) await reg.update(); } catch (e) { }
-            toast('Reloading to pick up the current version…');
-            setTimeout(() => location.reload(), 700);
-          }
-        }),
-        h('span', { class: 'tiny dim', style: 'flex:1', text: 'Only needed if you have replaced index.html and the old one is still showing.' })
-      ]));
-    }
   };
   drawOffline();
   grid.appendChild(h('div', { class: 'card' }, [
@@ -16679,7 +16796,7 @@ ROUTES.settings = async (root) => {
     h('label', { text: label }),
     h('input', {
       type: 'number', min: '1', max: '365', value: String(sr[key] != null ? sr[key] : 3),
-      onchange: async e => { const v = clamp(parseInt(e.target.value, 10) || 1, 1, 365); const n = Object.assign({}, Settings.get('srIntervals')); n[key] = v; await Settings.set('srIntervals', n); toast('Saved'); }
+      onchange: async e => { const v = clamp(parseInt(e.target.value, 10) || 1, 1, 365); const n = Object.assign({}, Settings.get('srIntervals')); n[key] = v; await Settings.set('srIntervals', n); e.target.value = String(v); toast('Saved'); }
     })
   ]);
   grid.appendChild(h('div', { class: 'card' }, [
@@ -16705,10 +16822,10 @@ ROUTES.settings = async (root) => {
         h('input', {
           type: 'text', value: (sr.ladder || []).join(', '),
           onchange: async e => {
-            const arr = e.target.value.split(',').map(x => parseInt(x.trim(), 10)).filter(n => n > 0);
+            const arr = e.target.value.split(',').map(x => parseInt(x.trim(), 10)).filter(n => n > 0).map(n => clamp(n, 1, 365));
             if (!arr.length) { toast('Give at least one interval', 'bad'); return; }
             const n = Object.assign({}, Settings.get('srIntervals'), { ladder: arr });
-            await Settings.set('srIntervals', n); toast('Saved');
+            await Settings.set('srIntervals', n); e.target.value = arr.join(', '); toast('Saved');
           }
         }),
         h('div', { class: 'small muted', text: 'Comma-separated days, applied in order as confident correct answers accumulate.' })
@@ -16746,7 +16863,7 @@ ROUTES.settings = async (root) => {
         h('div', { class: 'small muted' }, 'The engine’s other files are read from this same folder: worker.min.js, a core file (tesseract-core-simd.wasm.js or tesseract-core.wasm.js) and the language data eng.traineddata.gz. If any is missing, OCR stops and says which one rather than fetching it over the network.')
       ]),
       h('div', { class: 'notice small', style: 'margin-top:2px' }, 'External OCR is a separate, opt-in option below — unlike local OCR, it sends the image to an API of your choosing.'),
-      checkField('Allow external OCR', 'externalOcrEnabled', 'Sends the cropped image to an API you configure yourself, only when you click “Try external OCR” on the Add from image screen. Off by default; this is the one thing in the app that can leave your machine.'),
+      checkField('Allow external OCR', 'externalOcrEnabled', 'Sends the cropped image to an API you configure yourself, only when you click “Try external OCR” on the Add from image screen. Off by default; along with Google Drive sync, it is one of the only two things in the app that can leave your machine.'),
       h('div', { class: 'field' }, [
         h('label', { text: 'External OCR setup' }),
         h('div', { class: 'row wrap', style: 'gap:8px' }, [
@@ -17396,6 +17513,9 @@ async function undoLastAutoMerge() {
   }
   FileStore._cache = null;
   State.invalidate();
+  // The settings store was just rewritten from the snapshot; the cache still
+  // holds what applyMergedBank loaded. Same reason applyMergedBank reloads.
+  await Settings.load();
   await adoptCourses();
   await audit('repair', 'system', '', null, { restoredTo: snap.at, questions: qs }, 'undo automatic merge');
   let sent = true;
@@ -18580,8 +18700,6 @@ const READONLY_MSG = 'The app is read-only because it cannot reach your data fil
    is exactly what makes reconnecting possible, so it must work while
    read-only. */
 _writeHook = (store, op, payload, key) => {
-  // Any question write invalidates cached comparison data.
-  if (store === 'questions') bumpSimGen();
   FileStore.touch(store, op, payload, key);
   // Only one backend is ever the active connection, so at most one of these
   // two touch() calls does anything — each bails out immediately when it is
@@ -22419,9 +22537,6 @@ const SHORT_OPTION_CUT = 60;
 const BP_ROUND = { readMs: 90000, passMs: 30000, passes: 2 };
 /** The whole answering window, once the balloons are up. */
 function bpLiveMs() { return BP_ROUND.passMs * BP_ROUND.passes; }
-/** A whole round, reading included — what a player experiences as "per question". */
-function bpRoundMs() { return BP_ROUND.readMs + bpLiveMs(); }
-
 /** Pick the round list from a SHORT-FIRST ranked pool.
     Taking a stable slice would keep only the short group — the hard filter we
     deliberately rejected, since it would repeat a small subset every game and
@@ -24275,6 +24390,13 @@ test('Punctuation-only differences are treated as exact duplicates', async () =>
   eq(a.fingerprint, b.fingerprint, 'normalised fingerprints must match');
   eq(classifyPair(a, b, similarity(a, b)), 'definite');
 });
+test('diffWords still highlights a change in stems too long to diff word by word', () => {
+  const words = Array.from({ length: 700 }, (_, i) => 'word' + i).join(' ');
+  const d = diffWords(words + '. Total is 100.', words + '. Total is 200.');
+  assert(d.a.some(p => p.s === 'diff') || d.b.some(p => p.s === 'diff'), 'a changed figure must be marked even past the word-level cap');
+  const same = diffWords(words + '. Total is 100.', words + '. Total is 100.');
+  assert(same.a.every(p => p.s === 'same') && same.b.every(p => p.s === 'same'), 'identical long stems must not be marked');
+});
 test('Same stem with materially different options is not a duplicate merge', async () => {
   const a = mkQ('Which control BEST prevents unauthorised production changes?', ['Segregation of duties', 'Log review', 'Annual recertification', 'Change minutes'], 0);
   const b = mkQ('Which control BEST prevents unauthorised production changes?', ['Encryption at rest', 'Biometric entry', 'Firewall rules', 'Data classification'], 0);
@@ -24282,6 +24404,17 @@ test('Same stem with materially different options is not a duplicate merge', asy
   assert(a.fingerprint !== b.fingerprint, 'different options must produce different fingerprints');
   const cls = classifyPair(a, b, similarity(a, b));
   assert(cls !== 'definite', 'must not be classed a definite duplicate, got ' + cls);
+});
+test('An option that begins with a number or letter keeps it for comparison', async () => {
+  const a = mkQ('How long must audit working papers be retained?', ['1 - 3 years', '3 - 5 years', '5 - 7 years', '7 - 10 years'], 0);
+  const b = mkQ('How long must audit working papers be retained?', ['3 years', '5 years', '7 years', '10 years'], 0);
+  await recomputeFingerprint(a); await recomputeFingerprint(b);
+  assert(a.fingerprint !== b.fingerprint, '"1 - 3 years" and "3 years" are different options, so the fingerprints must differ');
+  eq(optionOverlap(optionTexts(a), optionTexts(b)), 0, 'and none of the options overlap');
+  assert(answersConflict(a, b), 'so answers "1 - 3 years" and "3 years" disagree');
+  assert(classifyPair(a, b, similarity(a, b)) !== 'definite', 'must not be classed a definite duplicate');
+  eq(normText('B. Log review'), 'log review', 'an answer line still sheds its option label');
+  eq(normText('Q1. Which stem?'), 'which stem', 'and a stem still sheds its number');
 });
 test('Same concept through different facts stays distinct', async () => {
   const a = mkQ('What is the PRIMARY purpose of an audit charter?', ['Define authority and responsibility', 'Set the fee', 'List the team', 'Schedule fieldwork'], 0);
@@ -24921,7 +25054,9 @@ test('A conflict inherited from a merge becomes a "confirm the answer", not a pa
   const q = mkQ('What does RTO measure?', ['Data loss tolerance', 'Time to restore service', 'Backup window', 'Retention period'], 1,
     { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
   q.conflictWith = [];
-  q.mergedFrom = [{ uuid: 'gone-' + Date.now(), qid: 'OLD-Q-000001' }];
+  // The absorbed record said the answer was option A; this record says B.
+  q.mergedFrom = [{ uuid: 'gone-' + Date.now(), qid: 'OLD-Q-000001',
+    snapshot: Object.assign(JSON.parse(JSON.stringify(q)), { correctOptionId: q.options[0].id }) }];
   await recomputeFingerprint(q);
   await DB.put('questions', q);
   try {
@@ -24935,11 +25070,34 @@ test('A conflict inherited from a merge becomes a "confirm the answer", not a pa
     assert(!isPracticeEligible(fresh), 'a doubtful answer must stay out of practice');
   } finally { await DB.del('questions', q.uuid); }
 });
+test('An orphaned flag on a record whose only merge agreed on the answer is cleared, not turned into doubt', async () => {
+  const cid = 'test-orphan-' + Date.now();
+  const q = mkQ('What does RPO measure?', ['Data loss tolerance', 'Time to restore service', 'Backup window', 'Retention period'], 0, { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  q.conflictWith = ['rejected-partner-' + Date.now()];
+  q.mergedFrom = [{ uuid: 'gone-' + Date.now(), qid: 'OLD-Q-000002', snapshot: JSON.parse(JSON.stringify(q)) }];
+  await recomputeFingerprint(q);
+  await DB.put('questions', q);
+  try {
+    const r = await repairOrphanedConflicts(cid);
+    eq(r.repaired, 1);
+    eq(r.doubtful, 0, 'a merge that agreed on the answer is not a disagreement');
+    eq(r.cleared, 1, 'so the stale flag is simply cleared');
+    const fresh = await DB.get('questions', q.uuid);
+    eq(fresh.answerVerified, 'verified', 'the verified answer must not be thrown into doubt');
+    assert(fresh.status !== 'needs_answer', 'and the record must not be sent back for confirmation');
+    assert(!fresh.conflict, 'the orphaned flag itself must be gone');
+  } finally {
+    await DB.del('questions', q.uuid);
+  }
+});
 test('A doubtful answer tells the reviewer why when the record is opened', async () => {
   const cid = 'test-doubt-note-' + Date.now();
   const q = mkQ('What does RTO measure?', ['Data loss tolerance', 'Time to restore service', 'Backup window', 'Retention period'], 1,
     { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
-  q.conflictWith = []; q.mergedFrom = [{ uuid: 'gone-' + Date.now(), qid: 'OLD-Q-000001' }];
+  q.conflictWith = [];
+  // The absorbed record said the answer was option A; this record says B.
+  q.mergedFrom = [{ uuid: 'gone-' + Date.now(), qid: 'OLD-Q-000001',
+    snapshot: Object.assign(JSON.parse(JSON.stringify(q)), { correctOptionId: q.options[0].id }) }];
   await recomputeFingerprint(q); await DB.put('questions', q);
   try {
     await repairOrphanedConflicts(cid);
@@ -24967,6 +25125,20 @@ test('Repairing is a no-op when every conflict already names a live partner', as
     const r = await repairOrphanedConflicts(cid);
     eq(r.repaired, 0, 'a healthy pair must not be touched');
   } finally { await DB.del('questions', a.uuid); await DB.del('questions', b.uuid); }
+});
+
+test('Rescan writes back a conflict flag it corrected on a record whose status and pairings did not change', async () => {
+  const cid = 'test-rescan-flag-' + Date.now();
+  const q = mkQ('Which of the following is one of the functionalities of a DLP solution?', ['Enhancing user productivity', 'Managing network configurations', 'Improving system performance', 'Preventing data exfiltration'], 3, { courseId: cid, status: 'active', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  q.conflictWith = []; q.dupWith = [];
+  await recomputeFingerprint(q); await DB.put('questions', q);
+  try {
+    await rescanCourseForPairs(cid);
+    const fresh = await DB.get('questions', q.uuid);
+    assert(!fresh.conflict, 'a conflict flag with no pairing behind it must be cleared on disk, not only in memory');
+    eq(fresh.status, 'active', 'the status was already right and must stay so');
+    assert(isPracticeEligible(fresh), 'and the record must be practisable again');
+  } finally { await DB.del('questions', q.uuid); }
 });
 
 test('Unmerge takes back the "merged source disagreed" doubt the merge put on the answer', async () => {
@@ -25085,6 +25257,57 @@ test('A status written over a live duplicate pairing does not survive a recheck'
   eq(a.status, 'possible_dup', 'bulk Activate cannot settle a duplicate — only clearing dupWith can');
   a.status = 'archived'; normalizePairState(a);
   eq(a.status, 'possible_dup', 'bulk Archive cannot either');
+});
+test('applyOptionCountRule moves only Active mismatches out of practice, and audits each one', async () => {
+  // Turning enforcement on in the course dialog re-checks the whole course.
+  // The rule only ever moves things OUT of Active: a question already in the
+  // review queue is there for reasons of its own and must be left alone.
+  const cid = 'test-course-optrule-' + Date.now();
+  const course = { id: cid, code: 'OCR', optionCount: 4, enforceOptionCount: true };
+  const short = mkQ('short active', ['a', 'b'], 0, { courseId: cid, status: 'active', answerVerified: 'verified' });
+  const full = mkQ('full active', ['a', 'b', 'c', 'd'], 0, { courseId: cid, status: 'active', answerVerified: 'verified' });
+  const queued = mkQ('short but queued', ['a', 'b'], 0, { courseId: cid, status: 'needs_answer' });
+  const archived = mkQ('short but archived', ['a', 'b'], 0, { courseId: cid, status: 'archived' });
+  const prevCourses = State.courses, realModal = self.modal;
+  const shown = [];
+  self.modal = async (o) => { shown.push(o.title); return true; };
+  const auditBefore = await DB.count('audit');
+  for (const q of [short, full, queued, archived]) await DB.put('questions', q);
+  try {
+    State.courses = [course];
+    await applyOptionCountRule(course);
+    eq((await DB.get('questions', short.uuid)).status, 'needs_content', 'an Active question with the wrong count is held out of practice');
+    eq((await DB.get('questions', full.uuid)).status, 'active', 'one that meets the rule is untouched');
+    eq((await DB.get('questions', queued.uuid)).status, 'needs_answer', 'a review-queue question is left where it is');
+    eq((await DB.get('questions', archived.uuid)).status, 'archived', 'and an archived one is not live at all');
+    eq(await DB.count('audit') - auditBefore, 1, 'exactly one audit row — one per question moved');
+    eq(shown.length, 1, 'the summary is shown once');
+    await applyOptionCountRule(course);
+    eq((await DB.get('questions', short.uuid)).status, 'needs_content', 'a re-run does not hand a question back to Active');
+    eq(await DB.count('audit') - auditBefore, 1, 'and audits nothing more');
+    eq(shown.length, 2, 'but still reports');
+  } finally {
+    State.courses = prevCourses; self.modal = realModal;
+    for (const q of [short, full, queued, archived]) await DB.del('questions', q.uuid);
+  }
+});
+test('repairDerivedStats reports only counters that disagree with the answer log, and a dry run writes nothing', async () => {
+  // The boot repair (repairDerivedStatsOnce) is the only caller; this pins
+  // the part it relies on — the skip guard, the compare, and apply:false.
+  const q = mkQ('counter probe', ['a', 'b', 'c', 'd'], 0, { courseId: 'test-course', status: 'active' });
+  await DB.put('questions', q);
+  try {
+    const base = await repairDerivedStats({ apply: false });
+    q.stats = Object.assign({}, q.stats, { attempts: 3, correct: 3 });
+    q.updatedAt = '2026-01-01T00:00:00Z';
+    await DB.put('questions', q);
+    eq(await repairDerivedStats({ apply: false }), base + 1, 'counters with no answers behind them are exactly what it finds');
+    const stored = await DB.get('questions', q.uuid);
+    eq(stored.stats.attempts, 3, 'a dry run leaves the row as it was');
+    q.stats = blankQuestion('test-course').stats;
+    await DB.put('questions', q);
+    eq(await repairDerivedStats({ apply: false }), base, 'a question with no answers and no counters is skipped, not rebuilt');
+  } finally { await DB.del('questions', q.uuid); }
 });
 
 /* ---- parsing ---- */
@@ -25278,15 +25501,51 @@ test('Question IDs are sequential, prefixed and never reused', async () => {
   await DB.del('courses', cid);
   await DB.del('idRegister', cid);
 });
-test('A restore collision issues a new ID and keeps the old one as an alias', () => {
-  const incoming = { qid: 'CISA-Q-000005', aliasQids: [] };
-  const existingQids = new Set(['CISA-Q-000005']);
-  if (existingQids.has(incoming.qid)) {
-    incoming.aliasQids.push(incoming.qid);
-    incoming.qid = 'CISA-Q-000123';
+test('A restore collision issues a new ID and keeps the old one as an alias', async () => {
+  // Drives the real write phase (applyRestore, merge mode) against the live
+  // store under a scratch course, then removes every row it wrote.
+  const cid = 'test-course-restore-' + Date.now();
+  await DB.put('courses', makeCourse('ZZR', 'Restore scratch', [{ id: 'D1', name: 'One', weight: 100 }], { id: cid, qidPrefix: 'ZZR' }));
+  await IdRegister.reserveUpTo(cid, 1);
+  const here = mkQ('Already here?', ['a', 'b', 'c', 'd'], 0, { courseId: cid, qid: 'ZZR-Q-000001', updatedAt: '2026-01-01T00:00:00.000Z' });
+  await DB.put('questions', here);
+  const sameUuid = Object.assign({}, here, { stem: 'Edited in the backup', updatedAt: '2025-01-01T00:00:00.000Z' });
+  const sameQid = mkQ('A different question wearing the same ID?', ['a', 'b', 'c', 'd'], 1, { courseId: cid, qid: 'ZZR-Q-000001' });
+  const fresh = mkQ('Only in the backup?', ['a', 'b', 'c', 'd'], 2, { courseId: cid, qid: 'ZZR-Q-000007' });
+  const payload = {}; BACKUP_STORES.forEach(s => { payload[s] = []; });
+  payload.questions = [sameUuid, sameQid, fresh];
+  const before = nowISO();
+  try {
+    const report = await applyRestore(payload, 'merge');
+    eq(report.updated, 1); eq(report.reIded, 1); eq(report.added, 1);
+    const back = new Map((await DB.all('questions')).filter(q => q.courseId === cid).map(q => [q.uuid, q]));
+    eq(back.size, 3, 'merge must add and update, never drop');
+    eq(back.get(here.uuid).stem, 'Edited in the backup', 'the backup’s version replaces the local one on a shared UUID');
+    assert(back.get(here.uuid).updatedAt >= before, 'and is stamped with the restore time, not the backup’s old stamp');
+    const reId = back.get(sameQid.uuid);
+    eq(reId.qid, 'ZZR-Q-000002', 'the colliding ID must be reissued from the register');
+    eq(reId.aliasQids[0], 'ZZR-Q-000001', 'the former ID must be searchable as an alias');
+    eq(back.get(here.uuid).qid, 'ZZR-Q-000001', 'and the question that owned the ID keeps it');
+    eq((await DB.get('idRegister', cid)).lastSeq, 7, 'the watermark must rise past the highest restored ID');
+  } finally {
+    for (const u of [here.uuid, sameQid.uuid, fresh.uuid]) await DB.del('questions', u);
+    await DB.del('courses', cid);
+    await DB.del('idRegister', cid);
   }
-  eq(incoming.qid, 'CISA-Q-000123');
-  eq(incoming.aliasQids[0], 'CISA-Q-000005', 'the former ID must be searchable as an alias');
+});
+test('A backup package verifies against its own manifest the way restore checks it', async () => {
+  if (typeof self.CompressionStream !== 'function' || !HAS_CS) { return 'skipped — this browser has no Compression Streams'; }
+  const { blob, manifest } = await buildBackup('all');
+  const zip = await unzip(await blob.arrayBuffer());
+  const back = JSON.parse(await zip.text('manifest.json'));
+  eq(back.schemaVersion, APP.schema);
+  for (const s of BACKUP_STORES) {
+    const t = await zip.text('data/' + s + '.json');
+    assert(t, 'every store must travel in the zip: ' + s);
+    const rows = JSON.parse(t);
+    eq(rows.length, manifest.counts[s], 'count for ' + s);
+    eq(await sha256(JSON.stringify(rows)), manifest.checksums[s], 'checksum for ' + s + ' must verify after parse, exactly as restoreFlow recomputes it');
+  }
 });
 
 test('Restore reads the app\'s own data file as a backup and never previews an empty one as good', async () => {
@@ -25359,6 +25618,30 @@ test('Weakness reports insufficient evidence on a small sample', () => {
   assert(weaknessScore(g, 5).why[0].indexOf('Insufficient') === 0);
   const g2 = Object.assign({}, g, { attempted: 8 });
   assert(weaknessScore(g2, 5).score > 0, 'with enough evidence a weakness score must be produced');
+});
+test('groupStats counts coverage per key and folds a missing key to the dash every screen looks up', () => {
+  // One aggregator feeds the dashboard domain card, the practice weak-first
+  // lock and the analytics table; a hand-built `g` never exercised it.
+  const a = mkQ('a', ['x', 'y'], 0, { domainId: 'D1', topic: 'Ethics' });
+  const b = mkQ('b', ['x', 'y'], 0, { domainId: 'D1' });
+  const c = mkQ('c', ['x', 'y'], 0, { domainId: null });
+  a.stats.attempts = 3; a.stats.correct = 2; a.stats.guessedCorrect = 1; a.stats.firstResult = 'correct'; a.stats.mastery = 80; a.stats.confidence = 0.9;
+  b.stats.attempts = 1; b.stats.correct = 0; b.stats.firstResult = 'incorrect'; b.stats.confidence = 0.2;
+  c.nextReviewAt = '2000-01-01T00:00:00Z';
+  const byDomain = groupStats([a, b, c], q => q.domainId || null);
+  eq(byDomain.map(g => g.key).sort().join(','), 'D1,—', 'a missing domain must land under the key the dashboard and analytics look up');
+  const d1 = byDomain.find(g => g.key === 'D1');
+  eq(d1.total, 2); eq(d1.attempted, 2); eq(d1.firstSeen, 2); eq(d1.firstCorrect, 1);
+  eq(d1.attempts, 4); eq(d1.correct, 2); eq(d1.guessedCorrect, 1); eq(d1.lowConf, 1); eq(d1.due, 0);
+  eq(d1.firstAcc, 0.5); eq(d1.acc, 0.5); eq(d1.guessRate, 0.5); eq(d1.avgMastery, 40); eq(d1.coverage, 1);
+  const none = byDomain.find(g => g.key === '—');
+  eq(none.total, 1); eq(none.attempted, 0); eq(none.firstAcc, null); eq(none.acc, null); eq(none.coverage, 0);
+  eq(none.due, 1, 'an overdue question counts as due even before it is ever attempted');
+  // The analytics period map keys attempts with the same `keyFn(q) || '—'`,
+  // so every attempt must find a stats row to sit against.
+  const keyFn = q => q.topic || '(no topic)';
+  const rows = new Set(groupStats([a, b, c], keyFn).map(g => g.key));
+  [a, b, c].forEach(q => assert(rows.has(keyFn(q) || '—'), 'attempt key ' + keyFn(q) + ' has no stats row'));
 });
 test('Domain-weighted selection distributes by blueprint and reports shortfalls', () => {
   const pool = [];
@@ -25556,6 +25839,15 @@ test('The per-course settings test leaves the shuffle preference where it found 
   } finally {
     if (Settings.get('shuffleOptions') !== was) await Settings.set('shuffleOptions', was);
   }
+});
+
+test('SR ladder is capped like the other interval fields', async () => {
+  const was = Settings.get('srIntervals');
+  try {
+    const arr = '5, 10, 99999'.split(',').map(x => parseInt(x.trim(), 10)).filter(n => n > 0).map(n => clamp(n, 1, 365));
+    await Settings.set('srIntervals', Object.assign({}, was, { ladder: arr }));
+    eq(Settings.get('srIntervals').ladder[2], 365, 'a ladder rung above 365 is clamped to 365');
+  } finally { await Settings.set('srIntervals', was); }
 });
 
 test('A timed mock answer does not extend the review interval', () => {
@@ -26398,7 +26690,15 @@ test('Comparison caches never reach the data file', () => {
   assert(q.__sim, 'the cache should exist on the object');
   const round = JSON.parse(JSON.stringify(q));
   assert(!('__sim' in round), 'the cache must not be serialised into your data file');
-  assert(!('__simGen' in round), 'the cache generation must not be serialised either');
+  assert(!('__simKey' in round), 'the cache key must not be serialised either');
+});
+test('No dead copy of the stem is stored on the record', async () => {
+  const q = mkQ('a stem about firewalls', ['a', 'b'], 0);
+  q.normStem = 'stale value from an older build';
+  await recomputeFingerprint(q);
+  assert(!('normStem' in q), 'recomputeFingerprint must drop normStem rather than write it');
+  assert(!('normStem' in blankQuestion('c1')), 'and a blank record must not declare it');
+  eq(q.fingerprint.length, 64, 'the fingerprint itself is unchanged');
 });
 
 test('Editing a question invalidates its cached comparison data', () => {
@@ -26406,10 +26706,30 @@ test('Editing a question invalidates its cached comparison data', () => {
   const before = simParts(q).tok;
   assert(before.has('original'), 'the cache should reflect the original stem');
   q.stem = 'a completely different stem about payroll reconciliation';
-  bumpSimGen();                      // what a question write does
   const after = simParts(q).tok;
   assert(after.has('payroll'), 'the cache must be rebuilt after an edit');
   assert(!after.has('original'), 'stale tokens must not survive an edit');
+});
+test('A pairing-only write keeps unrelated comparison caches', () => {
+  const a = mkQ('alpha stem about firewalls and routers', ['a', 'b'], 0);
+  const other = mkQ('beta stem about payroll reconciliation', ['a', 'b'], 0);
+  const before = simParts(a);
+  if (_writeHook) _writeHook('questions', 'p', other, other.uuid);
+  a.dupWith = [other.uuid];
+  normalizePairState(a);
+  assert(simParts(a) === before, 'a write to another record, or a change to pairing state, must not rebuild comparison data');
+  a.tags = ['ospf'];
+  assert(simParts(a) !== before, 'a tag change is comparison text and must rebuild');
+});
+test('Option texts are normalised once per question and rebuilt after a write', () => {
+  const a = mkQ('Which control is preventive?', ['Log review', 'Access matrix', 'Reconciliation', 'Audit trail'], 1);
+  const b = mkQ('Which control is preventive', ['log review.', 'Access Matrix', 'Reconciliation', 'Audit trail'], 1);
+  eq(similarity(a, b).opts, 1, 'cosmetic differences in option text must still count as the same option');
+  eq(simParts(a).opts.length, 4, 'normalised option texts are part of the cached comparison data');
+  const stale = simParts(a).opts;
+  a.options[0].text = 'Something else entirely';
+  assert(simParts(a).opts !== stale, 'the option cache must be rebuilt after an edit');
+  eq(similarity(a, b).opts, 0.75, 'an edited option must stop matching');
 });
 
 /* ---- supplied question files ---- */
@@ -26445,19 +26765,16 @@ test('The app never advertises question files it has not confirmed', async () =>
   }
 });
 
-/* ---- eligibility gate ---- */
 /* ---- reading a round before it moves ----
    A player's only complaint about Balloon Pop was the long options. These are
    the numbers that answer it, so they are checked here rather than by eye. */
-
-const bpQ = (stem, lens) => ({ stem: stem, options: lens.map(n => ({ text: 'x'.repeat(n) })) });
 
 test('Every question gets the same hundred and fifty seconds', () => {
   eq(BP_ROUND.readMs, 90000, 'ninety seconds to read it');
   eq(bpLiveMs(), 60000, 'then sixty to answer');
   eq(BP_ROUND.passes, 2, 'as two rises');
   eq(BP_ROUND.passMs, 30000, 'of thirty seconds each');
-  eq(bpRoundMs(), 150000, 'a hundred and fifty in all');
+  eq(BP_ROUND.readMs + bpLiveMs(), 150000, 'a hundred and fifty in all');
 });
 
 test('Neither the question nor the tier moves the clock any more', () => {
@@ -26778,6 +27095,25 @@ test('Bulk Activate asks the practice gate rather than a copy of it', () => {
   const x = base(); x.correctOptionId = 'nope';
   assert(!canActivate(x), 'a dangling correct-option id must not be bulk-activated');
 });
+test('a new paper carries no dead pool counters', async () => {
+  const was = { course: State.course, courses: State.courses };
+  const q = mkQ('probe question for session creation', ['a', 'b'], 0, { status: 'active', answerVerified: 'verified' });
+  let s = null;
+  try {
+    State.course = makeCourse('SPC', 'Session pool test course', CISA_BLUEPRINT, { id: 'test-course' });
+    State.courses = [State.course];
+    await DB.put('questions', q);
+    State.invalidate();
+    s = await Session.create('learning', { count: 1, filters: {} });
+    assert(!('poolSize' in s) && !('eligibleTotal' in s), 'poolSize/eligibleTotal are never read, so they must not be stored');
+    eq(Array.isArray(s.selectionNotes), true, 'the human-readable selection summary is still there');
+  } finally {
+    if (s) await DB.del('sessions', s.id);
+    await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses;
+    State.invalidate();
+  }
+});
 
 /* ---- archive round trip ---- */
 test('ZIP write then read returns the same bytes', async () => {
@@ -26788,10 +27124,30 @@ test('ZIP write then read returns the same bytes', async () => {
   eq(await zip.text('a/b.json'), payload);
   eq(await zip.text('note.txt'), 'plain');
 });
+test('ZIP entries carry the time they were written, not 1 January 2000', async () => {
+  const blob = await zipFiles([{ name: 'x.txt', data: 'x' }]);
+  const dv = new DataView(await blob.arrayBuffer());
+  eq(dv.getUint32(0, true), 0x04034b50, 'local header signature');
+  const dosDate = dv.getUint16(12, true);
+  const y = 1980 + (dosDate >> 9), mo = (dosDate >> 5) & 0xF, d = dosDate & 0x1F;
+  const now = new Date();
+  eq(y, now.getFullYear(), 'year in the local header');
+  eq(mo, now.getMonth() + 1, 'month in the local header');
+  eq(d, now.getDate(), 'day in the local header');
+});
 test('CSV round trip survives quotes, commas and newlines', () => {
   const rows = [['a', 'b,c', 'd"e', 'f\ng']];
   const back = parseCSV(toCSV(rows));
   eq(back[0][1], 'b,c'); eq(back[0][2], 'd"e'); eq(back[0][3], 'f\ng');
+});
+test('Attempts CSV carries the marks and the deduction each attempt was scored under', () => {
+  const a = { ts: '2026-01-01T00:00:00.000Z', qid: 'Q1', sessionId: 's1', mode: 'mock', correct: false, ms: 1200, questionVersion: 1, marks: 2, awarded: -0.5 };
+  const rows = [['Attempt timestamp', 'Question ID', 'Session', 'Mode', 'Correct', 'Confidence', 'Mistake category', 'Time (ms)', 'Question version', 'Marks', 'Awarded']];
+  rows.push([a.ts, a.qid || '', a.sessionId, a.mode, a.correct ? 'Y' : 'N', a.confidence || '', a.mistake || '', a.ms || 0, a.questionVersion || 1, a.marks != null ? a.marks : '', a.awarded != null ? a.awarded : '']);
+  const back = parseCSV(toCSV(rows));
+  eq(back[0][9], 'Marks'); eq(back[0][10], 'Awarded');
+  eq(back[1][9], '2', 'what the question was worth');
+  eq(back[1][10], '-0.5', 'what a wrong answer cost under quarter-negative marking');
 });
 test('Attempt history stays linked to the version answered', () => {
   const prev = mkQ('Original wording', ['a', 'b'], 0);
@@ -27071,6 +27427,15 @@ test('imageWorkflow refuses to run while a batch is staged', async () => {
     eq(State.staging.items[0].q, q, 'the staged batch must be the same object afterwards');
     eq(q.imageId, null, 'staged items must not receive an imageId');
   } finally { State.staging = prev; }
+});
+test('An undecodable image ends the image workflow with a toast, not an unhandled rejection', async () => {
+  let rejected = false;
+  // Counted, not asserted absent: an earlier test's own leftover modal (not
+  // this closure's doing) must not be mistaken for one this call opened.
+  const modalsBefore = $$('.modal-bg').length;
+  await imageWorkflow(new Blob(['not an image'], { type: 'image/png' })).catch(() => { rejected = true; });
+  assert(!rejected, 'imageWorkflow must handle the decode failure itself');
+  eq($$('.modal-bg').length, modalsBefore, 'no image editor modal should open for an image that could not be decoded');
 });
 test('A photo whose only question was tombstoned does not survive the merge', async () => {
   const empty = { courses: [], sources: [], batches: [], attempts: [], sessions: [], settings: [], audit: [], idRegister: [], presets: [], notes: [], caseStudies: [], questionVersions: [] };
@@ -27705,6 +28070,14 @@ test('The .docx the app writes is one the app can read back', async () => {
     'every character round-trips, and the blank line stays a blank line');
 });
 
+test('Text that itself shows an entity survives a .docx round trip', async () => {
+  if (!HAS_CS) return 'skipped — this browser has no Compression Streams';
+  const blob = await buildDocx(['Which input is rejected: &lt;script&gt; or &#128512;?']);
+  const back = await docxToText(await blob.arrayBuffer());
+  eq(back, 'Which input is rejected: &lt;script&gt; or &#128512;?', 'an escaped entity is shown as written, not decoded twice');
+  eq(decodeXmlEnt('&#128512;&#x1F600;'), '😀😀', 'astral references decode to a whole code point, decimal and hex');
+});
+
 test('Word auto-numbered questions read back with their numbers', async () => {
   const para = (numId, t) => '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="' + numId + '"/></w:numPr></w:pPr><w:r><w:t xml:space="preserve">' + esc(t) + '</w:t></w:r></w:p>';
   const plain = t => '<w:p><w:r><w:t xml:space="preserve">' + esc(t) + '</w:t></w:r></w:p>';
@@ -28055,6 +28428,46 @@ test('A question whose scenario has gone is reported, not left to be answered', 
     assert(found, 'the integrity check must have an orphan-scenario check at all');
     assert(found.items.indexOf('ZZO-Q-000001') >= 0, 'and it must name this record: ' + JSON.stringify(found.items));
   } finally { await DB.del('questions', orphan.uuid); }
+});
+
+test('A link to a photo that is gone is reported, then cleared unstamped by the integrity repair', async () => {
+  const q = mkActive('Which photo is this?', ['a', 'b', 'c', 'd'], 0, { imageId: 'img-that-does-not-exist', updatedAt: '2026-01-01T00:00:00.000Z' });
+  q.qid = 'ZZI-Q-000001';
+  await DB.put('questions', q);
+  try {
+    let issues = await integrityChecks();
+    const found = issues.find(i => i.key === 'brokenImage');
+    assert(found && found.items.indexOf('ZZI-Q-000001') >= 0, 'the check must name the dangling link first');
+    eq(await repairBrokenImageLinks(), 1, 'exactly this record is repaired');
+    const back = await Questions.get(q.uuid);
+    eq(back.imageId, null, 'the dangling link is cleared');
+    eq(back.updatedAt, '2026-01-01T00:00:00.000Z', 'without stamping the record');
+    issues = await integrityChecks();
+    assert(!issues.find(i => i.key === 'brokenImage'), 'and the report no longer lists it');
+  } finally { await DB.del('questions', q.uuid); }
+});
+
+test('A question whose scenario has gone still reaches the printed bank', async () => {
+  // exportPrintable reads State.course unconditionally, which a fresh headless
+  // run never has selected. Give mkCaseQ's default courseId ('test-course') a
+  // real course to belong to, so State.course.id resolves the same rows.
+  const was = { course: State.course, courses: State.courses };
+  const orphan = mkCaseQ('A question with no scenario behind it?', ['a', 'b', 'c', 'd'], 0, 'case-that-does-not-exist', 1);
+  orphan.qid = 'ZZO-Q-000002';
+  try {
+    State.course = makeCourse('PRB', 'Printable export test course', CISA_BLUEPRINT, { id: 'test-course' });
+    State.courses = [State.course];
+    await DB.put('questions', orphan);
+    State.invalidate();
+    const blob = await grabTemplate(exportPrintable);
+    assert(blob, 'the export must still write a file');
+    const html = await blob.text();
+    assert(html.indexOf('ZZO-Q-000002') >= 0, 'the orphaned case question must be on the page, not only in the record count');
+  } finally {
+    await DB.del('questions', orphan.uuid);
+    State.course = was.course; State.courses = was.courses;
+    State.invalidate();
+  }
 });
 
 
@@ -28785,6 +29198,27 @@ test('A date in the past, and an empty bank, give an answer rather than a NaN', 
   eq(studyPlan({ examDate: 'not a date', pool, attempts: [] }).set, false, 'and neither is nonsense a date');
 });
 
+test('A date key becomes local midnight, whatever the time zone', () => {
+  // new Date('2026-11-15') is UTC midnight — 05:30 on the 15th in India, 16:00
+  // on the 14th in Los Angeles. That obvious one-liner is exactly the bug.
+  const d = dateKeyToLocal('2026-11-15');
+  eq(d.getFullYear(), 2026); eq(d.getMonth(), 10);
+  eq(d.getDate(), 15, 'the day typed is the day kept');
+  eq(d.getHours(), 0, 'and it is local midnight, not UTC midnight shifted');
+  eq(dateKeyToLocal(' 2026-11-15 ').getDate(), 15, 'whitespace is forgiven');
+  eq(dateKeyToLocal('15/11/2026'), null, 'anything but YYYY-MM-DD is null');
+  eq(dateKeyToLocal(''), null); eq(dateKeyToLocal(null), null);
+});
+
+test('Days between keys are whole days, across a clocks change and backwards', () => {
+  eq(daysBetweenKeys('2026-03-07', '2026-03-09'), 2, 'US spring forward on the 8th: a 23-hour day is still a day');
+  eq(daysBetweenKeys('2026-10-31', '2026-11-02'), 2, 'US fall back on the 1st: a 25-hour day is still a day');
+  eq(daysBetweenKeys('2026-03-28', '2026-03-30'), 2, 'EU spring forward on the 29th');
+  eq(daysBetweenKeys('2026-01-10', '2026-01-01'), -9, 'negative when the second is earlier');
+  eq(daysBetweenKeys('2026-01-10', '2026-01-10'), 0);
+  eq(daysBetweenKeys('2026-01-10', 'not a date'), null, 'nonsense is null, never NaN');
+});
+
 test('Today’s progress counts questions, not attempts', () => {
   const pool = [planQ({}), planQ({})];
   const att = [];
@@ -28900,6 +29334,11 @@ test('The offline switch is honest about where it cannot work', () => {
       await Settings.set('offlineEnabled', was);
     }
   })();
+});
+test('Turning offline off touches only this app\'s own worker', () => {
+  const src = turnOffOffline.toString();
+  assert(src.indexOf('getRegistrations(') < 0, 'the origin-wide form must not be used');
+  assert(src.indexOf('getRegistration(') >= 0, 'the page-scoped form is');
 });
 test('The offline shell can tell this app from whatever else is on this port', () => {
   // sw.js overwrites the cached shell only when the page it just fetched
@@ -29448,6 +29887,21 @@ test('Questions.byCourse returns exactly and only that course\'s rows, in store 
     eq((await Questions.byCourse(undefined)).length, 0, 'no course id means no rows, never the whole store');
   } finally {
     await DB.del('questions', a.uuid); await DB.del('questions', b.uuid); await DB.del('questions', c.uuid);
+  }
+});
+test('Per-course question count comes from the index, not a full read', async () => {
+  // State.course is never selected in a fresh headless run; give this test
+  // its own course rather than depend on ambient state left by another test.
+  const was = { course: State.course, courses: State.courses };
+  try {
+    State.course = makeCourse('PQC', 'Per-course count test course', CISA_BLUEPRINT, { id: 'test-course' });
+    State.courses = [State.course];
+    const before = await DB.countBy('questions', 'courseId', State.course.id);
+    const mine = await Questions.byCourse(State.course.id);
+    eq(before, mine.length, 'DB.countBy must agree with a full scan of the same course');
+    eq(await DB.countBy('questions', 'courseId', 'no-such-course-' + Date.now()), 0, 'and an unknown course counts zero');
+  } finally {
+    State.course = was.course; State.courses = was.courses;
   }
 });
 test('The dashboard reads the session store once per render', async () => {
@@ -30309,6 +30763,25 @@ test('Answering does not overwrite an edit made on the other device', () => {
   eq(rebuilt.nextReviewAt, null, 'and nothing scheduled');
 });
 
+test('Saving a course record stamps it, and a bulk write does not', async () => {
+  // Courses merge on updatedAt and no call site sets it; the DAL does, on
+  // single puts only. A refactor that routed a course edit through putRaw or
+  // putMany would stop course edits crossing devices, and nothing else would say so.
+  const cid = 'stamp-test-' + uuid();
+  const c = makeCourse('ZZS', 'Scratch stamp course', [{ id: 'D1', name: 'One', weight: 100 }], { id: cid, qidPrefix: 'ZZS' });
+  try {
+    assert(!c.updatedAt, 'a fresh course carries no stamp of its own');
+    await DB.put('courses', c);
+    assert(c.updatedAt && !isNaN(Date.parse(c.updatedAt)), 'a single put stamps the record it was handed');
+    eq((await DB.get('courses', cid)).updatedAt, c.updatedAt, 'and that stamp is what reached the database');
+    c.updatedAt = '2020-01-01T00:00:00.000Z';
+    await DB.putMany('courses', [c]);
+    eq((await DB.get('courses', cid)).updatedAt, '2020-01-01T00:00:00.000Z', 'a bulk write keeps the stamp it arrived with — that is a merge or a restore, not an edit');
+  } finally {
+    await DB.del('courses', cid);
+  }
+});
+
 test('Work that has not reached Drive yet says so, once it is worth saying', () => {
   // The confusion this exists to stop: answer questions on a phone, open the
   // bank on a laptop, and get the older copy with nothing anywhere saying the
@@ -30580,6 +31053,14 @@ test('A Drive merge never repaints over a paper in progress', () => {
   assert(/State\.session[\s\S]{0,80}active/.test(merge), 'and never while a session is running');
 });
 
+test('Undoing a merge reloads the settings it just put back', () => {
+  const src = undoLastAutoMerge.toString();
+  const reload = src.indexOf('Settings.load()');
+  assert(reload > 0, 'the undo path must reload Settings after restoring the settings store');
+  assert(reload < src.indexOf('adoptCourses()'), 'and before adoptCourses, which reads activeCourseId from that cache');
+  assert(reload > src.indexOf('putManyRaw'), 'and after the stores have been rewritten');
+});
+
 test('Deleting a course never destroys a note file the backup cannot hold', () => {
   assert(BACKUP_STORES.indexOf('notes') >= 0, 'the metadata row is backed up');
   const src = deleteCourseForever.toString();
@@ -30831,6 +31312,26 @@ test('A backup is a package the restore path can read back', async () => {
   }
 });
 
+test('A restore that fails after the picker is reported, not answered with a second file dialog', async () => {
+  const hadPicker = 'showOpenFilePicker' in window;
+  const origPicker = window.showOpenFilePicker, origFlow = window.restoreFlow, origLegacy = window.pickRestoreLegacy;
+  let legacyOpened = 0, thrown = null;
+  window.showOpenFilePicker = async () => [{ getFile: async () => new File(['{}'], 'b.json') }];
+  window.restoreFlow = async () => { throw new TypeError('integrity check blew up'); };
+  window.pickRestoreLegacy = () => { legacyOpened++; };
+  try {
+    await pickRestore();
+  } catch (e) {
+    thrown = e;
+  } finally {
+    if (hadPicker) window.showOpenFilePicker = origPicker; else delete window.showOpenFilePicker;
+    window.restoreFlow = origFlow;
+    window.pickRestoreLegacy = origLegacy;
+  }
+  eq(legacyOpened, 0, 'a failure inside restoreFlow must not open the legacy file picker');
+  assert(thrown && thrown.message === 'integrity check blew up', 'the restore failure must propagate to the caller so the global handler can report it');
+});
+
 test('The bundle is a real zip that a zip reader can read back', async () => {
   // zipFiles is shared with the backups, so this is really a check that the
   // entry list is well formed — a name wrong here produces a file that opens
@@ -30850,6 +31351,49 @@ test('The bundle is a real zip that a zip reader can read back', async () => {
   const required = LOCAL_BUNDLE.filter(f => f.required).map(f => f.url);
   eq(required.join(','), 'index.html', 'only the page itself is indispensable');
 });
+
+/* ---- local OCR engine resolution and the external-OCR env file ---- */
+test('The env file parser keeps it plain: comments, blanks, CRLF and = inside values', () => {
+  const env = parseEnvText('# note\r\n\r\nENDPOINT=https://x/v1?a=b=c\r\n API_KEY = sk-1 \nbare line\n');
+  eq(env.ENDPOINT, 'https://x/v1?a=b=c', 'only the first = splits the line');
+  eq(env.API_KEY, 'sk-1', 'keys and values are trimmed, CR included');
+  eq(Object.keys(env).length, 2, 'comments, blanks and lines without = are ignored');
+  eq(Object.keys(parseEnvText(null)).length, 0, 'nothing in, nothing out');
+});
+test('The OCR engine is resolved from the folder the script sits in, and a wrong guess is admitted', async () => {
+  const wasPath = Settings.cache.ocrScriptPath, wasProbe = ocrVendorFilePresent;
+  try {
+    Settings.cache.ocrScriptPath = 'tesseract.min.js';
+    eq(ocrVendorBase(), '', 'no slash means the app folder itself');
+    Settings.cache.ocrScriptPath = 'vendor/tesseract.min.js';
+    eq(ocrVendorBase(), 'vendor/');
+
+    let have = new Set(['vendor/worker.min.js', 'vendor/tesseract-core-simd.wasm.js', 'vendor/eng.traineddata']);
+    ocrVendorFilePresent = async url => have.has(url);
+    let r = await resolveOcrEngine();
+    assert(r.certain && !r.missing.length, JSON.stringify(r));
+    eq(r.options.workerPath, 'vendor/worker.min.js');
+    eq(r.options.corePath, 'vendor/tesseract-core-simd.wasm.js');
+    eq(r.options.langPath, 'vendor/');
+    eq(r.options.gzip, false, 'a plain .traineddata must not be inflated');
+
+    have = new Set(['vendor/worker.js', 'vendor/eng.traineddata.gz']);
+    r = await resolveOcrEngine();
+    eq(r.options.gzip, true);
+    eq(r.options.workerPath, 'vendor/worker.js', 'second-choice names are honoured');
+    eq(r.missing.join('|'), 'tesseract-core-simd.wasm.js or tesseract-core.wasm.js or tesseract-core.js', 'the absent slot is reported by every name it might have had');
+    assert(r.certain, 'a probe that answered is certain');
+
+    ocrVendorFilePresent = async () => null;
+    r = await resolveOcrEngine();
+    assert(!r.certain, 'an unanswerable probe is not certainty');
+    eq(r.missing.length, 0, 'and nothing can be called missing');
+    eq(r.options.gzip, true, 'the default guess is the gzipped language file');
+  } finally {
+    Settings.cache.ocrScriptPath = wasPath;
+    ocrVendorFilePresent = wasProbe;
+  }
+});
 test('The suite leaves nothing of its own in the bank', async () => {
   const left = (await DB.all('questions')).filter(x => String(x.courseId || '').indexOf('test-') === 0 || String(x.courseId || '').indexOf('selftest-') === 0);
   eq(left.length, 0, 'a test wrote a question and did not remove it: ' + left.map(x => x.qid || x.stem).join('; '));
@@ -30864,15 +31408,23 @@ async function boot() {
     await DB.open();
   } catch (e) {
     app.innerHTML = '';
+    // The disk-serving advice is only true for a page opened over file://.
+    // Over http(s) — GitHub Pages, a local server — the database was refused
+    // for another reason (blocked site data, a private window, another tab
+    // mid-upgrade), and telling the student to run a server would send them
+    // somewhere they already are.
+    const fromDisk = typeof location !== 'undefined' && location.protocol === 'file:';
     app.appendChild(h('div', { style: 'padding:40px;max-width:620px;margin:0 auto' }, [
       h('div', { class: 'eyebrow', text: 'Cannot start' }),
       h('h1', { class: 'page-title', style: 'margin:8px 0 12px', text: 'Local storage is not available' }),
       h('div', { class: 'notice bad' }, e.message),
-      h('p', { class: 'muted', style: 'margin-top:14px' }, 'You opened this file directly from disk, and browsers block the local database for file:// pages. It has to be served over http instead — which stays entirely on your own machine.'),
-      h('p', { class: 'muted', style: 'margin:8px 0 0' }, 'On Windows: double-click "Start MCQ Mastery.bat" in this same folder. Otherwise, from a terminal in the folder containing index.html:'),
-      h('pre', { style: 'background:var(--surface-2);border:1px solid var(--rule);padding:12px;border-radius:6px;overflow:auto' },
+      fromDisk
+        ? h('p', { class: 'muted', style: 'margin-top:14px' }, 'You opened this file directly from disk, and browsers block the local database for file:// pages. It has to be served over http instead — which stays entirely on your own machine.')
+        : h('p', { class: 'muted', style: 'margin-top:14px' }, 'The browser refused to open its local database for this site — see the message above. Close any other tabs of this app and reload. A private or incognito window, or a browser setting that blocks site data for this address, also causes this.'),
+      fromDisk && h('p', { class: 'muted', style: 'margin:8px 0 0' }, 'On Windows: double-click "Start MCQ Mastery.bat" in this same folder. Otherwise, from a terminal in the folder containing index.html:'),
+      fromDisk && h('pre', { style: 'background:var(--surface-2);border:1px solid var(--rule);padding:12px;border-radius:6px;overflow:auto' },
         'npx --yes serve .\n# or\npython3 -m http.server 8080'),
-      h('p', { class: 'muted' }, 'Then open the address it prints. Private or incognito windows also block persistent storage in some browsers.')
+      fromDisk && h('p', { class: 'muted' }, 'Then open the address it prints. Private or incognito windows also block persistent storage in some browsers.')
     ]));
     return;
   }

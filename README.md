@@ -4,8 +4,10 @@ A local-first MCQ practice and revision app. One universal question bank per
 course, permanent Question IDs, full source traceability, duplicate detection,
 and attempt history that survives question edits.
 
-Everything runs in your browser. No backend, no cloud database, no API keys, no
-network calls at runtime. Your question bank never leaves your machine.
+Everything runs in your browser. No backend, no cloud database, no network calls
+at runtime. Nothing leaves your machine unless you switch on one of two
+off-by-default options yourself: Google Drive sync (your own account, one file)
+or external OCR (an API of your choosing, with your own key).
 
 Ships with two courses configured — **CISA** and **DISA AT** — and no questions.
 You import your own.
@@ -229,7 +231,7 @@ before you do.
 | `mcq-mastery-data.json` | Your bank. This is the file that matters. |
 | `mcq-mastery-journal.jsonl` | Answers since the last full write. Emptied each time the bank is rewritten. |
 | `mcq-mastery-data.previous.json` | The prior verified version, kept for rollback. |
-| `mcq-mastery-safety-backup-*.zip` | Written automatically before a deletion or a replace-restore. |
+| `mcq-mastery-safety-backup-*.zip` | Written automatically before anything that could overwrite or discard what this browser holds — deleting a course, restoring a backup (replace or merge), or merging with, or giving way to, a bank already in the folder. |
 
 If you copy your bank elsewhere, take `mcq-mastery-data.json`. The others are
 derived and disposable.
@@ -244,9 +246,10 @@ derived and disposable.
   notices — before each write, every 30 seconds, and whenever you return to the
   tab — stops writing, and asks what you want to do. It will not silently
   recreate a file you deleted, or overwrite a version written elsewhere.
-- **Deleting a course's questions or doing a replace-restore takes a verified
-  backup first**, automatically. If the backup cannot be made, the deletion is
-  abandoned.
+- **Deleting a course's questions, restoring a backup, or reconciling with a
+  bank found elsewhere takes a verified backup first**, automatically. If the
+  backup cannot be made, the app stops and says so; nothing goes ahead unless
+  you choose the red "Delete anyway, without a backup" button.
 
 ## 3. Getting questions in
 
@@ -344,9 +347,11 @@ a different sentence from the one above — the app can tell the two apart.
 ### When a PDF will not read
 
 The app decodes PDF text itself, with no external library. That covers most
-documents, but not every one: a PDF built from compressed object streams, or
-one whose fonts carry no usable character map, has no text this app can reach —
-and a scanned PDF has no text at all. It says so rather than importing nonsense.
+documents, but not every one: a font that stores glyph numbers instead of
+characters — common in PDFs from Chrome, Google Docs and LibreOffice — is
+readable only when it embeds a usable character map; without one, there is no
+text this app can reach. A scanned PDF has no text at all either way. It says
+so rather than importing nonsense.
 
 The way round it is **Question sheet for PDF (.docx)** and **Case study sheet
 for PDF (.docx)** under *Start from a template*. Copy the text out of the
@@ -1014,17 +1019,32 @@ count on Add Questions, so a queue left half-finished is never invisible.
 
 ## 7. Known limitations
 
-**Complex PDFs may refuse to import.** The built-in PDF reader has no external
-dependencies and handles straightforward text-layer PDFs. It cannot reliably
-read PDFs with compressed object streams or a linearized layout. When it cannot
-read one it says so and suggests a route, rather than importing nonsense. Open
-such a file in Word and save as `.docx`, or use **Add from image** page by page.
+**Some PDFs refuse to import.** The built-in PDF reader has no external
+dependencies and reads ordinary (WinAnsi) text, and glyph-ID (Identity-H) text
+too when the font embeds a usable character map — which is common in PDFs from
+Chrome, Google Docs and LibreOffice, though not guaranteed. When it cannot read
+one it says so and suggests a route, rather than importing nonsense. Open such
+a file in Word and save as `.docx`, or use **Add from image** page by page.
 Bundling PDF.js is the proper fix if this matters to you.
 
 **No built-in OCR.** "Add from image" gives you crop, rotate, greyscale and
 contrast alongside a transcription pane — you type what you see with the image
-next to the form. No offline OCR engine is small enough to bundle honestly. Drop
-a `vendor/tesseract.min.js` into the folder and the app will use it.
+next to the form. No offline OCR engine is small enough to bundle honestly. To
+use one anyway, download tesseract.js and put all four of its pieces in a
+`vendor/` folder next to `index.html` — `tesseract.min.js`, `worker.min.js`, a
+core file (`tesseract-core-simd.wasm.js` or `tesseract-core.wasm.js`, with its
+`.wasm` beside it) and the language data `eng.traineddata.gz` — then switch on
+**Use a local OCR engine** under Settings → Images and OCR → OCR setup. The app
+reads every piece from that folder and stops, naming the missing file, rather
+than fetch it over the network.
+
+**External OCR is one of the only two things that can leave your machine.**
+Settings → Images and OCR also has **Allow external OCR**, off by default. When on, a
+"Try external OCR" button appears on Add from image that sends the cropped
+image to an API you configure yourself — endpoint, key and model read from a
+`mcq-mastery.env` file you save in your connected data folder (Settings offers
+a template). Nothing is sent until you have both switched it on and clicked
+that button; decide for yourself what exam material you trust to a third party.
 
 **Suggested vs verified classification is not visible in the bank table.** When
 the app guesses a domain from keywords it records that it was a guess, but the
@@ -1057,8 +1077,9 @@ parser extracted, or pick a specific parsing template instead of auto-detect.
 Your bank is safe in the browser. Use the dialog to write the file again, or
 point at a different folder.
 
-**Built-in self-test:** Settings → Diagnostics → Run tests. 50 automated tests,
-listed in `TEST-CHECKLIST.md`.
+**Built-in self-test:** open the app with `#tools` on the end of the address
+(`index.html#tools`), then Settings → Maintenance → Run built-in tests. The
+dialog reports how many checks ran; they are described in `TEST-CHECKLIST.md`.
 
 ## 9. Licence
 

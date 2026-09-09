@@ -27,28 +27,32 @@ missing file rather than letting the library reach for a CDN. Where the probe
 itself cannot answer — `file://`, where `fetch` is blocked — it runs on the
 usual names and retries once with the other gzip setting.
 
-Source is maintained as 17 modules concatenated in numeric order into the
-`<script>` block of `index.html`. Editing `index.html` directly works; keeping
-the modules and re-concatenating is easier to maintain.
+Source is one `<script>` block in `index.html`, divided by banner comments.
+The numbered ones are listed below in file order (the numbers are the
+original reading order, not the file order — `17` sits before `15B`); the
+unnumbered ones are named after the section they follow. Find a section with
+`grep -n '^   NN · ' index.html`, never by line number: the file changes
+every commit.
 
 ```
-01-core.js        DOM helpers, IndexedDB DAL, settings, hashing, RNG
-02-model.js       Courses, statuses, blueprints, QID register, repositories
-03-dedupe.js      Fingerprinting, similarity, duplicate detection
-04-extract.js     ZIP/DOCX/XLSX/PDF/CSV extraction, file routing
-05-parse.js       Text and row parsing into question candidates
-06-learning.js    Mastery, spaced repetition, weak-topic scoring
-07-session.js     Practice modes, selection, blueprint weighting
-08-shell.js       App shell, routing, navigation, theming
-09-practice.js    The practice runner
-10-bank.js        Bank table, detail view, editing, review queue, hand entry
-11-import.js      Add Questions, staging, reconciliation, admission
-12-image.js       Image intake, crop/rotate/adjust, transcription
-13-analytics.js   Performance analytics and error-cause breakdown
-14-backup.js      Export, restore, safety backups, integrity checks
-15-settings.js    Settings, course management, diagnostics
-15b-filestore.js  The file-backed database
-16-tests-boot.js  Test suite and boot sequence
+01 · Core               Utilities, seeded RNG, hashing, IndexedDB DAL
+02 · Domain model       Courses, record statuses, Question ID controls, repos
+03 · Normalisation      Fingerprints and duplicate detection
+04 · File extraction    No third-party libraries
+05 · Parsing            Turn extracted text or rows into question candidates
+06 · Learning logic     Mastery, spaced repetition, weakness, selection
+07 · Session engine     Deterministic order, autosave, resume, scoring
+08 · Shell              Rail, control band, router, dashboard
+09 · Practice           Mode setup, runner, mock palette, results
+10 · Question Bank      Search, filter, bulk control, detail and editing — then Notes, Case Studies
+11 · Add Questions      Intake, preview, reconciliation, admission — then Needs Checking
+12 · Add from Image     Capture, adjust, transcribe, verify
+13 · Analytics          Drill-down that keeps coverage and accuracy distinct — see "Analytics" below
+14 · Backup             Export, restore, safety backups, integrity checks
+15 · Settings           Course management, which is what makes this multi-course
+17 · File-backed store  Your question bank as a real file on your disk — then Google Drive sync, Course notes, Bank merge engine
+15B · Games             A shell the app's own question bank feeds — then SAWAAL
+16 · Built-in tests     Test suite, then Boot
 ```
 
 And, alongside the file rather than inside it:
@@ -58,8 +62,8 @@ sw.js             The offline shell — see "Offline" below
 manifest.webmanifest   Name, icon and start URL, so it can be installed
 ```
 
-`15b` is deliberately named to sort before `16`, because the boot sequence at
-the end of `16` depends on it.
+Boot is the last thing in the file because it depends on everything above it,
+the file-backed store and the games included.
 
 ## Two layers of storage
 
@@ -94,6 +98,7 @@ Database `mcq_mastery`, schema version 4.
 | `idRegister` | `courseId` | — |
 | `tombstones` | `qid` | — |
 | `presets` | `id` | courseId |
+| `notes` | `id` | courseId, domainId |
 | `fsmeta` | `k` | — |
 | `caseStudies` | `id` | courseId |
 
@@ -161,9 +166,12 @@ its stores, and hold exactly the expected question count before it is trusted.
 **One generation of rollback.** The previous verified snapshot is written to
 `mcq-mastery-data.previous.json` before the main file is replaced.
 
-**Mandatory backups before destruction.** Deleting a course's questions or doing
-a replace-restore runs a full backup first and verifies it landed. If it fails,
-the destructive operation is abandoned.
+**Mandatory backups before destruction.** Deleting a course's questions, any
+restore, and every reconciliation that can overwrite this browser's bank runs a
+full backup first and verifies it landed (`requireSafetyBackup()`). If it fails,
+the operation stops unless the person takes an explicit, danger-styled override —
+kept because a bank too broken to back up is exactly the one a replace-restore
+must still be allowed to replace.
 
 ## Two banks, one register
 
@@ -923,8 +931,11 @@ non-enumerable, so it never reaches the data file, and a generation counter
 bumped on any question write invalidates it.
 
 **This runs at every point a question's content can change, not only at
-import.** `recheckQuestion()` is called after every save, admission, merge and
-unmerge, and re-evaluates that question against the whole live bank — a
+import.** `recheckQuestion()` is called after every save, merge and unmerge,
+and on admission for every candidate that matched something during staging
+(a candidate that matched nothing at staging is admitted as judged —
+staging detection runs once, at parse time), and re-evaluates that question
+against the whole live bank — a
 conflict or duplicate found this way is recorded on *both* sides
 (`conflictWith` / `dupWith`, arrays of uuids), and both are pulled out of
 practice, whichever one triggered the check. Import-time detection is one
@@ -1004,8 +1015,9 @@ index, so randomisation cannot desynchronise the correct answer from its text.
 ## Dependency-free file handling
 
 `.docx` and `.xlsx` are ZIP archives, and backup export needs deflate. Rather
-than bundle a ZIP library, `04-extract.js` implements ZIP reading and writing on
-the browser's native `CompressionStream` / `DecompressionStream`.
+than bundle a ZIP library, section `04 · File extraction` implements ZIP
+reading and writing on the browser's native `CompressionStream` /
+`DecompressionStream`.
 
 PDF is the weak point. The decoder handles simple text-layer PDFs and *fails
 loudly* on those it cannot read, having checked its own output is plausibly text
@@ -1085,7 +1097,7 @@ discarding Drive's copy, or an existing local file connected to without
 being loaded — content that was never in this browser's IndexedDB to begin
 with — runs `requireExternalBackup()`, which builds the same backup ZIP
 shape (`buildBackupFromPayload()`) directly from that content and downloads
-it. Every path blocks its next step if the backup fails, and asks a final
+it. Every path stops if the backup fails (only a danger-styled override goes on), and asks a final
 "Continue" before proceeding even when it succeeds. Merge is styled as the
 primary action in these dialogs; the two "keep only one side, discard the
 other" choices are both styled as danger — not "keep the bigger bank is
@@ -1430,3 +1442,18 @@ capped by `notesMaxKB` — the same trade-off images already make. The `notes`
 object store itself holds only metadata (title, domain, topic, size, where the
 bytes actually are) plus that fallback content field, and syncs like any other
 store.
+
+## Analytics
+
+One route, `ROUTES.analytics`, driven by `AnaState`: the breakdown tab, a day
+window, and a bank switch that is only drawn when the course has a case bank
+(a course without one is reset to "Both banks", since there would be no
+control on screen to undo the other choice with).
+
+The day window — All time / 7 / 30 / 90 days — filters **attempts** and
+nothing else. Attempts, Questions seen, the three accuracy tiles, the "seen"
+half of the coverage sentence and every tab are computed from the windowed
+attempts. The **Mastered** tile and the "of N active questions" denominators
+read each question's `stats.mastery` and practice eligibility, which are
+all-time state: mastery is a property of the question, not of the period, so
+under "Last 7 days" three tiles are windowed and that one is not.

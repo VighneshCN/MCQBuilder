@@ -1,9 +1,11 @@
 # Test checklist and results
 
-Run from **Settings → Maintenance → Run built-in tests**. The suite runs against
-a scratch course, so it never touches your real bank.
+Open the app with `#tools` on the URL (for example `index.html#tools`), then
+**Settings → Maintenance → Run built-in tests**. The button is hidden unless
+that hash is present. The suite runs against a scratch course, so it never
+touches your real bank.
 
-**Current result: 213 passed, 0 failed, of 213.**
+**Current result: 393 passed, 0 failed, of 393.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -296,7 +298,8 @@ Automated tests cannot verify rendering or real browser storage.
 ### Writing questions by hand
 
 - [ ] Question Bank → New question: open it, type a stem, then close it. No
-      record appears and no Question ID is spent (Settings → Question ID register)
+      record appears and no Question ID is spent (the last-issued ID shown on
+      the course's row in Settings does not move)
 - [ ] Type a complete question: the readiness strip says "Ready to practise",
       and Save makes it available in Learning immediately
 - [ ] Type it a second time, slightly reworded: the duplicate warning names the
@@ -396,7 +399,8 @@ Automated tests cannot verify rendering or real browser storage.
       section and any quota that could not be met
 - [ ] Backup & Restore → Printable HTML: each scenario is printed once with its
       questions under it, never a case question on its own
-- [ ] Settings → Diagnostics → Run tests reports 50 of 50
+- [ ] With `#tools` on the URL, Settings → Maintenance → Run built-in tests
+      reports every test passing
 
 ### Getting to the date
 
