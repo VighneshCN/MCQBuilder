@@ -1433,6 +1433,12 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 mark.dif{background:var(--amber-tint);color:var(--amber);border-radius:2px;padding:0 2px;font-weight:600}
 .imgstage{background:var(--surface-3);border:1px solid var(--rule);border-radius:var(--r);overflow:auto;max-height:440px;display:grid;place-items:center;padding:8px}
 .imgstage canvas,.imgstage img{max-width:100%;display:block}
+/* The crop canvas is the one thing in a scrolling .imgstage that owns its own
+   drag. Left at touch-action:auto the browser reads a diagonal touch drag as a
+   pan (this box and .modal-b both scroll) and cancels the pointer, so the crop
+   in imageWorkflow() never fires on a phone. Only the canvas opts out — the
+   question-image #qimg stage holds an <img> and must still scroll. */
+.imgstage canvas{touch-action:none}
 kbd{font-family:var(--mono);font-size:11px;background:var(--surface-3);border:1px solid var(--rule);border-bottom-width:2px;border-radius:4px;padding:1px 5px}
 .scroll-y{max-height:420px;overflow:auto}
 .dl-list{display:flex;flex-direction:column;gap:8px}
@@ -1524,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.3', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.4', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -2302,6 +2308,12 @@ function isPracticeEligible(q) {
     opts.some(o => o.id === q.correctOptionId) &&
     optionCountOk(q);
 }
+/** Would marking this record Active actually let it into practice? Asks the
+    practice gate itself, on a trial copy, so bulk Activate can never drift
+    from it — a hand-rolled copy of the gate silently missed the conflict flag
+    and a dangling correct-option id, and wrote status:'active' onto records
+    that then appeared in neither practice nor the review queue. */
+function canActivate(q) { return isPracticeEligible(Object.assign({}, q, { status: 'active' })); }
 function markFor(q) {
   if (q.conflict || q.status === 'answer_conflict') return 'conflict';
   if (q.status === 'possible_dup' || q.status === 'merged') return 'dup';
@@ -2572,7 +2584,11 @@ function similarity(a, b) {
   const ans = (A.ansText && B.ansText) ? (A.ansText === B.ansText ? 1 : jaccard(A.ansTok, B.ansTok)) : 0;
   const dom = (a.domainId && b.domainId) ? (a.domainId === b.domainId ? 1 : 0) : 0.5;
   const kw = jaccard(A.tags, B.tags);
-  const score = 0.34 * stemTok + 0.26 * stemChr + 0.22 * opts + 0.10 * ans + 0.05 * dom + 0.03 * kw;
+  // The answer is deliberately NOT part of the score: two records that match
+  // on everything else but state different answers are the conflict worth
+  // catching, so answer disagreement must never push a pair below the
+  // duplicate threshold. `ans` is still returned for the compare dialog.
+  const score = 0.38 * stemTok + 0.29 * stemChr + 0.24 * opts + 0.06 * dom + 0.03 * kw;
   return { score, stemTok, stemChr, opts, ans, dom, kw };
 }
 function classifyPair(a, b, sim) {
@@ -2784,7 +2800,17 @@ async function recheckQuestion(q, opts) {
   const dismissed = new Set(q.dismissedPairs || []);
 
   const stillConflict = new Set(), stillDup = new Set();
-  for (const other of candidatesFor(q, index, q.uuid)) {
+  // The blocking index is a bounded shortcut, not the judge: a partner it
+  // happens not to return is still a partner until re-judged distinct. Seed
+  // the pool with the current pairings so growth of the bank can never
+  // silently clear a live conflict.
+  const pool = new Map(candidatesFor(q, index, q.uuid).map(o => [o.uuid, o]));
+  for (const u of (q.conflictWith || []).concat(q.dupWith || [])) {
+    if (pool.has(u) || u === q.uuid) continue;
+    const o = byUuid.get(u) || await Questions.get(u);
+    if (o && o.status !== 'merged' && o.status !== 'rejected') pool.set(u, o);
+  }
+  for (const other of pool.values()) {
     if (other.uuid === q.uuid) continue;
     if (dismissed.has(other.uuid) || (other.dismissedPairs || []).indexOf(q.uuid) >= 0) continue;
     if (!comparablePair(q, other)) continue;
@@ -3401,6 +3427,7 @@ async function docxToText(arrayBuffer) {
   const zip = await unzip(arrayBuffer);
   const xml = await zip.text('word/document.xml');
   if (!xml) throw new Error('This does not look like a .docx file. If it is a legacy .doc, open it in Word and save as .docx.');
+  const num = { fmt: docxNumbering(await zip.text('word/numbering.xml')), count: {} };
   const body = /<w:body[^>]*>([\s\S]*?)<\/w:body>/.exec(xml);
   // Expand self-closing empty paragraphs first: left as-is, the block walker
   // treats <w:p/> as an opening tag and swallows the next table whole.
@@ -3410,12 +3437,12 @@ async function docxToText(arrayBuffer) {
   const blockRe = /<w:(p|tbl)\b[^>]*>[\s\S]*?<\/w:\1>/g;
   let m;
   while ((m = blockRe.exec(src))) {
-    if (m[1] === 'p') { const t = wpText(m[0]); out.push(t); }
+    if (m[1] === 'p') { const t = wpText(m[0], num); out.push(t); }
     else {
       const rows = m[0].match(/<w:tr\b[^>]*>[\s\S]*?<\/w:tr>/g) || [];
       rows.forEach(r => {
         const cells = (r.match(/<w:tc\b[^>]*>[\s\S]*?<\/w:tc>/g) || []).map(c => {
-          return (c.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) || []).map(wpText).join(' ').trim();
+          return (c.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) || []).map(p => wpText(p, num)).join(' ').trim();
         });
         out.push(cells.join('\t'));
       });
@@ -3424,13 +3451,58 @@ async function docxToText(arrayBuffer) {
   }
   return out.join('\n').replace(/\n{3,}/g, '\n\n');
 }
-function wpText(p) {
+/* Word keeps list labels out of the paragraph text. A paragraph only says
+   "level L of list N" (<w:numPr>); word/numbering.xml says whether list N
+   counts 1, 2, 3, letters a, b, c, or shows a bullet. Read that much of it
+   so an auto-numbered stem reaches the parser as "1. ..." -- the only shape
+   it recognises as a question start -- and auto-lettered options as "a) ...".
+   Returns numId -> { ilvl -> numFmt }. */
+function docxNumbering(xml) {
+  const abs = {}, byId = {};
+  if (!xml) return byId;
+  (xml.match(/<w:abstractNum\b[^>]*>[\s\S]*?<\/w:abstractNum>/g) || []).forEach(a => {
+    const id = (/w:abstractNumId="(\d+)"/.exec(a) || [])[1], lv = {};
+    (a.match(/<w:lvl\b[^>]*>[\s\S]*?<\/w:lvl>/g) || []).forEach(l => {
+      const i = (/w:ilvl="(\d+)"/.exec(l) || [])[1];
+      if (i != null) lv[i] = (/<w:numFmt\b[^>]*w:val="([^"]+)"/.exec(l) || [])[1] || 'decimal';
+    });
+    if (id != null) abs[id] = lv;
+  });
+  (xml.match(/<w:num\b[^>]*>[\s\S]*?<\/w:num>/g) || []).forEach(n => {
+    const id = (/w:numId="(\d+)"/.exec(n) || [])[1];
+    const a = (/<w:abstractNumId\b[^>]*w:val="(\d+)"/.exec(n) || [])[1];
+    if (id != null) byId[id] = abs[a] || {};
+  });
+  return byId;
+}
+/** The label Word would paint for item n of a list level in format fmt. */
+function docxListLabel(fmt, n) {
+  if (/letter/i.test(fmt)) {
+    const ch = String.fromCharCode(97 + (n - 1) % 26);
+    return (/^upper/i.test(fmt) ? ch.toUpperCase() : ch) + ') ';
+  }
+  return n + '. ';
+}
+function wpText(p, num) {
   let s = p.replace(/<w:tab\b[^>]*\/>/g, '\t').replace(/<w:br\b[^>]*\/>/g, '\n');
   const parts = s.match(/<w:t[^>]*>[\s\S]*?<\/w:t>/g) || [];
   let text = parts.map(x => x.replace(/<[^>]+>/g, '')).join('');
   text = decodeXmlEnt(text);
-  // numbered/bulleted list markers are lost in OOXML text; add a hint marker
-  if (/<w:numPr>/.test(p) && text.trim()) text = '• ' + text;
+  // list markers are not in the text: put the number or letter back where
+  // numbering.xml says the list counts, and a bullet hint everywhere else
+  const np = /<w:numPr>[\s\S]*?<\/w:numPr>/.exec(p);
+  if (np && text.trim()) {
+    const id = (/<w:numId\b[^>]*w:val="(\d+)"/.exec(np[0]) || [])[1];
+    const lvl = (/<w:ilvl\b[^>]*w:val="(\d+)"/.exec(np[0]) || [])[1] || '0';
+    const fmt = num && num.fmt[id] ? num.fmt[id][lvl] : '';
+    if (fmt && fmt !== 'bullet' && fmt !== 'none') {
+      // a shallower item restarts the deeper levels, as Word does
+      Object.keys(num.count).forEach(k => { if (k.split(':')[0] === id && +k.split(':')[1] > +lvl) delete num.count[k]; });
+      const k = id + ':' + lvl;
+      num.count[k] = (num.count[k] || 0) + 1;
+      text = docxListLabel(fmt, num.count[k]) + text;
+    } else text = '• ' + text;
+  }
   return text.replace(/\u00a0/g, ' ').trimEnd();
 }
 
@@ -3657,7 +3729,7 @@ function pdfDictAt(latin, from) {
   }
   return null;
 }
-function pdfDictNum(d, key) { const m = new RegExp('/' + key + '\\s+(-?\\d+)(?!\\s+\\d+\\s+R)').exec(d); return m ? parseInt(m[1], 10) : null; }
+function pdfDictNum(d, key) { const m = new RegExp('/' + key + '\\s+(-?\\d+)(?!\\d)(?!\\s+\\d+\\s+R)').exec(d); return m ? parseInt(m[1], 10) : null; }
 function pdfDictName(d, key) { const m = new RegExp('/' + key + '\\s*/([A-Za-z0-9]+)').exec(d); return m ? m[1] : null; }
 function pdfDictBool(d, key) { const m = new RegExp('/' + key + '\\s+(true|false)').exec(d); return m ? m[1] === 'true' : null; }
 const PDF_STR_RX = '(<[0-9A-Fa-f\\s]*>|\\((?:\\\\[\\s\\S]|[^\\\\()])*\\))';
@@ -3783,7 +3855,15 @@ async function pdfSecurity(latin) {
     if (!UE || UE.length < 32) throw new Error(PDF_LOCKED);
     fileKey = await aesCbcDecryptNoPad(inter, new Uint8Array(16), UE.subarray(0, 32));
   } else {
-    const bits = pdfDictNum(dict, 'Length') || 40;
+    // /Length is in bits at the top level, but the crypt filter's own
+    // /Length (in bytes) can come first in the text (qpdf writes /CF before
+    // /Length), so read the top level with the /CF sub-dictionary cut out,
+    // and fall back to the filter's own value when the top level has none.
+    const cfAt = /\/CF\s*<</.exec(dict);
+    const cf = cfAt ? pdfDictAt(dict, dict.indexOf('<<', cfAt.index)) : null;
+    let bits = pdfDictNum(cf ? dict.replace(cf, '') : dict, 'Length');
+    if (!bits && cf) { bits = pdfDictNum(cf, 'Length'); if (bits && bits < 40) bits <<= 3; }
+    if (!bits) bits = cfm === 'AESV2' ? 128 : 40;
     const keyBytes = R === 2 ? 5 : Math.max(5, Math.min(16, bits >> 3));
     const id = pdfFirstId(latin);
     fileKey = pdfLegacyKey(O, P, id, R, keyBytes, pdfDictBool(dict, 'EncryptMetadata'));
@@ -3868,7 +3948,10 @@ async function pdfToText(arrayBuffer) {
     // The LAST /Length before the keyword, not the first: the lookback
     // window can reach back into the previous object, whose length would
     // cut this stream in the wrong place and lose it.
-    const lenRe = /\/Length\s+(\d+)(?!\s*\d+\s*R)/g;
+    // (?!\d) pins the whole digit run. Without it the engine backtracks to a
+    // shorter run so the indirect-reference lookahead no longer sees "0 R",
+    // and "/Length 11 0 R" is read as a direct length of 1.
+    const lenRe = /\/Length\s+(\d+)(?!\d)(?!\s*\d+\s*R)/g;
     let lenM, lenSeen = null;
     while ((lenM = lenRe.exec(header))) lenSeen = lenM;
     let stop = end;
@@ -4164,8 +4247,8 @@ const RX = {
   // Matches "Answer: B", "Ans - c", "Correct answer: D", and prose forms like
   // "The correct answer is: C." or "The correct answer is B." (with or
   // without a separating colon/dash — real documents mix both).
-  answer: /^\s*(?:the\s+)?(?:correct\s+)?(?:answer|ans\.?|key|correct\s+option|correct\s+choice)s?\s*(?:is|was)?\s*[:\-–.=]?\s*(.*)$/i,
-  explanation: /^\s*(?:explanation|rationale|reason|justification|why|note|solution)\s*[:\-–.=]?\s*(.*)$/i,
+  answer: /^\s*(?:the\s+)?(?:correct\s+)?(?:answer|ans\.?|key|correct\s+option|correct\s+choice)s?(?![a-z])\s*(?:(?:is|was)\b\s*)?(?:[:\-–.=]|(?=[\(\[]?[a-hA-H]\b)|$)\s*(.*)$/i,
+  explanation: /^\s*(?:explanation|rationale|reason|justification|why|note|solution)s?(?![a-z])\s*(?:[:\-–.=]|$)\s*(.*)$/i,
   // A leading letter with a word-boundary right after it, so "Available…"
   // (A + boundary-less "vailable") never misreads as option A. Whatever
   // follows — nothing, ") text", ". text", or "text" with no punctuation
@@ -4254,10 +4337,16 @@ function cleanLines(text) {
   // page and is decoration. "Answer: c" also repeats hundreds of times —
   // but it collapses to one of only four possible strings, is genuine
   // per-question content, and must never be stripped just for recurring.
+  // Option CONTENT repeats by nature and is never page furniture: a bullet
+  // option, or the text line under a lone option letter in the Word-to-PDF
+  // layout parseText reads below. "All of the above" in four questions is
+  // four real options, and counting it as a running footer blanked the very
+  // option the answer pointed at.
+  const isOptionBody = (i) => RX.optionBullet.test(raw[i]) || (i > 0 && RX.optionOnly.test(raw[i - 1]));
   const freq = new Map();
-  raw.forEach(l => {
+  raw.forEach((l, i) => {
     const k = normText(l);
-    if (k.length > 3 && k.length < 90 && !looksStructuralLine(l)) freq.set(k, (freq.get(k) || 0) + 1);
+    if (k.length > 3 && k.length < 90 && !looksStructuralLine(l) && !isOptionBody(i)) freq.set(k, (freq.get(k) || 0) + 1);
   });
   const pages = Math.max(1, Math.round(raw.length / 45));
   const repeat = new Set();
@@ -4322,7 +4411,7 @@ function parseText(text, opts) {
   const candidates = [];
   const unresolved = [];
   const caseStudies = [];
-  let cur = null, mode = 'idle', expl = [], stemBuf = [];
+  let cur = null, mode = 'idle', expl = [], stemBuf = [], subNum = 0;
   /* Sheet layout state. `curCase` is the scenario questions are currently
      hanging off; `sheetMeta` are the header-block values that stand as
      defaults until a question overrides them for itself. */
@@ -4361,7 +4450,7 @@ function parseText(text, opts) {
       caseRef: curCase ? curCase.ref : '', caseSeq: 0
     };
     if (curCase) cur.caseSeq = ++curCase.seq;
-    stemBuf = rest ? [rest] : []; mode = 'stem';
+    stemBuf = rest ? [rest] : []; mode = 'stem'; subNum = 0;
   };
 
   for (let i = 0; i < lines.length; i++) {
@@ -4414,9 +4503,23 @@ function parseText(text, opts) {
     const isAnswerLine = RX.answer.test(t);
     const isExplLine = RX.explanation.test(t);
 
-    // A numbered line while collecting options is the next question, not an option.
+    // A numbered line while collecting options is the next question, not an
+    // option. The exception is a numbered sub-item inside the stem we are
+    // still building — "Consider the following statements: 1. … 2. …", or the
+    // 1.–4. list the lettered options refer back to. It is told apart by its
+    // numbering alone: it opens at 1 while the question we are inside carries
+    // a number of its own and has captured no options yet, and it then runs
+    // one at a time. Without this every statement became a question, and the
+    // real one was flushed with no options while its options attached to the
+    // last statement. "Q1."-style markers (qWord) are never sub-items.
     if ((qw || qs) && !optHit && !isAnswerLine && !isExplLine) {
       const m = qw || qs;
+      const sn = qs && !qw ? Number(qs[1]) : 0;
+      const outer = Number(cur ? cur.originalNumber : '');
+      if (cur && mode === 'stem' && !cur.options.length && stemBuf.length &&
+          (subNum ? sn === subNum + 1 : sn === 1 && outer >= 1)) {
+        subNum = sn; stemBuf.push(t); continue;
+      }
       startQ(m[1], m[2], L.n);
       continue;
     }
@@ -4471,11 +4574,15 @@ function parseText(text, opts) {
     // anywhere in the line, not just at its start.
     if (cur && (mode === 'answer' || mode === 'expl') && t) {
       let line = t;
-      const labelMidLine = /\b(?:explanation|rationale|reason|justification)s?\s*[:\-–.]?\s*/i.exec(line);
+      // Anchored, not hunted: only an answer restatement may stand before the
+      // label, and the label must carry a real colon or dash. A bare "reason"
+      // inside prose ("it is reasonable to rely…", "the primary reason is…")
+      // is ordinary explanation text and must keep everything before it.
+      const labelMidLine = /^(?:(?:the\s+)?(?:correct\s+)?answers?\s*(?:is|was)?\s*[:.\-–]?\s*)?(?:[a-hA-H]\s*[\)\].:]\s*)?(?:explanation|rationale|reason|justification)s?\s*[:\-–]\s*/i.exec(line);
       if (labelMidLine) {
         line = line.slice(labelMidLine.index + labelMidLine[0].length);
       } else {
-        const restated = /^(?:the\s+)?(?:correct\s+)?answers?\s*(?:is|was)?\s*[:.\-–]?\s*/i.exec(line);
+        const restated = /^(?:the\s+)?(?:correct\s+)?answers?(?![a-z])\s*(?:is|was)?\s*[:.\-–]?\s*/i.exec(line);
         if (restated) line = line.slice(restated[0].length);
         if (cur.answerLetter) {
           const letterPrefix = new RegExp('^' + cur.answerLetter + '\\b[\\)\\].:]?\\s*[-–:]?\\s*', 'i').exec(line);
@@ -4552,12 +4659,23 @@ function parseText(text, opts) {
     if (!c.text) unresolved.push({ line: 0, text: 'Case study "' + c.ref + '" has no scenario text. Check that the passage sits between SCENARIO: and END SCENARIO.' });
   });
 
-  // Separate answer key ("1. A  2. C 3. B") anywhere in the document.
-  const keyMap = harvestAnswerKey(text);
+  // Separate answer keys ("1. A  2. C 3. B"). A document can carry several —
+  // one per mock paper or per chapter, each numbered from 1 — so a key is
+  // scoped to the questions it follows instead of being merged document-wide.
+  const keyBlocks = harvestAnswerKeys(text);
+  const keyMap = {};
+  keyBlocks.forEach(b => Object.keys(b.map).forEach(k => { if (keyMap[k] == null) keyMap[k] = b.map[k]; }));
+  const keyFor = (line) => {
+    for (let i = 0; i < keyBlocks.length; i++) if (keyBlocks[i].line > line) return keyBlocks[i].map;
+    // Nothing after these questions. A lone key printed above them all is
+    // still theirs; anything else would be a guess, so they stay unanswered.
+    return (keyBlocks.length === 1 && candidates[0] && keyBlocks[0].line < candidates[0].line) ? keyBlocks[0].map : {};
+  };
   candidates.forEach(c => {
     c.conf.options = c.options.length >= 2 ? (c.weakOptions ? 0.6 : 0.92) : 0.2;
-    if (!c.answerLetter && c.originalNumber && keyMap[c.originalNumber]) {
-      c.answerLetter = keyMap[c.originalNumber];
+    const km = keyFor(c.line);
+    if (!c.answerLetter && c.originalNumber && km[c.originalNumber]) {
+      c.answerLetter = km[c.originalNumber];
       c.answerFromKey = true;
       c.conf.answer = 0.8;
     }
@@ -4565,17 +4683,46 @@ function parseText(text, opts) {
   return { candidates, unresolved, keyMap, caseStudies };
 }
 
-function harvestAnswerKey(text) {
-  const map = {};
-  // A header on its own line ("Answer key") followed by the pairs…
-  const block = /(?:^|\n)[ \t]*(?:answer\s*key|answers|solutions|key|correct\s*answers)[ \t]*[:\-–]?[ \t]*\n([\s\S]{0,8000})/i.exec(text);
-  // …or the pairs stated inline after the label ("Answers: 1-B, 2-C, 3-A").
-  const inline = /answers?\s*[:\-–]\s*((?:\s*(?:q\.?\s*)?\d{1,4}\s*[.):\-=]?\s*[a-hA-H]\b[,;\s]*){2,})/i.exec(text);
-  const hunt = (block ? block[1] : '') + '\n' + (inline ? inline[1] : '');
-  if (!hunt.trim()) return map;
-  let m; RX.keyPair.lastIndex = 0;
-  while ((m = RX.keyPair.exec(hunt))) map[m[1]] = m[2].toUpperCase();
-  return map;
+/**
+ * Every separate answer key in the document, in order, each with the line it
+ * starts on. A block runs from its header until the first line that is
+ * neither blank, page furniture, nor mostly number-letter pairs — so it can
+ * never swallow the next section's questions or the next section's key.
+ */
+function harvestAnswerKeys(text) {
+  const blocks = [];
+  const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
+  const mostlyPairs = (s) => {
+    RX.keyPair.lastIndex = 0;
+    let m, n = 0, covered = 0;
+    while ((m = RX.keyPair.exec(s))) { n++; covered += m[0].length; }
+    return n >= 1 && covered / s.length > 0.6;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    let hunt = '', start = -1;
+    // A header on its own line ("Answer key") followed by the pairs…
+    if (KEY_HEADER_RX.test(t)) start = i + 1;
+    else {
+      // …or the pairs stated after the label ("Answers: 1-B, 2-C, 3-A").
+      const inline = /(?:answer\s*key|answers?|solutions?|key|correct\s*answers?)\s*[:\-–]\s*(\S.*)$/i.exec(t);
+      if (inline && mostlyPairs(inline[1])) { hunt = inline[1] + '\n'; start = i + 1; }
+    }
+    if (start < 0) continue;
+    let j = start;
+    for (; j < lines.length; j++) {
+      const s = lines[j].trim();
+      if (!s || RX.header.test(s)) continue;
+      if (!mostlyPairs(s)) break;
+      hunt += s + '\n';
+    }
+    const map = {};
+    let m; RX.keyPair.lastIndex = 0;
+    while ((m = RX.keyPair.exec(hunt))) map[m[1]] = m[2].toUpperCase();
+    if (Object.keys(map).length) blocks.push({ line: i + 1, map });
+    i = Math.max(i, j - 1);
+  }
+  return blocks;
 }
 
 function tableRowToCandidate(cells, lineNo) {
@@ -4873,11 +5020,24 @@ function jsonToCandidates(json) {
 }
 
 /* ---------- candidate → question record ---------- */
-const FIXED_ORDER_RX = /\b(all of the above|none of the above|both a and b|a and b only|option [a-h]\b|options? [a-h] and|first option|last option|above options)\b/i;
+/* An option that names other options cannot survive a shuffle: the runner
+   relabels by display position, so "Both (a) and (b)" ends up pointing at two
+   arbitrary choices. Indian papers write these with brackets far more often
+   than without, and with "these" as often as "above", so all of those
+   spellings have to be recognised. Over-matching only costs one question its
+   shuffle; under-matching shows the student a broken question. */
+const FIXED_ORDER_RX = /\b(?:(?:all|none|any|both|either|neither|more than one)\s+(?:of\s+)?(?:the\s+)?(?:above|these|them|those)|(?:both|either|neither)\s+\(?[a-h]\)?\s*(?:,|and|or|nor|&)\s*\(?[a-h]\)?|\(?[a-h]\)?\s*(?:,|and|&)\s*\(?[a-h]\)?\s+only|options?\s+\(?[a-h]\)?\b|first option|last option|above options)\b/i;
 
 function autoLockOrder(stem, options) {
   if (FIXED_ORDER_RX.test(stem)) return true;
   return options.some(o => FIXED_ORDER_RX.test(o.text));
+}
+/* The stored flag was decided once, at import, by whatever the regex knew
+   then — questions already in the bank never get re-examined. Asking again at
+   shuffle time costs one regex per option, needs no migration and no write,
+   and each device fixes itself. */
+function optionsPinned(q) {
+  return !!q.lockOptionOrder || autoLockOrder(q.stem, q.options);
 }
 function suggestDomain(course, text) {
   const hints = course.hints || {};
@@ -4955,14 +5115,21 @@ function candidateToQuestion(c, ctx) {
   }
   // status
   q.parseConf = c.conf || {};
-  if (q.options.length < 2) q.status = 'parsing';
-  else if (!q.correctOptionId) q.status = 'needs_answer';
-  else if (!q.domainId) q.status = 'needs_class';
-  else if ((c.conf && c.conf.options < 0.7) || (c.conf && c.conf.stem < 0.7)) q.status = 'needs_content';
-  else q.status = 'draft';
+  // Verification is settled BEFORE the status, in the same order
+  // deriveEntryStatus() uses. 'needs_class' is the status that means "the only
+  // thing still missing is a domain": it practises, it is not counted as
+  // stuck, and the review queue calls it "already in practice". An answer
+  // nobody has confirmed is not that — and admitBatch only ever re-derives
+  // 'draft', so deciding the status first left those records held out of
+  // practice by the gate while every counter reported them as practising.
   if (q.correctOptionId && c.conf && c.conf.answer >= 0.8 && ctx.trustSourceAnswers) {
     q.answerVerified = 'verified'; q.verifiedAt = nowISO(); q.verifyNote = 'Answer stated by source';
   }
+  if (q.options.length < 2) q.status = 'parsing';
+  else if (!q.correctOptionId || q.answerVerified !== 'verified') q.status = 'needs_answer';
+  else if (!q.domainId) q.status = 'needs_class';
+  else if ((c.conf && c.conf.options < 0.7) || (c.conf && c.conf.stem < 0.7)) q.status = 'needs_content';
+  else q.status = 'draft';
   return q;
 }
 
@@ -6119,7 +6286,7 @@ const Session = {
     const optionOrders = {};
     ordered.forEach(q => {
       const ids = q.options.map(o => o.id);
-      optionOrders[q.uuid] = (shuffleOpts && !q.lockOptionOrder) ? shuffle(ids, rng) : ids;
+      optionOrders[q.uuid] = (shuffleOpts && !optionsPinned(q)) ? shuffle(ids, rng) : ids;
     });
     const s = {
       id: uuid(), courseId: State.course.id, mode, seed,
@@ -8190,7 +8357,7 @@ async function configureMode(mode, preset) {
       // position is exactly the false confidence this session exists to find.
       const rng3 = mulberry32(s.seed ^ 0x5bf03635);
       picked.questions.forEach(q => {
-        s.optionOrders[q.uuid] = (Settings.get('shuffleOptions') && !q.lockOptionOrder) ? shuffle(q.options.map(o => o.id), rng3) : q.options.map(o => o.id);
+        s.optionOrders[q.uuid] = (Settings.get('shuffleOptions') && !optionsPinned(q)) ? shuffle(q.options.map(o => o.id), rng3) : q.options.map(o => o.id);
         s.marks[q.uuid] = marksOf(q, State.course.id);
       });
       await Session.save(s);
@@ -8212,7 +8379,7 @@ async function configureMode(mode, preset) {
       // s.marking is whatever Session.create already fixed; only the paper changed.
       const rng2 = mulberry32(s.seed ^ 0x9e3779b9);
       keep.forEach(q => {
-        s.optionOrders[q.uuid] = (Settings.get('shuffleOptions') && !q.lockOptionOrder) ? shuffle(q.options.map(o => o.id), rng2) : q.options.map(o => o.id);
+        s.optionOrders[q.uuid] = (Settings.get('shuffleOptions') && !optionsPinned(q)) ? shuffle(q.options.map(o => o.id), rng2) : q.options.map(o => o.id);
         s.marks[q.uuid] = marksOf(q, State.course.id);
       });
       await Session.save(s);
@@ -9765,13 +9932,13 @@ ROUTES.bank = async (root) => {
 
   // Shared with the per-record skip below, so the warning count and what
   // actually gets skipped can never quietly disagree with each other.
-  const notActivatable = (q) => q.answerVerified !== 'verified' || !q.correctOptionId || q.options.length < 2 || !optionCountOk(q);
+  const notActivatable = (q) => !canActivate(q);
   async function bulkStatus(status) {
     const sel = Array.from(BankState.sel);
     if (status === 'active') {
       const bad = [];
       for (const u of sel) { const q = await Questions.get(u); if (notActivatable(q)) bad.push(q.qid); }
-      if (bad.length) { const ok = await confirmBox('Some questions cannot be activated', bad.length + ' of ' + sel.length + ' have no verified correct answer (or the wrong number of options for this course), so they will stay in the review queue. Activate the rest?'); if (!ok) return; }
+      if (bad.length) { const ok = await confirmBox('Some questions cannot be activated', bad.length + ' of ' + sel.length + ' still have an unresolved answer conflict, no verified correct answer, or the wrong number of options for this course, so they will stay in the review queue. Activate the rest?'); if (!ok) return; }
     } else if (status === 'archived') {
       const ok = await confirmBox('Archive ' + sel.length + ' question(s)?', 'They leave the practice pool but keep their Question ID, sources and attempt history. Archiving is reversible.');
       if (!ok) return;
@@ -10067,11 +10234,11 @@ async function openQuestion(uuidStr) {
                 if (freshQ) {
                   Object.assign(q, freshQ);
                   Object.assign(edit, {
-                    stem: freshQ.stem, options: freshQ.options.map(o => ({ id: o.id, text: o.text })),
+                    stem: freshQ.stem, options: freshQ.options.map(o => ({ id: o.id, text: o.text, rationale: o.rationale || '' })),
                     correctOptionId: freshQ.correctOptionId, explanation: freshQ.explanation, learningPoint: freshQ.learningPoint,
                     domainId: freshQ.domainId, topic: freshQ.topic, subtopic: freshQ.subtopic,
                     srcModule: freshQ.srcModule, srcChapter: freshQ.srcChapter, srcSection: freshQ.srcSection,
-                    difficulty: freshQ.difficulty, tags: (freshQ.tags || []).join(', '), lockOptionOrder: freshQ.lockOptionOrder,
+                    difficulty: difficultyUngraded(freshQ) ? 'ungraded' : freshQ.difficulty, tags: (freshQ.tags || []).join(', '), lockOptionOrder: freshQ.lockOptionOrder,
                     status: freshQ.status, answerVerified: freshQ.answerVerified
                   });
                 }
@@ -10750,8 +10917,18 @@ ROUTES.notes = async (root) => {
         });
         return;
       }
+      // The blob's OWN type decides, because that is the value the browser
+      // will act on — not rec.mimeType, which is only what was recorded when
+      // the note was saved, restored or merged. Anything the browser might
+      // execute is handed over as a download instead: a download runs
+      // nothing, needs no new control, and still gets the person their file.
+      if (!noteOpensInertly(blob.type)) {
+        download(rec.filename || (rec.title + '.bin'), blob);
+        toast('That note is not a format this app can display safely, so it was downloaded instead.', 'ok', 7000);
+        return;
+      }
       const url = URL.createObjectURL(blob);
-      window.open(url, '_blank');
+      window.open(url, '_blank', 'noopener');
       setTimeout(() => URL.revokeObjectURL(url), 60000);
     } catch (e) { toast('Could not open that note: ' + e.message, 'bad', 8000); }
   };
@@ -10905,7 +11082,15 @@ async function newCaseStudy() {
     keeps every Question ID, source and attempt, exactly as archiving one
     question does. */
 async function archiveCaseStudy(cs, archive) {
-  const qs = await CaseStudies.questionsOf(cs.id);
+  // Merged duplicates and rejected records are already out of practice, and
+  // their status is a decision about the record itself, not something the
+  // scenario's availability can re-derive. Archiving would flatten it to
+  // 'archived' and restoring would then hand a merged duplicate — or a
+  // record the student deliberately rejected — back as Active, because
+  // deriveEntryStatus reads content only and normalizePairState has nothing
+  // left to read (mergeQuestions empties conflictWith and dupWith). Leave
+  // them exactly as they are, and out of the counts the dialogs quote.
+  const qs = (await CaseStudies.questionsOf(cs.id)).filter(q => q.status !== 'merged' && q.status !== 'rejected');
   const ok = await confirmBox(
     archive ? 'Archive this case study?' : 'Restore this case study?',
     archive
@@ -11982,7 +12167,24 @@ function renderStaging(root) {
             h('span', { class: 'docnum', text: letterOf(oi) })
           ]),
           h('input', { type: 'text', value: o.text, oninput: e => o.text = e.target.value }),
-          h('button', { class: 'btn sm ghost', style: 'margin-top:3px', onclick: () => { q.options.splice(oi, 1); drawOpts(); }, text: '✕' })
+          h('button', {
+            class: 'btn sm ghost', style: 'margin-top:3px',
+            // The same two rules the hand-entry composer follows: deleting an
+            // option takes the answer with it when it WAS the answer, and a
+            // question never drops below two options. Without them the staged
+            // row keeps an id pointing at nothing, admitBatch promotes it to
+            // Active (it only tests that the id is truthy), and the result is
+            // drawn by no session and listed in no review queue.
+            disabled: q.options.length <= 2,
+            onclick: () => {
+              const wasAnswer = q.options[oi].id === q.correctOptionId;
+              q.options.splice(oi, 1);
+              // drawAll, not drawOpts, when the answer went: the row's "No
+              // answer was found in the source" notice has to come back.
+              if (wasAnswer) { q.correctOptionId = null; drawAll(); } else drawOpts();
+            },
+            text: '✕'
+          })
         ]));
       });
       optBox.appendChild(h('button', { class: 'btn sm', onclick: () => { q.options.push(makeOption('')); drawOpts(); }, text: '+ Add option' }));
@@ -12107,7 +12309,13 @@ async function admitBatch() {
     rec.batchId = st.batch.id;
     rec.importedAt = nowISO();
     await CaseStudies.save(rec, 'batch ' + st.batch.id.slice(0, 8));
-    byText.set(normText(rec.text || ''), rec);
+    // A scenario with no passage is not a de-duplication key. Two text-less
+    // scenarios in one batch are two scenarios, not one repeated — without
+    // this the second was folded into the first and its questions were
+    // written pointing at the wrong passage, permanently. Same guard the
+    // bank side above already applies.
+    const writtenKey = normText(rec.text || '');
+    if (writtenKey) byText.set(writtenKey, rec);
     caseIdByKey.set(cs.key, rec.id);
   }
   if (reusedCases) setTimeout(() => toast(reusedCases + ' scenario(s) already in the bank were reused rather than duplicated.', 'info', 6000), 900);
@@ -12125,10 +12333,19 @@ async function admitBatch() {
     if (it.decision === 'review' && it.q.status === 'draft') it.q.status = 'possible_dup';
     // Promote clean drafts to Active only where the answer is actually
     // verified and, if this course enforces one, the option count matches.
-    if (it.q.status === 'draft' && it.q.correctOptionId && it.q.domainId && it.q.answerVerified === 'verified' && optionCountOk(it.q)) it.q.status = 'active';
-    else if (it.q.status === 'draft' && !it.q.correctOptionId) it.q.status = 'needs_answer';
-    else if (it.q.status === 'draft' && it.q.answerVerified !== 'verified') it.q.status = 'needs_answer';
-    else if (it.q.status === 'draft' && !optionCountOk(it.q)) it.q.status = 'needs_content';
+    // deriveEntryStatus is the one place that decides what a question's own
+    // content earns it — the hand-rolled ladder that used to live here had no
+    // branch for "answered, verified, but filed under no domain", so such a
+    // candidate kept status 'draft' (practice:false) instead of the
+    // needs_class (practice:true) it deserves. Hand entry and import cannot
+    // drift now because they call the same function.
+    if (it.q.status === 'draft') it.q.status = deriveEntryStatus(it.q);
+    // The same rule at the one boundary every import crosses, so no staging
+    // control can put an unconfirmed answer into the bank as merely unfiled.
+    // The row's answer radio does exactly that: it sets correctOptionId and
+    // moves needs_answer to needs_class when there is no domain, without
+    // touching answerVerified.
+    else if (it.q.status === 'needs_class' && it.q.answerVerified !== 'verified') it.q.status = 'needs_answer';
     toAdmit.push(it.q);
     if (it.dup) needsRecheck.push(it.q);
   });
@@ -12808,7 +13025,15 @@ async function imageWorkflow(fileOrNull) {
   canvas.addEventListener('pointerdown', e => {
     const r = canvas.getBoundingClientRect();
     dragging = { x: (e.clientX - r.left) * canvas.width / r.width, y: (e.clientY - r.top) * canvas.height / r.height };
+    // Capture keeps the matching pointerup on this canvas even when the finger
+    // or mouse is released past its edge — without it a drag that ends over the
+    // stage padding silently leaves `dragging` set and drops the crop.
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) { }
   });
+  // A pan, a second finger or a system gesture aborts the pointer with no
+  // pointerup at all; clear the half-built rectangle instead of letting the
+  // next pointerup pair with a stale origin.
+  canvas.addEventListener('pointercancel', () => { dragging = null; });
   canvas.addEventListener('pointerup', e => {
     if (!dragging) return;
     const r = canvas.getBoundingClientRect();
@@ -12959,6 +13184,27 @@ function loadImage(file) {
    to the folder the wrapper script sits in, and a missing file is reported by
    name instead of being turned into a network request behind your back. */
 
+/**
+ * The engine script as a URL on this app's own origin, or '' if it is not one.
+ * ocrScriptPath is an ordinary settings row, and settings rows arrive wholesale
+ * from a restored backup (restoreFlow, "replace") and from the connected data
+ * file at every boot (FileStore.loadFromDisk) — neither filters the
+ * device-local keys the way the Drive merge does. A path pointing off this
+ * origin would run somebody else's code against the bank, the Drive token and
+ * the folder handle, so it is refused here. The documented setup is a vendor/
+ * folder beside index.html, which resolves to this origin and is unaffected.
+ */
+function ocrScriptSrc() {
+  const p = (Settings.get('ocrScriptPath') || '').trim();
+  if (!p) return '';
+  try {
+    const u = new URL(p, location.href);
+    // Both sides through the same algorithm, so an opaque file:// origin
+    // compares equal to itself instead of tripping on location.origin quirks.
+    return u.origin === new URL(location.href).origin ? u.href : '';
+  } catch (e) { return ''; }
+}
+
 /** The folder holding the OCR script — everything else is resolved from it. */
 function ocrVendorBase() {
   const p = (Settings.get('ocrScriptPath') || '').trim();
@@ -13042,9 +13288,13 @@ async function runOCR(canvas, textArea, statusEl) {
   if (textArea.value.trim() && !await confirmBox('Replace the current text?', 'Running OCR will overwrite what is already in the box — including anything you typed or corrected by hand.', false, 'Run OCR')) return;
   statusEl.textContent = 'Loading the local OCR engine…';
   try {
+    // Checked before anything is loaded, and before resolveOcrEngine() derives
+    // the worker and core paths from the same string.
+    const src = ocrScriptSrc();
+    if (!src) throw new Error('the OCR engine must be a file in this app’s own folder, and “' + (Settings.get('ocrScriptPath') || '') + '” is not one — fix the path in Settings → Images and OCR → OCR setup');
     if (!self.Tesseract) {
       await new Promise((res, rej) => {
-        const s = h('script', { src: Settings.get('ocrScriptPath'), onload: res, onerror: () => rej(new Error('Could not load ' + Settings.get('ocrScriptPath'))) });
+        const s = h('script', { src, onload: res, onerror: () => rej(new Error('Could not load ' + src)) });
         document.head.appendChild(s);
       });
     }
@@ -19052,6 +19302,17 @@ const DriveSync = {
 const NOTES_SUBFOLDER = 'notes';
 const NOTES_ACCEPT = '.pdf,.png,.jpg,.jpeg,.webp,.txt,.md,.html,.htm';
 
+/** Whether the browser renders this type INERTLY — no script, no stylesheet
+    that can carry script. It has to be an allowlist, never "not HTML": a
+    note's type is whatever was picked, restored from a backup or merged from
+    another device, and a blob: URL carries THIS origin, so every format the
+    browser is willing to execute in (SVG, XHTML, XML with an XSLT sheet,
+    MHTML) would run as the app itself. Anything not named here — including
+    types nobody has thought of yet — is handled without being opened. */
+function noteOpensInertly(type) {
+  return /^(application\/pdf|image\/(png|jpeg|gif|webp|bmp)|text\/(plain|markdown|csv))$/i.test((type || '').split(';')[0].trim());
+}
+
 function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -23251,6 +23512,17 @@ test('Locked option order is respected', () => {
   assert(autoLockOrder(q2.stem, q2.options), '"All of the above" must lock the order');
   const q3 = mkQ('Which is the strongest control?', ['MFA', 'Password length', 'Firewall', 'CCTV'], 0);
   assert(!autoLockOrder(q3.stem, q3.options), 'an ordinary question should not be locked');
+  const q4 = mkQ('Which of the statements are correct?', ['Only (a)', 'Only (b)', 'Both (a) and (b)', 'None of these'], 2);
+  assert(autoLockOrder(q4.stem, q4.options), '"Both (a) and (b)" must lock the order');
+  const q5 = mkQ('Which is true?', ['P is true', 'Q is true', 'Neither A nor B', 'All of these'], 3);
+  assert(autoLockOrder(q5.stem, q5.options), '"All of these" / "Neither A nor B" must lock the order');
+  const q6 = mkQ('Which apply?', ['(a) only', '(b) only', '(a) and (b) only', 'Any of the above'], 2);
+  assert(autoLockOrder(q6.stem, q6.options), '"(a) and (b) only" must lock the order');
+});
+test('A question already in the bank whose options name other options is not shuffled', () => {
+  const q = mkQ('Which of the statements are correct?', ['Only (a)', 'Only (b)', 'Both (a) and (b)', 'None of these'], 2);
+  q.lockOptionOrder = false;
+  assert(optionsPinned(q), 'the shuffle path must pin it even though the stored flag says false');
 });
 
 /* ---- duplicate detection ---- */
@@ -23283,6 +23555,17 @@ test('Conflicting correct answers are detected, not merged', async () => {
   const verdicts = detectDuplicates([b], [a]);
   const v = verdicts.get(b.uuid);
   assert(v && v.conflict, 'duplicate detection must surface the conflict');
+});
+test('Answer disagreement never lowers a reworded pair below the duplicate threshold', async () => {
+  const opts = ['Segregation of duties', 'Log review', 'Annual recertification', 'Change control minutes'];
+  const a = mkQ('Which of the following controls BEST prevents unauthorised changes from reaching production?', opts, 0, { domainId: 'd1' });
+  const agree = mkQ('Which of the following is the BEST control for preventing unauthorized changes from reaching production?', opts, 0, { domainId: 'd1' });
+  const differ = mkQ('Which of the following is the BEST control for preventing unauthorized changes from reaching production?', opts, 1, { domainId: 'd1' });
+  await recomputeFingerprint(a); await recomputeFingerprint(agree); await recomputeFingerprint(differ);
+  eq(classifyPair(a, agree, similarity(a, agree)), 'possible', 'the reworded pair is a possible duplicate when the answers agree');
+  eq(similarity(a, differ).score, similarity(a, agree).score, 'the classification score must not depend on whether the answers agree');
+  const v = detectDuplicates([differ], [a]).get(differ.uuid);
+  assert(v && v.conflict, 'so the same rewording with a different answer is raised as an answer conflict');
 });
 test('Same question from two sources merges to one canonical record', async () => {
   const a = mkQ('What does RTO measure?', ['Data loss tolerance', 'Time to restore service', 'Backup window', 'Retention period'], 1);
@@ -23423,6 +23706,35 @@ test('"Not the same question" clears a conflict on both sides without touching e
     await DB.del('questions', a.uuid); await DB.del('questions', b.uuid);
   }
 });
+test('A live conflict survives a recheck after the bank outgrows the pair\'s shared vocabulary', async () => {
+  const cid = 'test-course-conflict-' + Date.now();
+  const opts = ['Business impact', 'Segregation of duties', 'Change approval evidence', 'Rule ordering'];
+  const a = mkQ('Which of the following is the MOST important consideration when reviewing firewall rulebase changes at a bank branch network?', opts, 0, { courseId: cid, answerVerified: 'verified', domainId: 'D1', status: 'active' });
+  const b = mkQ('Which of the following is the MOST important factor when reviewing firewall rulebase changes at a bank branch network?', opts, 1, { courseId: cid, answerVerified: 'verified', domainId: 'D1', status: 'active' });
+  a.conflictWith = [b.uuid]; b.conflictWith = [a.uuid];
+  normalizePairState(a); normalizePairState(b);
+  await recomputeFingerprint(a); await recomputeFingerprint(b);
+  await DB.put('questions', a); await DB.put('questions', b);
+  const filler = [];
+  for (let i = 0; i < 40; i++) {
+    const f = mkQ('Which of the following is the MOST important control when reviewing firewall rulebase changes at a bank branch network scenario ' + i + ' item' + i + '?', opts, 0, { courseId: cid, answerVerified: 'verified', domainId: 'D1', status: 'active' });
+    await recomputeFingerprint(f); await DB.put('questions', f); filler.push(f);
+  }
+  try {
+    const index = buildIndex([b].concat(filler));
+    assert(!candidatesFor(a, index, a.uuid).some(o => o.uuid === b.uuid), 'precondition: the bounded index no longer returns the partner');
+    const r = await recheckQuestion(a, {});
+    eq(r.changed, false, 'a partner the index missed must not count as removed');
+    assert((a.conflictWith || []).indexOf(b.uuid) >= 0, 'a must still conflict with b');
+    eq(a.status, 'answer_conflict');
+    const freshB = await DB.get('questions', b.uuid);
+    eq(freshB.status, 'answer_conflict', 'b must not have been silently un-flagged');
+    assert((freshB.conflictWith || []).indexOf(a.uuid) >= 0);
+  } finally {
+    await DB.del('questions', a.uuid); await DB.del('questions', b.uuid);
+    for (const f of filler) await DB.del('questions', f.uuid);
+  }
+});
 
 /* ---- difficulty grading ---- */
 test('Every question starts ungraded, however sensible its default difficulty', () => {
@@ -23433,6 +23745,13 @@ test('Every question starts ungraded, however sensible its default difficulty', 
   const legacy = mkQ('y', ['a', 'b', 'c', 'd'], 0);
   delete legacy.difficultyVerified;
   assert(difficultyUngraded(legacy), 'an older record with no flag must read as ungraded, not as graded');
+});
+test('An option round-tripped without its rationale loses it, so every edit buffer must carry one', () => {
+  const src = makeOption('B is a corrective control', 'o1', 'the classic trap');
+  const dropped = { id: src.id, text: src.text };
+  eq(makeOption(dropped.text, dropped.id, dropped.rationale).rationale, undefined, 'a missing rationale key erases the stored rationale');
+  const kept = { id: src.id, text: src.text, rationale: src.rationale || '' };
+  eq(makeOption(kept.text, kept.id, kept.rationale).rationale, 'the classic trap', 'carrying the key preserves it');
 });
 test('Grading during practice writes to the question and is never asked again', async () => {
   const cid = 'test-diff-' + Date.now();
@@ -23819,6 +24138,71 @@ test('An answer key printed separately is matched back by question number', () =
   eq(out.candidates[0].answerLetter, 'B', 'question 1 should take its answer from the key');
   eq(out.candidates[1].answerLetter, 'C', 'question 2 should take its answer from the key');
   assert(out.candidates[0].answerFromKey, 'the source of the answer must be recorded');
+});
+test('A key per section is scoped to that section, not merged document-wide', () => {
+  const paper = (tag, a, b) => [tag, '', '1. Stem alpha for ' + tag + '?', 'A. aa', 'B. bb', 'C. cc', 'D. dd', '',
+    '2. Stem beta for ' + tag + '?', 'A. aa', 'B. bb', 'C. cc', 'D. dd', '', 'Answer Key', '1. ' + a + '  2. ' + b, ''].join('\n');
+  const out = parseText(paper('Paper 1', 'B', 'C') + '\n' + paper('Paper 2', 'D', 'A'), { template: 'auto' });
+  eq(out.candidates.length, 4, 'both papers must parse');
+  eq(out.candidates[0].answerLetter, 'B', 'paper 1 question 1 must take paper 1’s key');
+  eq(out.candidates[1].answerLetter, 'C', 'paper 1 question 2 must take paper 1’s key');
+  eq(out.candidates[2].answerLetter, 'D', 'paper 2 question 1 must take paper 2’s key');
+  eq(out.candidates[3].answerLetter, 'A', 'paper 2 question 2 must take paper 2’s key');
+  assert(out.candidates[0].answerFromKey, 'the source of the answer must still be recorded');
+});
+test('A line that merely begins with "Key", "Note" or "Why" is not an answer or explanation label', () => {
+  const out = parseText([
+    '1. Which of the following is the PRIMARY purpose of',
+    'Key performance indicators in IT governance?',
+    'A) Log review',
+    'B) Authorisation',
+    'Answer: B',
+    'Note that reasonable assurance is not absolute.'
+  ].join('\n'), { template: 'auto' });
+  eq(out.candidates.length, 1);
+  eq(out.candidates[0].options.length, 2, 'the options must not be swallowed into the explanation');
+  assert(out.candidates[0].stem.indexOf('Key performance indicators') >= 0, 'the wrapped stem line stays in the stem');
+  eq(out.candidates[0].answerLetter, 'B');
+  eq(out.candidates[0].explanation, 'Note that reasonable assurance is not absolute.', 'and an explanation line keeps its first word');
+});
+
+test('An explanation line that merely contains "reason" keeps its first half', () => {
+  const out = parseText([
+    'Q1. Which control is preventive?',
+    'A) Log review',
+    'B) Segregation of duties',
+    'Answer: B',
+    'Explanation: Segregation stops the act.',
+    'It is reasonable to rely on the control for this reason.',
+    'Correct Answer: B. Explanation: a restated label is still stripped.'
+  ].join('\n'), { template: 'auto' });
+  eq(out.candidates.length, 1);
+  const e = out.candidates[0].explanation;
+  assert(e.indexOf('It is reasonable to rely on the control for this reason.') >= 0, 'the sentence is not cut at "reasonable"');
+  assert(e.indexOf('a restated label is still stripped.') >= 0, 'a real mid-line label after the answer restatement is still removed');
+  assert(e.indexOf('Correct Answer') < 0, 'and the restatement itself is not kept');
+});
+test('A numbered list inside a stem stays in the stem', () => {
+  const out = parseText([
+    '5. Consider the following statements:',
+    '1. RTO measures the time to restore service.',
+    '2. RPO measures acceptable data loss.',
+    'Which of the statements given above is/are correct?',
+    '(a) 1 only', '(b) 2 only', '(c) Both 1 and 2', '(d) Neither 1 nor 2',
+    'Answer: (c)'
+  ].join('\n'), { template: 'auto' });
+  eq(out.candidates.length, 1, 'one question, not one per statement');
+  eq(out.candidates[0].originalNumber, '5');
+  assert(out.candidates[0].stem.indexOf('1. RTO measures') >= 0 &&
+         out.candidates[0].stem.indexOf('2. RPO measures') >= 0,
+         'both statements stay in the stem the options refer back to');
+  eq(out.candidates[0].options.length, 4);
+  eq(out.candidates[0].answerLetter, 'C');
+  const two = parseText([
+    '1. Which control is preventive?', 'A) Log review', 'B) Authorisation', 'Answer: B',
+    '2. Which is detective?', 'A) Authorisation', 'B) Log review', 'Answer: B'
+  ].join('\n'), { template: 'auto' });
+  eq(two.candidates.length, 2, 'two plainly numbered questions are still two');
 });
 test('A stray capital letter does not become a phantom option', () => {
   const txt = ['1. According to Standard B, what must the auditor do?', 'A) Plan the work', 'B) Skip planning', 'Answer: A'].join('\n');
@@ -24637,6 +25021,31 @@ test('mergeBankPayloads merges questions, and settings key-by-key except the dev
   });
 });
 
+test('a cross-origin OCR engine path is refused before any script is loaded', () => {
+  const was = Settings.cache.ocrScriptPath;
+  try {
+    Settings.cache.ocrScriptPath = 'vendor/tesseract.min.js';
+    assert(ocrScriptSrc(), 'the documented vendor folder beside index.html must still be allowed');
+    Settings.cache.ocrScriptPath = 'https://attacker.example/tesseract.min.js';
+    eq(ocrScriptSrc(), '', 'a path on another origin \u2014 which a restored backup or the data file can set \u2014 must never be loaded as a script');
+    Settings.cache.ocrScriptPath = '//attacker.example/tesseract.min.js';
+    eq(ocrScriptSrc(), '', 'and a protocol-relative one is the same thing written differently');
+    Settings.cache.ocrScriptPath = '';
+    eq(ocrScriptSrc(), '', 'an empty path must not resolve to the app document itself');
+  } finally { Settings.cache.ocrScriptPath = was; }
+});
+
+test('A note is only opened as a document when the browser renders it inertly', () => {
+  assert(noteOpensInertly('application/pdf'), 'a PDF still opens in a tab');
+  assert(noteOpensInertly('image/png'), 'a PNG still opens in a tab');
+  assert(noteOpensInertly('text/plain; charset=utf-8'), 'a text note with a charset still opens in a tab');
+  assert(!noteOpensInertly('image/svg+xml'), 'an SVG must never be opened in this origin');
+  assert(!noteOpensInertly('application/xml'), 'nor XML, which can carry an XSLT stylesheet');
+  assert(!noteOpensInertly('application/xhtml+xml'), 'nor XHTML');
+  assert(!noteOpensInertly('text/html'), 'nor HTML');
+  assert(!noteOpensInertly(''), 'nor an unknown type');
+});
+
 test('A merge-restore must not leave the backup\'s counters standing over a unioned answer log', () => {
   const backupSaw = [{ ts: '2026-09-01T10:00:00Z', correct: true, confidence: 'sure', ms: 5000 }];
   const sinceThen = [{ ts: '2026-09-05T10:00:00Z', correct: false, confidence: 'guessed', ms: 7000 }];
@@ -25120,6 +25529,14 @@ test('Only active, verified questions can enter a session', () => {
   const d = base(); d.status = 'draft'; assert(!isPracticeEligible(d), 'a draft must be blocked');
   const x = base(); x.correctOptionId = 'nope'; assert(!isPracticeEligible(x), 'a dangling correct-option id must be blocked');
 });
+test('Bulk Activate asks the practice gate rather than a copy of it', () => {
+  const base = () => { const q = mkQ('q', ['a', 'b'], 0); q.status = 'answer_conflict'; q.answerVerified = 'verified'; return q; };
+  assert(canActivate(base()), 'a settled record is activatable');
+  const c = base(); c.conflict = true;
+  assert(!canActivate(c), 'an unresolved answer conflict must not be bulk-activated');
+  const x = base(); x.correctOptionId = 'nope';
+  assert(!canActivate(x), 'a dangling correct-option id must not be bulk-activated');
+});
 
 /* ---- archive round trip ---- */
 test('ZIP write then read returns the same bytes', async () => {
@@ -25421,6 +25838,27 @@ test('Every page of a PDF is read, not just the first', async () => {
   eq(out.candidates[2].answerLetter, 'A');
 });
 
+test('An indirect /Length ("/Length 11 0 R") is not misread as a direct length', async () => {
+  if (typeof self.CompressionStream !== 'function') return 'skipped — this browser has no Compression Streams';
+  const enc = new TextEncoder();
+  const parts = [enc.encode('%PDF-1.4\n')];
+  const pages = [['Q1. First page question?', 'A) One', 'B) Two', 'Answer: A'], ['Q2. Second page question?', 'A) Three', 'B) Four', 'Answer: B']];
+  let objNum = 10;
+  for (const lines of pages) {
+    const body = 'BT /F1 9 Tf 40 800 Td 12 TL\n' + lines.map(l => '(' + l.replace(/([()\\])/g, '\\$1') + ') Tj T*\n').join('') + 'ET';
+    const cs = new CompressionStream('deflate');
+    const z = new Uint8Array(await new Response(new Blob([enc.encode(body)]).stream().pipeThrough(cs)).arrayBuffer());
+    parts.push(enc.encode(objNum + ' 0 obj\n<< /Length ' + (objNum + 1) + ' 0 R /Filter /FlateDecode >>\nstream\n'), z, enc.encode('\nendstream\nendobj\n' + (objNum + 1) + ' 0 obj\n' + z.length + '\nendobj\n'));
+    objNum += 2;
+  }
+  let n = 0; parts.forEach(p => n += p.length);
+  const raw = new Uint8Array(n); let o = 0;
+  parts.forEach(p => { raw.set(p, o); o += p.length; });
+  const out = parseText(await pdfToText(raw.buffer), { template: 'lettered' });
+  eq(out.candidates.length, 2, 'both pages came through despite the indirect lengths');
+  eq(out.candidates[1].stem, 'Second page question?');
+});
+
 /* ---- PDF standard security ----
    These fixtures were written by pypdf, an unrelated implementation, and
    that is the whole point: a key derivation can only honestly be tested
@@ -25624,6 +26062,20 @@ test('An encrypted PDF that opens without a password is read, not refused', asyn
   }
 });
 
+test('A protected PDF whose crypt filter precedes /Length is still read', async () => {
+  if (!HAS_SUBTLE) return 'skipped — this browser exposes no SubtleCrypto';
+  const bytes = new Uint8Array(b64ToBuf(ENC_PDFS.aes_128));
+  let latin = '';
+  for (let i = 0; i < bytes.length; i++) latin += String.fromCharCode(bytes[i]);
+  const cf = /\/CF <<[\s\S]*?>>\n>>\n\/StmF \/StdCF\n\/StrF \/StdCF\n/.exec(latin)[0];
+  latin = latin.replace(cf, '').replace('/V 4\n/R 4', cf + '/V 4\n/R 4');
+  const buf = new Uint8Array(latin.length);
+  for (let i = 0; i < latin.length; i++) buf[i] = latin.charCodeAt(i);
+  const text = await pdfToText(buf.buffer);
+  assert(text.indexOf('Q1. Which control is preventive?') >= 0, 'the question came through');
+  assert(text.indexOf('Answer: B') >= 0, 'and its answer');
+});
+
 test('Every page of an encrypted PDF is decrypted with its own object key', async () => {
   if (!HAS_SUBTLE) return 'skipped — this browser exposes no SubtleCrypto';
   // Revisions up to 4 key each object separately, so a second page proves
@@ -25760,6 +26212,27 @@ test('An option that wraps onto the next line is still joined up', () => {
   eq(out.candidates[0].answerLetter, 'A');
 });
 
+test('An option that repeats across questions is not mistaken for a page footer', () => {
+  let txt = '';
+  for (let i = 1; i <= 5; i++) {
+    txt += 'Q' + i + '. Which control is best for scenario ' + i + '?\n' +
+      'A.\nAccess control matrix ' + i + '\nB.\nSegregation of duties ' + i + '\n' +
+      'C.\nManagement review ' + i + '\nD.\nAll of the above\nAnswer: D\n\n';
+  }
+  const out = parseText(txt, { template: 'auto' });
+  eq(out.candidates.length, 5);
+  out.candidates.forEach(c => eq(c.options[3].text, 'All of the above', 'the repeated option keeps its text'));
+  const q = candidateToQuestion(out.candidates[0], { courseId: 'test-course', course: { blueprint: CISA_BLUEPRINT, hints: CISA_HINTS }, sourceId: 's', sourceTitle: 't', filename: 'f' });
+  assert(q.options.every(o => o.text.trim()), 'no option is admitted blank');
+  eq(q.options.find(o => o.id === q.correctOptionId).text, 'All of the above');
+  assert(q.lockOptionOrder, 'and it is still auto-locked against shuffling');
+  let hdr = '';
+  for (let i = 1; i <= 8; i++) hdr += 'Mock Assessment Test Paper 1\nQ' + i + '. Stem ' + i + ' about controls?\nA) Alpha ' + i + '\nB) Beta ' + i + '\nAnswer: A\n\n';
+  const h8 = parseText(hdr, { template: 'auto' });
+  eq(h8.candidates.length, 8);
+  assert(!h8.candidates.some(c => c.stem.indexOf('Mock Assessment') >= 0), 'the running title is still stripped');
+});
+
 test('Column references run past Z', () => {
   eq(xlsxCol(0), 'A'); eq(xlsxCol(25), 'Z');
   eq(xlsxCol(26), 'AA'); eq(xlsxCol(51), 'AZ'); eq(xlsxCol(52), 'BA');
@@ -25815,6 +26288,33 @@ test('The .docx the app writes is one the app can read back', async () => {
   const back = await docxToText(await blob.arrayBuffer());
   eq(back, 'Ampersands & "quotes" survive\n\nSo does an apostrophe\'s <angle>',
     'every character round-trips, and the blank line stays a blank line');
+});
+
+test('Word auto-numbered questions read back with their numbers', async () => {
+  const para = (numId, t) => '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="' + numId + '"/></w:numPr></w:pPr><w:r><w:t xml:space="preserve">' + esc(t) + '</w:t></w:r></w:p>';
+  const plain = t => '<w:p><w:r><w:t xml:space="preserve">' + esc(t) + '</w:t></w:r></w:p>';
+  const doc = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
+    para(1, 'Which control is preventive?') + plain('(a) Reconciliation') + plain('(b) Segregation of duties') + plain('(c) Exception report') + plain('(d) Audit trail') + plain('Answer: b') +
+    para(1, 'Which control is detective?') + plain('(a) Segregation of duties') + plain('(b) Authorisation') + plain('(c) Reconciliation') + plain('(d) Access rights') + plain('Answer: c') +
+    para(2, 'A bullet stays a bullet') +
+    '</w:body></w:document>';
+  const numbering = '<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+    '<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>' +
+    '<w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val=""/></w:lvl></w:abstractNum>' +
+    '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>';
+  const blob = await zipFiles([
+    { name: '[Content_Types].xml', data: DOCX_PARTS.types }, { name: '_rels/.rels', data: DOCX_PARTS.rels },
+    { name: 'word/document.xml', data: doc }, { name: 'word/numbering.xml', data: numbering }
+  ]);
+  const text = await docxToText(await blob.arrayBuffer());
+  assert(text.startsWith('1. Which control is preventive?'), 'the list number is put back');
+  assert(text.indexOf('\n2. Which control is detective?') > 0, 'and counts on');
+  assert(text.endsWith('\u2022 A bullet stays a bullet'), 'a bullet list still gets the bullet hint');
+  const out = parseText(text, { template: 'auto' });
+  eq(out.candidates.length, 2, 'two questions, not one with the second inside its explanation');
+  eq(out.candidates[1].originalNumber, '2');
+  eq(out.candidates[1].answerLetter, 'C');
+  eq(out.candidates[0].explanation, '');
 });
 
 /** Build what a download button writes, without the download. */
@@ -26041,6 +26541,18 @@ test('A hand-written question earns exactly the status its content deserves', ()
   } finally { State.courses = State.courses.filter(c => c.id !== 'test-course'); }
 });
 
+test('A staged draft with its domain cleared is admitted into practice, not benched', () => {
+  const q = blankQuestion('test-course');
+  q.options = [makeOption('one'), makeOption('two'), makeOption('three'), makeOption('four')];
+  q.stem = 'Its suggested domain was wrong, so it was set back to Unmapped?';
+  q.correctOptionId = q.options[0].id;
+  q.answerVerified = 'verified';
+  q.domainId = null;
+  q.status = 'draft';
+  eq(deriveEntryStatus(q), 'needs_class', 'the shared rule files it rather than leaving it Draft');
+  assert(STATUS[deriveEntryStatus(q)].practice, 'and what admitBatch now writes must practise');
+});
+
 test('Blockers name what is left to do, and go quiet when nothing is', () => {
   const q = blankQuestion('test-course');
   q.options = [makeOption(''), makeOption('')];
@@ -26188,6 +26700,23 @@ test('Restoring an archived case study does not lose a conflict', () => {
   eq(ok.status, 'active');
 });
 
+test('Restoring an archived case study does not resurrect a merged or rejected record', () => {
+  const merged = mkCaseQ('A question that was merged away?', ['a', 'b', 'c', 'd'], 0, 'cs-1', 1);
+  merged.domainId = 'D1'; merged.status = 'merged'; merged.canonicalUuid = 'the-canonical';
+  merged.conflictWith = []; merged.dupWith = [];
+  const rejected = mkCaseQ('A question the student rejected?', ['a', 'b', 'c', 'd'], 0, 'cs-1', 2);
+  rejected.domainId = 'D1'; rejected.status = 'rejected';
+  const live = mkCaseQ('An ordinary case question?', ['a', 'b', 'c', 'd'], 0, 'cs-1', 3);
+  live.domainId = 'D1';
+  const walked = [merged, rejected, live].filter(q => q.status !== 'merged' && q.status !== 'rejected');
+  eq(walked.length, 1, 'only the live record is archived and restored with its scenario');
+  eq(walked[0].uuid, live.uuid);
+  eq(deriveEntryStatus(merged), 'active', 'content alone says the duplicate is fine — which is the trap');
+  eq(merged.status, 'merged', 'so it must never be walked: Unmerge depends on this status');
+  eq(rejected.status, 'rejected');
+  assert(!isPracticeEligible(merged) && !isPracticeEligible(rejected), 'and neither returns to the pool');
+});
+
 test('One case reference is one scenario, however often a file repeats it', () => {
   // JSON listing the same ref twice: the halves fold together rather than
   // producing a second record that steals every question from the first.
@@ -26238,6 +26767,17 @@ test('A scenario already in the bank is reused, not written a second time', asyn
     await DB.del('courses', cid);
     await DB.del('idRegister', cid);
   }
+});
+
+test('Two scenarios with no passage stay two scenarios', () => {
+  const byText = new Map();
+  const fold = (rec) => { const k = normText(rec.text || ''); if (k) byText.set(k, rec); };
+  const a = { id: 'a', text: '' }, b = { id: 'b', text: '' }, c = { id: 'c', text: 'A real passage.' };
+  fold(a);
+  assert(!byText.get(normText(b.text || '')), 'an empty passage never matches the empty one written before it');
+  fold(b); fold(c);
+  eq(byText.get(normText('A real passage.')), c, 'a real passage still de-duplicates');
+  eq(byText.size, 1, 'and only real passages are ever keys');
 });
 
 test('A paper says what it was actually made of', () => {
@@ -26489,6 +27029,23 @@ test('Reasoning survives both import shapes', () => {
   const plain = rowsToCandidates([['Question', 'A', 'B', 'Answer'], ['Q?', 'x', 'y', 'A']]);
   const pq = candidateToQuestion(plain.candidates[0], { courseId: 'test-course', course: { blueprint: [] } });
   assert(!('rationale' in pq.options[0]), 'and adds nothing where there was nothing');
+});
+
+test('An imported answer nobody has confirmed is never filed as merely unclassified', () => {
+  const cand = {
+    stem: 'Which control is preventive?',
+    options: [{ letter: 'A', text: 'Log review' }, { letter: 'B', text: 'Authorisation' }],
+    answerLetter: 'B', conf: { stem: 1, options: 1, answer: 1 }
+  };
+  const ctx = { courseId: 'test-course', course: { blueprint: [], hints: {} }, sourceId: 's', sourceTitle: 't', filename: 'f', trustSourceAnswers: false };
+  const q = candidateToQuestion(cand, ctx);
+  eq(q.answerVerified, 'unverified');
+  eq(q.status, 'needs_answer', 'an unconfirmed answer outranks a missing domain');
+  assert(!isPracticeEligible(q), 'it cannot be practised');
+  assert(isBlocked(q), 'so it must be counted as waiting, not as in practice');
+  const trusted = candidateToQuestion(cand, Object.assign({}, ctx, { trustSourceAnswers: true }));
+  eq(trusted.status, 'needs_class', 'a confirmed answer with no domain is still merely unfiled');
+  assert(isPracticeEligible(trusted), 'and no domain must not cost somebody their bank');
 });
 
 /* ---- which wrong answer keeps working ---- */
@@ -28359,6 +28916,14 @@ test('Skipping the exam-centre ceremony starts the paper instead of hanging', as
   btn.click();
   const how = await Promise.race([p, new Promise(r => setTimeout(() => r('HUNG'), 1500))]);
   eq(how, 'skipped', 'skipping on the first frame must resolve examDayFlow');
+});
+
+test('The crop canvas opts out of browser panning so a touch drag reaches pointerup', () => {
+  const stage = h('div', { class: 'imgstage' }, h('canvas'));
+  document.body.appendChild(stage);
+  try {
+    eq(getComputedStyle(stage.querySelector('canvas')).touchAction, 'none', 'the crop canvas must set touch-action:none or a phone drag becomes a scroll');
+  } finally { stage.remove(); }
 });
 
 test('resumeLatest sees an unfinished session, so configureMode is gated', async () => {
