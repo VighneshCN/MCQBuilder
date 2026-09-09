@@ -1524,7 +1524,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.1', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.2', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1794,7 +1794,11 @@ const DB = {
   _stampedStores: ['courses', 'sources', 'batches', 'presets', 'notes', 'sessions', 'caseStudies'],
 
   async _guard(store, run, op, payload) {
-    if (_writeVeto && _writeVeto(store)) {
+    // Rows that never reach the data file (theme, active course, last backup
+    // time — see DEVICE_LOCAL_SETTINGS) cannot make it diverge, so refusing
+    // them while read-only only breaks this device's own bookkeeping.
+    const deviceLocal = store === 'settings' && isDeviceLocalSetting(op === 'd' ? payload : (payload && payload.k));
+    if (_writeVeto && !deviceLocal && _writeVeto(store)) {
       const err = new Error(typeof READONLY_MSG !== 'undefined' ? READONLY_MSG : 'The app is read-only.');
       err.name = 'ReadOnlyError';
       throw err;
@@ -5064,8 +5068,14 @@ function applyAttempt(q, att) {
   // due — so it is an edit, and the merge decides which of two devices holds
   // the newer version of a question by reading exactly this field. Without it,
   // two devices held different versions under identical stamps and the answer
-  // never crossed.
-  q.updatedAt = nowISO();
+  // Answering is NOT an edit to the record. Everything it changes — mastery,
+  // streak, stage, the date it next falls due — is arithmetic over the answer
+  // log, and that log merges as a union and is replayed by
+  // rebuildQuestionStats on both devices, so the answer crosses without a
+  // stamp. Stamping it here meant whichever device answered last won the
+  // question WHOLE: a stem, option, explanation or verification edited on the
+  // other device while it was offline was thrown away with the row it lost,
+  // silently and with nothing left to restore it from.
   return q;
 }
 
@@ -13997,7 +14007,7 @@ async function safetyBackup(reason) {
 
     download(name, blob);
     await Settings.set('lastBackupAt', nowISO());
-    await audit('backup', 'system', '', null, { scope: 'all', reason: reason, file: name, counts: manifest.counts }, 'Safety backup before a destructive action');
+    await audit('backup', 'system', '', null, { scope: 'all', reason: reason, file: name, counts: manifest.counts }, 'Safety backup before a destructive action').catch(e => { if (e.name !== 'ReadOnlyError') throw e; });
     return { ok: true, where: 'download', name: name, size: blob.size };
   } catch (e) {
     return { ok: false, error: e.message || String(e) };
@@ -14277,7 +14287,7 @@ async function doBackup(scope) {
     }
 
     await Settings.set('lastBackupAt', nowISO());
-    await audit('backup', 'system', '', null, { scope, counts: manifest.counts }, '');
+    await audit('backup', 'system', '', null, { scope, counts: manifest.counts }, '').catch(e => { if (e.name !== 'ReadOnlyError') throw e; });
     toast(where === 'folder' ? 'Backup saved to your data folder · ' + bytes(blob.size) : 'Backup saved · ' + bytes(blob.size), 'ok');
     if (State.view === 'backup') go('backup');
   } catch (e) {
@@ -14311,6 +14321,17 @@ function pickRestoreLegacy() {
   input.click();
 }
 
+/** The JSON a person is most likely to pick is the app's own data file —
+    the picker opens in the data folder and the manual says to take
+    mcq-mastery-data.json when moving a bank — so its shape
+    ({ app, schema, savedAt, stores }) must restore like a backup. */
+function restorePayloadFromJson(j) {
+  if (j && j.stores && typeof j.stores === 'object' && !Array.isArray(j.stores)) {
+    return { payload: j.stores, manifest: { schemaVersion: j.schema || 0, createdAt: j.savedAt, scope: 'all' } };
+  }
+  return { payload: j.data || j, manifest: j.manifest || { schemaVersion: j.schemaVersion || 0 } };
+}
+
 async function restoreFlow(file) {
   let payload = null, manifest = null;
   try {
@@ -14320,7 +14341,7 @@ async function restoreFlow(file) {
         await modal({ title: 'That looks like an import file', body: h('p', {}, 'This JSON is a question list rather than a backup package. Use Add Questions for it — that way it goes through duplicate detection and reconciliation.') });
         return;
       }
-      payload = j.data || j; manifest = j.manifest || { schemaVersion: j.schemaVersion || 0 };
+      ({ payload, manifest } = restorePayloadFromJson(j));
     } else {
       const zip = await unzip(await file.arrayBuffer());
       manifest = JSON.parse(await zip.text('manifest.json') || '{}');
@@ -14346,6 +14367,11 @@ async function restoreFlow(file) {
   }
   if ((manifest.schemaVersion || 0) > APP.schema) {
     await modal({ title: 'Made by a newer version of the app', body: h('p', {}, 'This backup was made by a newer version of MCQ Mastery than the one you have open. Update the app first, or restoring now may not bring everything back correctly.') });
+    return;
+  }
+
+  if (!(payload.courses || []).length && !(payload.questions || []).length) {
+    await modal({ title: 'Nothing to restore', body: h('p', {}, 'This file holds no courses and no questions, so restoring it could only empty this bank. Pick a backup zip made by the app, or a mcq-mastery-data.json that has your questions in it.') });
     return;
   }
 
@@ -14460,7 +14486,13 @@ async function restoreFlow(file) {
     // next merge with Drive compared those old stamps against the copies the
     // restore was meant to replace and put the old ones straight back.
     const restoredAt = nowISO();
-    out.forEach(q => { q.updatedAt = restoredAt; });
+    // …and a restore is also a statement that these questions are BACK, which
+    // is a different claim from "recently edited". A tombstone written by the
+    // wipe this backup was taken before still sits on every other device, and
+    // the union in mergeBankPayloads has no way to tell that this restore came
+    // after it — so the restore was undone by the next sync, on every device,
+    // with no control anywhere that clears a tombstone. This stamp is that way.
+    out.forEach(q => { q.updatedAt = restoredAt; q.restoredAt = restoredAt; });
     await DB.putMany('questions', out);
     for (const [cid, seq] of maxSeqByCourse) await IdRegister.reserveUpTo(cid, seq);
     report.stores.questions = out.length;
@@ -14478,11 +14510,17 @@ async function restoreFlow(file) {
   State.course = State.courses.find(c => c.id === wanted) || State.courses[0] || null;
   State.invalidate();
 
+  // A merge unions the answers but takes the backup's question row whole, so
+  // the counters on it describe only the answers the backup knew about — the
+  // same arithmetic applyMergedBank redoes after a sync merge. Written
+  // unstamped, so the restore stamp still wins the next merge, now with the
+  // right numbers on it.
+  const recounted = await repairDerivedStats();
   const issues = await integrityChecks();
   await modal({
     title: 'Restore complete', wide: true,
     body: h('div', { class: 'stack' }, [
-      h('div', { class: 'notice ok' }, report.added + ' added · ' + report.updated + ' updated in place · ' + report.reIded + ' given a new Question ID after a collision'),
+      h('div', { class: 'notice ok' }, report.added + ' added · ' + report.updated + ' updated in place · ' + report.reIded + ' given a new Question ID after a collision' + (recounted ? ' · practice counts recalculated for ' + recounted + ' question(s) from the answer history' : '')),
       h('div', { class: 'small muted' }, 'Records written: ' + Object.keys(report.stores).map(k => k + ' ' + report.stores[k]).join(' · ')),
       h('div', { class: 'notice ' + (issues.length ? 'warn' : 'ok') }, issues.length ? 'Integrity check found ' + issues.length + ' issue type(s) — open the report from Backup & Restore.' : 'Integrity check passed.')
     ])
@@ -14845,7 +14883,15 @@ async function offlineState() {
   let ready = false;
   try {
     const reg = await navigator.serviceWorker.getRegistration();
-    ready = !!(reg && (reg.active || reg.installing || reg.waiting));
+    ready = !!(reg && (reg.active || reg.installing || reg.waiting)) &&
+      // A registration is not a stored copy: install's cache.addAll is
+      // allowed to fail silently (sw.js), and the worker still activates.
+      // So ask the cache the same question the worker's own navigate
+      // fallback asks — index.html under its own name (what install put
+      // there) or the directory URL (what the fetch handler puts there on a
+      // later load). Neither present means the next offline open is a
+      // browser error page, whatever the registration says.
+      !!((await caches.match('./index.html')) || (await caches.match('./')));
   } catch (e) { ready = false; }
   return { can: true, on, ready };
 }
@@ -16670,6 +16716,19 @@ function retiredCourseIds(tombstones) {
   });
   return out;
 }
+/* A single note removed, recorded the same way. A note has no qid of its own,
+   so the key is namespaced by the note's id, and it deliberately carries no
+   `uuid` — the question-removal pass must never read it as a question. */
+const NOTE_TOMBSTONE = 'NOTE:';
+function retiredNoteIds(tombstones) {
+  const out = new Set();
+  (tombstones || []).forEach(t => {
+    if (t && typeof t.qid === 'string' && t.qid.indexOf(NOTE_TOMBSTONE) === 0) {
+      out.add(t.noteId || t.qid.slice(NOTE_TOMBSTONE.length));
+    }
+  });
+  return out;
+}
 /** Every store filed under a course, and the field naming it. */
 const COURSE_SCOPED = ['sources', 'batches', 'presets', 'notes', 'sessions', 'caseStudies'];
 
@@ -16995,7 +17054,25 @@ const FileStore = {
    * Read the file and rebuild IndexedDB from it.
    * Returns 'loaded' | 'empty' | 'missing'.
    */
+  /**
+   * Any failure here leaves the app read-only. A load that did not finish
+   * means this browser does not know what the file holds, so the write path
+   * would see no stamp and no disk count, take the create:true snapshot
+   * branch, and replace the file it could not read. Owning the failure here
+   * covers every caller — boot, reconnect, recovery and the loss dialog.
+   */
   async loadFromDisk() {
+    try { return await this._loadFromDisk(); }
+    catch (e) {
+      this.connected = false;
+      this.needsReconnect = true;
+      this.problem = 'changed';
+      updateStorageBar();
+      throw e;
+    }
+  },
+
+  async _loadFromDisk() {
     let fh;
     try { fh = await this.fileHandleFor(false); }
     catch (e) { if (e && e.name === 'NotFoundError') return 'missing'; throw e; }
@@ -17010,6 +17087,14 @@ const FileStore = {
     catch (e) { throw new Error('Your data file is not valid JSON. It may have been edited or truncated. Restore a backup, or move the file aside and reconnect to start a fresh one.'); }
     if (!payload || !payload.stores) throw new Error('That file is not an MCQ Mastery data file.');
     if ((payload.schema || 1) > APP.schema) throw new Error('That file was written by a newer version of the app. Update the app before opening it.');
+
+    // Arm the loss guard from the FILE, before a single store is touched. The
+    // rebuild below clears each store before refilling it, so anything that
+    // throws part-way through leaves this browser holding less than the file
+    // does — exactly the half-initialised state lossCheck() exists to refuse.
+    // Setting this only after a fully successful load disarmed the guard for
+    // the one failure it was written to catch.
+    this._diskQuestionCount = (payload.stores.questions || []).length;
 
     const names = syncStores();
     for (const s of names) {
@@ -17287,10 +17372,16 @@ const FileStore = {
       return false;
     }
     const lines = this._journal.map(e => JSON.stringify(e)).join('\n') + '\n';
+    // File.size counts BYTES, and writing a string here encodes it as UTF-8,
+    // but a JS string's .length counts UTF-16 units. Every answer journals an
+    // srReason holding '→' (one unit, three bytes), so counting units left the
+    // stamp short of the real file and the next append read our own write as
+    // someone else's edit — read-only, mid-session. Encode once, count that.
+    const bytes = new TextEncoder().encode(lines);
     const w = await jh.createWritable({ keepExistingData: true });
-    await w.write({ type: 'write', position: existing.size, data: lines });
+    await w.write({ type: 'write', position: existing.size, data: bytes });
     await w.close();
-    this._journalBytes = existing.size + lines.length;
+    this._journalBytes = existing.size + bytes.length;
     this._journalStamp = this._journalBytes;
     this._journal = [];
     this.dirty = false;
@@ -17695,10 +17786,13 @@ const DriveSync = {
   // data; the app simply had not been asked the right question.
   connected: false, configured: false, fileId: null, accessToken: null, tokenExpiresAt: 0,
   _resumeTimer: null, _resumeDelay: null, _resuming: false, _resumeWatching: false, _lastResumeAt: 0,
+  _silentBlockedAt: null,
   // Why this browser must not upload right now, or null when it may.
   _holdPush: null,
   // One reconciliation at a time.
   _catchingUp: false,
+  // A merge writing its own result back into IndexedDB — not an edit; see touch().
+  _applyingMerge: false,
   // A Google sign-in in flight — nothing automatic may talk to Google meanwhile.
   _tokenPending: null,
   _watchTimer: null, _lastRemoteCheck: 0,
@@ -17768,6 +17862,7 @@ const DriveSync = {
     // actually pending.
     this.lastPushedAt = (await FileStore.meta('driveLastSyncedAt')) || null;
     this._remoteQuestionCount = (await FileStore.meta('driveQuestionCount')) || 0;
+    this._accountHint = (await FileStore.meta('driveAccountHint')) || null;
     // Whatever happens with the token, this browser is now watching for a
     // chance to get one: a tab brought back to the front, a network that
     // returns, or simply time passing. Registered before the first attempt so
@@ -17831,6 +17926,12 @@ const DriveSync = {
       const outcome = await this._mergeInRemote(remote);
       if (!outcome.applied) return;      // declined; the hold is already set
       const contributed = outcome.contributed || dirtySince;
+      // The copy at this stamp has now been merged in. push() compares Drive's
+      // stamp with this one before uploading, and until it was set here the
+      // push below saw "Drive moved", called back into this catch-up (which
+      // returns at once while running) and pushed again — for ever. Persisted
+      // at _recordSyncedStamp() below, as before.
+      this.lastSyncedModifiedTime = remoteModified;
       if (contributed) await this.push();
       this._holdPush = null;
       // Level with Drive without having pushed — the merge produced exactly
@@ -17910,14 +18011,33 @@ const DriveSync = {
       || (merged.stores.attempts || []).length !== (remote.stores.attempts || []).length
       || JSON.stringify((merged.stores.questions || []).map(q => q.updatedAt).sort()) !==
          JSON.stringify((remote.stores.questions || []).map(q => q.updatedAt).sort());
-    await applyMergedBank(merged, report);
+    /* Writing the merged result back is not an edit: every row in it came from
+       one of the two copies being merged. Unguarded, the DAL's write hook
+       called DriveSync.touch() for every store, so a catch-up that only
+       downloaded still marked the bank dirty and uploaded the whole thing six
+       seconds later — which moved Drive's modifiedTime, woke the other device's
+       watcher into the same pull-merge-push, and left two open tabs trading
+       whole-bank uploads for as long as both stayed open. Work done here before
+       the merge is already recorded in driveDirtySince, which _catchUpWithDrive
+       reads before the pull and folds into `contributed`. */
+    this._applyingMerge = true;
+    try { await applyMergedBank(merged, report); }
+    finally { this._applyingMerge = false; }
     /* The screen was painted before this merge existed. Boot fires the Drive
        catch-up without waiting for it and draws the dashboard immediately, and
        nothing in the merge path re-renders — so a phone opened at 12:23 showed
        counts from before the laptop's 12:21 sync, indefinitely, until the person
        navigated somewhere. Repaint what they are looking at. */
     State.invalidate();
-    if (typeof go === 'function' && State.view) { await go(State.view); }
+    // Only repaint a view the router can actually draw. State.view is
+    // 'runner' during a paper and 'results' straight after one, and neither
+    // is in ROUTES — go() would empty #view, fall through to ROUTES.dashboard
+    // and wipe the paper off the screen mid-question with its timer still
+    // running (go()'s leave-guard is skipped for view === 'runner' by design).
+    // The runner holds its own copy of the questions and re-renders from the
+    // merged bank at the next real navigation.
+    const live = State.session && State.session.status === 'active';
+    if (typeof go === 'function' && State.view && ROUTES[State.view] && !live) { await go(State.view); }
     const gained = (report.stores.questions && (report.stores.questions.added + report.stores.questions.updated)) || 0;
     const answers = (report.stores.attempts && report.stores.attempts.added) || 0;
     if (gained || answers) {
@@ -17947,7 +18067,11 @@ const DriveSync = {
   _watchForResume() {
     if (this._resumeWatching) return;
     this._resumeWatching = true;
-    const attempt = () => { this.tryResume(); };
+    // An automatic attempt always opens a popup window — prompt:'none' only stops
+    // Google drawing inside it. When Google refuses for a reason a person has to
+    // settle (more than one account signed in, consent withdrawn), repeating that
+    // on every tab switch is a window flashing on screen for nothing.
+    const attempt = () => { if (!this._silentBlockedAt) this.tryResume(); };
     window.addEventListener('online', attempt);
     window.addEventListener('focus', attempt);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) attempt(); });
@@ -17969,6 +18093,10 @@ const DriveSync = {
    */
   async tryResume() {
     if (!this.configured || this.connected || this._resuming) return false;
+    // Set when a silent request failed for a reason only interaction can fix. The
+    // backoff timer may still try (it is capped at DRIVE_RESUME_MAX_MS = 10 min);
+    // the event listeners may not, and neither may _ensureToken().
+    if (this._silentBlockedAt && Date.now() - this._silentBlockedAt < DRIVE_RESUME_MAX_MS) return false;
     // Somebody is mid sign-in, or mid connect. Leave Google alone.
     if (this._tokenPending || this._connecting) return false;
     // A local folder took over as the active backend — Drive is not this
@@ -17984,7 +18112,15 @@ const DriveSync = {
       await this._loadGis();
       await this._requestToken(true);
       this.connected = !!this.accessToken;
-    } catch (e) { this.connected = false; }
+    } catch (e) {
+      this.connected = false;
+      // Distinguish "Google said no, a person must act" from "the network blipped".
+      // Only the former should stop the event-driven retries.
+      const m = String((e && e.message) || '');
+      if (/interaction_required|login_required|consent_required|access_denied|popup|did not answer/i.test(m)) {
+        this._silentBlockedAt = Date.now();
+      }
+    }
     finally { this._resuming = false; }
     if (!this.connected) { this._scheduleResume(); updateStorageBar(); return false; }
     clearTimeout(this._resumeTimer);
@@ -18041,6 +18177,7 @@ const DriveSync = {
       client.callback = (resp) => {
         if (resp.error) { no(new Error(resp.error)); return; }
         this.accessToken = resp.access_token;
+        this._silentBlockedAt = null;
         this.tokenExpiresAt = Date.now() + ((resp.expires_in || 3600) * 1000) - 60000;
         ok(resp);
       };
@@ -18054,7 +18191,13 @@ const DriveSync = {
       // picking one did nothing — a window opened without a user's gesture has
       // no working way back to the page that opened it. Automatic attempts
       // must fail quietly; only the button a person presses may open anything.
-      client.requestAccessToken(silent ? { prompt: 'none' } : {});
+      // With more than one Google account signed in, prompt:'none' fails unless the
+      // request names the account. The hint is recorded after the first interactive
+      // sign-in (see below) and is the difference between a silent renewal that works
+      // and a window that opens and closes on every tab switch.
+      const opts = silent ? { prompt: 'none' } : {};
+      if (silent && this._accountHint) opts.hint = this._accountHint;
+      client.requestAccessToken(opts);
     });
     this._tokenPending = p;
     const clear = () => { if (this._tokenPending === p) this._tokenPending = null; };
@@ -18069,8 +18212,23 @@ const DriveSync = {
       yet", and every later call reused it. Permanently stuck, with the bar
       still claiming to be syncing. Clearing it forces the next call to ask
       Google again. Returns true when it handled the response. */
-  _handleAuthFailure(res) {
+  async _handleAuthFailure(res) {
     if (!res || (res.status !== 401 && res.status !== 403)) return false;
+    // A 403 is not always an answer about the token. Drive returns it just as
+    // readily when the account's storage is full, or a daily/rate limit is
+    // spent — none of which signing in again can fix, and all of which
+    // describeSyncFailure already explains in words. Only a 403 whose reason
+    // is positively a quota one is handed back as an ordinary error; anything
+    // unreadable or unrecognised keeps the old, safe behaviour of throwing the
+    // token away, so a genuinely dead grant can never linger in memory.
+    if (res.status === 403) {
+      let reason = '';
+      try {
+        const j = typeof res.clone === 'function' ? await res.clone().json() : null;
+        reason = (j && j.error && j.error.errors && j.error.errors[0] && j.error.errors[0].reason) || '';
+      } catch (e) { reason = ''; }
+      if (/quota|ratelimit|limitexceeded/i.test(reason)) return false;
+    }
     this.accessToken = null;
     this.tokenExpiresAt = 0;
     this.connected = false;
@@ -18120,6 +18278,17 @@ const DriveSync = {
       try {
         await this._loadGis();
         await this._requestToken(false);
+        // Remember the account so later silent renewals can name it. drive.file scope
+        // allows this call. A failure here is harmless — it only costs the hint.
+        try {
+          const who = await fetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)',
+            { headers: { 'Authorization': 'Bearer ' + this.accessToken } });
+          if (who.ok) {
+            const j = await who.json();
+            this._accountHint = (j.user && j.user.emailAddress) || null;
+            if (this._accountHint) await FileStore.setMeta('driveAccountHint', this._accountHint);
+          }
+        } catch (e) { /* no hint; part 2 still stops the flashing */ }
       } catch (e) { this.setupError = translateGoogleAuthError(e.message); updateStorageBar(); toast(this.setupError, 'bad', 8000); return; }
     }
     try {
@@ -18191,6 +18360,20 @@ const DriveSync = {
     // whatever is actually there.
     let remote;
     try { remote = await this.pull(); } catch (e) {
+      // A 404 for the id this browser remembers is not a transient failure:
+      // that file has been deleted for good, and every later attempt reuses
+      // the same dead id and lands back on this same dialog — while the app's
+      // own 404 wording tells the person to reconnect "to make a new one",
+      // which the stored id makes impossible. Forget it here, so the next
+      // connect falls through to _findExisting() || _createFile() and does.
+      if (/Drive returned 404/.test((e && e.message) || '')) {
+        this.fileId = null; this.lastSyncedModifiedTime = null;
+        await FileStore.delMeta('driveFileId');
+        await FileStore.delMeta('driveModifiedTime');
+        await FileStore.delMeta('driveSyncedSignature');
+        await modal({ title: 'That Drive file is gone', body: h('p', {}, 'It was deleted from Drive, so there is nothing there to sync with — nothing in this browser has been changed. Connect Google Drive again and a fresh file is made from what is here.') });
+        return false;
+      }
       await modal({ title: 'Could not check Google Drive', body: h('p', {}, e.message + ' Try connecting again once that is resolved — nothing here has been changed.') });
       return false;
     }
@@ -18249,6 +18432,7 @@ const DriveSync = {
     await FileStore.delMeta('driveModifiedTime');
     await FileStore.delMeta('driveDirtySince');
     await FileStore.delMeta('driveQuestionCount');
+    await FileStore.delMeta('driveAccountHint');
     updateStorageBar();
     toast('Google Drive disconnected — the file stays in your Drive, this only forgets it here.', 'ok');
     return true;
@@ -18259,6 +18443,10 @@ const DriveSync = {
       schedules a debounced whole-file push rather than journalling. */
   touch(store) {
     if (store === 'fsmeta') return;
+    // A merge writing its own result back is not a change to upload — those
+    // rows came from this browser and Drive in the first place, and pushing
+    // them again is what made two devices ping-pong the whole bank.
+    if (this._applyingMerge) return;
     // Drive has to be the chosen backend for any of this to mean anything —
     // configured, not merely connected, so a dead token still counts and a
     // local-folder user never accumulates a Drive marker they will never use.
@@ -18279,6 +18467,18 @@ const DriveSync = {
     // path reads driveDirtySince on the next connect and flushes it.
     if (!this.connected) return;
     clearTimeout(this._debounceTimer);
+    // Every push serialises and uploads the WHOLE bank — the images store of
+    // base64 data URLs included — because Drive has no cheap append. One
+    // answered question writes attempts, questions and sessions, so a
+    // six-second debounce means a full-bank JSON.stringify on the main thread
+    // plus a full-file upload after EVERY question, for the length of a
+    // session. Let a session's answers pool instead: the 60-second safety
+    // interval (_startTimer → maybePush) still carries them up, and
+    // Session.finish(), visibilitychange-hidden and disconnect() all force a
+    // push outright, so nothing reaches Drive later than it already did at any
+    // moment that matters — there is just one upload a minute rather than one
+    // an answer.
+    if (State.session && State.session.status === 'active') return;
     const overdue = Date.now() - this._firstUnpushedChangeAt >= DRIVE_PUSH_MAX_GAP_MS;
     this._debounceTimer = setTimeout(() => this.push(), overdue ? 0 : DRIVE_PUSH_DEBOUNCE_MS);
   },
@@ -18359,6 +18559,10 @@ const DriveSync = {
       const remoteNow = await this._fetchModifiedTime();
       if (remoteNow && this.lastSyncedModifiedTime && remoteNow !== this.lastSyncedModifiedTime) {
         this._pushing = false;
+        // A catch-up already in progress will merge this and push whatever
+        // there is to send; calling it again returns immediately, and pushing
+        // again from here only asks the same question without end.
+        if (this._catchingUp) return false;
         await this._catchUpWithDrive();
         return this._holdPush ? false : await this.push();
       }
@@ -18411,7 +18615,7 @@ const DriveSync = {
         await new Promise(r => setTimeout(r, 2500));
         res = await send();
       }
-      if (this._handleAuthFailure(res)) return false;
+      if (await this._handleAuthFailure(res)) return false;
       if (!res.ok) throw new Error('Drive returned ' + res.status);
       const meta = await res.json().catch(() => null);
       // What this upload actually contained. A sync that reports only "done"
@@ -18444,7 +18648,7 @@ const DriveSync = {
     const res = await fetch('https://www.googleapis.com/drive/v3/files/' + this.fileId + '?alt=media', {
       headers: { 'Authorization': 'Bearer ' + this.accessToken }
     });
-    if (this._handleAuthFailure(res)) throw new Error('Google sign-in is no longer valid.');
+    if (await this._handleAuthFailure(res)) throw new Error('Google sign-in is no longer valid.');
     if (!res.ok) throw new Error('Drive returned ' + res.status);
     const payload = await readBankBytes(await res.arrayBuffer());
     if (!payload || !payload.stores) throw new Error('That file did not look like an MCQ Mastery snapshot.');
@@ -18464,7 +18668,7 @@ const DriveSync = {
       // the most misleading answer available: it is the input to
       // driveSyncSettled(), so a dead token would make a reconnect skip the
       // merge question on the grounds that nothing had moved.
-      if (this._handleAuthFailure(res)) return null;
+      if (await this._handleAuthFailure(res)) return null;
       if (!res.ok) return null;
       const j = await res.json();
       return j.modifiedTime || null;
@@ -18557,7 +18761,7 @@ const DriveSync = {
     // used to give the same null for both. connect() reads null as "there is
     // no file yet" and creates one — so an expired token could hand somebody a
     // SECOND Drive file and split their bank across the two. Throw instead.
-    if (this._handleAuthFailure(res)) throw new Error('Google sign-in is no longer valid.');
+    if (await this._handleAuthFailure(res)) throw new Error('Google sign-in is no longer valid.');
     if (!res.ok) throw new Error('Drive returned ' + res.status + ' while looking for your file.');
     const j = await res.json();
     return (j.files && j.files[0] && j.files[0].id) || null;
@@ -18838,6 +19042,10 @@ const NotesStore = {
         fileDeleted = false;
       }
     } catch (e) { fileDeleted = false; }
+    // Without this the row is gone HERE only: the merge unions every row one
+    // side holds, so another device's stale copy comes straight back — and it
+    // points at a file this delete has already destroyed for good.
+    await DB.put('tombstones', { qid: NOTE_TOMBSTONE + rec.id, noteId: rec.id, courseId: rec.courseId, retiredAt: nowISO(), reason: 'note removed' });
     await DB.del('notes', rec.id);
     return fileDeleted;
   },
@@ -19009,8 +19217,9 @@ async function recoveryFlow(kind) {
         theirsPayload = payload;
         theirs = { savedAt: payload.savedAt, questions: (payload.stores && payload.stores.questions || []).length };
       } catch (e) { /* unreadable — treated as unknown below */ }
+      const canMerge = !!(theirs && theirsPayload && theirsPayload.stores);
 
-      const choice = await modal({
+      let choice = await modal({
         title: 'That file was changed outside the app',
         body: h('div', { class: 'stack' }, [
           h('p', {}, 'Something other than this tab wrote to your data file — another copy of the app, a sync client pulling a version from a different machine, or a restored backup.'),
@@ -19026,15 +19235,47 @@ async function recoveryFlow(kind) {
               h('div', { class: 'tiny dim', text: FileStore.lastSnapshotAt ? 'written ' + fmtDate(FileStore.lastSnapshotAt, true) : '' })
             ])])
           ]),
-          h('div', { class: 'notice warn small' }, 'Whichever you discard is not recoverable from here. Take a backup first from Backup & Restore if you are unsure.')
+          h('div', { class: 'notice small' }, canMerge
+            ? 'Merging keeps everything both copies hold \u2014 nothing is discarded, and this browser is backed up first, automatically.'
+            : 'That file cannot be read, so there is nothing to merge with. Whatever you discard is backed up first, automatically.')
         ]),
-        actions: [
-          { label: 'Stay read-only', value: '' },
-          { label: 'Keep what is on disk', value: 'file' },
-          { label: 'Keep this browser\u2019s version', value: 'browser', kind: 'primary' }
-        ]
+        actions: canMerge
+          ? [
+            { label: 'Stay read-only', value: '' },
+            { label: 'Choose one side instead', value: 'choose' },
+            { label: 'Merge both', value: 'merge', kind: 'primary' }
+          ]
+          : [
+            { label: 'Stay read-only', value: '' },
+            { label: 'Keep this browser\u2019s version', value: 'browser', kind: 'primary' }
+          ]
       });
-      if (choice === 'file') {
+      if (choice === 'choose') {
+        choice = await chooseOneSideDialog('the file on disk', 'file', theirs.questions, qHere, qHere === 0 || qHere < theirs.questions * 0.5);
+      }
+      if (choice === 'merge') {
+        if (!await requireSafetyBackup('merging this browser\u2019s bank with the file that changed on disk')) { toast('Nothing was changed.', 'ok'); return; }
+        // Clear read-only FIRST: applyMergedBank writes through the guarded DB
+        // layer, and _writeVeto refuses every store while isReadOnly().
+        FileStore.connected = true; FileStore.needsReconnect = false; FileStore.problem = null;
+        try {
+          const { merged, report } = await mergeBankPayloads(await FileStore.buildPayload(), theirsPayload);
+          await applyMergedBank(merged, report);
+          // What the file actually holds, so the loss guard judges the write
+          // against the foreign copy rather than this browser's last snapshot.
+          FileStore._diskQuestionCount = theirs.questions;
+          // The stamp is stale by definition here; without clearing it the
+          // snapshot's own verifyFile() would report 'changed' all over again.
+          FileStore._stamp = null; FileStore.needSnapshot = true; FileStore.dirty = true;
+          const ok = await FileStore.flushNow('snapshot');
+          await showMergeReport(report, 'Merged with your file', ok
+            ? 'Both copies were combined and written to the file \u2014 this browser and the file now match.'
+            : 'Both copies were combined in this browser, but the file could not be written.');
+        } catch (e) {
+          toast('Could not merge with that file: ' + e.message, 'bad', 9000);
+          FileStore.connected = false; FileStore.needsReconnect = true; FileStore.problem = 'changed';
+        }
+      } else if (choice === 'file') {
         if (!await requireSafetyBackup('discarding this browser’s bank for the file on disk')) { toast('Nothing was changed.', 'ok'); return; }
         FileStore.connected = true; FileStore.needsReconnect = false; FileStore.problem = null;
         try {
@@ -19080,9 +19321,16 @@ async function reconnectFlow() {
   try {
     const ok = await FileStore.reconnect();
     if (!ok) { toast('Permission was not granted. Still read-only.', 'bad'); updateStorageBar(); return; }
-    const res = await FileStore.loadFromDisk();
+    // Mid-session the stamp proves whether the file is still the one this
+    // tab last wrote. When it is, IndexedDB and the pending journal are
+    // AHEAD of the disk, not behind it: reloading would clear IndexedDB and
+    // discard everything answered since the last successful write (a
+    // transient lock on the file is enough to get here). Only a fresh page
+    // (no stamp yet) or a file that really did change has anything to load.
+    const unchanged = !!FileStore._stamp && (await FileStore.verifyFile()) === 'ok';
+    const res = unchanged ? 'unchanged' : await FileStore.loadFromDisk();
     if (res === 'loaded') toast('Reconnected. Your bank was reloaded from your file.', 'ok');
-    else { await FileStore.flushNow(); toast('Reconnected.', 'ok'); }
+    else { FileStore.problem = null; await FileStore.flushNow(); toast('Reconnected.', 'ok'); }
     updateStorageBar();
     await go(State.view || 'dashboard');
   } catch (e) {
@@ -19322,14 +19570,49 @@ async function mergeBankPayloads(localPayload, remotePayload) {
   // history — the moment it merges. This is the one exception to "merging
   // keeps everything both sides hold".
   const tr = mergeKeyedRowsUnionOnly(localPayload.stores.tombstones || [], remotePayload.stores.tombstones || [], 'qid');
-  merged.stores.tombstones = tr.rows;
   report.stores.tombstones = { added: tr.added };
-  const retiredUuids = new Set(tr.rows.map(t => t.uuid).filter(Boolean));
+
+  // Union-only keeps whichever side's row it happened to see first, which is
+  // wrong the moment the same id is retired twice: a course wiped AGAIN after
+  // a restore must stay wiped, even on the device still holding the first,
+  // older tombstone. Take the later retirement per id before judging anything.
+  const latestRetiredAt = new Map();
+  [].concat(localPayload.stores.tombstones || [], remotePayload.stores.tombstones || [])
+    .forEach(t => { if (t && (t.retiredAt || '') > (latestRetiredAt.get(t.qid) || '')) latestRetiredAt.set(t.qid, t.retiredAt || ''); });
+  const tombs = tr.rows.map(t => {
+    const at = latestRetiredAt.get(t.qid) || '';
+    return at > (t.retiredAt || '') ? Object.assign({}, t, { retiredAt: at }) : t;
+  });
+
+  // Restoring the safety backup the wipe itself took is the documented way
+  // back from that wipe, and it was the one thing the union could not express:
+  // the tombstones live on every other device, are never pruned, and dropped
+  // the restored questions again on the next merge — which then asked the
+  // wrong device whether to apply a deletion it had already applied. A restore
+  // that post-dates a retirement supersedes it, on both sides, and the
+  // superseded row is dropped from the merged set so the resurrection travels.
+  // A question tombstone names only a uuid; a course tombstone names a course,
+  // so a restored question speaks for its course too.
+  const restoredByUuid = new Map(), restoredByCourse = new Map();
+  [].concat(localPayload.stores.questions || [], remotePayload.stores.questions || []).forEach(q => {
+    if (!q || !q.restoredAt) return;
+    if (q.restoredAt > (restoredByUuid.get(q.uuid) || '')) restoredByUuid.set(q.uuid, q.restoredAt);
+    if (q.courseId && q.restoredAt > (restoredByCourse.get(q.courseId) || '')) restoredByCourse.set(q.courseId, q.restoredAt);
+  });
+  const supersededTomb = t => {
+    const at = (t && t.retiredAt) || '';
+    if (!at) return false;                       // an older row with no stamp: leave it alone
+    return (restoredByUuid.get(t.uuid) || '') > at
+      || (t.courseId ? (restoredByCourse.get(t.courseId) || '') > at : false);
+  };
+  merged.stores.tombstones = tombs.filter(t => !supersededTomb(t));
+  const retiredUuids = new Set(merged.stores.tombstones.map(t => t.uuid).filter(Boolean));
 
   // A course retired on either side takes everything filed under it with it,
   // the same way a retired question takes its answers. Without this the union
   // handed the deleting device its own course back on the next merge.
-  const retiredCourses = retiredCourseIds(tr.rows);
+  const retiredCourses = retiredCourseIds(merged.stores.tombstones);
+  const retiredNotes = retiredNoteIds(merged.stores.tombstones);
   const dropped = row => row && retiredCourses.has(row.courseId);
   const courseR = mergeKeyedRows(localPayload.stores.courses || [], remotePayload.stores.courses || [], 'id');
   merged.stores.courses = courseR.rows.filter(c => !retiredCourses.has(c.id));
@@ -19339,11 +19622,34 @@ async function mergeBankPayloads(localPayload, remotePayload) {
     const r = s === 'sessions'
       ? mergeSessionRows(localPayload.stores.sessions || [], remotePayload.stores.sessions || [])
       : mergeKeyedRows(localPayload.stores[s] || [], remotePayload.stores[s] || [], 'id');
-    merged.stores[s] = r.rows.filter(row => !dropped(row));
+    merged.stores[s] = r.rows.filter(row => !dropped(row) && !(s === 'notes' && retiredNotes.has(row.id)));
     report.stores[s] = { added: r.added, updated: r.updated, tombstoned: r.rows.length - merged.stores[s].length };
   });
 
   const qr = mergeKeyedRows(localPayload.stores.questions || [], remotePayload.stores.questions || [], 'uuid');
+  // Newest-wins takes the whole row, which is right when one side is simply
+  // stale and wrong when the answer key itself is what the two sides disagree
+  // about: the older row is dropped entire, so a corrected key silently
+  // reverts. `version` separates the two cases: Questions.save bumps it on
+  // every material edit, so a stale copy is a version BEHIND the winner and
+  // its key must not stand in the way of the fix propagating, while a loser at
+  // the same version or higher holds an edit the winner never saw. Ask for the
+  // one thing that settles it.
+  const theirQByUuid = new Map((remotePayload.stores.questions || []).map(q => [q.uuid, q]));
+  (localPayload.stores.questions || []).forEach(mine => {
+    const theirs = theirQByUuid.get(mine.uuid);
+    if (!theirs || !mine.correctOptionId || !theirs.correctOptionId) return;
+    if (mine.correctOptionId === theirs.correctOptionId) return;
+    const i = qr.rows.findIndex(r => r.uuid === mine.uuid);
+    if (i < 0) return;
+    const win = qr.rows[i], lose = win === theirs ? mine : theirs;
+    if ((lose.version || 0) < (win.version || 0)) return;
+    qr.rows[i] = Object.assign({}, win, {
+      answerVerified: 'doubtful', status: 'needs_answer', conflict: false,
+      verifyNote: 'Two devices disagreed on the answer — confirm which is right'
+    });
+    if (qr.touchedKeys.indexOf(mine.uuid) < 0) qr.touchedKeys.push(mine.uuid);
+  });
   const goneQ = q => retiredUuids.has(q.uuid) || retiredCourses.has(q.courseId);
   const revivedQuestions = qr.rows.filter(goneQ).length;
   merged.stores.questions = qr.rows.filter(q => !goneQ(q));
@@ -19405,7 +19711,21 @@ async function applyMergedBank(merged, report) {
     // the slowest device, in the middle of a merge somebody is waiting for.
     const kp = STORES[s].keyPath;
     const liveStamps = new Map();
-    await DB.each(s, r => { liveStamps.set(r[kp], r.updatedAt || ''); });
+    const liveAnswered = new Map();
+    await DB.each(s, r => {
+      liveStamps.set(r[kp], r.updatedAt || '');
+      if (s === 'questions') liveAnswered.set(r[kp], (r.stats && r.stats.lastAttemptAt) || '');
+    });
+    // Answering no longer moves the stamp, so the guard below cannot see an
+    // answer given while this merge was running: the row about to land carries
+    // counters for a shorter history than the log this database already holds.
+    // Name those questions as touched and the rebuild further down replays them
+    // from the merged log, which by then includes the answer.
+    if (s === 'questions') incoming.forEach(r => {
+      if ((liveAnswered.get(r[kp]) || '') > ((r.stats && r.stats.lastAttemptAt) || '')) {
+        (merged.touchedQuestionUuids = merged.touchedQuestionUuids || []).push(r[kp]);
+      }
+    });
     await DB.putMany(s, incoming.filter(r => !((liveStamps.get(r[kp]) || '') > (r.updatedAt || ''))));
   }
 
@@ -19425,6 +19745,24 @@ async function applyMergedBank(merged, report) {
   // deleted is worse than one that never happened: it comes back on every
   // device, and the person has to do it again and watch it fail again.
   await applyTombstoneRemovals(merged);
+
+  // applyTombstoneRemovals arms the shrink guards from what IT removed here.
+  // That misses the mirror case: the tombstones are already applied in this
+  // browser and the questions still live on the other side, so the merge
+  // simply does not admit them — nothing is deleted here, nothing is armed,
+  // and the merged bank is then refused by lossCheck/driveLossCheck as a
+  // catastrophic collapse. The recommended way out of that refusal reloads
+  // the stale copy, wiping the tombstones and resurrecting the deletion.
+  // A merged bank that is smaller than the other side only because recorded
+  // deletions were honoured is deliberate by construction, whichever side
+  // recorded them.
+  const tombQ = (report && report.stores && report.stores.questions && report.stores.questions.tombstoned) || 0;
+  const tombC = (report && report.stores && report.stores.courses && report.stores.courses.tombstoned) || 0;
+  if (tombQ || tombC) {
+    const whyMerged = 'merge honoured ' + (tombC ? tombC + ' course deletion(s) and ' : '') + tombQ + ' question deletion(s) recorded on either side';
+    FileStore.allowShrink(whyMerged);
+    if (typeof DriveSync !== 'undefined') DriveSync.allowDriveShrink(whyMerged);
+  }
 
   // FileStore.buildPayload() caches its last snapshot and only refreshes the
   // stores its own touch() marked dirty — which never fires for a store this
@@ -19458,6 +19796,15 @@ async function applyMergedBank(merged, report) {
      stamp is restored afterwards, because this is arithmetic over facts both
      devices already hold, not an edit — stamping it would hand this device every
      future merge for every question at once. */
+  // A sitting split across two devices comes out of the merge complete while
+  // still holding answers the device that finished it never had: finish()
+  // committed only the responses its own copy held, and finish never runs on a
+  // complete session again. Those answers then count on the results screen and
+  // nowhere else — not in the question's counters, not in its mastery, not in
+  // its review date — on every device, for ever. Done before the rebuild below
+  // so a question that is also in changedHistory is replayed over the full log.
+  await commitMergedSessionAnswers(merged);
+
   const changedHistory = new Set(touched);
   const addedAttempts = (report && report.stores && report.stores.attempts && report.stores.attempts.added) || 0;
   if (addedAttempts) (merged.stores.attempts || []).forEach(a => { if (a && a.questionUuid) changedHistory.add(a.questionUuid); });
@@ -19503,6 +19850,43 @@ async function applyMergedBank(merged, report) {
  * tail, which re-adopts courses and would move the selected course under a
  * person running the built-in tests.
  */
+/**
+ * The commit half of a session merge. mergeSessionRows unions the responses of
+ * a sitting two devices both held; the answers only the unfinished device had
+ * arrive with no `committed` marker, and Session.finish — the only thing that
+ * ever writes a mock's answers to the attempts log — cannot run again on a row
+ * that is already complete.
+ *
+ * Only 'complete': abandoning a mock deliberately discards its answers, and a
+ * merge must not resurrect them. Only non-reveal modes: every other mode
+ * commits at the moment of answering. commit() is idempotent on
+ * (session, question, moment) via its twin check, so an answer already in the
+ * log is a no-op.
+ */
+async function commitMergedSessionAnswers(merged) {
+  const rows = (merged && merged.stores && merged.stores.sessions) || [];
+  let committed = 0;
+  for (const row of rows) {
+    if (!row || !row.id) continue;
+    const s = await DB.get('sessions', row.id);
+    if (!s || s.status !== 'complete') continue;
+    if (!MODES[s.mode] || MODES[s.mode].reveal) continue;
+    let dirty = false;
+    for (const uid of (s.questionUuids || [])) {
+      const rec = (s.responses || {})[uid];
+      if (!rec || rec.committed) continue;
+      const q = await DB.get('questions', uid);
+      if (!q) continue;
+      try { await Session.commit(s, q, rec); } catch (e) { continue; }
+      rec.committed = true; dirty = true; committed++;
+    }
+    // Written without touching updatedAt: recording that an attempt both
+    // devices now hold exists is arithmetic over facts, not an edit.
+    if (dirty) await DB.put('sessions', s);
+  }
+  return committed;
+}
+
 async function applyTombstoneRemovals(merged) {
   const tombs = (merged && merged.stores && merged.stores.tombstones) || [];
   const retired = new Set(tombs.map(t => t.uuid).filter(Boolean));
@@ -19521,6 +19905,13 @@ async function applyTombstoneRemovals(merged) {
     try { await DB.del('idRegister', courseId); } catch (e) { /* nothing registered */ }
     if (typeof Settings !== 'undefined' && Settings.clearCourse) await Settings.clearCourse(courseId);
     await DB.each('questions', q => { if (q.courseId === courseId) retired.add(q.uuid); });
+  }
+
+  // A note removed on another device. Notes carry no uuid and no answer
+  // history, so this stands on its own — ahead of the question pass and its
+  // early return, and not counted as a question deletion.
+  for (const noteId of retiredNoteIds(tombs)) {
+    if (await DB.get('notes', noteId)) await DB.del('notes', noteId);
   }
 
   if (!retired.size && !coursesGone) return 0;
@@ -23388,6 +23779,18 @@ test('A restore collision issues a new ID and keeps the old one as an alias', ()
   eq(incoming.aliasQids[0], 'CISA-Q-000005', 'the former ID must be searchable as an alias');
 });
 
+test('Restore reads the app\'s own data file as a backup and never previews an empty one as good', async () => {
+  const snap = await FileStore.buildPayload();
+  const r = restorePayloadFromJson(snap);
+  eq(r.payload, snap.stores, 'stores of the data file are the restore payload');
+  eq(r.manifest.schemaVersion, APP.schema, 'the data file\'s schema is honoured, not read as 0');
+  eq(r.manifest.scope, 'all');
+  const zipStyle = restorePayloadFromJson({ courses: [{ id: 'c' }], questions: [] });
+  eq(zipStyle.payload.courses.length, 1, 'a flat store map still works');
+  const empty = restorePayloadFromJson({ app: 'mcq-mastery', schema: APP.schema, stores: {} });
+  assert(!(empty.payload.courses || []).length && !(empty.payload.questions || []).length, 'an empty data file is detectable before Replace is offered');
+});
+
 /* ---- learning logic ---- */
 test('Spaced repetition intervals follow the stated ladder', () => {
   const cfg = { wrong: 1, guessed: 1, lowConf: 3, medConf: 7, highConf: 14, ladder: [14, 30, 60, 90] };
@@ -23509,6 +23912,24 @@ test('Read-only blocks writes but never blocks reconnecting', async () => {
     assert(!FileStore.isReadOnly(), 'a browser with no file API is always editable');
   } finally {
     FileStore.tier = was.tier; FileStore.connected = was.connected; FileStore.everConnected = was.ever;
+  }
+});
+
+test('Read-only still lets this device record its own theme, course and backup time', async () => {
+  const was = { tier: FileStore.tier, connected: FileStore.connected, ever: FileStore.everConnected, theme: Settings.get('theme') };
+  try {
+    FileStore.tier = 'folder'; FileStore.everConnected = true; FileStore.connected = false;
+    assert(FileStore.isReadOnly(), 'precondition: the app is read-only');
+    await Settings.set('theme', 'dark');
+    eq((await DB.get('settings', 'theme')).v, 'dark', 'a device-local setting never reaches the file, so it must still be written while read-only');
+    await Settings.set('lastBackupAt', '2026-01-01T00:00:00.000Z');
+    eq(Settings.get('lastBackupAt'), '2026-01-01T00:00:00.000Z', 'the backup time must be recordable while read-only');
+    let blocked = false;
+    try { await DB.put('settings', { k: '__ro_probe', v: 1 }); } catch (e) { blocked = e.name === 'ReadOnlyError'; }
+    assert(blocked, 'a shared setting must still be refused while read-only');
+  } finally {
+    FileStore.tier = was.tier; FileStore.connected = was.connected; FileStore.everConnected = was.ever;
+    await Settings.set('theme', was.theme);
   }
 });
 
@@ -23634,6 +24055,43 @@ test('Replaying a journal survives a half-written final line', async () => {
   } finally { FileStore.dirHandle = was; }
 });
 
+test('A second journal append does not read its own UTF-8 write as an outside edit', async () => {
+  const was = { dir: FileStore.dirHandle, conn: FileStore.connected, j: FileStore._journal,
+                stamp: FileStore._journalStamp, bytes: FileStore._journalBytes,
+                dirty: FileStore.dirty, onProblem: FileStore.onProblem };
+  let disk = new Uint8Array(0), problem = null;
+  try {
+    FileStore.connected = true;
+    FileStore.onProblem = async (k) => { problem = k; };
+    FileStore.dirHandle = {
+      getFileHandle: async () => ({
+        getFile: async () => ({ size: disk.length }),
+        createWritable: async () => ({
+          write: async (p) => {
+            const d = (p && p.data != null) ? p.data : p;
+            const add = typeof d === 'string' ? new TextEncoder().encode(d) : new Uint8Array(d);
+            const next = new Uint8Array(disk.length + add.length);
+            next.set(disk); next.set(add, disk.length); disk = next;
+          },
+          close: async () => { }
+        })
+      })
+    };
+    FileStore._journalStamp = 0; FileStore._journalBytes = 0;
+    const entry = (u) => ({ o: 'p', s: 'questions', v: { uuid: u, srReason: 'Incorrect → back to 1 day' } });
+    FileStore._journal = [entry('a')];
+    eq(await FileStore._appendJournal(), true, 'the first append should land');
+    FileStore._journal = [entry('b')];
+    eq(await FileStore._appendJournal(), true, 'the second append must not be refused');
+    eq(problem, null, 'our own UTF-8 write must not be reported as changed outside the app');
+    eq(FileStore._journalStamp, disk.length, 'the stamp must count bytes, as File.size does');
+  } finally {
+    FileStore.dirHandle = was.dir; FileStore.connected = was.conn; FileStore._journal = was.j;
+    FileStore._journalStamp = was.stamp; FileStore._journalBytes = was.bytes;
+    FileStore.dirty = was.dirty; FileStore.onProblem = was.onProblem;
+  }
+});
+
 /* ---- appearance ---- */
 test('Appearance resolves Light, Dark and Auto correctly', async () => {
   const was = Settings.get('theme');
@@ -23752,6 +24210,50 @@ test('A file deleted while the app was closed is not resurrected on next launch'
   }
 });
 
+test('A load that fails leaves the app read-only, so the next answer cannot overwrite the file', async () => {
+  const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, p: FileStore.problem, t: FileStore.tier, e: FileStore.everConnected, n: FileStore.needsReconnect, g: FileStore._lastGoodText, z: FileStore._lastSize };
+  try {
+    FileStore.tier = 'folder'; FileStore.everConnected = true; FileStore._stamp = null;
+    FileStore.connected = true; FileStore.needsReconnect = false; FileStore.problem = null;
+    const text = JSON.stringify({ app: 'mcq-mastery', schema: APP.schema + 1, stores: {} });
+    FileStore.dirHandle = { getFileHandle: async () => ({ getFile: async () => ({ size: text.length, lastModified: 1, text: async () => text }) }) };
+    let threw = false;
+    try { await FileStore.loadFromDisk(); } catch (e) { threw = true; }
+    assert(threw, 'a file from a newer app version must not load');
+    assert(FileStore.isReadOnly(), 'a failed load must leave the app read-only');
+    assert(FileStore.status().key !== 'connected', 'the bar must not claim it is saving after a failed load');
+  } finally {
+    FileStore.connected = was.c; FileStore.dirHandle = was.d; FileStore._stamp = was.s;
+    FileStore.problem = was.p; FileStore.tier = was.t; FileStore.everConnected = was.e;
+    FileStore.needsReconnect = was.n; FileStore._lastGoodText = was.g; FileStore._lastSize = was.z;
+  }
+});
+
+test('Reconnecting mid-session never reloads a file this tab is already ahead of', async () => {
+  const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, p: FileStore.problem, t: FileStore.tier, e: FileStore.everConnected, j: FileStore._journal, dirty: FileStore.dirty, n: FileStore.needsReconnect };
+  const real = { load: FileStore.loadFromDisk, flush: FileStore.flushNow, reconnect: FileStore.reconnect, go: window.go };
+  let loaded = false, flushed = false;
+  try {
+    FileStore.tier = 'folder'; FileStore.everConnected = true; FileStore.connected = false; FileStore.needsReconnect = true; FileStore.problem = 'noaccess';
+    FileStore._stamp = { size: 100, lastModified: 1000 };
+    FileStore.dirHandle = { getFileHandle: async () => ({ getFile: async () => ({ size: 100, lastModified: 1000, text: async () => '{}' }) }) };
+    FileStore._journal = [{ o: 'p', s: 'questions', v: { id: 'q-pending' } }]; FileStore.dirty = true;
+    FileStore.reconnect = async () => { FileStore.connected = true; FileStore.needsReconnect = false; return true; };
+    FileStore.loadFromDisk = async () => { loaded = true; FileStore._journal = []; return 'loaded'; };
+    FileStore.flushNow = async () => { flushed = true; return true; };
+    window.go = async () => { };
+    await reconnectFlow();
+    assert(!loaded, 'a file the stamp still matches must not be reloaded over this browser’s newer bank');
+    assert(flushed, 'the pending journal must be written instead');
+    eq(FileStore._journal.length, 1, 'nothing pending may be discarded by reconnecting');
+    eq(FileStore.problem, null, 'the problem is cleared once the file is reachable again');
+  } finally {
+    FileStore.loadFromDisk = real.load; FileStore.flushNow = real.flush; FileStore.reconnect = real.reconnect; window.go = real.go;
+    FileStore.connected = was.c; FileStore.dirHandle = was.d; FileStore._stamp = was.s; FileStore.problem = was.p;
+    FileStore.tier = was.t; FileStore.everConnected = was.e; FileStore._journal = was.j; FileStore.dirty = was.dirty; FileStore.needsReconnect = was.n;
+  }
+});
+
 test('Once a file is known to exist, the write path never creates it', async () => {
   const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, p: FileStore.problem, t: FileStore.tier, e: FileStore.everConnected, q: FileStore._lastQuestionCount };
   try {
@@ -23806,6 +24308,31 @@ test('An empty or badly shrunken bank cannot overwrite a full file', () => {
     FileStore._diskQuestionCount = 0; FileStore._shrinkOk = null;
     assert(!FileStore.lossCheck(0), 'a first save to an empty folder must not be blocked');
   } finally { FileStore._diskQuestionCount = was.d; FileStore._shrinkOk = was.s; }
+});
+
+test('A load that dies half-way still arms the loss guard', async () => {
+  const was = { d: FileStore._diskQuestionCount, q: FileStore._lastQuestionCount, s: FileStore._shrinkOk,
+                dir: FileStore.dirHandle, fh: FileStore.fileHandle, lg: FileStore._lastGoodText,
+                sz: FileStore._lastSize, st: FileStore._stamp };
+  const realClear = DB.clearRaw, realPutMany = DB.putManyRaw;
+  try {
+    FileStore._diskQuestionCount = 0; FileStore._shrinkOk = null; FileStore.fileHandle = null;
+    const text = JSON.stringify({ app: 'mcq-mastery', schema: APP.schema, savedAt: '2026-01-01T00:00:00.000Z',
+      stores: { questions: [{ uuid: 'a' }, { uuid: 'b' }] } });
+    FileStore.dirHandle = { getFileHandle: async () => ({ getFile: async () => ({ size: text.length, lastModified: 1, text: async () => text }) }) };
+    DB.clearRaw = async () => { };
+    DB.putManyRaw = async () => { throw new Error('quota'); };
+    let threw = false;
+    try { await FileStore.loadFromDisk(); } catch (e) { threw = true; }
+    assert(threw, 'a rebuild that cannot write must surface as an error');
+    eq(FileStore._diskQuestionCount, 2, 'the guard must know what the file holds even though the load failed');
+    assert(FileStore.lossCheck(0), 'an emptied browser bank must never overwrite that file');
+  } finally {
+    DB.clearRaw = realClear; DB.putManyRaw = realPutMany;
+    FileStore._diskQuestionCount = was.d; FileStore._lastQuestionCount = was.q; FileStore._shrinkOk = was.s;
+    FileStore.dirHandle = was.dir; FileStore.fileHandle = was.fh; FileStore._lastGoodText = was.lg;
+    FileStore._lastSize = was.sz; FileStore._stamp = was.st;
+  }
 });
 
 test('An empty or badly shrunken bank cannot overwrite Drive either', () => {
@@ -23892,6 +24419,32 @@ test('a sitting continued on a second device keeps both devices\u2019 answers', 
   eq(Object.keys(r.rows[0].responses).sort().join(','), 'q1,q2', 'taking the winning row whole used to discard the other side\u2019s answers');
   assert(r.rows[0].flags.q1, 'and its flags with them');
 });
+test('a mock finished on one device commits the answers only the other device held', async () => {
+  const cid = 'test-merge-commit-' + Date.now();
+  const q = mkQ('x', ['a', 'b', 'c', 'd'], 0, { courseId: cid, status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  await DB.put('questions', q);
+  const s = { id: 'sess-' + Date.now(), courseId: cid, mode: 'mock', status: 'complete',
+    questionUuids: [q.uuid], flags: {}, optionOrders: {},
+    responses: { [q.uuid]: { selectedOptionId: q.options[0].id, correct: true, ms: 900, confidence: null, at: nowISO() } } };
+  await DB.put('sessions', s);
+  try {
+    eq(await commitMergedSessionAnswers({ stores: { sessions: [s] } }), 1, 'the answer only the other device held must reach the attempts log');
+    const atts = (await DB.byIndex('attempts', 'sessionId', s.id)).filter(a => a.questionUuid === q.uuid);
+    eq(atts.length, 1);
+    assert((await DB.get('sessions', s.id)).responses[q.uuid].committed, 'and be marked committed');
+    eq(await commitMergedSessionAnswers({ stores: { sessions: [s] } }), 0, 'a second merge must not commit it again');
+    eq((await DB.byIndex('attempts', 'sessionId', s.id)).filter(a => a.questionUuid === q.uuid).length, 1);
+    const ab = { id: 'sess-ab-' + Date.now(), courseId: cid, mode: 'mock', status: 'abandoned',
+      questionUuids: [q.uuid], flags: {}, optionOrders: {},
+      responses: { [q.uuid]: { selectedOptionId: q.options[1].id, correct: false, ms: 500, confidence: null, at: nowISO() } } };
+    await DB.put('sessions', ab);
+    eq(await commitMergedSessionAnswers({ stores: { sessions: [ab] } }), 0, 'abandoning a mock still discards its answers');
+    await DB.del('sessions', ab.id);
+  } finally {
+    for (const a of await DB.byIndex('attempts', 'sessionId', s.id)) await DB.del('attempts', a.id);
+    await DB.del('questions', q.uuid); await DB.del('sessions', s.id);
+  }
+});
 test('mergeAppendOnlyRows dedupes by content, not by the meaningless auto-increment key', () => {
   const local = [{ id: 1, sessionId: 's1', questionUuid: 'q1', ts: 't1' }, { id: 2, sessionId: 's1', questionUuid: 'q2', ts: 't2' }];
   // id 2 on the remote side is a completely different real attempt that
@@ -23953,6 +24506,21 @@ test('mergeBankPayloads merges questions, and settings key-by-key except the dev
     eq(val('theme'), 'dark', 'appearance stays whatever this device is set to');
     eq(val('ocrScriptPath'), '/laptop/vendor/tesseract.min.js', 'and a local engine path is never overwritten by another machine\u2019s');
   });
+});
+
+test('A merge-restore must not leave the backup\'s counters standing over a unioned answer log', () => {
+  const backupSaw = [{ ts: '2026-09-01T10:00:00Z', correct: true, confidence: 'sure', ms: 5000 }];
+  const sinceThen = [{ ts: '2026-09-05T10:00:00Z', correct: false, confidence: 'guessed', ms: 7000 }];
+  const local = Object.assign(blankQuestion('test-course'), { uuid: 'u1' });
+  backupSaw.concat(sinceThen).forEach(a => applyAttempt(local, a));
+  const backup = Object.assign(blankQuestion('test-course'), { uuid: 'u1' });
+  backupSaw.forEach(a => applyAttempt(backup, a));
+  const restored = Object.assign({}, local, backup);
+  const union = mergeAppendOnlyRows('attempts', sinceThen.concat(backupSaw).map(a => Object.assign({ sessionId: 's', questionUuid: 'u1' }, a)), backupSaw.map(a => Object.assign({ sessionId: 's', questionUuid: 'u1' }, a))).rows;
+  eq(restored.stats.attempts, 1, 'the raw restore row really does carry the backup\'s count');
+  rebuildQuestionStats(restored, union);
+  eq(restored.stats.attempts, 2, 'rebuilding from the unioned log restores the true count');
+  eq(restored.stats.lastResult, 'incorrect', 'and the answer given after the backup is the one that counts');
 });
 
 test('The shrink consent is one-shot, not a standing permission', async () => {
@@ -26165,6 +26733,15 @@ test('The offline switch is honest about where it cannot work', () => {
   })();
 });
 
+test('Offline "Ready" is only ever said when the shell is really cached', () => {
+  return (async () => {
+    const st = await offlineState();
+    if (!st.can || !st.ready) return;
+    const shell = (await caches.match('./index.html')) || (await caches.match('./'));
+    assert(!!shell, 'ready is claimed only when the shell the worker falls back to is in the cache');
+  })();
+});
+
 
 /* ---- out of the student's way ---- */
 
@@ -26842,6 +27419,52 @@ test('Work done while Drive is unreachable is still marked for pushing', async (
   }
 });
 
+test('A merge writing Drive’s own rows back does not arm a push', async () => {
+  const D = DriveSync;
+  const saved = { c: D.connected, g: D.configured, a: D._applyingMerge, p: D._pendingChange, f: D._firstUnpushedChangeAt };
+  const savedMark = await FileStore.meta('driveDirtySince');
+  try {
+    await FileStore.delMeta('driveDirtySince');
+    D.connected = false; D.configured = true;
+    D._pendingChange = false; D._firstUnpushedChangeAt = null;
+    D._applyingMerge = true;
+    D.touch('questions'); D.touch('attempts');
+    assert(!D._pendingChange, 'rows arriving from Drive are not this browser’s unpushed work');
+    await new Promise(r => setTimeout(r, 0));
+    eq(await FileStore.meta('driveDirtySince'), undefined, 'and leave no marker for the next connect to flush');
+    D._applyingMerge = false;
+    D.touch('questions');
+    assert(D._pendingChange, 'an edit made after the merge still counts as unpushed');
+  } finally {
+    D.connected = saved.c; D.configured = saved.g;
+    D._applyingMerge = saved.a; D._pendingChange = saved.p; D._firstUnpushedChangeAt = saved.f;
+    if (savedMark) await FileStore.setMeta('driveDirtySince', savedMark);
+    else await FileStore.delMeta('driveDirtySince');
+  }
+});
+
+test('A running session pools Drive pushes instead of one per answer', () => {
+  const D = DriveSync;
+  const saved = { c: D.connected, g: D.configured, t: D._debounceTimer,
+                  p: D._pendingChange, f: D._firstUnpushedChangeAt, s: State.session };
+  try {
+    D.connected = true; D.configured = true;
+    D._pendingChange = false; D._firstUnpushedChangeAt = null;
+    clearTimeout(D._debounceTimer); D._debounceTimer = null;
+    State.session = { status: 'active' };
+    D.touch('attempts');
+    assert(D._pendingChange, 'the answer is still recorded as unpushed');
+    eq(D._debounceTimer, null, 'but no whole-bank push is armed for a single answer');
+    State.session = null;
+    D.touch('attempts');
+    assert(D._debounceTimer, 'outside a session the debounce is unchanged');
+  } finally {
+    clearTimeout(D._debounceTimer);
+    D._debounceTimer = saved.t; D.connected = saved.c; D.configured = saved.g;
+    D._pendingChange = saved.p; D._firstUnpushedChangeAt = saved.f; State.session = saved.s;
+  }
+});
+
 test('The browser-only warning is loud once, then respects being waved away', () => {
   // It is shown outside Settings, in every view, because the storage bar that
   // used to carry it is behind a hamburger on a phone. That makes restraint
@@ -26919,6 +27542,31 @@ test('A failed sync says what happened, not what the browser called it', () => {
     'and anything unrecognised is still shown rather than swallowed');
 });
 
+test('A Drive file that has been deleted is forgotten rather than retried forever', async () => {
+  const D = DriveSync;
+  const saved = { pull: D.pull, mt: D._fetchModifiedTime, id: D.fileId, conn: D.connected, last: D.lastSyncedModifiedTime };
+  const savedId = await FileStore.meta('driveFileId');
+  const savedStamp = await FileStore.meta('driveModifiedTime');
+  const realModal = globalThis.modal;
+  try {
+    globalThis.modal = async () => false;
+    await FileStore.setMeta('driveFileId', 'deleted-file-id');
+    await FileStore.setMeta('driveModifiedTime', 'T1');
+    D.connected = true; D.fileId = 'deleted-file-id'; D.lastSyncedModifiedTime = 'T1';
+    D._fetchModifiedTime = async () => null;
+    D.pull = async () => { throw new Error('Drive returned 404'); };
+    eq(await D._reconcileOnConnect(), false, 'a vanished file stops the connect');
+    eq(await FileStore.meta('driveFileId'), undefined, 'and the dead id is not kept for the next attempt to reuse');
+    eq(D.fileId, null, 'nor left in memory');
+  } finally {
+    globalThis.modal = realModal;
+    D.pull = saved.pull; D._fetchModifiedTime = saved.mt;
+    D.fileId = saved.id; D.connected = saved.conn; D.lastSyncedModifiedTime = saved.last;
+    if (savedId) await FileStore.setMeta('driveFileId', savedId); else await FileStore.delMeta('driveFileId');
+    if (savedStamp) await FileStore.setMeta('driveModifiedTime', savedStamp); else await FileStore.delMeta('driveModifiedTime');
+  }
+});
+
 test('A deletion made on another device actually deletes, and can then be pushed', async () => {
   // applyMergedBank only ever put rows, never removed them. mergeBankPayloads
   // correctly dropped questions named by a tombstone, and then this threw that
@@ -26961,6 +27609,27 @@ test('A deletion made on another device actually deletes, and can then be pushed
     DriveSync._firstUnpushedChangeAt = wasFirstUnpushed;
     if (wasMark) await FileStore.setMeta('driveDirtySince', wasMark);
     else await FileStore.delMeta('driveDirtySince');
+  }
+});
+
+test('A merge that shrinks only because this browser held the tombstones can still be saved', async () => {
+  const was = { f: FileStore._shrinkOk, d: DriveSync._driveShrinkOk, c: State.course, list: State.courses.slice() };
+  const savedActive = Settings.get('activeCourseId');
+  try {
+    FileStore._shrinkOk = null; DriveSync._driveShrinkOk = null;
+    const local = { stores: { questions: [], tombstones: [{ qid: 'ZZZ-Q-424242', uuid: 'selftest-gone-1', retiredAt: nowISO(), reason: 'course wipe' }] } };
+    const remote = { stores: { questions: [{ uuid: 'selftest-gone-1', qid: 'ZZZ-Q-424242', courseId: 'selftest-course', status: 'active', stem: 'x', options: [], stats: {}, updatedAt: nowISO() }], tombstones: [] } };
+    const { merged, report } = await mergeBankPayloads(local, remote);
+    eq(report.stores.questions.tombstoned, 1, 'the merge honoured this browser’s own tombstone');
+    eq(merged.stores.questions.length, 0, 'and did not admit the question the other side still holds');
+    await applyMergedBank(merged, report);
+    assert(FileStore._shrinkOk, 'the file guard is armed, so the smaller merged bank can still be written');
+    assert(DriveSync._driveShrinkOk, 'and so is the Drive guard');
+  } finally {
+    FileStore._shrinkOk = was.f; DriveSync._driveShrinkOk = was.d;
+    State.courses = was.list; State.course = was.c;
+    if (savedActive) await Settings.set('activeCourseId', savedActive);
+    await DB.delRaw('tombstones', 'ZZZ-Q-424242');
   }
 });
 
@@ -27058,6 +27727,22 @@ test('A deleted course stays deleted, and takes only its own things with it', as
   eq(retiredCourseIds([ct, { qid: 'CISA-Q-1', uuid: 'u' }]).size, 1, 'and only course tombstones are read as courses');
 });
 
+test('A note removed on one device does not come back from the other', async () => {
+  const stores = extra => Object.assign({
+    courses: [], sources: [], batches: [], attempts: [], sessions: [], audit: [], images: [],
+    idRegister: [], tombstones: [], presets: [], notes: [], caseStudies: [], questionVersions: [],
+    questions: [], settings: []
+  }, extra || {});
+  const behind = { savedAt: '2026-01-01T00:00:00Z', stores: stores({
+    notes: [{ id: 'n1', courseId: 'c', storage: 'drive', driveFileId: 'already-deleted' }] }) };
+  const removedSide = { savedAt: '2026-02-01T00:00:00Z', stores: stores({
+    tombstones: [{ qid: 'NOTE:n1', noteId: 'n1', courseId: 'c', retiredAt: '2026-02-01T00:00:00Z' }] }) };
+  const { merged } = await mergeBankPayloads(behind, removedSide);
+  eq(merged.stores.notes.length, 0, 'the union does not resurrect a note removed elsewhere');
+  eq(retiredCourseIds(removedSide.stores.tombstones).size, 0, 'and a note tombstone is never read as a course one');
+  eq(retiredNoteIds([courseTombstone('x', 'X')]).size, 0, 'nor a course tombstone as a note one');
+});
+
 test('A bank file may be gzipped or plain, and is told apart by its own bytes', async () => {
   // Drive has no cheap append, so every sync is the whole bank. Compressed, a
   // phone finishes it; uncompressed it drops one. Reading has to accept both,
@@ -27112,6 +27797,27 @@ test('A deletion is counted as a deletion, not netted against what arrived', asy
     'the boot path must gate its prompt and its snapshot on this, never on the size difference');
 });
 
+test('Two devices that disagree about the answer key do not settle it by the clock', async () => {
+  const q = (correctOptionId, version, updatedAt) => ({
+    uuid: 'a', qid: 'a', courseId: 'c', status: 'active', answerVerified: 'verified',
+    correctOptionId, version, updatedAt, options: [{ id: 'o1', text: 'a' }, { id: 'o2', text: 'b' }], stats: {}
+  });
+  const pay = qs => ({ savedAt: nowISO(), stores: {
+    courses: [], sources: [], batches: [], attempts: [], sessions: [], audit: [], images: [],
+    idRegister: [], tombstones: [], presets: [], notes: [], caseStudies: [], questionVersions: [],
+    settings: [], questions: qs } });
+  const r = await mergeBankPayloads(pay([q('o2', 4, '2026-09-01T10:05:00.000Z')]),
+                                    pay([q('o1', 4, '2026-09-01T10:00:00.000Z')]));
+  const w = r.merged.stores.questions[0];
+  eq(w.updatedAt, '2026-09-01T10:05:00.000Z', 'the newer row is still the one that survives');
+  eq(w.answerVerified, 'doubtful', 'but its answer key is no longer treated as verified');
+  eq(w.status, 'needs_answer', 'so it lands in the review queue instead of practice');
+  const r2 = await mergeBankPayloads(pay([q('o2', 4, '2026-09-01T10:05:00.000Z')]),
+                                     pay([q('o1', 3, '2026-09-01T10:00:00.000Z')]));
+  eq(r2.merged.stores.questions[0].correctOptionId, 'o2', 'the corrected key still reaches the second device');
+  eq(r2.merged.stores.questions[0].status, 'active', 'without dragging every propagated fix into review');
+});
+
 test('A push records what it uploaded, not what the database says afterwards', () => {
   // The fingerprint decides whether a later boot thinks this browser is level
   // with Drive. Taken from live IndexedDB after the upload, an answer given
@@ -27160,12 +27866,30 @@ test('An automatic merge only stops for the one thing that can remove work', () 
   });
 });
 
-test('Answering a question stamps it, so a merge can tell which side is newer', () => {
-  // mergeKeyedRows resolves a question by comparing updatedAt. Answering
-  // changed mastery, streak and the next review date but left updatedAt where
-  // it was, so two devices held different versions of the same question under
-  // identical stamps and a merge kept whichever it already had — the answer
-  // never crossed, however many times either side synced.
+test('A restore outranks the wipe it undoes — and a wipe made after the restore still wins', () => {
+  const q = (uuid, restoredAt) => ({ uuid, qid: uuid, courseId: 'c', status: 'active', updatedAt: restoredAt, restoredAt, options: [], stats: {} });
+  const tomb = (qid, at) => ({ qid, uuid: qid, retiredAt: at, reason: 'course wipe' });
+  const pay = (questions, tombstones) => ({ savedAt: nowISO(), stores: { questions, tombstones: tombstones || [], attempts: [], sessions: [], courses: [] } });
+  const stale = pay([], [tomb('a', '2026-03-01T00:00:00.000Z')]);
+  const restored = pay([q('a', '2026-03-02T00:00:00.000Z')]);
+  return mergeBankPayloads(stale, restored).then(r => {
+    eq(r.merged.stores.questions.length, 1, 'a question restored after the wipe survives the merge on the device that still holds the tombstone');
+    eq(r.merged.stores.tombstones.length, 0, 'and the superseded tombstone is dropped, so the resurrection reaches the other side too');
+    eq(r.report.stores.questions.tombstoned, 0, 'so the boot path does not ask about a deletion that has been undone');
+    return mergeBankPayloads(stale, pay([q('a', '2026-03-02T00:00:00.000Z')], [tomb('a', '2026-03-03T00:00:00.000Z')]));
+  }).then(r2 => {
+    eq(r2.merged.stores.questions.length, 0, 'but a wipe made after the restore still wins');
+    eq(r2.merged.stores.tombstones.length, 1, 'and its tombstone is kept');
+  });
+});
+
+test('Answering does not overwrite an edit made on the other device', () => {
+  // mergeKeyedRows resolves a question by comparing updatedAt, and answering
+  // used to move that stamp. Whichever device answered last therefore won the
+  // whole row, so a stem, option or explanation edited on the other device
+  // while it was offline was dropped without a word. The answer does not need
+  // that stamp to cross: it travels in the attempt log, which merges as a
+  // union, and the counters are replayed from that log on both devices.
   //
   // Pure by construction. The first version of this test ran a real answer
   // through Session.commit() against whatever question happened to be first in
@@ -27176,15 +27900,16 @@ test('Answering a question stamps it, so a merge can tell which side is newer', 
   q.updatedAt = '2020-01-01T00:00:00.000Z';
   const before = q.updatedAt;
   applyAttempt(q, { correct: false, confidence: 'unsure', ms: 1000, ts: nowISO() });
-  assert(q.updatedAt !== before, 'the answered record carries a newer stamp than the one it replaced');
-  assert(Date.parse(q.updatedAt) > Date.parse(before), 'and it moves forward, not back');
+  eq(q.updatedAt, before, 'answering leaves the edit stamp where it was — it is not an edit');
+  assert(q.stats.lastAttemptAt, 'the answer itself is recorded, and travels in the attempt log');
   assert(q.nextReviewAt, 'and it is scheduled to come round again');
 
-  // Two sides of one question, one of them answered: the answered side wins.
-  const mine = Object.assign({}, q, { updatedAt: before, nextReviewAt: null });
-  const merged = mergeKeyedRows([mine], [q], 'uuid');
-  eq(merged.rows[0].updatedAt, q.updatedAt, 'so the merge takes the answered side');
-  eq(merged.rows[0].nextReviewAt, q.nextReviewAt, 'bringing its review date with it');
+  // The other device fixed the stem an hour before this answer was given, and
+  // has not synced yet. Newest-wins used to hand the whole row to the answered
+  // side and drop that edit.
+  const edited = Object.assign({}, q, { stem: 'the corrected stem', updatedAt: '2020-01-01T01:00:00.000Z', nextReviewAt: null });
+  eq(mergeKeyedRows([q], [edited], 'uuid').rows[0].stem, 'the corrected stem', 'the edit survives an answer given here');
+  eq(mergeKeyedRows([edited], [q], 'uuid').rows[0].stem, 'the corrected stem', 'and survives from the other side too');
 
   // Rolling counters rebuild from history alone, which is what makes a bad
   // write undoable.
@@ -27260,7 +27985,60 @@ test('A lapsed Drive sign-in retries itself instead of waiting to be noticed', a
   }
 });
 
-test('A rejected token is thrown away rather than reused', () => {
+test('A silent sign-in Google refused is not retried by the next tab switch', async () => {
+  const D = DriveSync;
+  const saved = { c: D.connected, g: D.configured, b: D._silentBlockedAt, r: D._resuming, l: D._lastResumeAt };
+  const realReq = D._requestToken;
+  // tryResume() calls _loadGis() before _requestToken(). A real user runs the
+  // built-in suite offline as often as not — this app is offline-first — so a
+  // test must not depend on actually reaching accounts.google.com.
+  const realGis = D._loadGis;
+  let calls = 0;
+  try {
+    D.configured = true; D.connected = false; D._resuming = false; D._lastResumeAt = 0;
+    D._loadGis = () => Promise.resolve();
+    D._requestToken = async () => { calls++; throw new Error('interaction_required'); };
+    D._silentBlockedAt = Date.now();
+    await D.tryResume();
+    eq(calls, 0, 'a blocked silent path must not ask Google again on a focus event');
+    D._silentBlockedAt = null; D._lastResumeAt = 0;
+    await D.tryResume();
+    eq(calls, 1, 'and it must still try when nothing is blocking it');
+  } finally {
+    D._requestToken = realReq;
+    D._loadGis = realGis;
+    D.connected = saved.c; D.configured = saved.g; D._silentBlockedAt = saved.b;
+    D._resuming = saved.r; D._lastResumeAt = saved.l;
+  }
+});
+
+test('A push that meets a moved Drive stamp while a catch-up is already running hands off instead of looping', async () => {
+  const D = DriveSync;
+  const keys = ['connected', 'fileId', 'accessToken', 'tokenExpiresAt', 'lastSyncedModifiedTime', '_catchingUp', '_pushing', '_holdPush', 'problem'];
+  const saved = {}; keys.forEach(k => { saved[k] = D[k]; });
+  const realFetch = globalThis.fetch;
+  let gets = 0, patches = 0;
+  try {
+    Object.assign(D, { connected: true, fileId: 'test-file', accessToken: 'tok', tokenExpiresAt: Date.now() + 3600000,
+      lastSyncedModifiedTime: '2026-01-01T00:00:00.000Z', _catchingUp: true, _pushing: false, _holdPush: null, problem: null });
+    globalThis.fetch = async (url, opts) => {
+      if (opts && opts.method === 'PATCH') { patches++; return { ok: true, status: 200, json: async () => ({ modifiedTime: '2026-01-01T00:00:02.000Z' }) }; }
+      gets++;
+      if (gets > 5) throw new Error('push() is re-entering itself');
+      return { ok: true, status: 200, json: async () => ({ modifiedTime: '2026-01-01T00:00:01.000Z' }) };
+    };
+    const sent = await D.push();
+    eq(sent, false, 'inside a running catch-up a moved stamp is that catch-up\'s to handle');
+    eq(patches, 0, 'nothing is uploaded over a copy this browser has not merged');
+    assert(gets <= 1, 'one metadata read, not a loop — got ' + gets);
+    eq(D._pushing, false, 'the push guard is released');
+  } finally {
+    globalThis.fetch = realFetch;
+    Object.assign(D, saved);
+  }
+});
+
+test('A rejected token is thrown away rather than reused', async () => {
   const D = DriveSync;
   const saved = { t: D.accessToken, e: D.tokenExpiresAt, c: D.connected, p: D.problem };
   try {
@@ -27268,20 +28046,26 @@ test('A rejected token is thrown away rather than reused', () => {
     D.tokenExpiresAt = Date.now() + 3600000;   // not expired, just no longer accepted
     D.connected = true; D.problem = null;
 
-    eq(D._handleAuthFailure({ status: 500 }), false, 'a server error is not an auth failure');
-    eq(D._handleAuthFailure({ status: 404 }), false);
-    eq(D._handleAuthFailure(null), false, 'and nothing at all is not either');
+    eq(await D._handleAuthFailure({ status: 500 }), false, 'a server error is not an auth failure');
+    eq(await D._handleAuthFailure({ status: 404 }), false);
+    eq(await D._handleAuthFailure(null), false, 'and nothing at all is not either');
     eq(D.accessToken, 'dead-token', 'none of which should have touched the token');
 
-    assert(D._handleAuthFailure({ status: 401 }), '401 is');
+    assert(await D._handleAuthFailure({ status: 401 }), '401 is');
     eq(D.accessToken, null, 'the token is dropped, not kept until its nominal expiry');
     eq(D.tokenExpiresAt, 0, 'so _ensureToken cannot short-circuit on it');
     eq(D.connected, false);
     assert(/sign-in/i.test(D.problem), D.problem);
 
     D.accessToken = 'dead-token'; D.tokenExpiresAt = Date.now() + 3600000;
-    assert(D._handleAuthFailure({ status: 403 }), '403 is too');
+    assert(await D._handleAuthFailure({ status: 403 }), 'a 403 with no readable reason is still treated as auth');
     eq(D.accessToken, null);
+
+    D.accessToken = 'dead-token'; D.tokenExpiresAt = Date.now() + 3600000; D.connected = true; D.problem = null;
+    const full = new Response(JSON.stringify({ error: { errors: [{ reason: 'storageQuotaExceeded' }] } }), { status: 403 });
+    eq(await D._handleAuthFailure(full), false, 'a full Drive is not a dead sign-in');
+    eq(D.accessToken, 'dead-token', 'so the token survives and the 403 reaches describeSyncFailure');
+    assert(/quota|read-only/.test(describeSyncFailure(new Error('Drive returned 403'))), 'which is where the real explanation lives');
   } finally {
     D.accessToken = saved.t; D.tokenExpiresAt = saved.e; D.connected = saved.c; D.problem = saved.p;
   }
@@ -27350,6 +28134,24 @@ test('Merging is what happens wherever the two copies meet — not a question', 
     'the wholesale "replace this browser with Drive" path is gone, not merely unlinked from a button');
   const merge = DriveSync._mergeInRemote.toString();
   assert(merge.indexOf('Apply the deletion') > 0, 'a deletion arriving from elsewhere is still the one thing that asks first');
+});
+
+test('The file-changed recovery merges too, like every other place two copies meet', () => {
+  const src = recoveryFlow.toString();
+  assert(/mergeBankPayloads/.test(src) && /applyMergedBank/.test(src), 'the changed-file recovery must reconcile by merging, not only by discarding one side');
+  assert(src.indexOf("{ label: 'Merge both', value: 'merge', kind: 'primary' }") > 0, 'merging must be the primary action in that dialog');
+  assert(src.indexOf("{ label: 'Keep what is on disk', value: 'file' }") < 0, 'discarding a whole copy belongs behind chooseOneSideDialog, not in the footer');
+  assert(src.indexOf('FileStore.connected = true') < src.indexOf('applyMergedBank'), 'read-only must be cleared before the merge writes, or _writeVeto refuses every row');
+  assert(src.indexOf('not recoverable from here') < 0, 'the dialog must not claim the discarded side is unrecoverable — both sides are backed up automatically');
+});
+
+test('A Drive merge never repaints over a paper in progress', () => {
+  eq(typeof ROUTES.runner, 'undefined', 'the runner is not a route and must not be re-entered through go()');
+  eq(typeof ROUTES.results, 'undefined', 'nor is the results screen');
+  const merge = DriveSync._mergeInRemote.toString();
+  assert(/go\(State\.view\)/.test(merge), 'the merge still repaints the current screen');
+  assert(/ROUTES\[State\.view\]/.test(merge), 'but only when the current view is a real route');
+  assert(/State\.session[\s\S]{0,80}active/.test(merge), 'and never while a session is running');
 });
 
 test('Every disconnected state offers a way out, on every browser', () => {
