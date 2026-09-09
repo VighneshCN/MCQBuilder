@@ -1524,7 +1524,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.2', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.3', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -4998,18 +4998,34 @@ function masteryOf(q, attempts) {
   const cw = recent.reduce((s, x) => s + (x.correct ? confWeight(x.confidence) : 0), 0) / recent.length;
   add('confidence', 'Answer quality', cw * 20, 20, cw >= 0.8 ? 'Answered from knowledge' : cw >= 0.45 ? 'Reasoned or unsure' : 'Mostly guessing');
 
-  const guessed = a.filter(x => x.correct && x.confidence === 'guessed').length;
+  // Scored over the same recent window as every other component. Over the whole
+  // log it was the one permanent dock, and stacked on the permanent first-attempt
+  // component it put the ceiling at 72 — under the default target of 75 — so a
+  // question missed on first sight and guessed right once could never be
+  // mastered however many spaced "Knew it" answers followed, and sat in the
+  // study-plan backlog for good.
+  const guessed = recent.filter(x => x.correct && x.confidence === 'guessed').length;
   const gPen = -Math.min(12, guessed * 6);
-  if (guessed) add('guessed', 'Guessed-correct penalty', gPen, 0, guessed + ' correct answer(s) marked as a guess');
+  if (guessed) add('guessed', 'Guessed-correct penalty', gPen, 0, guessed + ' of the last ' + recent.length + ' correct answer(s) marked as a guess');
 
-  // Retention: spacing between the last two correct answers, capped.
-  let space = 0;
+  // Retention: the LONGEST gap between two consecutive correct answers, capped.
+  // Reading only the last pair threw evidence away instead of accumulating it:
+  // a question held across 20 days scored the full 20, and the next correct
+  // answer — three days later, because that is exactly when the ladder puts an
+  // unsure or mock answer back in front of you (srIntervals.lowConf /
+  // .unknown) — recomputed the gap as 3 and cut mastery by ~16, dropping a
+  // solid question into the shaky column for being answered correctly. A gap
+  // once held is a fact about the history; it cannot be un-held later.
+  let space = 0, bestGap = 0;
   const corr = a.filter(x => x.correct);
   if (corr.length >= 2) {
-    const gap = (new Date(corr[corr.length - 1].ts) - new Date(corr[corr.length - 2].ts)) / 86400000;
-    space = clamp(gap / 14, 0, 1) * 20;
+    for (let i = 1; i < corr.length; i++) {
+      const g = (new Date(corr[i].ts) - new Date(corr[i - 1].ts)) / 86400000;
+      if (g > bestGap) bestGap = g;
+    }
+    space = clamp(bestGap / 14, 0, 1) * 20;
   }
-  add('retention', 'Retention over time', space, 20, corr.length >= 2 ? 'Held across a ' + Math.round((new Date(corr[corr.length - 1].ts) - new Date(corr[corr.length - 2].ts)) / 86400000) + '-day gap' : 'Needs a second correct answer after a gap');
+  add('retention', 'Retention over time', space, 20, corr.length >= 2 ? 'Held across a ' + Math.round(bestGap) + '-day gap' : 'Needs a second correct answer after a gap');
 
   const score = clamp(parts.reduce((s, p) => s + p.value, 0), 0, 100);
   return { score: Math.round(score), parts };
@@ -5318,7 +5334,11 @@ function studyPlan(opts) {
   }
 
   return {
-    set: true, examDate: o.examDate, today, daysLeft, past: gap < 0,
+    // Two different day numbers, deliberately: daysLeft counts today, because
+    // that is what the work divides over; gap is the calendar distance, for
+    // anything that says "in N days" or "N to go". Clamped at 0 so a past date
+    // keeps the never-negative invariant the rest of the object holds to.
+    set: true, examDate: o.examDate, today, daysLeft, gap: Math.max(0, gap), past: gap < 0,
     unseen, weak, dueBefore, settled, backlog, perDay,
     doneToday, remainingToday: Math.max(0, perDay - doneToday),
     recentPerDay, projected, state, verdict,
@@ -5741,6 +5761,22 @@ function compositionDimensions(spec, blueprint) {
  * perfect fit in adversarial cases — which is why what it reports is the
  * deficit it actually ended with, never an assumption that greedy succeeded.
  */
+/** The spec a paper is ACTUALLY composed against. A mock — and a mixed paper
+    left on exam weights — is blueprint-weighted whether or not anyone opened
+    the domain table, so the weighting is a quota in its own right and has to
+    be supplied here rather than lost by omission. It lives in one place
+    because both the feasibility preview and the session that gets built must
+    judge the same request: a preview that prices a smaller spec than the
+    start will enforce reports a fit that is then refused. */
+function effectiveComposition(spec, mode, weighted, blueprint) {
+  if (!spec) return spec;
+  if ((spec.domainMix && spec.domainMix.length) || !(mode === 'mock' || weighted)) return spec;
+  return Object.assign({}, spec, {
+    domainMix: (blueprint || []).map(d => ({ id: d.id, pct: d.weight || 0 })),
+    domainMixImplied: true
+  });
+}
+
 function composeTest(pool, spec, count, rng, blueprint) {
   const dims = compositionDimensions(spec || {}, blueprint || []);
   if (!dims.length) {
@@ -6037,12 +6073,7 @@ const Session = {
       // however the bank happened to be imported. The weighting is a quota in
       // its own right, so it is supplied here when the candidate has not
       // overridden it, rather than lost by omission.
-      if (!(spec.domainMix && spec.domainMix.length) && (mode === 'mock' || config.weighted)) {
-        spec = Object.assign({}, spec, {
-          domainMix: (State.course.blueprint || []).map(d => ({ id: d.id, pct: d.weight || 0 })),
-          domainMixImplied: true
-        });
-      }
+      spec = effectiveComposition(spec, mode, config.weighted, State.course.blueprint);
       const r = composeTest(filtered, spec, wanted, rng, State.course.blueprint);
       if (r.shortfalls.length && spec.strict !== false) {
         const err = new Error(describeShortfalls(r.shortfalls, wanted));
@@ -6999,7 +7030,17 @@ ROUTES.dashboard = async (root) => {
   const caseActive = drawableCasePool(all, caseRecords);
   const attempts = (await DB.byIndex('attempts', 'courseId', State.course.id));
   const firstAttempts = new Map();
-  attempts.forEach(a => { if (!firstAttempts.has(a.questionUuid)) firstAttempts.set(a.questionUuid, a); });
+  // getAll() on an index returns rows in primary-key order, and for `attempts`
+  // that key is the auto-increment id — the order THIS browser happened to
+  // write them, which is not the order they were answered. A merge appends the
+  // other device's answers with `delete clean.id`, so an attempt given first
+  // but synced second sorts last here and the "first" attempt picked is the
+  // wrong one. Analytics (firstMap) and rebuildQuestionStats both order by ts
+  // before folding; so does this, or the same bank reads differently on two
+  // devices and the readiness verdict flips with it. Sorted on a copy: the
+  // `attempts` array below is also read for guessRate and the time average.
+  attempts.slice().sort((a, b) => new Date(a.ts) - new Date(b.ts))
+    .forEach(a => { if (!firstAttempts.has(a.questionUuid)) firstAttempts.set(a.questionUuid, a); });
   const firstArr = Array.from(firstAttempts.values());
   const firstAcc = firstArr.length ? firstArr.filter(a => a.correct).length / firstArr.length : null;
   const recent = attempts.slice().sort((a, b) => new Date(b.ts) - new Date(a.ts)).slice(0, 100);
@@ -7022,7 +7063,7 @@ ROUTES.dashboard = async (root) => {
     caseActive.length ? { k: 'Case study', v: String(caseActive.length) } : null,
     { k: 'In review', v: String(inReview.length), color: inReview.length ? 'var(--amber)' : null },
     { k: 'Due today', v: String(due.length), color: due.length ? 'var(--pencil)' : null },
-    plan.set && !plan.past ? { k: 'Exam in', v: qtyLabel(plan.daysLeft, 'day'), color: plan.daysLeft <= 14 ? 'var(--pencil)' : null } : null
+    plan.set && !plan.past ? { k: plan.gap === 0 ? 'Exam' : 'Exam in', v: plan.gap === 0 ? 'Today' : qtyLabel(plan.gap, 'day'), color: plan.daysLeft <= 14 ? 'var(--pencil)' : null } : null
   ].filter(Boolean), [h('button', { class: 'btn primary', onclick: () => go('practice'), text: 'Start practice' })]);
 
   // A course-level note (currently only ever set by the DISA quick-add
@@ -7368,7 +7409,7 @@ function studyPlanCard(plan) {
 
   return h('div', { class: 'card', style: 'margin-bottom:16px' }, [
     h('div', { class: 'card-h' }, [
-      h('h3', { text: qtyLabel(plan.daysLeft, 'day') + ' to go' }),
+      h('h3', { text: plan.gap === 0 ? 'Exam today' : qtyLabel(plan.gap, 'day') + ' to go' }),
       h('div', { class: 'spacer' }),
       h('button', { class: 'btn sm ghost', onclick: () => exportStudyCalendar(), text: 'Remind me' }),
       h('button', {
@@ -7639,7 +7680,7 @@ ROUTES.practice = async (root, preselect) => {
     worse than one that stays out of the way. Feasibility is recomputed on
     every keystroke against the real pool, so an impossible mix is visible
     here rather than being discovered at the moment you press Start. */
-function compositionEditor(cfg, pool, filters) {
+function compositionEditor(cfg, pool, filters, mode, casePool) {
   const wrap = h('div', { class: 'field', style: 'margin-top:4px' });
   const spec = cfg.composition = { domainMix: null, difficultyMix: null, seenMix: null, strict: true };
   const bp = State.course.blueprint || [];
@@ -7747,7 +7788,15 @@ function compositionEditor(cfg, pool, filters) {
     const filtered = applyFilters(pool, filters);
     // Dry run on a fixed seed: this is a preview of feasibility, not of the
     // actual paper, so it must not consume or depend on the session's seed.
-    const r = composeTest(filtered, spec, Math.max(1, cfg.count || 20), mulberry32(1), bp);
+    // Exactly what Session.create will compose: a mock (and a mixed paper on
+    // exam weights) carries the blueprint as a quota whether or not the domain
+    // table was opened, and the case-study section comes out of the same
+    // total. Previewing anything smaller is what let a green verdict here be
+    // contradicted by "Cannot start this session" a moment later.
+    const caseTaken = (mode === 'mock' && cfg.caseCount)
+      ? pickCaseBlock(casePool || [], cfg.caseCount, mulberry32(1)).taken : 0;
+    const r = composeTest(filtered, effectiveComposition(spec, mode, cfg.weighted, bp),
+      Math.max(1, (cfg.count || 20) - caseTaken), mulberry32(1), bp);
     const tbl = h('table', { class: 'recon' });
     const tb = h('tbody');
     // Grouped by dimension, because the quotas are per dimension: "hard" is
@@ -7803,6 +7852,19 @@ function compositionEditor(cfg, pool, filters) {
     the only one so far. Everything remains editable once the dialog is open;
     this is a starting point, never a lock. */
 async function configureMode(mode, preset) {
+  // Every mode card on the Practice screen is already disabled while an
+  // unfinished session exists ("Resume or discard your unfinished session
+  // first"), but the dashboard's Recommended-next button and "Practise that"
+  // reach this dialog directly, and the preselect below the grid runs whether
+  // or not one is resumable. Starting a second session leaves the first one
+  // active and invisible — resumeLatest() only ever surfaces the newest — so
+  // the same gate is enforced here, at the one point all of them pass.
+  const live = await Session.resumeLatest(State.course.id);
+  if (live) {
+    toast('Resume or discard your unfinished ' + MODES[live.mode].label.toLowerCase() + ' session first.', 'warn', 4200);
+    if (State.view !== 'practice') go('practice');
+    return;
+  }
   const all = await State.questions();
   const isCaseMode = !!(MODES[mode] && MODES[mode].caseBank);
   // Titles for the picker, and the count of askable questions each scenario
@@ -7835,6 +7897,11 @@ async function configureMode(mode, preset) {
     caseFilters: { caseStudies: [] }
   };
 
+  // Read here, not beside the marks line below: drawSectionNote() runs while
+  // this dialog is still being assembled, so a const declared further down is
+  // still in its temporal dead zone when that note is first drawn.
+  const perQ = Number(Settings.get('marksPerQuestion')) || 1;
+  const perCase = Number(Settings.get('marksPerCaseQuestion')) || 1;
   const countLabel = h('span', { class: 'docnum' });
   let compositionPanel = null;
   // Assigned below, once the marks line exists; recount() runs before that on
@@ -8061,17 +8128,16 @@ async function configureMode(mode, preset) {
     drawCaseNoteRef = () => { drawCaseNote(); drawSectionNote(); };
   }
   if (mode === 'mixed') {
-    body.appendChild(h('label', { class: 'check' }, [h('input', { type: 'checkbox', checked: true, onchange: (e) => cfg.weighted = e.target.checked }), h('span', { text: 'Distribute by official exam weights (' + State.course.blueprint.map(d => d.weight + '%').join(' / ') + ')' })]));
+    body.appendChild(h('label', { class: 'check' }, [h('input', { type: 'checkbox', checked: true, onchange: (e) => { cfg.weighted = e.target.checked; recount(); } }), h('span', { text: 'Distribute by official exam weights (' + State.course.blueprint.map(d => d.weight + '%').join(' / ') + ')' })]));
   }
   if (mode === 'mock' || mode === 'mixed' || mode === 'custom') {
-    compositionPanel = compositionEditor(cfg, pool, f);
+    compositionPanel = compositionEditor(cfg, pool, f, mode, casePool);
     body.appendChild(compositionPanel);
   }
   body.appendChild(h('div', { class: 'row' }, [h('span', { class: 'eyebrow', text: 'Matching pool' }), countLabel]));
   // What the paper is worth, on a course where that is not simply the number
-  // of questions. Kept out of the way otherwise.
-  const perQ = Number(Settings.get('marksPerQuestion')) || 1;
-  const perCase = Number(Settings.get('marksPerCaseQuestion')) || 1;
+  // of questions. Kept out of the way otherwise. (perQ/perCase are read much
+  // higher up — the case-study section note needs them before this point.)
   const marksLine = h('div', { class: 'row' }, [h('span', { class: 'eyebrow', text: 'Paper is worth' }), h('span', { class: 'docnum' })]);
   const drawMarks = () => {
     const caseN = mode === 'mock' ? (cfg.caseCount || 0) : (isCaseMode ? cfg.count : 0);
@@ -8361,6 +8427,12 @@ async function examDayFlow(session, course) {
     stage.onclick = null;
     stage._advance = go;
     setTimeout(() => { if (!armed) { armed = true; stage.onclick = go; } }, 0);
+    // Skip and Escape resolve `finished`, but the body is parked here on a
+    // beat whose stage has just been detached — beat(0) has no timer at all,
+    // and nothing can ever click a removed element. Releasing every beat on
+    // `finished` lets the remaining scenes unwind at once so the function's
+    // `return finished` is actually reached and runSession() carries on.
+    finished.then(go);
   });
   const nextBtn = (label) => h('button', {
     class: 'btn primary',
@@ -8402,7 +8474,9 @@ async function examDayFlow(session, course) {
       h('button', { class: 'btn primary', onclick: signAndGo, text: 'Sign the register →' })
     ]);
     setTimeout(() => nameInput.focus(), 60);
-    await signed;
+    // The one scene that waits for a person is also the one a skip can
+    // strand: its input and its button leave the document with the layer.
+    await Promise.race([signed, finished]);
 
     /* 3 · the ticket prints */
     show([
@@ -16210,7 +16284,14 @@ async function courseDialog(course) {
     await DB.put('courses', course);
     await audit('edit', 'course', course.id, prev, { code: course.code, blueprint: bp, optionCount, enforceOptionCount }, '');
     State.courses = await DB.all('courses');
-    State.course = State.courses.find(c => c.id === course.id);
+    // Editing a course is not selecting it. Re-point at whatever was ALREADY
+    // selected (that record was just replaced by the re-read above); pointing
+    // at the edited course instead switched the app onto it — possibly onto an
+    // archived course the rail picker cannot even show — while
+    // Settings 'activeCourseId' and State.cache still belonged to the old one,
+    // so practice drew the previous course's questions and filed every attempt
+    // under the edited course's id.
+    State.course = (State.course && State.courses.find(c => c.id === State.course.id)) || State.course;
     toast('Course updated', 'ok');
     if (ruleChanged) await applyOptionCountRule(course);
   }
@@ -16272,8 +16353,12 @@ async function deleteCourseForever(course) {
     NotesStore.list(course.id),
     CaseStudies.byCourse(course.id)
   ]);
+  // A note whose bytes live in the notes/ subfolder or in Drive is not in the
+  // safety backup — that zip is BACKUP_STORES, and the notes store holds only
+  // the metadata row. Say so here rather than promise a backup of "everything".
+  const externalNotes = notes.filter(n => n.storage === 'folder' || n.storage === 'drive');
   const ok = await confirmBox('Delete ' + course.code + ' permanently?',
-    'This removes the course itself and everything filed under it — ' + qs.length + ' question(s), ' + cases.length + ' case study/studies, ' + notes.length + ' note(s), ' + srcs.length + ' source file(s) — with no way back. A safety backup of everything is taken first, automatically.', true, 'Delete permanently');
+    'This removes the course itself and everything filed under it — ' + qs.length + ' question(s), ' + cases.length + ' case study/studies, ' + notes.length + ' note(s), ' + srcs.length + ' source file(s) — with no way back. A safety backup of everything is taken first, automatically.' + (externalNotes.length ? ' ' + externalNotes.length + ' of those note(s) keep their file in your folder or in Google Drive, where the backup cannot reach — those files are left where they are, not deleted.' : ''), true, 'Delete permanently');
   if (!ok) return;
   const codeInput = h('input', { type: 'text', id: 'delCourseCode', placeholder: course.code });
   const again = await modal({
@@ -16313,7 +16398,17 @@ async function deleteCourseForever(course) {
   for (const s of srcs) await DB.del('sources', s.id);
   for (const b of batches) await DB.del('batches', b.id);
   for (const p of presets) await DB.del('presets', p.id);
-  for (const n of notes) await NotesStore.remove(n);
+  // Row only for a note whose bytes sit outside IndexedDB: the safety backup
+  // above cannot hold them (requireNoteBackup, the single-note path, exists
+  // precisely because of that), so destroying them here would be the one
+  // deletion in this function nothing can undo. This is also what the same
+  // course deletion already does when it arrives from another device —
+  // applyTombstoneRemovals drops COURSE_SCOPED rows and never touches a file.
+  // An IndexedDB-only note IS inside the backup, so it goes with the course.
+  for (const n of notes) {
+    if (n.storage === 'folder' || n.storage === 'drive') await DB.del('notes', n.id);
+    else await NotesStore.remove(n);
+  }
   for (const c of cases) await DB.del('caseStudies', c.id);
   await DB.del('idRegister', course.id);
   await DB.del('courses', course.id);
@@ -23562,6 +23657,19 @@ test('The same seed and spec compose the same paper twice', () => {
   const b = composeTest(pool, spec, 10, mulberry32(1234), BP3);
   eq(a.questions.map(q => q.uuid).join(','), b.questions.map(q => q.uuid).join(','), 'composition must be reproducible from its seed');
 });
+test('A mock previews the blueprint quota it will actually be judged against', () => {
+  const pool = [];
+  for (let i = 0; i < 40; i++) pool.push(mkPoolQ('D1', 'medium', i % 2 ? 3 : 0));
+  for (let i = 0; i < 2; i++) pool.push(mkPoolQ('D2', 'medium', 0));
+  const spec = { seenMix: { seenPct: 50 }, strict: true };
+  eq(composeTest(pool, spec, 20, mulberry32(1), BP3).shortfalls.length, 0, 'the raw spec alone looks satisfiable');
+  const eff = effectiveComposition(spec, 'mock', true, BP3);
+  assert(eff.domainMixImplied, 'a mock carries the blueprint whether or not the domain table was opened');
+  const r = composeTest(pool, eff, 20, mulberry32(1), BP3);
+  assert(r.shortfalls.some(s => s.dimension === 'domain' && s.available === 2),
+    'the preview must show the quota Start will refuse on');
+  assert(effectiveComposition(spec, 'custom', false, BP3) === spec, 'an unweighted custom paper is left alone');
+});
 test('A keyword filter matches the question form, not just the topic', () => {
   const a = mkQ('Which of the following BEST describes a preventive control?', ['x', 'y'], 0);
   const b = mkQ('Which control is detective?', ['x', 'y'], 0);
@@ -23811,6 +23919,14 @@ test('A guessed-correct answer is not treated as mastery', () => {
   assert(guessed.score < knew.score, 'a guess must score below knowing');
   assert(guessed.score < 75, 'a guessed-correct answer must not reach the mastery target, got ' + guessed.score);
 });
+test('A question missed on first sight recovers once the guessing stops', () => {
+  const q = mkQ('x', ['a', 'b'], 0);
+  const at = (d, correct, confidence) => ({ ts: new Date(Date.UTC(2026, 0, 1) + d * 86400000).toISOString(), correct, confidence });
+  const hist = [at(0, false, 'knew'), at(20, true, 'guessed'),
+    at(40, true, 'knew'), at(60, true, 'knew'), at(80, true, 'knew'), at(100, true, 'knew'), at(120, true, 'knew')];
+  assert(masteryOf(q, hist).score >= 75, 'five spaced confident answers must clear the default target, got ' + masteryOf(q, hist).score);
+  assert(masteryOf(q, hist.concat([at(140, true, 'guessed')])).score < 75, 'but a fresh guess must still drop it below target');
+});
 test('Repeating a question immediately does not inflate mastery', () => {
   const q = mkQ('x', ['a', 'b'], 0);
   const t0 = new Date('2026-01-01T10:00:00Z');
@@ -23821,6 +23937,19 @@ test('Repeating a question immediately does not inflate mastery', () => {
     { ts: '2026-02-01T10:00:00Z', correct: true, confidence: 'knew' }
   ];
   assert(masteryOf(q, spaced).score > masteryOf(q, rapid).score, 'spacing must beat repetition; rapid=' + masteryOf(q, rapid).score + ' spaced=' + masteryOf(q, spaced).score);
+});
+test('A correct answer never lowers mastery', () => {
+  const q = mkQ('x', ['a', 'b'], 0);
+  const spaced = [
+    { ts: '2026-01-01T10:00:00Z', correct: true, confidence: 'unsure' },
+    { ts: '2026-01-21T10:00:00Z', correct: true, confidence: 'unsure' }
+  ];
+  const before = masteryOf(q, spaced).score;
+  eq(before, 84, 'two unsure corrects twenty days apart');
+  const after = masteryOf(q, spaced.concat([{ ts: '2026-01-21T20:00:00Z', correct: true, confidence: null }])).score;
+  assert(after >= before, 'a right answer must not cost mastery; before=' + before + ' after=' + after);
+  const onSchedule = masteryOf(q, spaced.concat([{ ts: '2026-01-24T10:00:00Z', correct: true, confidence: 'unsure' }])).score;
+  assert(onSchedule >= before, 'following the review schedule must not cost mastery; got ' + onSchedule);
 });
 test('Weakness reports insufficient evidence on a small sample', () => {
   const g = { attempted: 2, firstAcc: 0, acc: 0, guessRate: 1, lowConf: 2, due: 2, avgMastery: 0, total: 10 };
@@ -24525,6 +24654,18 @@ test('A merge-restore must not leave the backup\'s counters standing over a unio
 
 test('The shrink consent is one-shot, not a standing permission', async () => {
   const was = { d: FileStore._diskQuestionCount, s: FileStore._shrinkOk, c: FileStore.connected, dir: FileStore.dirHandle, st: FileStore._stamp, lg: FileStore._lastGoodText };
+  // This is the real _writeSnapshot(), so its tail retires the REAL pending
+  // write queue on its way out: the journal entries waiting for the folder,
+  // the dirty flag every forced flush is guarded by, and the journal position
+  // that tells the next append whether another tab has been writing. Keep the
+  // lot and put it back, or running the suite with a folder connected drops
+  // whatever was queued and makes the next append cry "changed outside the app".
+  const q = {
+    dirty: FileStore.dirty, journal: FileStore._journal, jb: FileStore._journalBytes,
+    js: FileStore._journalStamp, need: FileStore.needSnapshot, prob: FileStore.problem,
+    saved: FileStore.lastSavedAt, snap: FileStore.lastSnapshotAt,
+    size: FileStore._lastSize, lq: FileStore._lastQuestionCount
+  };
   try {
     FileStore._diskQuestionCount = 100;
     FileStore._lastGoodText = null;
@@ -24551,6 +24692,33 @@ test('The shrink consent is one-shot, not a standing permission', async () => {
     FileStore._diskQuestionCount = was.d; FileStore._shrinkOk = was.s;
     FileStore.connected = was.c; FileStore.dirHandle = was.dir;
     FileStore._stamp = was.st; FileStore._lastGoodText = was.lg; FileStore._cache = null;
+    FileStore.dirty = q.dirty; FileStore._journal = q.journal; FileStore._journalBytes = q.jb;
+    FileStore._journalStamp = q.js; FileStore.needSnapshot = q.need; FileStore.problem = q.prob;
+    FileStore.lastSavedAt = q.saved; FileStore.lastSnapshotAt = q.snap;
+    FileStore._lastSize = q.size; FileStore._lastQuestionCount = q.lq;
+    updateStorageBar();
+  }
+});
+
+test('Running the write tests leaves the real pending queue alone', async () => {
+  const F = FileStore;
+  const was = { c: F.connected, dir: F.dirHandle, dirty: F.dirty, j: F._journal, jb: F._journalBytes, js: F._journalStamp, ns: F.needSnapshot, p: F.problem, sa: F.lastSavedAt, sn: F.lastSnapshotAt, ls: F._lastSize, lq: F._lastQuestionCount, dq: F._diskQuestionCount, sk: F._shrinkOk, st: F._stamp, lg: F._lastGoodText };
+  try {
+    F.connected = true; F.dirty = true; F.needSnapshot = true;
+    F._journal = [{ o: 'p', s: 'questions', v: { uuid: 'answered-just-now' } }];
+    F._journalBytes = 42; F._journalStamp = 42;
+    const shrink = TESTS.find(t => t.name === 'The shrink consent is one-shot, not a standing permission');
+    assert(shrink, 'the test under guard must still exist');
+    await shrink.fn();
+    eq(F.dirty, true, 'a write queued for the real folder must still be owed');
+    eq(F._journal.length, 1, 'and the entry itself must still be queued');
+    eq(F._journalStamp, 42, 'and the journal position must still describe the real journal, not the stub');
+    assert(F.needSnapshot, 'and a snapshot that was owed is still owed');
+  } finally {
+    F.connected = was.c; F.dirHandle = was.dir; F.dirty = was.dirty; F._journal = was.j;
+    F._journalBytes = was.jb; F._journalStamp = was.js; F.needSnapshot = was.ns; F.problem = was.p;
+    F.lastSavedAt = was.sa; F.lastSnapshotAt = was.sn; F._lastSize = was.ls; F._lastQuestionCount = was.lq;
+    F._diskQuestionCount = was.dq; F._shrinkOk = was.sk; F._stamp = was.st; F._lastGoodText = was.lg; F._cache = null;
   }
 });
 
@@ -26600,6 +26768,17 @@ test('The daily target counts today, and never divides by nothing', () => {
   eq(studyPlan({ examDate: dayKey(9), pool: pool.concat([planQ({})]), attempts: [] }).perDay, 3);
 });
 
+test('The countdown is the calendar distance; the target still counts today', () => {
+  const pool = Array.from({ length: 20 }, () => planQ({}));
+  const soon = studyPlan({ examDate: dayKey(1), pool, attempts: [] });
+  eq(soon.gap, 1, 'the exam is tomorrow: one day away');
+  eq(soon.daysLeft, 2, 'but two days of work — today and tomorrow');
+  const onTheDay = studyPlan({ examDate: dayKey(0), pool, attempts: [] });
+  eq(onTheDay.gap, 0, 'on the day, no days away');
+  eq(onTheDay.daysLeft, 1, 'and still one day of work');
+  assert(studyPlan({ examDate: dayKey(-4), pool, attempts: [] }).gap >= 0, 'never a negative countdown');
+});
+
 test('A date in the past, and an empty bank, give an answer rather than a NaN', () => {
   const pool = [planQ({}), planQ({ stats: { attempts: 2, mastery: 10 } })];
   const past = studyPlan({ examDate: dayKey(-4), pool, attempts: [] });
@@ -28152,6 +28331,50 @@ test('A Drive merge never repaints over a paper in progress', () => {
   assert(/go\(State\.view\)/.test(merge), 'the merge still repaints the current screen');
   assert(/ROUTES\[State\.view\]/.test(merge), 'but only when the current view is a real route');
   assert(/State\.session[\s\S]{0,80}active/.test(merge), 'and never while a session is running');
+});
+
+test('Deleting a course never destroys a note file the backup cannot hold', () => {
+  assert(BACKUP_STORES.indexOf('notes') >= 0, 'the metadata row is backed up');
+  const src = deleteCourseForever.toString();
+  assert(/DB\.del\('notes'/.test(src), 'an external note is dropped by row');
+  assert(!/for \(const n of notes\) await NotesStore\.remove\(n\);/.test(src),
+    'and never fed wholesale to the file-destroying remove()');
+  assert(applyTombstoneRemovals.toString().indexOf('NotesStore.remove') < 0,
+    'both ends of one deletion must agree');
+});
+
+test('A mock reopens after a case-study count has been set', () => {
+  const src = configureMode.toString();
+  assert(src.indexOf('const perQ') >= 0 && src.indexOf('const drawSectionNote') >= 0, 'mock dialog still builds its marks and section-note pieces');
+  assert(src.indexOf('const perQ') < src.indexOf('const drawSectionNote'),
+    'perQ/perCase must be declared before drawSectionNote(), which reads them while the dialog is still being built');
+});
+
+test('Skipping the exam-centre ceremony starts the paper instead of hanging', async () => {
+  const session = { seed: 1234, startedAt: nowISO(), timeLimitMs: 3600000, questionUuids: ['a', 'b'] };
+  const p = examDayFlow(session, { code: 'TEST' });
+  await new Promise(r => setTimeout(r, 30));
+  const btn = document.querySelector('.sim .sim-bar button');
+  assert(btn, 'the skip button must be on the very first frame');
+  btn.click();
+  const how = await Promise.race([p, new Promise(r => setTimeout(() => r('HUNG'), 1500))]);
+  eq(how, 'skipped', 'skipping on the first frame must resolve examDayFlow');
+});
+
+test('resumeLatest sees an unfinished session, so configureMode is gated', async () => {
+  const cid = 'gate-course';
+  const s = { id: 'sess-gate', courseId: cid, mode: 'mock', responses: {}, flags: {}, optionOrders: {}, questionUuids: ['u1'], status: 'active', startedAt: nowISO() };
+  try {
+    await DB.put('sessions', s);
+    const live = await Session.resumeLatest(cid);
+    assert(!!live, 'an active row is resumable');
+    eq(live.id, 'sess-gate');
+  } finally {
+    // Left by the plan's own test text with no cleanup — a stray row under a
+    // course that does not exist. Run twice and it survives itself; the whole
+    // point of this batch (C4) is that the suite must not leave damage behind.
+    await DB.del('sessions', 'sess-gate');
+  }
 });
 
 test('Every disconnected state offers a way out, on every browser', () => {

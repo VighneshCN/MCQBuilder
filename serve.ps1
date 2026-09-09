@@ -55,31 +55,32 @@ $mime = @{
     '.zip'  = 'application/zip'
 }
 
-# Find a free port. 8080 first, then upwards, in case something already has it.
+# One address, always. The browser keys IndexedDB — the whole bank, the folder
+# handle, every setting — to the origin, and the origin includes the port.
+# Walking forward to 8081 when 8080 is busy would open a second, empty database
+# that looks exactly like total data loss. A busy 8080 means the app is already
+# running, so point the browser at it instead of starting a second one.
 $listener = $null
-$port = 0
-foreach ($p in 8080..8095) {
-    try {
-        $candidate = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $p)
-        $candidate.Start()
-        $listener = $candidate
-        $port = $p
-        break
-    } catch {
-        # port in use, try the next one
-    }
+try {
+    $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 8080)
+    $listener.Start()
+} catch {
+    $listener = $null
 }
+
+$url = 'http://localhost:8080/index.html'
 
 if (-not $listener) {
     Write-Host ''
-    Write-Host '  Could not open a free port between 8080 and 8095.' -ForegroundColor Red
-    Write-Host '  Close whatever is using them and try again.'
+    Write-Host '  MCQ Mastery is already running (port 8080 is in use).' -ForegroundColor Yellow
+    Write-Host "  Opening $url — your bank is there."
+    Write-Host '  If that address shows something else, close it and start this again.'
+    Write-Host '  The app only ever uses this one address: a different one is a different,'
+    Write-Host '  empty database.'
     Write-Host ''
-    Read-Host '  Press Enter to close'
-    exit 1
+    try { Start-Process $url } catch { Write-Host "  Paste this in yourself: $url" }
+    exit 0
 }
-
-$url = "http://localhost:$port/index.html"
 
 Write-Host ''
 Write-Host '  MCQ Mastery' -ForegroundColor Cyan
