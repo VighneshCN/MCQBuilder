@@ -1433,6 +1433,7 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 mark.dif{background:var(--amber-tint);color:var(--amber);border-radius:2px;padding:0 2px;font-weight:600}
 .imgstage{background:var(--surface-3);border:1px solid var(--rule);border-radius:var(--r);overflow:auto;max-height:440px;display:grid;place-items:center;padding:8px}
 .imgstage canvas,.imgstage img{max-width:100%;display:block}
+.imgstage canvas{touch-action:none}
 /* The crop canvas is the one thing in a scrolling .imgstage that owns its own
    drag. Left at touch-action:auto the browser reads a diagonal touch drag as a
    pan (this box and .modal-b both scroll) and cancels the pointer, so the crop
@@ -1530,7 +1531,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.4', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.5', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1765,13 +1766,40 @@ const DB = {
   putManyRaw(store, vals) {
     if (!vals.length) return Promise.resolve([]);
     const t = this.tx(store, 'readwrite'), os = t.objectStore(store);
-    vals.forEach(v => os.put(v));
-    return new Promise((res, rej) => { t.oncomplete = () => res(vals); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error); });
+    // A failed request's error event reaches the transaction BEFORE the
+    // transaction's own .error is set (the abort that follows sets it), so read
+    // the error off the event target and never reject with null — the global
+    // handler treats a null reason as "nothing happened".
+    const fail = (rej) => (ev) => rej((ev && ev.target && ev.target.error) || t.error || new Error('The bulk write to ' + store + ' failed.'));
+    // put() throws synchronously for a row with no usable key; without an abort
+    // the rows already queued would commit and the "atomic" batch be partial.
+    try { vals.forEach(v => os.put(v)); }
+    catch (e) { try { t.abort(); } catch (_) { /* already finished */ } return Promise.reject(e); }
+    return new Promise((res, rej) => { t.oncomplete = () => res(vals); t.onerror = fail(rej); t.onabort = fail(rej); });
   },
 
   /* --- guarded writes: everything in the app uses these --- */
   put(store, val) { return this._guard(store, () => this.putRaw(store, val), 'p', val); },
   putMany(store, vals) { return this._guard(store, () => this.putManyRaw(store, vals), 'm', vals); },
+  /** Several stores, ONE transaction: rows that only make sense together (an
+      import's questions and the batch/source rows that account for them)
+      either all land or none do. Vetoed and hooked per store exactly as
+      putMany is; a row that cannot even be queued aborts the lot. */
+  async putAll(map) {
+    const names = Object.keys(map).filter(s => map[s] && map[s].length);
+    if (!names.length) return map;
+    for (const s of names) if (_writeVeto && _writeVeto(s)) {
+      const err = new Error(typeof READONLY_MSG !== 'undefined' ? READONLY_MSG : 'The app is read-only.');
+      err.name = 'ReadOnlyError';
+      throw err;
+    }
+    const t = this.tx(names, 'readwrite');
+    try { names.forEach(s => { const os = t.objectStore(s); map[s].forEach(v => os.put(v)); }); }
+    catch (e) { t.abort(); throw e; }
+    await new Promise((res, rej) => { t.oncomplete = () => res(); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error); });
+    if (_writeHook) names.forEach(s => _writeHook(s, 'm', map[s], map[s]));
+    return map;
+  },
   del(store, key) { return this._guard(store, () => this.delRaw(store, key), 'd', key); },
   clear(store) { return this._guard(store, () => this.clearRaw(store), 'c', null); },
 
@@ -1947,13 +1975,16 @@ const Settings = {
   async set(k, v, courseId) {
     const cid = courseId || (State && State.course ? State.course.id : null);
     const key = (cid && isCourseSetting(k)) ? courseKey(k, cid) : k;
-    this.cache[key] = v;
     // Stamped so a merge can tell which device changed a setting last. Without
     // this the merge compared whole-payload timestamps, and buildPayload()
     // stamps the local payload at the moment of the merge — so the local side
     // always won and no setting ever crossed devices: an exam date, a mock
     // length or a negative-marking rule set on a laptop never reached a phone.
+    // Written before it is cached: a write the read-only guard refuses (or
+    // that storage rejects) must not leave every screen showing a value the
+    // settings store never received, only for a reload to take it back.
     await DB.put('settings', { k: key, v, updatedAt: nowISO() });
+    this.cache[key] = v;
     return v;
   },
   /** Forget a course's overrides when the course itself is deleted. */
@@ -2330,9 +2361,11 @@ function statusBadge(q) {
 const Questions = {
   get: (uuidStr) => DB.get('questions', uuidStr),
   async byCourse(courseId) {
-    const out = [];
-    await DB.each('questions', q => { if (q.courseId === courseId) out.push(q); });
-    return out;
+    // One indexed request, like CaseStudies.byCourse — not a cursor step per
+    // record of every course. An absent id would make getAll return the whole
+    // store, so it returns nothing instead.
+    if (courseId == null) return [];
+    return DB.byIndex('questions', 'courseId', courseId);
   },
   async byQid(qid) {
     const rows = await DB.byIndex('questions', 'qid', qid);
@@ -2357,13 +2390,13 @@ const Questions = {
     if (prev) await audit('edit', 'question', q.qid || q.uuid, summarise(prev), summarise(q), reason || '');
     return q;
   },
-  async admit(list, courseId, note) {
+  async admit(list, courseId, note, also) {
     // Allocates the permanent Question IDs. Called once, at the end of import.
     const need = list.filter(q => !q.qid);
     const ids = need.length ? await IdRegister.next(courseId, need.length, { note: note || 'import' }) : [];
     need.forEach((q, i) => { q.qid = ids[i]; });
     for (const q of list) { await recomputeFingerprint(q); }
-    await DB.putMany('questions', list);
+    await DB.putAll(Object.assign({ questions: list }, also || {}));
     if (list.length) await audit('import', 'question', (list[0].qid || '') + '…' + (list[list.length - 1].qid || ''), null, { count: list.length }, note || '');
     return list;
   }
@@ -2660,7 +2693,12 @@ function candidatesFor(q, index, excludeUuid) {
   if (q.fingerprint && index.byFp.has(q.fingerprint)) {
     index.byFp.get(q.fingerprint).forEach(o => seen.set(o.uuid, o));
   }
-  const keys = rareKeys(q, index.df, index.maxDf);
+  // A token no indexed record carries has no bucket and can never answer, so
+  // it must not take one of the DUP_MAX_KEYS query slots (an OCR page with
+  // eight garbled words would otherwise be checked against nothing). Filter
+  // on byTok rather than df: a batch member indexed a moment ago has buckets
+  // for its new words but no df entry, and must still be found.
+  const keys = rareKeys({ tokens: qTokens(q).filter(w => index.byTok.has(w)) }, index.df, index.maxDf);
   for (const w of keys) {
     const bucket = index.byTok.get(w);
     if (!bucket || bucket.length > DUP_MAX_BUCKET) continue;
@@ -2923,7 +2961,7 @@ async function repairOrphanedConflicts(courseId) {
       q.conflict = false;
       q.answerVerified = 'doubtful';
       q.status = 'needs_answer';
-      q.verifyNote = 'A merged source disagreed on the answer — confirm which is right';
+      q.verifyNote = MERGE_DISAGREE_NOTE;
       doubtful++;
     } else cleared++;
     q.updatedAt = nowISO();
@@ -2971,6 +3009,13 @@ async function resolveConflictGroup(choices) {
   // leaving it undismissed keeps a genuinely useful future warning alive if
   // either record is edited apart again later.
   let agreed = 0, accepted = 0;
+  // A pair that now agrees AND is word-for-word the same question (same stem,
+  // same options) is one question — the import pipeline merges such a match
+  // on sight. Left as two records, the recheck inside Questions.save below
+  // would only re-list both under Possible duplicates, still out of
+  // practice, one Compare → Merge away from where this action already put
+  // them. The first-named record of the group is the one that survives.
+  const identical = [];
   for (const a of recs) {
     for (const b of recs) {
       if (a.uuid === b.uuid) continue;
@@ -2980,7 +3025,10 @@ async function resolveConflictGroup(choices) {
       if (textOf(a) !== textOf(b)) {
         a.dismissedPairs = Array.from(new Set((a.dismissedPairs || []).concat([b.uuid])));
         accepted++;
-      } else agreed++;
+      } else {
+        agreed++;
+        if (recs.indexOf(a) < recs.indexOf(b) && contentKey(a) === contentKey(b)) identical.push([a.uuid, b.uuid]);
+      }
     }
   }
   // Any partner OUTSIDE this group stays flagged and keeps its own pairing —
@@ -2991,11 +3039,21 @@ async function resolveConflictGroup(choices) {
   for (const r of recs) { normalizePairState(r); r.updatedAt = nowISO(); await DB.put('questions', r); }
   const saved = [];
   for (const r of recs) saved.push(await Questions.save(r, 'answer conflict settled'));
+  let merged = 0;
+  for (const [canonUuid, dupUuid] of identical) {
+    const canon = await Questions.get(canonUuid), dup = await Questions.get(dupUuid);
+    if (!canon || !dup || canon.status === 'merged' || dup.status === 'merged') continue;
+    await mergeQuestions(canonUuid, dupUuid, 'Settled to the same answer — same stem and options, so one question');
+    merged++;
+  }
+  // The merges re-wrote these records; report what is actually in the bank.
+  if (merged) for (let i = 0; i < saved.length; i++) saved[i] = (await Questions.get(saved[i].uuid)) || saved[i];
   await audit('verify', 'question', recs.map(r => r.qid || r.uuid).join(', '), { conflict: true },
     { records: recs.length }, 'Answer conflict settled across ' + recs.length + ' record(s)' +
     (accepted / 2 ? ', ' + (accepted / 2) + ' pair(s) accepted as differing' : '') +
-    (agreed / 2 ? ', ' + (agreed / 2) + ' pair(s) brought into agreement' : ''));
-  return { saved, agreedPairs: agreed / 2, acceptedPairs: accepted / 2 };
+    (agreed / 2 ? ', ' + (agreed / 2) + ' pair(s) brought into agreement' : '') +
+    (merged ? ', ' + merged + ' identical pair(s) combined into one record' : ''));
+  return { saved, agreedPairs: agreed / 2, acceptedPairs: accepted / 2, mergedPairs: merged };
 }
 
 /** "These aren't actually the same question" — the conflict equivalent of the
@@ -3058,6 +3116,10 @@ function renderDiff(parts) {
 }
 
 /* ---------- merge / unmerge ---------- */
+/* The note a merge (or the orphan repair) leaves on the surviving record when
+   the absorbed record disagreed on the answer. One string, so Unmerge can
+   recognise the doubt this merge set and take exactly that back. */
+const MERGE_DISAGREE_NOTE = 'A merged source disagreed on the answer — confirm which is right';
 async function mergeQuestions(canonicalUuid, dupUuid, note) {
   const canon = await Questions.get(canonicalUuid);
   const dup = await Questions.get(dupUuid);
@@ -3072,11 +3134,14 @@ async function mergeQuestions(canonicalUuid, dupUuid, note) {
     // Just enough of the pre-merge canonical record for Unmerge to
     // actually undo what this specific merge changed, without touching
     // anything a later edit or a different merge has since added.
-    before: { sourceRefs: before.sourceRefs, explanation: before.explanation, topic: before.topic, domainId: before.domainId, conflict: before.conflict, status: before.status }
+    before: { sourceRefs: before.sourceRefs, explanation: before.explanation, topic: before.topic, domainId: before.domainId, conflict: before.conflict, status: before.status, answerVerified: before.answerVerified, verifyNote: before.verifyNote }
   }]);
   if (!canon.explanation && dup.explanation) canon.explanation = dup.explanation;
   if (!canon.topic && dup.topic) canon.topic = dup.topic;
   if (!canon.domainId && dup.domainId) canon.domainId = dup.domainId;
+  // The absorbed record's answers are part of the survivor's history now.
+  // Replayed, not summed, so every rebuild pass reaches the same numbers.
+  rebuildQuestionStats(canon, await attemptsOf(canon));
   const mergeConflict = answersConflict(canon, dup);
   // Recorded, not asserted as a conflict — see the merge-conflict note below,
   // where this is turned into a "confirm the answer" the reviewer can act on.
@@ -3104,7 +3169,7 @@ async function mergeQuestions(canonicalUuid, dupUuid, note) {
     canon.conflict = false;
     canon.answerVerified = 'doubtful';
     canon.status = 'needs_answer';
-    canon.verifyNote = 'A merged source disagreed on the answer — confirm which is right';
+    canon.verifyNote = MERGE_DISAGREE_NOTE;
     canon.updatedAt = nowISO();
     await DB.put('questions', canon);
   }
@@ -3120,6 +3185,9 @@ async function unmergeQuestion(dupUuid) {
     const entry = (canon.mergedFrom || []).find(m => m.uuid === dup.uuid);
     canon.mergedFrom = (canon.mergedFrom || []).filter(m => m.uuid !== dup.uuid);
     canon.aliasQids = (canon.aliasQids || []).filter(a => a !== dup.qid);
+    // dup's own row was never touched, so its counters are still its own;
+    // the survivor just stops reading dup's answers.
+    rebuildQuestionStats(canon, await attemptsOf(canon));
 
     if (entry && entry.before) {
       const before = entry.before;
@@ -3145,6 +3213,19 @@ async function unmergeQuestion(dupUuid) {
       if (!before.conflict && canon.conflict && !(canon.mergedFrom || []).length && !(canon.conflictWith || []).length) {
         canon.conflict = false;
         if (canon.status === 'answer_conflict') canon.status = before.status || (canon.answerVerified === 'verified' ? 'active' : 'needs_answer');
+      }
+      // The "merged source disagreed" doubt this merge put on the answer —
+      // still exactly what the merge set (a hand verification since would
+      // have replaced it), and with no other merged-in duplicate left to
+      // justify it — goes with the merge that caused it. normalizePairState
+      // re-derives the status from whatever pairings canon actually has,
+      // so a pre-merge answer_conflict/possible_dup cannot come back
+      // partnerless. Entries written before this field was snapshotted
+      // (no answerVerified in `before`) are left alone.
+      if ('answerVerified' in before && canon.answerVerified === 'doubtful' && canon.verifyNote === MERGE_DISAGREE_NOTE && !(canon.mergedFrom || []).length) {
+        canon.answerVerified = before.answerVerified;
+        canon.verifyNote = before.verifyNote || '';
+        if (canon.status === 'needs_answer') { canon.status = before.status || 'needs_answer'; normalizePairState(canon); }
       }
     }
     canon.updatedAt = nowISO();
@@ -3321,8 +3402,8 @@ async function buildDocx(paragraphs) {
    read back cell for cell, which is what the round-trip test asserts. Four
    things in here are load-bearing to that, and each fails silently:
 
-     · the worksheet must be xl/worksheets/sheet1.xml, the only name the
-       reader looks for;
+     · workbook.xml's <sheet r:id> must resolve through workbook.xml.rels to
+       the part, which is how the reader finds every tab in tab order;
      · tags must be unprefixed — <x:row> matches nothing;
      · a <row> must never self-close, or the reader drops it and every row
        after it shifts up one;
@@ -3517,25 +3598,48 @@ async function xlsxToRows(arrayBuffer) {
       shared.push(decodeXmlEnt(t));
     });
   }
-  const sheetName = zip.names().filter(n => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort()[0];
-  if (!sheetName) throw new Error('No worksheet found in the workbook.');
-  const sx = await zip.text(sheetName);
+  // Every visible tab, in tab order. workbook.xml lists <sheet> in the order
+  // the tabs are shown and each r:id resolves through the workbook rels to its
+  // part; part names are allocation order (a tab dragged to the front is still
+  // sheet3.xml), and one tab per domain is the natural way to keep a bank.
+  const wb = (await zip.text('xl/workbook.xml')) || '';
+  const target = {};
+  (((await zip.text('xl/_rels/workbook.xml.rels')) || '').match(/<Relationship\b[^>]*>/g) || []).forEach(r => {
+    const id = (/\bId="([^"]*)"/.exec(r) || [])[1], t = (/\bTarget="([^"]*)"/.exec(r) || [])[1];
+    if (id && t) target[id] = t.charAt(0) === '/' ? t.slice(1) : 'xl/' + t;
+  });
+  let sheetNames = (wb.match(/<sheet\b[^>]*>/g) || [])
+    .filter(s => !/state="(hidden|veryHidden)"/.test(s))
+    .map(s => target[(/\br:id="([^"]*)"/.exec(s) || [])[1]])
+    .filter(n => n && zip.has(n));
+  if (!sheetNames.length) sheetNames = zip.names().filter(n => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort();
+  if (!sheetNames.length) throw new Error('No worksheet found in the workbook.');
   const rows = [];
+  for (const sheetName of sheetNames) {
+  const sx = (await zip.text(sheetName)) || '';
+  const first = rows.length;
   (sx.match(/<row[^>]*>[\s\S]*?<\/row>/g) || []).forEach(r => {
     const cells = [];
     (r.match(/<c[^>]*(?:\/>|>[\s\S]*?<\/c>)/g) || []).forEach(c => {
       const ref = (/r="([A-Z]+)\d+"/.exec(c) || [])[1] || '';
       const col = colIndex(ref);
-      const isStr = /t="s"/.test(c), isInline = /t="(inlineStr|str)"/.test(c);
+      // t="str" is a formula whose cached text result sits in <v>, never in
+      // <is><t>; Excel writes it for every TRIM/VLOOKUP/& column.
+      const isStr = /t="s"/.test(c), isInline = /t="inlineStr"/.test(c);
       let v = '';
       const vm = /<v>([\s\S]*?)<\/v>/.exec(c);
       if (isInline) { const im = /<t[^>]*>([\s\S]*?)<\/t>/.exec(c); v = im ? decodeXmlEnt(im[1]) : ''; }
-      else if (vm) v = isStr ? (shared[parseInt(vm[1], 10)] || '') : vm[1];
+      else if (vm) v = isStr ? (shared[parseInt(vm[1], 10)] || '') : decodeXmlEnt(vm[1]);
       while (cells.length < col) cells.push('');
       cells[col] = v;
     });
     rows.push(cells);
   });
+  // A later tab repeating the first tab's header is the template continued,
+  // not a question. A different header is left in, so it reaches the
+  // reconciliation screen as a row that did not parse rather than vanishing.
+  if (first && rows[first] && rows[first].join('\t') === (rows[0] || []).join('\t')) rows.splice(first, 1);
+  }
   return rows;
 }
 function colIndex(ref) { let n = 0; for (let i = 0; i < ref.length; i++) n = n * 26 + (ref.charCodeAt(i) - 64); return Math.max(0, n - 1); }
@@ -3915,7 +4019,7 @@ async function pdfToText(arrayBuffer) {
   // read — and open in any reader without a prompt. pdfSecurity works out
   // the key for those, and throws only where a password is genuinely needed.
   const sec = /\/Encrypt\b/.test(latin) ? await pdfSecurity(latin) : null;
-  const out = [];
+  const content = [], cmaps = {};
   const re = /stream\r?\n?/g;
   let m;
   while ((m = re.exec(latin))) {
@@ -3933,7 +4037,7 @@ async function pdfToText(arrayBuffer) {
     // per object, so the number and generation in front of it are part of
     // reading it at all.
     let objNum = 0, objGen = 0;
-    if (sec) {
+    {
       const objRe = /(\d+)\s+(\d+)\s+obj\b/g;
       let om, seen = null;
       while ((om = objRe.exec(header))) seen = om;
@@ -3985,19 +4089,32 @@ async function pdfToText(arrayBuffer) {
     let txt = '';
     const CH2 = 32768;
     for (let i = 0; i < data.length; i += CH2) txt += String.fromCharCode.apply(null, data.subarray(i, i + CH2));
-    if (/BT[\s\S]{0,4000}?ET/.test(txt) || /\bTj\b|\bTJ\b/.test(txt)) out.push(extractPdfOps(txt));
+    if (/begincodespacerange|beginbf(?:char|range)/.test(txt)) {
+      const map = pdfParseCMap(txt);
+      if (map) cmaps[objNum] = map;
+    } else if (/BT[\s\S]{0,4000}?ET/.test(txt) || /\bTj\b|\bTJ\b/.test(txt)) content.push({ objNum, txt });
     re.lastIndex = next;
   }
+  // Text is extracted only once every stream has been seen: the /ToUnicode
+  // map a page's font needs is usually written AFTER the page's content.
+  const refs = Object.keys(cmaps).length ? pdfFontRefs(latin) : {};
+  const out = content.map(({ objNum, txt }) => {
+    const names = refs[objNum] || refs['*'] || {};
+    const fonts = {};
+    for (const nm in names) if (cmaps[names[nm]]) fonts[nm] = cmaps[names[nm]];
+    return extractPdfOps(txt, fonts);
+  });
   const text = out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   if (!text) throw new Error('No extractable text layer. This is probably a scanned PDF — use Add from Image instead, or copy the questions into the Question sheet template under “Start from a template” and export that to PDF.');
   // A from-scratch decoder cannot resolve every PDF structure (linearized
   // files, compressed object streams, predictor-filtered or hint streams
-  // sitting alongside real content streams, non-WinAnsi subset fonts). When
+  // sitting alongside real content streams, two-byte fonts with no
+  // /ToUnicode map). When
   // it has clearly failed, garbled bytes must never be presented as a
   // successful import — fail with a concrete next step instead.
   const printable = (text.match(/[ -~\n\t]/g) || []).length;
   if (printable / text.length < 0.85 || text.replace(/\s/g, '').length < 30) {
-    throw new Error('This PDF\'s text layer could not be read reliably (its internal structure — a compressed or linearized layout — defeats this app\'s built-in decoder). The dependable way round it: download the Question sheet or Case study sheet template under “Start from a template”, paste the text into it, and save that as PDF. Opening the original in Word or Google Docs and saving as .docx also works, as does Add from Image, page by page.');
+    throw new Error('This PDF\'s text layer could not be read reliably (its internal structure — a compressed object layout, or a font with no character map — defeats this app\'s built-in decoder). The dependable way round it: download the Question sheet or Case study sheet template under “Start from a template”, paste the text into it, and save that as PDF. Opening the original in Word or Google Docs and saving as .docx also works, as does Add from Image, page by page.');
   }
   return text;
 }
@@ -4076,9 +4193,26 @@ function pdfTokenize(s) {
  * every line with a matrix had its whole page run together into one line,
  * swallowing the next question into the end of the previous answer.
  */
-function extractPdfOps(s) {
+function extractPdfOps(s, fonts) {
   const lines = [];
-  let buf = '';
+  let buf = '', font = '';
+  // A string as the characters it shows. A font the file gave a /ToUnicode
+  // map for holds two-byte codes — glyph numbers, under Identity-H — and
+  // only the map says which character each one is; read by the byte, "The"
+  // comes out as "7KH". Any other font is single-byte and near enough ASCII.
+  const decode = (raw) => {
+    const map = fonts && fonts[font];
+    // A single-byte font is WinAnsiEncoding in practice: 0x80-0x9F are the
+    // curly quotes, dashes and bullet, not invisible C1 controls. A font with
+    // a /ToUnicode map is two-byte and must NOT be touched here.
+    if (!map) return raw.replace(/\0/g, '').replace(/[\x80-\x9f]/g, (c) => pdfChar(c.charCodeAt(0)));
+    let s = '';
+    for (let i = 0; i + 1 < raw.length; i += 2) {
+      const t = map[(raw.charCodeAt(i) << 8) | raw.charCodeAt(i + 1)];
+      if (t) s += t;
+    }
+    return s;
+  };
   // The text LINE matrix. Only its translation matters here: glyph advances
   // move the text matrix, but every new line starts from this one.
   let ma = 1, mb = 0, mc = 0, md = 1, me = 0, mf = 0;
@@ -4093,7 +4227,8 @@ function extractPdfOps(s) {
     me = ma * tx + mc * ty + me;
     mf = mb * tx + md * ty + mf;
   };
-  const show = (txt) => {
+  const show = (raw) => {
+    const txt = decode(raw);
     if (!txt) return;
     // How far the text must move vertically to count as a new line, rather
     // than as a superscript or a rounding wobble.
@@ -4134,7 +4269,7 @@ function extractPdfOps(s) {
     switch (t.v) {
       case 'BT': flush(); ma = 1; mb = 0; mc = 0; md = 1; me = 0; mf = 0; lastY = null; break;
       case 'ET': flush(); lastY = null; break;
-      case 'Tf': fontSize = num(1); break;
+      case 'Tf': fontSize = num(1); { const x = st[st.length - 2]; font = x && x.k === 'n' ? x.v : ''; } break;
       case 'TL': leading = num(1); break;
       case 'Td': translate(num(2), num(1)); break;
       case 'TD': leading = -num(1); translate(num(2), num(1)); break;
@@ -4162,14 +4297,17 @@ function extractPdfOps(s) {
   return lines.join('\n');
 }
 
+/** WinAnsiEncoding's 0x80-0x9F: the curly quotes, dashes, bullet and
+    ellipsis every Word-, Ghostscript- and ReportLab-written PDF uses. Left
+    byte-for-code-point they are C1 control characters, invisible in a stem
+    and unrecognisable to the option and answer patterns. */
+const PDF_WINANSI_HI = '€\u0081‚ƒ„…†‡ˆ‰Š‹Œ\u008dŽ\u008f\u0090‘’“”•–—˜™š›œ\u009džŸ';
+const pdfChar = (code) => (code >= 0x80 && code <= 0x9f) ? PDF_WINANSI_HI[code - 0x80] : String.fromCharCode(code);
 function pdfStr(tok) {
   if (tok[0] === '<') {
     const hex = tok.slice(1, -1).replace(/\s+/g, '');
     let s = '';
-    for (let i = 0; i + 1 < hex.length; i += 2) {
-      const code = parseInt(hex.substr(i, 2), 16);
-      if (code) s += String.fromCharCode(code);
-    }
+    for (let i = 0; i + 1 < hex.length; i += 2) s += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
     return s;
   }
   return tok.slice(1, -1)
@@ -4177,6 +4315,80 @@ function pdfStr(tok) {
     .replace(/\\b/g, '').replace(/\\f/g, '')
     .replace(/\\([0-7]{1,3})/g, (_, o) => String.fromCharCode(parseInt(o, 8)))
     .replace(/\\(.)/g, '$1');
+}
+
+/** A /ToUnicode CMap as a table from two-byte code to text, or null for any
+    other shape. Only two-byte fonts need it: a single-byte font's codes are
+    read directly, as they always were. */
+function pdfParseCMap(txt) {
+  const first = /begincodespacerange\s*<([0-9A-Fa-f]+)>/.exec(txt) || /beginbf(?:char|range)\s*<([0-9A-Fa-f]+)>/.exec(txt);
+  if (!first || first[1].length !== 4) return null;
+  const map = {};
+  const uni = (h) => { let s = ''; for (let i = 0; i < h.length; i += 4) s += String.fromCharCode(parseInt(h.substr(i, 4), 16)); return s; };
+  const HEX = '<([0-9A-Fa-f]+)>';
+  let sec, e;
+  const chars = /beginbfchar([\s\S]*?)endbfchar/g;
+  while ((sec = chars.exec(txt))) {
+    const re = new RegExp(HEX + '\\s*' + HEX, 'g');
+    while ((e = re.exec(sec[1]))) map[parseInt(e[1], 16)] = uni(e[2]);
+  }
+  const ranges = /beginbfrange([\s\S]*?)endbfrange/g;
+  while ((sec = ranges.exec(txt))) {
+    const re = new RegExp(HEX + '\\s*' + HEX + '\\s*(?:' + HEX + '|\\[([^\\]]*)\\])', 'g');
+    while ((e = re.exec(sec[1]))) {
+      const lo = parseInt(e[1], 16), hi = Math.min(parseInt(e[2], 16), lo + 65535);
+      if (e[4] != null) {
+        (e[4].match(/[0-9A-Fa-f]+/g) || []).forEach((h, i) => { map[lo + i] = uni(h); });
+      } else {
+        const head = uni(e[3].slice(0, -4)), base = parseInt(e[3].slice(-4), 16);
+        for (let c = lo; c <= hi; c++) map[c] = head + String.fromCharCode(base + c - lo);
+      }
+    }
+  }
+  return map;
+}
+
+/** For each content stream (by object number), the /ToUnicode object each
+    font resource name means on its page: page → /Resources (its own, or
+    inherited down the page tree) → /Font → font → /ToUnicode. Under '*',
+    every binding in the file, for a stream no page claims. */
+function pdfFontRefs(latin) {
+  const dict = {};
+  const objRe = /(?:^|[^0-9])(\d+)\s+\d+\s+obj\b\s*/g;
+  let m;
+  while ((m = objRe.exec(latin))) {
+    const at = m.index + m[0].length;
+    if (latin.substr(at, 2) === '<<') dict[m[1]] = pdfDictAt(latin, at) || '';
+  }
+  const deref = (d, key) => {
+    const r = new RegExp('/' + key + '\\s+(\\d+)\\s+\\d+\\s+R').exec(d);
+    if (r) return dict[r[1]] || '';
+    const i = d.search(new RegExp('/' + key + '\\s*<<'));
+    return i < 0 ? '' : (pdfDictAt(d, d.indexOf('<<', i)) || '');
+  };
+  const out = { '*': {} };
+  for (const n in dict) {
+    const d = dict[n];
+    if (!/\/Type\s*\/Page\b/.test(d)) continue;
+    const c = /\/Contents\s*(\[[^\]]*\]|\d+\s+\d+\s+R)/.exec(d);
+    if (!c) continue;
+    let res = deref(d, 'Resources');
+    for (let p = d, k = 0; !res && k < 16 && (p = deref(p, 'Parent')); k++) res = deref(p, 'Resources');
+    const fontsDict = deref(res, 'Font');
+    const names = {};
+    const fr = /\/([^\s/<>\[\]()]+)\s+(\d+)\s+\d+\s+R/g;
+    let f;
+    while ((f = fr.exec(fontsDict))) {
+      const tu = /\/ToUnicode\s+(\d+)\s+\d+\s+R/.exec(dict[f[2]] || '');
+      if (!tu) continue;
+      names[f[1]] = parseInt(tu[1], 10);
+      if (!(f[1] in out['*'])) out['*'][f[1]] = names[f[1]];
+    }
+    const cr = /(\d+)\s+\d+\s+R/g;
+    let r;
+    while ((r = cr.exec(c[1]))) out[r[1]] = names;
+  }
+  return out;
 }
 
 /* ---------- CSV (RFC 4180, quote-safe) ---------- */
@@ -4211,6 +4423,18 @@ const ACCEPTED = ['.txt', '.md', '.csv', '.json', '.docx', '.xlsx', '.pdf', '.pn
 const MAX_FILE_MB = 40;
 function extOf(name) { const m = /\.[a-z0-9]+$/i.exec(name || ''); return m ? m[0].toLowerCase() : ''; }
 
+/** Text files are not always UTF-8: Excel's "CSV (Comma delimited)" and
+    Word's "Save as Plain Text" write the Windows code page, and Notepad's
+    "Unicode" is UTF-16. Sniff the BOM, insist on clean UTF-8, else fall
+    back to Windows-1252 — the writer side already knows this (downloadCSV). */
+function decodeTextBytes(buf) {
+  const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  if (u8.length >= 2 && u8[0] === 0xFF && u8[1] === 0xFE) return new TextDecoder('utf-16le').decode(u8);
+  if (u8.length >= 2 && u8[0] === 0xFE && u8[1] === 0xFF) return new TextDecoder('utf-16be').decode(u8);
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(u8); }
+  catch (e) { return new TextDecoder('windows-1252').decode(u8); }
+}
+
 async function readFile(file) {
   const ext = extOf(file.name);
   if (ext === '.doc') throw new Error('Legacy .doc is not supported. Open it in Word and save as .docx, then import again.');
@@ -4225,7 +4449,7 @@ async function readFile(file) {
   if (ext === '.docx') return Object.assign(base, { kind: 'text', sourceType: 'docx', text: await docxToText(buf) });
   if (ext === '.xlsx') return Object.assign(base, { kind: 'rows', sourceType: 'xlsx', rows: await xlsxToRows(buf) });
   if (ext === '.pdf') return Object.assign(base, { kind: 'text', sourceType: 'pdf', text: await pdfToText(buf) });
-  const text = new TextDecoder().decode(buf);
+  const text = decodeTextBytes(buf);
   if (ext === '.csv') return Object.assign(base, { kind: 'rows', sourceType: 'csv', rows: parseCSV(text) });
   if (ext === '.json') return Object.assign(base, { kind: 'json', sourceType: 'json', json: JSON.parse(text) });
   return Object.assign(base, { kind: 'text', sourceType: 'txt', text });
@@ -4254,7 +4478,7 @@ const RX = {
   // follows — nothing, ") text", ". text", or "text" with no punctuation
   // at all — is accepted, which real answer lines do inconsistently.
   answerLetter: /^\s*[\(\[]?\s*([a-hA-H])\b[\)\].:]?\s*[-–:]?\s*(.*)$/,
-  keyPair: /(?:^|[\s,;|])(?:q\.?\s*)?(\d{1,4})\s*[.):\-=]?\s*([a-hA-H])(?=$|[\s,;|.])/g,
+  keyPair: /(?:^|[\s,;|])(?:q\.?\s*)?(\d{1,4})\s*[.):\-=]?\s*[\(\[]?\s*([a-hA-H])[\)\]]?(?=$|[\s,;|.])/g,
   header: /^\s*(page\s+\d+|chapter\s+\d+|module\s+\d+|\d+\s*\|\s*page|copyright|all rights reserved)\b/i,
   /* The sheet layout. A .pdf, .docx or .txt arrives here as free text, so a
      scenario and the questions hanging off it can only be told apart by
@@ -4360,14 +4584,19 @@ function cleanLines(text) {
  * Without this, "1. B  2. C" at the end of a chapter parses as question 1.
  */
 const KEY_HEADER_RX = /^(answer\s*key|answers|solutions|key|correct\s*answers)\s*[:\-–]?$/i;
-function isKeyLine(t) {
+function isKeyLine(t, inKey) {
   const s = String(t || '').trim();
   if (!s) return false;
   if (KEY_HEADER_RX.test(s)) return true;
   RX.keyPair.lastIndex = 0;
   let m, n = 0, covered = 0;
   while ((m = RX.keyPair.exec(s))) { n++; covered += m[0].length; }
-  return n >= 2 && covered / s.length > 0.6;
+  if (n >= 2 && covered / s.length > 0.6) return true;
+  // Below a key header the key is often one pair per line ("1. B"). Only
+  // there, and only when the pair is the whole line, does a single pair
+  // count — otherwise a stem broken as "12. A" / "company was…" by a PDF
+  // extractor would be eaten as a key.
+  return !!inKey && n === 1 && covered / s.length > 0.9;
 }
 
 /** Guard against treating a stray capital letter as an option. */
@@ -4411,7 +4640,7 @@ function parseText(text, opts) {
   const candidates = [];
   const unresolved = [];
   const caseStudies = [];
-  let cur = null, mode = 'idle', expl = [], stemBuf = [], subNum = 0;
+  let cur = null, mode = 'idle', expl = [], stemBuf = [], subNum = 0, keyMode = false;
   /* Sheet layout state. `curCase` is the scenario questions are currently
      hanging off; `sheetMeta` are the header-block values that stand as
      defaults until a question overrides them for itself. */
@@ -4431,6 +4660,20 @@ function parseText(text, opts) {
 
   const flush = () => {
     if (!cur) return;
+    /* Auto-detect only reads a bullet as an option once an option run is
+       already open, so a question whose choices are a dash or asterisk list
+       arrives here with the whole list still sitting in the stem and no
+       options at all. Peel a trailing run of two or more bullets back off.
+       Guarded on having found NO options, so "Consider the following: / -
+       Statement I / - Statement II / Which is correct? / A) … / B) …" is
+       left exactly as it parses today — the bullets there stay in the stem. */
+    if (!cur.options.length) {
+      let k = stemBuf.length;
+      while (k > 0 && RX.optionBullet.test(stemBuf[k - 1])) k--;
+      if (k > 0 && stemBuf.length - k >= 2) {
+        stemBuf.splice(k).forEach(l => cur.options.push({ letter: letterOf(cur.options.length), text: RX.optionBullet.exec(l)[1].trim() }));
+      }
+    }
     cur.stem = stemBuf.join('\n').trim();
     cur.explanation = expl.join('\n').trim();
     // Defaults fill in only where the question said nothing itself, nearest
@@ -4470,7 +4713,8 @@ function parseText(text, opts) {
 
     if (!t) { if (mode === 'stem' && stemBuf.length) mode = 'stem'; continue; }
     // A separate answer key is harvested below, never parsed as questions.
-    if (isKeyLine(t)) { flush(); continue; }
+    if (isKeyLine(t, keyMode)) { flush(); if (KEY_HEADER_RX.test(t)) keyMode = true; continue; }
+    keyMode = false;
 
     /* ---- sheet layout markers ---- */
     const caseM = sheetMode ? RX.caseStart.exec(t) : null;
@@ -4634,7 +4878,13 @@ function parseText(text, opts) {
 
     if (cur && mode === 'stem') { stemBuf.push(t); continue; }
     if (cur && mode === 'options' && cur.options.length) {
-      // A heading or a page number ends the question instead of joining it.
+      // A bare page number is the booklet's own furniture at a page break.
+      // It must not join the option — but it must not end the question
+      // either: when the page breaks between two options, the rest of the
+      // option run and the answer line are still to come, and flushing here
+      // truncated the question and threw them into unresolved.
+      if (/^\d{1,4}$/.test(t)) continue;
+      // A heading ends the question instead of joining it.
       if (breaksOptionRun(t)) {
         flush();
         unresolved.push({ line: L.n, text: t.slice(0, 160) });
@@ -4717,8 +4967,14 @@ function harvestAnswerKeys(text) {
       hunt += s + '\n';
     }
     const map = {};
-    let m; RX.keyPair.lastIndex = 0;
-    while ((m = RX.keyPair.exec(hunt))) map[m[1]] = m[2].toUpperCase();
+    hunt.split('\n').forEach(ln => {
+      // Only a line that IS a key contributes. Explanations sitting under the
+      // key header are full of "section 2(a)" and "para 1 c", and reading
+      // those as pairs overwrites real answers with wrong ones.
+      if (!isKeyLine(ln, true)) return;
+      let m; RX.keyPair.lastIndex = 0;
+      while ((m = RX.keyPair.exec(ln))) map[m[1]] = m[2].toUpperCase();
+    });
     if (Object.keys(map).length) blocks.push({ line: i + 1, map });
     i = Math.max(i, j - 1);
   }
@@ -4983,6 +5239,9 @@ function jsonToCandidates(json) {
     if (/^[a-hA-H]$/.test(ansRaw)) letter = ansRaw.toUpperCase();
     else if (o.correctIndex != null) letter = letterOf(+o.correctIndex);
     else if (ansRaw) { const hit = opts.findIndex(x => normText(x.text) === normText(ansRaw)); if (hit >= 0) letter = opts[hit].letter; }
+    // A record written by "JSON (full structure)" names its answer by option
+    // id rather than by letter; the ids were kept on `opts` above.
+    if (!letter && o.correctOptionId) { const ix = opts.findIndex(x => x.id === o.correctOptionId); if (ix >= 0) letter = opts[ix].letter; }
     // Every plain field is read through JSON_ALIASES, which is the same
     // IMPORT_FIELDS table the Add Questions reference panel is rendered from —
     // so a key the panel advertises is by construction a key read here.
@@ -5284,6 +5543,27 @@ function rebuildQuestionStats(q, hist) {
   ordered.forEach(a => applyAttempt(q, a));
   q.stats.mastery = masteryOf(q, ordered).score;
   return q;
+}
+
+/** Every uuid whose answers belong to this question: its own, plus those of
+    each record merged into it — and whatever those had absorbed in turn. The
+    log itself is never re-pointed (it is append-only and syncs by content),
+    so a merged-away record's answers stay under its uuid and are read from
+    there; this is the one place that knows to look. */
+function historyUuids(q) {
+  const out = [q.uuid];
+  const walk = (list) => (list || []).forEach(m => {
+    if (!m || !m.uuid || out.indexOf(m.uuid) >= 0) return;
+    out.push(m.uuid);
+    walk((m.snapshot || {}).mergedFrom);
+  });
+  walk(q.mergedFrom);
+  return out;
+}
+async function attemptsOf(q) {
+  let out = [];
+  for (const u of historyUuids(q)) out = out.concat(await DB.byIndex('attempts', 'questionUuid', u));
+  return out;
 }
 
 /* ---------- topic / domain weakness ---------- */
@@ -6168,7 +6448,7 @@ const MODES = {
   mixed:    { label: 'Mixed revision', reveal: true, confidence: true, desc: 'Across the whole bank, optionally exam-weighted.' },
   mock:     { label: 'Timed mock exam', reveal: false, confidence: false, desc: 'Full length, timed, no confidence asked, nothing revealed until you submit.' },
   spaced:   { label: 'Spaced repetition', reveal: true, confidence: true, desc: 'Whatever has fallen due today, from every mode you have practised.' },
-  custom:   { label: 'Custom practice', reveal: true, confidence: true, desc: 'Your own filter combination, savable as a preset.' },
+  custom:   { label: 'Custom practice', reveal: true, confidence: true, desc: 'Your own filter combination.' },
   // Its own mode because its questions are its own bank: they are drawn as
   // whole scenarios, with the passage in front of you, and they appear in no
   // other mode at all.
@@ -6327,6 +6607,15 @@ const Session = {
     return s;
   },
   async save(s) { s.updatedAt = nowISO(); await DB.put('sessions', s); },
+  /** The mock clock's periodic checkpoint. A local write only: nothing has
+      been answered, so it must not journal the whole paper to the folder or
+      re-arm a whole-bank Drive upload — the guarded save on every answer,
+      on leaving and on finishing is what carries the session across
+      devices. The read-only veto still applies. */
+  async checkpoint(s) {
+    if (_writeVeto && _writeVeto('sessions')) return;
+    await DB.putRaw('sessions', s);
+  },
   async resumeLatest(courseId) {
     const rows = await DB.byIndex('sessions', 'courseId', courseId);
     return rows.filter(s => s.status === 'active').sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt))[0] || null;
@@ -6376,7 +6665,11 @@ const Session = {
       correct: rec.correct, confidence: rec.confidence, ms: rec.ms,
       displayedOrder: (s.optionOrders[q.uuid] || []).slice(),
       mistake: rec.mistake || null, flagged: !!s.flags[q.uuid],
-      questionVersion: q.version,
+      // The version that was on screen when it was answered (stamped by
+      // Session.answer / the mock's choose()), not whatever the bank holds by
+      // the time a mock is submitted — an edit in between must not relabel
+      // the attempt as a sitting of wording the student never saw.
+      questionVersion: rec.qVersion || q.version,
       // What it was worth, and what it actually earned once any deduction
       // for a wrong answer is applied — so an attempt log read years later
       // still adds up to the score that was reported at the time.
@@ -6397,20 +6690,40 @@ const Session = {
     await DB.put('attempts', att);
     const fresh = await Questions.get(q.uuid);
     applyAttempt(fresh, att);
-    const hist = await DB.byIndex('attempts', 'questionUuid', q.uuid);
+    const hist = await attemptsOf(fresh);
     fresh.stats.mastery = masteryOf(fresh, hist).score;
     fresh.flagged = !!s.flags[q.uuid] || fresh.flagged;
     await DB.put('questions', fresh);
     State.invalidate();
     return att;
   },
+  /* Time running out and the "Submit the exam?" confirm being answered can
+     both ask for this within the same second. A second commit loop running
+     beside the first passes the twin check before the first has written its
+     row, so the same answer lands in the attempts log twice and every counter
+     on the question counts the sitting twice. A second caller joins the
+     first instead, and a session already finished is never walked again. */
+  _finishing: new Map(),
   async finish(s) {
+    if (s.status !== 'active') return s;
+    if (this._finishing.has(s.id)) return this._finishing.get(s.id);
+    const run = this._finishRun(s);
+    this._finishing.set(s.id, run);
+    try { return await run; } finally { this._finishing.delete(s.id); }
+  },
+  async _finishRun(s) {
     const all = await State.questions();
     const byId = new Map(all.map(q => [q.uuid, q]));
     if (!MODES[s.mode].reveal) {
       for (const uid of s.questionUuids) {
         const rec = s.responses[uid];
-        if (rec && !rec.committed) { await this.commit(s, byId.get(uid), rec); rec.committed = true; }
+        // A question can leave the bank between answering and submitting — a
+        // course wiped or archived on another device, merged in here while the
+        // paper was still unfinished. It cannot be scored, exactly as
+        // markSession already treats it; commit() dereferenced it instead and
+        // made the whole mock permanently unsubmittable.
+        const q = byId.get(uid);
+        if (rec && !rec.committed && q) { await this.commit(s, q, rec); rec.committed = true; }
       }
     }
     s.status = 'complete'; s.endedAt = nowISO();
@@ -7084,6 +7397,12 @@ async function go(view, arg) {
   // right after the only course is removed) there isn't one yet, so every
   // destination is redirected to the same "add your first course" screen
   // instead of each route having to guard against a null State.course.
+  // There is no ROUTES.runner: a live paper paints itself. An automatic
+  // repaint (Drive catch-up, folder recovery) arriving as go('runner') used to
+  // fall through to the dashboard and draw it over the exam with the clock
+  // still running. Leave the paper alone; State was already invalidated, so
+  // the next real navigation shows the merged counts.
+  if (view === 'runner' && State.session && State.session.status === 'active') return;
   if (!State.course) view = 'onboarding';
   if (State.session && State.session.status === 'active' && view !== 'runner') {
     // Route through the exact same confirm-and-clean-up the runner's own
@@ -7318,7 +7637,13 @@ ROUTES.dashboard = async (root) => {
      on the strength of a record that no longer refers to anything. Filtering
      on the marks available covers both. */
   const mockById = new Map(all.map(q => [q.uuid, q]));
-  const mockPcts = (await DB.byIndex('sessions', 'courseId', State.course.id))
+  // One read of the session store per render. Every session record carries its
+  // questionUuids, responses, optionOrders and marks, so re-reading it for each
+  // of the three things this page derives from it deserialised the same few MB
+  // three times over on the app's first screen. Each derivation below filters
+  // before it sorts, so they work on their own copies and cannot disturb this.
+  const courseSessions = await DB.byIndex('sessions', 'courseId', State.course.id);
+  const mockPcts = courseSessions
     .filter(x => x.status === 'complete' && x.mode === 'mock' && (x.questionUuids || []).length)
     .sort((a, b) => new Date(a.endedAt || a.startedAt) - new Date(b.endedAt || b.startedAt))
     .map(m => markSession(m, mockById))
@@ -7401,7 +7726,7 @@ ROUTES.dashboard = async (root) => {
   root.appendChild(grid);
 
   // recent sessions
-  const sessions = (await DB.byIndex('sessions', 'courseId', State.course.id))
+  const sessions = courseSessions
     .filter(s => s.status === 'complete').sort((a, b) => new Date(b.endedAt) - new Date(a.endedAt)).slice(0, 6);
   if (sessions.length) {
     const byId = new Map(all.map(q => [q.uuid, q]));
@@ -7431,7 +7756,7 @@ ROUTES.dashboard = async (root) => {
 
     // Mocks only, oldest first: a trend of revision sets of assorted lengths
     // would be a line through unrelated numbers.
-    const mocks = (await DB.byIndex('sessions', 'courseId', State.course.id))
+    const mocks = courseSessions
       .filter(x => x.status === 'complete' && x.mode === 'mock')
       .sort((a, b) => new Date(a.endedAt) - new Date(b.endedAt)).slice(-8);
     const trend = mockTrendCard(mocks, byId);
@@ -7849,7 +8174,7 @@ ROUTES.practice = async (root, preselect) => {
     here rather than being discovered at the moment you press Start. */
 function compositionEditor(cfg, pool, filters, mode, casePool) {
   const wrap = h('div', { class: 'field', style: 'margin-top:4px' });
-  const spec = cfg.composition = { domainMix: null, difficultyMix: null, seenMix: null, strict: true };
+  const spec = cfg.composition = cfg.composition || { domainMix: null, difficultyMix: null, seenMix: null, strict: true };
   const bp = State.course.blueprint || [];
   const body = h('div', { class: 'stack', style: 'gap:10px' });
   const feasibility = h('div', { style: 'margin-top:8px' });
@@ -8043,13 +8368,15 @@ async function configureMode(mode, preset) {
   casePool.forEach(q => caseCounts.set(q.caseStudyId, (caseCounts.get(q.caseStudyId) || 0) + 1));
   const allCaseQs = all.filter(isCaseQuestion);
   const body = h('div', { class: 'stack' });
-  const f = { domains: [], topics: [], sources: [], modules: [], difficulty: [], batches: [], caseStudies: [] };
-  if (preset && preset.domains) f.domains = preset.domains.filter(Boolean);
-
   const mockOpening = mockOpeningFor(pool.length + casePool.length,
     Settings.get('mockCount'), Settings.get('mockMinutes'));
-  const cfg = {
-    filters: f,
+  // `preset.cfg` is the configuration that just failed to start, handed back
+  // by the shortfall dialog: five domain percentages and a difficulty split
+  // are too expensive to retype, so the retry opens on them. Every field
+  // below therefore reads its opening state from cfg rather than assuming a
+  // blank form.
+  const cfg = (preset && preset.cfg) || {
+    filters: { domains: [], topics: [], sources: [], modules: [], difficulty: [], batches: [], caseStudies: [] },
     // A last-mile session defaults to forty rather than twenty: it is the one
     // people sit as a single long sweep of everything still broken, and it is
     // capped by what actually qualifies so the field never opens on a number
@@ -8063,6 +8390,8 @@ async function configureMode(mode, preset) {
     caseCount: mode === 'mock' ? clamp(Settings.get('mockCaseCount') || 0, 0, casePool.length) : 0,
     caseFilters: { caseStudies: [] }
   };
+  const f = cfg.filters;
+  if (preset && preset.domains) f.domains = preset.domains.filter(Boolean);
 
   // Read here, not beside the marks line below: drawSectionNote() runs while
   // this dialog is still being assembled, so a const declared further down is
@@ -8161,10 +8490,11 @@ async function configureMode(mode, preset) {
     // amount of domain filtering gets at it.
     const kw = h('input', {
       type: 'text', placeholder: 'e.g. BEST describes, MOST likely, FIRST',
+      value: f.keyword || '',
       oninput: debounce(e => { f.keyword = e.target.value; recount(); }, 250)
     });
     const kwOpts = h('label', { class: 'check' }, [
-      h('input', { type: 'checkbox', onchange: e => { f.keywordInOptions = e.target.checked; recount(); } }),
+      h('input', { type: 'checkbox', checked: !!f.keywordInOptions, onchange: e => { f.keywordInOptions = e.target.checked; recount(); } }),
       h('span', { class: 'small', text: 'Search the answer options too, not just the question' })
     ]);
     body.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Question contains the phrase' }), kw, kwOpts]));
@@ -8175,7 +8505,7 @@ async function configureMode(mode, preset) {
     body.appendChild(chipRow('Difficulty', DIFFICULTY.map(d => ({ v: d, label: d })), f.difficulty));
     const flags = h('div', { class: 'grid g2' });
     [['neverAttempted', 'Never attempted'], ['incorrect', 'Previously incorrect'], ['guessed', 'Guessed correct'], ['lowConfidence', 'Answered with low confidence'], ['flagged', 'Flagged'], ['due', 'Due for review'], ['notMastered', 'Below mastery target']].forEach(([k, label]) => {
-      flags.appendChild(h('label', { class: 'check' }, [h('input', { type: 'checkbox', onchange: (e) => { f[k] = e.target.checked; if (k === 'notMastered') f.masteryTarget = Settings.get('masteryTarget'); recount(); } }), h('span', { text: label })]));
+      flags.appendChild(h('label', { class: 'check' }, [h('input', { type: 'checkbox', checked: !!f[k], onchange: (e) => { f[k] = e.target.checked; if (k === 'notMastered') f.masteryTarget = Settings.get('masteryTarget'); recount(); } }), h('span', { text: label })]));
     });
     body.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Include only' }), flags]));
   }
@@ -8259,7 +8589,7 @@ async function configureMode(mode, preset) {
        longest to read. */
     const sectionNote = h('div', { class: 'tiny dim' });
     const caseMinutesInput = h('input', {
-      type: 'number', min: '0', max: '600', value: '',
+      type: 'number', min: '0', max: '600', value: cfg.caseMinutes == null ? '' : String(cfg.caseMinutes),
       placeholder: 'auto',
       onchange: (e) => {
         const v = parseInt(e.target.value, 10);
@@ -8295,7 +8625,7 @@ async function configureMode(mode, preset) {
     drawCaseNoteRef = () => { drawCaseNote(); drawSectionNote(); };
   }
   if (mode === 'mixed') {
-    body.appendChild(h('label', { class: 'check' }, [h('input', { type: 'checkbox', checked: true, onchange: (e) => { cfg.weighted = e.target.checked; recount(); } }), h('span', { text: 'Distribute by official exam weights (' + State.course.blueprint.map(d => d.weight + '%').join(' / ') + ')' })]));
+    body.appendChild(h('label', { class: 'check' }, [h('input', { type: 'checkbox', checked: cfg.weighted !== false, onchange: (e) => { cfg.weighted = e.target.checked; recount(); } }), h('span', { text: 'Distribute by official exam weights (' + State.course.blueprint.map(d => d.weight + '%').join(' / ') + ')' })]));
   }
   if (mode === 'mock' || mode === 'mixed' || mode === 'custom') {
     compositionPanel = compositionEditor(cfg, pool, f, mode, casePool);
@@ -8321,7 +8651,6 @@ async function configureMode(mode, preset) {
     title: MODES[mode].label, body, wide: mode === 'custom',
     actions: [
       { label: 'Cancel', value: null },
-      mode === 'custom' ? { label: 'Save as preset', value: 'preset' } : null,
       { label: 'Start', value: 'start', kind: 'primary' }
     ].filter(Boolean)
   });
@@ -8329,11 +8658,6 @@ async function configureMode(mode, preset) {
   if (mode === 'spaced') { f.due = true; }
   if (mode === 'redo') { cfg.redo = true; }
   if (mode === 'lastmile') { cfg.lastmile = true; }
-  if (res === 'preset') {
-    const name = prompt('Name this preset');
-    if (name) { await DB.put('presets', { id: uuid(), courseId: State.course.id, name, mode, config: cfg, createdAt: nowISO() }); toast('Preset saved', 'ok'); }
-    return;
-  }
   try {
     if (cfg.lastmile) {
       // Same shape as the redo branch below: let Session.create build a paper
@@ -8415,7 +8739,7 @@ async function configureMode(mode, preset) {
     // The configuration is expensive to rebuild — five domain percentages, a
     // difficulty split, filters — so reopen it as it was rather than dropping
     // the candidate back to an empty picker to type it all again.
-    if (rows) return configureMode(mode);
+    if (rows) return configureMode(mode, { cfg });
   }
 }
 
@@ -8741,8 +9065,30 @@ function examAnnouncer(session) {
   };
 }
 
+/** How much real time a resumed session must be charged for. Only a mock
+    whose pausing is disabled owes anything: from the explicit Leave stamp if
+    there is one, else from the last persisted tick — a closed, reloaded or
+    discarded tab (the ordinary way a mock is interrupted on a phone) never
+    ran leaveGuarded, and must not be a free pause when Leave is not. */
+function resumeGapMs(s, isMock, allowPause, now) {
+  if (!isMock || allowPause) return s.leftAt ? Math.max(0, now - s.leftAt) : 0;
+  const from = s.leftAt || s.lastTickAt;
+  return from ? Math.max(0, now - from) : 0;
+}
+
 /* ---------- runner ---------- */
 async function runSession(s) {
+  // A second tap on Resume (or Start) before the first runner has painted
+  // must not start a second runner: State.runnerStop only ever holds the
+  // latest one, so the first runner's timer and keydown handler would
+  // outlive every teardown. The same session is already on its way, so the
+  // second call simply returns; a different session while one is live is
+  // left the way the nav rail leaves it (go()'s guard), and not started at
+  // all if the student declines.
+  if (State.session && State.view === 'runner') {
+    if (State.session.id === s.id) return;
+    if (State.runnerStop && !(await State.runnerStop())) return;
+  }
   State.session = s;
   State.view = 'runner';
   const all = await State.questions();
@@ -8775,7 +9121,8 @@ async function runSession(s) {
   }
   const announcer = isMock ? examAnnouncer(s) : null;
 
-  if (s.leftAt) { s.elapsedMs = (s.elapsedMs || 0) + (Date.now() - s.leftAt); s.leftAt = null; }
+  s.elapsedMs = (s.elapsedMs || 0) + resumeGapMs(s, isMock, !!Settings.get('mockAllowPause'), Date.now());
+  s.leftAt = null;
   s.lastTickAt = Date.now();
   const tick = async () => {
     const nowT = Date.now();
@@ -8801,8 +9148,8 @@ async function runSession(s) {
         qt.classList.toggle('over', on > 120000);
       }
       if (announcer) announcer.tick(s.elapsedMs);
-      if (left <= 0) { clearInterval(tickTimer); toast('Time is up. The exam has been submitted.', 'warn', 5000); await submitMock(); return; }
-      if (s.elapsedMs % 15000 < 1100) await Session.save(s);
+      if (left <= 0) { clearInterval(tickTimer); $$('.modal').forEach(m => { if (m._close) m._close(null); }); toast('Time is up. The exam has been submitted.', 'warn', 5000); await submitMock(); return; }
+      if (s.elapsedMs % 15000 < 1100) await Session.checkpoint(s);
     }
   };
   if (isMock) { tickTimer = setInterval(tick, 1000); }
@@ -9100,8 +9447,14 @@ async function runSession(s) {
       if (!correct) mistake = await askMistake();
       await Session.answer(s, q, optId, { ms, confidence: ans.confidence, mistake, difficulty: ans.difficulty });
       State.invalidate();
-      const all2 = await State.questions();
-      byId.clear(); all2.forEach(x => byId.set(x.uuid, x));
+      // One indexed read, not a walk of the whole store. Answering rewrites
+      // exactly this question — its counters, its SR stage and the srReason
+      // printed in the reveal below — and nothing else on the paper. The map's
+      // copy must still be replaced rather than left alone: the Flag button
+      // puts `q` straight back to the bank, so a stale entry here would
+      // overwrite the attempt that was just committed.
+      const fresh = await Questions.get(q.uuid);
+      if (fresh) byId.set(q.uuid, fresh);
     } else {
       // A mock records the response here rather than through Session.answer,
       // which does not run until submission — so it stamps the marks itself,
@@ -9820,9 +10173,17 @@ ROUTES.bank = async (root) => {
     });
     const dir = BankState.dir;
     const key = BankState.sort;
+    // The qid comparator used to run the sequence regex twice per comparison,
+    // so a full-bank sort executed it about 2 n log2(n) times — 250,000 times
+    // at 5,000 records — for n distinct answers. Keying once per record here
+    // is the same result three times cheaper. The map is built from the array
+    // that is about to be sorted and thrown away with it, so unlike a property
+    // stamped on the shared question objects it can never go stale when a qid
+    // is assigned on activation.
+    const seq = key === 'qid' ? new Map(list.map(q => [q, IdRegister.seqOf(q.qid)])) : null;
     list.sort((a, b) => {
       let x, y;
-      if (key === 'qid') { x = IdRegister.seqOf(a.qid); y = IdRegister.seqOf(b.qid); }
+      if (key === 'qid') { x = seq.get(a); y = seq.get(b); }
       else if (key === 'imported') { x = a.importedAt || a.createdAt; y = b.importedAt || b.createdAt; }
       else if (key === 'last') { x = a.stats.lastAttemptAt || ''; y = b.stats.lastAttemptAt || ''; }
       else if (key === 'acc') { x = a.stats.attempts ? a.stats.correct / a.stats.attempts : -1; y = b.stats.attempts ? b.stats.correct / b.stats.attempts : -1; }
@@ -10056,6 +10417,7 @@ async function openQuestion(uuidStr) {
   body.appendChild(h('div', { class: 'row wrap' }, [
     h('span', { class: 'docnum', text: q.qid || '(no id yet)' }), statusBadge(q),
     q.answerVerified === 'verified' ? h('span', { class: 'badge b-active', text: '✓ Answer verified' }) : h('span', { class: 'badge b-review', text: 'Answer ' + q.answerVerified }),
+    q.verifyNote ? h('span', { class: 'tiny dim', text: q.verifyNote + (q.answerVerified === 'verified' && q.verifiedAt ? ' · ' + fmtDate(q.verifiedAt) : '') }) : null,
     q.conflict ? h('span', { class: 'badge b-conflict', text: 'Conflict' }) : null,
     h('span', { class: 'badge b-draft', text: 'v' + q.version }),
     q.caseStudyId ? h('span', { class: 'badge b-info', text: '❐ Case study' }) : null
@@ -10405,8 +10767,10 @@ async function openQuestion(uuidStr) {
       }
       const r = await resolveConflictGroup(choices);
       if (r) {
-        resolveNote = r.agreedPairs
-          ? ' Conflict resolved — the other record now gives the same answer.'
+        resolveNote = r.mergedPairs
+          ? ' Conflict resolved — the other record was the same question with the same answer, so it has been combined into this one.'
+          : r.agreedPairs
+          ? ' Conflict resolved — the other record now gives the same answer; both are listed under Possible duplicates until you compare them.'
           : ' Conflict settled — the records keep their own answers and won’t be flagged against each other again.';
         const stuck = r.saved.filter(s => s.status === 'answer_conflict').length;
         if (stuck) resolveNote += ' ' + stuck + ' record(s) also conflict with something outside this pair.';
@@ -10927,8 +11291,23 @@ ROUTES.notes = async (root) => {
         toast('That note is not a format this app can display safely, so it was downloaded instead.', 'ok', 7000);
         return;
       }
+      // This runs AFTER an awaited read. For a Drive-stored note that read is
+      // a full network download of the file, and by the time it resolves the
+      // View click's transient user activation is gone (~5 s on Chromium; iOS
+      // Safari, where Drive is the only backend that exists because there is
+      // no folder handle, blocks pop-ups by default). window.open then returns
+      // null — it throws nothing, so the catch below never sees it, and the
+      // button would simply do nothing at all. Handing the same bytes to the
+      // download path the rest of the app already uses keeps the note
+      // reachable without adding a control.
       const url = URL.createObjectURL(blob);
-      window.open(url, '_blank', 'noopener');
+      const win = window.open(url, '_blank', 'noopener');
+      if (!win) {
+        URL.revokeObjectURL(url);
+        download(rec.filename || (rec.title + '.bin'), blob);
+        toast('Your browser blocked the new tab — “' + rec.title + '” was downloaded instead', 'warn', 6000);
+        return;
+      }
       setTimeout(() => URL.revokeObjectURL(url), 60000);
     } catch (e) { toast('Could not open that note: ' + e.message, 'bad', 8000); }
   };
@@ -11584,9 +11963,14 @@ async function intake(files) {
   }
   const images = parsedFiles.filter(f => f.kind === 'image');
   const docs = parsedFiles.filter(f => f.kind !== 'image');
-  if (images.length && !docs.length) { imageWorkflow(images[0].blob); return; }
-  if (!docs.length) return;
-  await sourceDialog(docs);
+  // Every image in the drop goes through the adjust/transcribe modal in turn,
+  // and the transcriptions join whatever documents were dropped alongside, so
+  // the whole drop is one Source details dialog and one batch.
+  const pages = images.length ? await transcribeImages(images.map(i => i.blob)) : [];
+  const all = docs.concat(pages);
+  if (!all.length) return;
+  await sourceDialog(all);
+  attachImageIds(pages);
 }
 
 async function sourceDialog(files) {
@@ -12275,6 +12659,8 @@ function renderStaging(root) {
 
 async function admitBatch() {
   const st = State.staging;
+  for (const row of (st.pendingImages || [])) await DB.put('images', row);
+  st.pendingImages = null;
   for (const s of st.sources) await DB.put('sources', s);
 
   /* Scenarios are written before their questions, so a case-study question is
@@ -12373,7 +12759,14 @@ async function admitBatch() {
   // the two can drift if the course selector was switched mid-review, and
   // a Question ID's prefix must match the course it was really issued for,
   // not whatever happens to be selected at the moment "Admit" is clicked.
-  await Questions.admit(toAdmit, st.batch.courseId, 'batch ' + st.batch.id.slice(0, 8));
+  // Tallied into copies, not onto st.sources: if this write fails and the
+  // student tries Admit again, the base counts are still what the bank holds
+  // and the retry cannot count the same questions twice.
+  const sourceRows = st.sources.map(s => Object.assign({}, s, {
+    admitted: (s.admitted || 0) + toAdmit.filter(q => q.sourceId === s.id).length,
+    rejected: (s.rejected || 0) + rejected.filter(r => r.q.sourceId === s.id).length
+  }));
+  await Questions.admit(toAdmit, st.batch.courseId, 'batch ' + st.batch.id.slice(0, 8), { batches: [st.batch], sources: sourceRows });
 
   // Matched candidates were only ever judged from their own side during
   // staging. Bring the record(s) each one matches up to date too, so a
@@ -12420,7 +12813,6 @@ async function admitBatch() {
   st.batch.report = report;
   st.batch.finishedAt = nowISO();
   await DB.put('batches', st.batch);
-  for (const s of st.sources) { s.admitted = (s.admitted || 0) + toAdmit.filter(q => q.sourceId === s.id).length; s.rejected = (s.rejected || 0) + rejected.filter(r => r.q.sourceId === s.id).length; await DB.put('sources', s); }
   await audit('import', 'batch', st.batch.id, null, report, st.meta.title);
   State.staging = null;
   State.invalidate();
@@ -12992,12 +13384,53 @@ function templateCard() {
    ========================================================================== */
 
 async function imageWorkflow(fileOrNull) {
-  let file = fileOrNull;
-  if (!file) {
-    const picked = await pickImage();
-    if (!picked) return;
-    file = picked;
+  // The global paste handler reaches here from any non-import view while a
+  // batch is still staged. Parsing this image would replace that batch
+  // (runParse assigns State.staging unconditionally), and cancelling would
+  // hand the image to the old batch at the bottom of this function instead.
+  if (State.staging) { toast('Finish or discard the batch you’re reviewing before adding from an image.', 'warn', 6000); return; }
+  const files = fileOrNull ? [fileOrNull] : await pickImage();
+  if (!files.length) return;
+  const pages = await transcribeImages(files);
+  if (!pages.length) return;
+  await sourceDialog(pages);
+  attachImageIds(pages);
+}
+
+/** Link each staged question to the photo of the page it came from. */
+function attachImageIds(pages) {
+  if (!State.staging) return;
+  State.staging.pendingImages = pages.map(p => p.imageRow).filter(Boolean);
+  const byFile = {};
+  pages.forEach(p => { if (p.imageId) byFile[p.filename] = p.imageId; });
+  State.staging.items.forEach(it => {
+    const fn = ((it.q.sourceRefs || [])[0] || {}).filename;
+    if (!it.q.imageId && byFile[fn]) it.q.imageId = byFile[fn];
+  });
+}
+
+/**
+ * Run the adjust/transcribe modal once per image, in order. Resolves to the
+ * parsed .txt file of every page that ended with text. Empty text + Continue
+ * skips that page; Cancel stops here and keeps the pages already transcribed.
+ */
+async function transcribeImages(files) {
+  const pages = [];
+  window._imageWorkflowOpen = true;
+  try {
+    for (let i = 0; i < files.length; i++) {
+      const p = await transcribeOne(files[i], i, files.length);
+      if (p === null) break;
+      if (p) pages.push(p);
+    }
+  } finally {
+    window._imageWorkflowOpen = false;
   }
+  return pages;
+}
+
+/** null = cancelled (stop the run), undefined = skipped (no text), else the parsed .txt file. */
+async function transcribeOne(file, index, total) {
   let img = await loadImage(file);
   const origImg = img;
   const st = { rotate: 0, contrast: 100, grayscale: false, crop: null, scale: 1 };
@@ -13009,7 +13442,10 @@ async function imageWorkflow(fileOrNull) {
     const rad = st.rotate * Math.PI / 180;
     const swap = st.rotate % 180 !== 0;
     const w = swap ? img.height : img.width, hgt = swap ? img.width : img.height;
-    const maxW = 900, s = Math.min(1, maxW / w);
+    // OCR reads these pixels and a crop is cut from them, so keep them near
+    // native size; the on-screen size is `.imgstage canvas{max-width:100%}`'s
+    // job. 2500 keeps a 48 MP phone photo inside mobile canvas-area limits.
+    const maxW = 2500, s = Math.min(1, maxW / w);
     canvas.width = Math.round(w * s); canvas.height = Math.round(hgt * s);
     ctx.save();
     ctx.filter = 'contrast(' + st.contrast + '%)' + (st.grayscale ? ' grayscale(1)' : '');
@@ -13020,26 +13456,42 @@ async function imageWorkflow(fileOrNull) {
   }
   paint();
 
-  // simple drag-to-crop
+  // simple drag-to-crop. touch-action:none on the canvas plus pointer
+  // capture keep a finger drag on the canvas instead of scrolling the
+  // stage/modal; pointermove strokes the rectangle so the drag isn't blind.
   let dragging = null;
-  canvas.addEventListener('pointerdown', e => {
+  const toCanvas = e => {
     const r = canvas.getBoundingClientRect();
-    dragging = { x: (e.clientX - r.left) * canvas.width / r.width, y: (e.clientY - r.top) * canvas.height / r.height };
+    return { x: clamp((e.clientX - r.left) * canvas.width / r.width, 0, canvas.width),
+             y: clamp((e.clientY - r.top) * canvas.height / r.height, 0, canvas.height) };
+  };
+  canvas.addEventListener('pointerdown', e => {
+    dragging = toCanvas(e);
     // Capture keeps the matching pointerup on this canvas even when the finger
     // or mouse is released past its edge — without it a drag that ends over the
     // stage padding silently leaves `dragging` set and drops the crop.
     try { canvas.setPointerCapture(e.pointerId); } catch (_) { }
   });
+  canvas.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const p = toCanvas(e);
+    paint();
+    ctx.save();
+    ctx.strokeStyle = '#ff3b30'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+    ctx.strokeRect(Math.min(dragging.x, p.x), Math.min(dragging.y, p.y), Math.abs(p.x - dragging.x), Math.abs(p.y - dragging.y));
+    ctx.restore();
+  });
   // A pan, a second finger or a system gesture aborts the pointer with no
   // pointerup at all; clear the half-built rectangle instead of letting the
   // next pointerup pair with a stale origin.
-  canvas.addEventListener('pointercancel', () => { dragging = null; });
+  canvas.addEventListener('pointercancel', () => { if (dragging) { dragging = null; paint(); } });
   canvas.addEventListener('pointerup', e => {
     if (!dragging) return;
-    const r = canvas.getBoundingClientRect();
-    const x2 = (e.clientX - r.left) * canvas.width / r.width, y2 = (e.clientY - r.top) * canvas.height / r.height;
+    const p = toCanvas(e);
+    const x2 = p.x, y2 = p.y;
     const x = Math.min(dragging.x, x2), y = Math.min(dragging.y, y2), w = Math.abs(x2 - dragging.x), hh = Math.abs(y2 - dragging.y);
     dragging = null;
+    paint(); // remove the drag rectangle before the pixels are read or OCR'd
     if (w > 24 && hh > 24) {
       // Bake the crop into a new source image — rotate/contrast/grayscale
       // are already reflected in these pixels (the canvas was painted with
@@ -13098,46 +13550,52 @@ async function imageWorkflow(fileOrNull) {
   // That guard only ever covers the app's own controls, though — an actual
   // tab close, refresh, or Back button bypasses it entirely, so the global
   // beforeunload handler checks this flag too while real work is at risk.
-  window._imageWorkflowOpen = true;
-  try {
-    let res;
-    for (; ;) {
-      res = await modal({
-        title: 'Add from image', wide: true, sticky: true,
-        body: bodyContent,
-        actions: [{ label: 'Cancel', value: false }, { label: 'Continue to import', value: true, kind: 'primary' }]
-      });
-      if (res) break;
-      const hasWork = !!(textArea.value.trim() || st.crop || st.rotate || st.contrast !== 100 || st.grayscale);
-      if (!hasWork) return;
-      const discard = await confirmBox('Discard this image?', 'Your crop, adjustments and transcribed text will be lost.', true, 'Discard');
-      if (discard) return;
-    }
-    if (!textArea.value.trim()) return;
+  const last = index + 1 >= total;
+  let res;
+  for (; ;) {
+    res = await modal({
+      title: 'Add from image' + (total > 1 ? ' (' + (index + 1) + ' of ' + total + ')' : ''), wide: true, sticky: true,
+      body: bodyContent,
+      actions: [{ label: 'Cancel', value: false }, { label: last ? 'Continue to import' : 'Next page', value: true, kind: 'primary' }]
+    });
+    if (res) break;
+    const hasWork = !!(textArea.value.trim() || st.crop || st.rotate || st.contrast !== 100 || st.grayscale);
+    if (!hasWork) return null;
+    const discard = await confirmBox('Discard this image?', 'Your crop, adjustments and transcribed text will be lost.' + (total > 1 ? ' Pages already transcribed are kept.' : ''), true, 'Discard');
+    if (discard) return null;
+  }
+  if (!textArea.value.trim()) return undefined;
 
     // keep a compressed copy of the source image for provenance
-    let imageId = null;
+    let imageId = null, imageRow = null;
     if (Settings.get('storeSourceImages')) {
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.72);
+      // The stored copy is provenance, not OCR input — shrink it back to
+      // 900 px wide so the imageMaxKB budget means what it did before.
+      const keepW = Math.min(900, canvas.width), keep = document.createElement('canvas');
+      keep.width = keepW; keep.height = Math.round(canvas.height * keepW / canvas.width);
+      keep.getContext('2d').drawImage(canvas, 0, 0, keep.width, keep.height);
+      const dataUrl = keep.toDataURL('image/jpeg', 0.72);
       const approxKB = Math.round(dataUrl.length * 0.75 / 1024);
       if (approxKB <= Settings.get('imageMaxKB')) {
         imageId = uuid();
-        await DB.put('images', { id: imageId, dataUrl, hash: await sha256(dataUrl), capturedAt: nowISO(), filename: file.name || 'pasted-image', ocrText: textArea.value, sizeKB: approxKB });
+        imageRow = { id: imageId, dataUrl, hash: await sha256(dataUrl), capturedAt: nowISO(), filename: file.name || 'pasted-image', ocrText: textArea.value, sizeKB: approxKB };
       } else {
         toast('Image not stored — it is ' + approxKB + ' KB, above the ' + Settings.get('imageMaxKB') + ' KB limit in Settings.', 'warn', 5000);
       }
     }
-    const blob = new Blob([textArea.value], { type: 'text/plain' });
-    const f = new File([blob], (file.name || 'image') + '.txt', { type: 'text/plain' });
-    const parsedF = await readFile(f);
-    parsedF.sourceType = 'image';
-    parsedF.imageId = imageId;
-    await sourceDialog([parsedF]);
-    // attach the image to the questions of this batch
-    if (imageId && State.staging) State.staging.items.forEach(it => { if (!it.q.imageId) it.q.imageId = imageId; });
-  } finally {
-    window._imageWorkflowOpen = false;
-  }
+  const blob = new Blob([textArea.value], { type: 'text/plain' });
+  // A page-number prefix keeps a multi-page paper in order and stops two
+  // same-named photos (every paste is "image.png") sharing one filename.
+  const name = (total > 1 ? String(index + 1).padStart(2, '0') + ' ' : '') + (file.name || 'image') + '.txt';
+  const f = new File([blob], name, { type: 'text/plain' });
+  const parsedF = await readFile(f);
+  parsedF.sourceType = 'image';
+  parsedF.imageId = imageId;
+  // Not written yet: admitBatch() writes it in the same pass as the questions
+  // that name it, so a cancelled Source details or a discarded batch leaves no
+  // orphaned photo behind to ride every snapshot and push for ever.
+  parsedF.imageRow = imageRow;
+  return parsedF;
 }
 
 function pickImage() {
@@ -13150,7 +13608,7 @@ function pickImage() {
       input.remove();
       resolve(file);
     };
-    const input = h('input', { type: 'file', accept: 'image/*', capture: 'environment', class: 'hidden', onchange: e => finish(e.target.files[0] || null) });
+    const input = h('input', { type: 'file', accept: 'image/*', multiple: true, capture: 'environment', class: 'hidden', onchange: e => finish(Array.from(e.target.files)) });
     // No 'change' event fires at all when the picker is dismissed without
     // choosing a file — cancelling is a completely ordinary thing to do,
     // and without this the whole workflow just silently sat there with no
@@ -13158,10 +13616,10 @@ function pickImage() {
     // the window regaining focus after the native picker closes (with no
     // file chosen in time for 'change' to beat it) is the fallback for
     // ones that don't.
-    input.addEventListener('cancel', () => finish(null));
+    input.addEventListener('cancel', () => finish([]));
     document.body.appendChild(input);
     input.click();
-    const onFocus = () => setTimeout(() => finish(null), 300);
+    const onFocus = () => setTimeout(() => finish([]), 300);
     window.addEventListener('focus', onFocus, { once: true });
   });
 }
@@ -13654,6 +14112,7 @@ async function renderReviewQueue(root) {
     ]),
     h('div', { class: 'q-prev-lg', style: 'margin:5px 0', text: q.stem.slice(0, 200) + (q.stem.length > 200 ? '…' : '') }),
     pairLine(q),
+    q.verifyNote && q.answerVerified !== 'verified' ? h('div', { class: 'notice warn small', style: 'margin-top:4px', text: q.verifyNote }) : null,
     extra || null
   ]);
 
@@ -13695,7 +14154,7 @@ async function renderReviewQueue(root) {
       group.forEach(rec => { ConflictQueueState.answers.delete(rec.uuid); ConflictQueueState.sel.delete(rec.uuid); });
       const stillStuck = r.saved.filter(s => s.status === 'answer_conflict').length;
       toast(
-        'Resolved' + (r.agreedPairs ? ' — both records now give the same answer.' : r.acceptedPairs ? ' — kept as they are, and they won’t be flagged against each other again.' : '.') +
+        'Resolved' + (r.mergedPairs ? ' — same question, same answer: combined into one record.' : r.agreedPairs ? ' — both records now give the same answer; they are listed under Possible duplicates, so compare them to merge or keep separate.' : r.acceptedPairs ? ' — kept as they are, and they won’t be flagged against each other again.' : '.') +
         (stillStuck ? ' ' + stillStuck + ' record(s) also conflict with something outside this pair, still listed below.' : ''),
         stillStuck ? 'warn' : 'ok', stillStuck ? 7000 : undefined
       );
@@ -16592,6 +17051,17 @@ async function applyOptionCountRule(course) {
     action list only offers this once course.archived is true) — archiving
     is the reversible, one-click step; this is the deliberate second one
     past it, for a course someone genuinely wants gone rather than hidden. */
+/** Delete the stored photos named by `imageIds` that no remaining question
+    references. Run after the questions themselves are gone, so a photo a
+    surviving question still names is left alone. */
+async function reapOrphanImages(imageIds) {
+  const ids = new Set(Array.from(imageIds || []).filter(Boolean));
+  if (!ids.size) return 0;
+  await DB.each('questions', q => { if (q.imageId) ids.delete(q.imageId); });
+  for (const id of ids) await DB.del('images', id);
+  return ids.size;
+}
+
 async function deleteCourseForever(course) {
   const [qs, srcs, batches, atts, sess, presets, notes, cases] = await Promise.all([
     Questions.byCourse(course.id),
@@ -16643,6 +17113,7 @@ async function deleteCourseForever(course) {
     if (q.qid) await DB.put('tombstones', { qid: q.qid, uuid: q.uuid, retiredAt: nowISO(), reason: 'course deleted' });
     await DB.del('questions', q.uuid);
   }
+  await reapOrphanImages(qs.map(q => q.imageId));
   for (const a of atts) await DB.del('attempts', a.id);
   for (const s of sess) await DB.del('sessions', s.id);
   for (const s of srcs) await DB.del('sources', s.id);
@@ -16707,7 +17178,7 @@ async function purgeSelfTestArtifacts() {
   for (const uuid of uuids) {
     const q = await DB.get('questions', uuid);
     if (!q) continue;
-    rebuildQuestionStats(q, await DB.byIndex('attempts', 'questionUuid', uuid));
+    rebuildQuestionStats(q, await attemptsOf(q));
     q.updatedAt = nowISO();
     await DB.put('questions', q);
     fixed++;
@@ -16754,7 +17225,7 @@ async function repairDerivedStats(opts) {
   });
   const changed = [];
   await DB.each('questions', q => {
-    const hist = byQ.get(q.uuid) || [];
+    const hist = historyUuids(q).reduce((acc, u) => acc.concat(byQ.get(u) || []), []);
     // A question with no answers and no counters has nothing to recompute;
     // one with counters but no answers has counters that are simply wrong.
     if (!hist.length && !(q.stats && q.stats.attempts)) return;
@@ -16906,6 +17377,7 @@ async function wipeCourse() {
     if (q.qid) await DB.put('tombstones', { qid: q.qid, uuid: q.uuid, retiredAt: nowISO(), reason: 'course wipe' });
     await DB.del('questions', q.uuid);
   }
+  await reapOrphanImages(all.map(q => q.imageId));
   for (const a of await DB.byIndex('attempts', 'courseId', State.course.id)) await DB.del('attempts', a.id);
   for (const s of await DB.byIndex('sessions', 'courseId', State.course.id)) await DB.del('sessions', s.id);
   // A scenario with every one of its questions gone is not a case study any
@@ -20026,7 +20498,12 @@ async function mergeBankPayloads(localPayload, remotePayload) {
   report.stores.idRegister = { touched: ir.touched };
 
   const imr = mergeKeyedRowsUnionOnly(localPayload.stores.images || [], remotePayload.stores.images || [], 'id');
-  merged.stores.images = imr.rows;
+  // A photo is only ever reached through a question's imageId. One that no
+  // surviving question names — its question was tombstoned, or its batch was
+  // never committed — must not be handed back by the union, or a deletion made
+  // on one device returns on every merge and rides every push for ever.
+  const usedImages = new Set(merged.stores.questions.map(q => q.imageId).filter(Boolean));
+  merged.stores.images = imr.rows.filter(r => usedImages.has(r.id));
   report.stores.images = { added: imr.added };
 
   report.questionsBefore = { local: (localPayload.stores.questions || []).length, remote: (remotePayload.stores.questions || []).length };
@@ -20165,19 +20642,13 @@ async function applyMergedBank(merged, report) {
   const addedAttempts = (report && report.stores && report.stores.attempts && report.stores.attempts.added) || 0;
   if (addedAttempts) (merged.stores.attempts || []).forEach(a => { if (a && a.questionUuid) changedHistory.add(a.questionUuid); });
   if (changedHistory.size) {
-    const byQ = new Map();
-    await DB.each('attempts', a => {
-      if (!changedHistory.has(a.questionUuid)) return;
-      if (!byQ.has(a.questionUuid)) byQ.set(a.questionUuid, []);
-      byQ.get(a.questionUuid).push(a);
-    });
     const rebuilt = [];
     for (const uuid of changedHistory) {
       const q = await DB.get('questions', uuid);
       if (!q) continue;
       const before = JSON.stringify([q.stats, q.srStage, q.nextReviewAt]);
       const stamp = q.updatedAt;
-      rebuildQuestionStats(q, byQ.get(uuid) || []);
+      rebuildQuestionStats(q, await attemptsOf(q));
       q.updatedAt = stamp;
       if (JSON.stringify([q.stats, q.srStage, q.nextReviewAt]) !== before) rebuilt.push(q);
     }
@@ -20282,7 +20753,8 @@ async function applyTombstoneRemovals(merged) {
   // that has had a course wiped carries them for ever and this is the hot loop
   // of every merge that follows.
   const here = new Set();
-  await DB.each('questions', q => { if (retired.has(q.uuid) && !kept.has(q.uuid)) here.add(q.uuid); });
+  const heldImages = new Set();
+  await DB.each('questions', q => { if (retired.has(q.uuid) && !kept.has(q.uuid)) { here.add(q.uuid); if (q.imageId) heldImages.add(q.imageId); } });
   let removed = 0;
   for (const uuid of here) {
     await DB.del('questions', uuid);
@@ -20290,6 +20762,7 @@ async function applyTombstoneRemovals(merged) {
     for (const a of hist) if (a.id != null) await DB.del('attempts', a.id);
     removed++;
   }
+  await reapOrphanImages(heldImages);
   // Both backends refuse a push that shrinks the bank, which is right when a
   // bank collapses unexpectedly and wrong here: this shrank because somebody
   // deleted a course on purpose, on another device, and that is exactly what
@@ -23568,14 +24041,94 @@ test('Answer disagreement never lowers a reworded pair below the duplicate thres
   assert(v && v.conflict, 'so the same rewording with a different answer is raised as an answer conflict');
 });
 test('Same question from two sources merges to one canonical record', async () => {
-  const a = mkQ('What does RTO measure?', ['Data loss tolerance', 'Time to restore service', 'Backup window', 'Retention period'], 1);
-  a.sourceRefs = [{ sourceId: 's1', sourceTitle: 'Book A', locator: 'p.12' }];
-  await recomputeFingerprint(a);
-  const b = mkQ('What does RTO measure?', ['Data loss tolerance', 'Time to restore service', 'Backup window', 'Retention period'], 1);
-  b.sourceRefs = [{ sourceId: 's2', sourceTitle: 'Book B', locator: 'p.98' }];
-  await recomputeFingerprint(b);
-  const merged = { sourceRefs: a.sourceRefs.concat(b.sourceRefs) };
-  eq(merged.sourceRefs.length, 2, 'both source references must survive a merge');
+  const cid = 'test-course-merge-' + Date.now();
+  const opts = ['Data loss tolerance', 'Time to restore service', 'Backup window', 'Retention period'];
+  const canon = mkQ('What does RTO measure?', opts, 1,
+    { courseId: cid, qid: 'MERGE-A-' + Date.now(), status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  canon.sourceRefs = [{ sourceId: 's1', sourceTitle: 'Book A', locator: 'p.12' }];
+  const dup = mkQ('What does RTO measure?', opts, 1,
+    { courseId: cid, qid: 'MERGE-B-' + Date.now(), status: 'possible_dup', answerVerified: 'verified', domainId: 'D1', explanation: 'Recovery time, not data loss.' });
+  dup.sourceRefs = [{ sourceId: 's2', sourceTitle: 'Book B', locator: 'p.98' }];
+  const third = mkQ('Which body approves the business continuity policy?', ['The board', 'The DBA', 'The vendor', 'Internal audit'], 0,
+    { courseId: cid, status: 'possible_dup', answerVerified: 'verified', domainId: 'D1' });
+  third.dupWith = [dup.uuid]; dup.dupWith = [third.uuid];
+  await recomputeFingerprint(canon); await recomputeFingerprint(dup); await recomputeFingerprint(third);
+  await DB.put('questions', canon); await DB.put('questions', dup); await DB.put('questions', third);
+  try {
+    await mergeQuestions(canon.uuid, dup.uuid, 'test merge');
+    const c = await DB.get('questions', canon.uuid);
+    const d = await DB.get('questions', dup.uuid);
+    const t = await DB.get('questions', third.uuid);
+    eq(c.sourceRefs.length, 2, 'both source references must survive a merge');
+    assert((c.aliasQids || []).indexOf(dup.qid) >= 0, "the absorbed record's Question ID must be kept as an alias");
+    eq((c.mergedFrom || []).length, 1, 'the merge must be recorded so Unmerge can undo it');
+    eq(c.mergedFrom[0].uuid, dup.uuid);
+    eq(c.explanation, 'Recovery time, not data loss.', 'an explanation only the duplicate had must carry over');
+    eq(d.status, 'merged'); eq(d.canonicalUuid, canon.uuid);
+    eq((d.dupWith || []).length, 0, 'a merged record keeps no pairings of its own');
+    eq((t.dupWith || []).length, 0, 'a partner must not be left pointing at a merged record');
+    eq(t.status, 'active', 'and is released once its only pairing is gone');
+  } finally {
+    await DB.del('questions', canon.uuid); await DB.del('questions', dup.uuid); await DB.del('questions', third.uuid);
+  }
+});
+test('Unmerge puts back exactly what that merge changed', async () => {
+  const cid = 'test-course-unmerge-' + Date.now();
+  const opts = ['Data loss tolerance', 'Time to restore service', 'Backup window', 'Retention period'];
+  const canon = mkQ('What does RTO measure?', opts, 1,
+    { courseId: cid, qid: 'UNMERGE-A-' + Date.now(), status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  canon.sourceRefs = [{ sourceId: 's1', sourceTitle: 'Book A', locator: 'p.12' }];
+  const dup = mkQ('What does RTO measure?', opts, 1,
+    { courseId: cid, qid: 'UNMERGE-B-' + Date.now(), status: 'active', answerVerified: 'verified', domainId: 'D1', explanation: 'Recovery time, not data loss.', topic: 'Continuity' });
+  dup.sourceRefs = [{ sourceId: 's2', sourceTitle: 'Book B', locator: 'p.98' }];
+  await recomputeFingerprint(canon); await recomputeFingerprint(dup);
+  await DB.put('questions', canon); await DB.put('questions', dup);
+  try {
+    await mergeQuestions(canon.uuid, dup.uuid, 'test merge');
+    await unmergeQuestion(dup.uuid);
+    const c = await DB.get('questions', canon.uuid);
+    const d = await DB.get('questions', dup.uuid);
+    eq((c.mergedFrom || []).length, 0, 'the merge record must be gone');
+    eq((c.aliasQids || []).length, 0, "the duplicate's Question ID must stop being an alias");
+    eq(c.sourceRefs.length, 1, 'the source reference the duplicate brought must leave with it');
+    eq(c.sourceRefs[0].sourceId, 's1', "and the canonical record's own must stay");
+    eq(c.explanation, '', 'a field only this merge filled in must revert');
+    eq(c.topic, '');
+    assert(d.status !== 'merged', 'the duplicate must be live again');
+    eq(d.canonicalUuid, null);
+    assert((d.dupWith || []).indexOf(canon.uuid) >= 0, 'and be re-checked against the bank it rejoined');
+    eq(d.status, 'possible_dup');
+  } finally {
+    await DB.del('questions', canon.uuid); await DB.del('questions', dup.uuid);
+  }
+});
+test('A merge whose sources disagree asks for the answer, and unmerge brings the pairing back', async () => {
+  const cid = 'test-course-mergeconflict-' + Date.now();
+  const opts = ['Firewall', 'Log review', 'Encryption', 'Training'];
+  const canon = mkQ('Which is a detective control?', opts, 1,
+    { courseId: cid, qid: 'CONF-A-' + Date.now(), status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  const dup = mkQ('Which is a detective control?', opts, 0,
+    { courseId: cid, qid: 'CONF-B-' + Date.now(), status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  canon.conflictWith = [dup.uuid]; dup.conflictWith = [canon.uuid];
+  await recomputeFingerprint(canon); await recomputeFingerprint(dup);
+  await DB.put('questions', canon); await DB.put('questions', dup);
+  try {
+    await mergeQuestions(canon.uuid, dup.uuid, 'test merge');
+    let c = await DB.get('questions', canon.uuid);
+    eq(c.status, 'needs_answer', 'a disagreement that survives the merge must ask for the answer');
+    eq(c.answerVerified, 'doubtful');
+    eq(c.conflict, false, 'not a conflict flag — the other side is no longer live to resolve against');
+    eq((c.conflictWith || []).length, 0, 'and no pairing naming a merged record');
+    assert(/confirm/i.test(c.verifyNote || ''), 'the reviewer must be told what settles it, got ' + JSON.stringify(c.verifyNote));
+    await unmergeQuestion(dup.uuid);
+    c = await DB.get('questions', canon.uuid);
+    const d = await DB.get('questions', dup.uuid);
+    assert((d.conflictWith || []).indexOf(canon.uuid) >= 0, 'the real conflict comes back with the record');
+    assert((c.conflictWith || []).indexOf(dup.uuid) >= 0, 'on both sides');
+    eq(c.status, 'answer_conflict'); eq(d.status, 'answer_conflict');
+  } finally {
+    await DB.del('questions', canon.uuid); await DB.del('questions', dup.uuid);
+  }
 });
 
 /* ---- conflict resolution (writes to a scratch course, cleaned up after) ---- */
@@ -23612,6 +24165,14 @@ test('resolveConflictGroup settles a pair by bringing both to the same answer', 
     eq(freshA.answerVerified, 'verified'); eq(freshB.answerVerified, 'verified');
     // Agreement, not dismissal — so a genuine future divergence still gets caught.
     eq((freshA.dismissedPairs || []).length, 0, 'agreeing must not silence future checks on this pair');
+    // Same stem, same options, same answer now — that is one question, which
+    // the import pipeline would have merged on sight. Left as two records the
+    // recheck would only re-list both as possible duplicates, out of practice.
+    eq(r.mergedPairs, 1, 'a word-for-word identical pair is combined once it agrees');
+    eq(freshB.status, 'merged', 'b is folded into a');
+    eq(freshB.canonicalUuid, a.uuid);
+    eq(freshA.status, 'active', 'a is back in practice, not parked under Possible duplicates');
+    assert(isPracticeEligible(freshA), 'and is drawable again');
   } finally {
     await DB.del('questions', a.uuid); await DB.del('questions', b.uuid);
   }
@@ -23809,6 +24370,27 @@ test('A rubbish difficulty value is refused rather than stored', async () => {
     await DB.del('questions', q.uuid); await DB.del('sessions', s.id);
   }
 });
+test('One answer changes exactly one question, so the runner refreshes one record', async () => {
+  const cid = 'test-refresh-' + Date.now();
+  const q = mkQ('Which control is preventive?', ['Log review', 'Access card', 'Audit trail', 'Post-review'], 1,
+    { courseId: cid, status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  const other = mkQ('An untouched question in the same bank?', ['a', 'b', 'c', 'd'], 0,
+    { courseId: cid, status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  await recomputeFingerprint(q); await recomputeFingerprint(other);
+  await DB.put('questions', q); await DB.put('questions', other);
+  const otherBefore = JSON.stringify(await DB.get('questions', other.uuid));
+  const s = { id: 'sess-' + Date.now(), courseId: cid, mode: 'learning', responses: {}, flags: {}, optionOrders: {}, questionUuids: [q.uuid, other.uuid], status: 'active' };
+  await DB.put('sessions', s);
+  try {
+    await Session.answer(s, q, q.options[1].id, { ms: 1000, confidence: 'knew', difficulty: null });
+    const fresh = await Questions.get(q.uuid);
+    eq(fresh.stats.attempts, 1, 'the single indexed read carries the attempt the runner must show');
+    assert(!!fresh.srReason, 'and the schedule reason the reveal panel prints');
+    eq(JSON.stringify(await DB.get('questions', other.uuid)), otherBefore, 'nothing else moved, so reloading the whole bank buys nothing');
+  } finally {
+    await DB.del('questions', q.uuid); await DB.del('questions', other.uuid); await DB.del('sessions', s.id);
+  }
+});
 
 /* ---- test composition ---- */
 const mkPoolQ = (domainId, difficulty, attempts) => {
@@ -23957,6 +24539,23 @@ test('Composition never returns the same question twice', () => {
   const ids = r.questions.map(q => q.uuid);
   eq(new Set(ids).size, ids.length, 'a question must not appear twice in one paper');
 });
+test('A mix that could not be filled comes back as it was, not as an empty form', () => {
+  // compositionEditor reads State.course.blueprint directly; the suite can
+  // run before any course has been selected, unlike the app proper.
+  const prevCourse = State.course;
+  State.course = { id: 'test-composition-editor', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  try {
+    const pool = [{ domainId: 'D1', stem: 'x', options: [], flagged: false, difficultyVerified: 'verified', stats: { attempts: 0 } }];
+    const filters = { domains: [], topics: [], sources: [], modules: [], difficulty: [], batches: [], caseStudies: [] };
+    const cfg = { count: 40, filters, composition: { domainMix: [{ id: 'D1', pct: 40 }], difficultyMix: null, seenMix: null, strict: false } };
+    const wrap = compositionEditor(cfg, pool, filters);
+    eq(cfg.composition.domainMix.length, 1, 'the domain mix survives the editor being reopened');
+    eq(cfg.composition.domainMix[0].pct, 40, 'with the percentage that was typed');
+    eq(cfg.composition.strict, false, 'and the strict tick as it was left');
+    assert(/Set the domain mix myself/.test(wrap.textContent), 'the editor still renders');
+    assert([...wrap.querySelectorAll('input[type=checkbox]')].some(b => b.checked), 'and its toggle opens ticked');
+  } finally { State.course = prevCourse; }
+});
 test('weightedPick never repeats a question when two domains share a code', () => {
   // "+ Add domain" numbers from the current length, so removing a middle
   // domain and adding another re-issues a code already in use. Both rows then
@@ -24060,6 +24659,26 @@ test('A conflict inherited from a merge becomes a "confirm the answer", not a pa
     assert(!isPracticeEligible(fresh), 'a doubtful answer must stay out of practice');
   } finally { await DB.del('questions', q.uuid); }
 });
+test('A doubtful answer tells the reviewer why when the record is opened', async () => {
+  const cid = 'test-doubt-note-' + Date.now();
+  const q = mkQ('What does RTO measure?', ['Data loss tolerance', 'Time to restore service', 'Backup window', 'Retention period'], 1,
+    { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  q.conflictWith = []; q.mergedFrom = [{ uuid: 'gone-' + Date.now(), qid: 'OLD-Q-000001' }];
+  await recomputeFingerprint(q); await DB.put('questions', q);
+  try {
+    await repairOrphanedConflicts(cid);
+    // openQuestion awaits its own modal closing — every real caller is a
+    // click handler that never awaits it either — so it is driven from the
+    // outside here instead, the same way a click would, rather than awaited
+    // directly (which would hang forever with nothing to close the dialog).
+    const opened = openQuestion(q.uuid);
+    let dlg = null;
+    for (let i = 0; i < 50 && !dlg; i++) { await new Promise(r => setTimeout(r, 10)); dlg = $$('.modal').pop(); }
+    assert(dlg && dlg.textContent.indexOf('A merged source disagreed on the answer') >= 0, 'the reason for the doubt must be visible on the record');
+    if (dlg && dlg._close) dlg._close(null);
+    await opened;
+  } finally { await DB.del('questions', q.uuid); }
+});
 test('Repairing is a no-op when every conflict already names a live partner', async () => {
   const cid = 'test-orphan-' + Date.now();
   const opts = ['Firewall', 'Log review', 'Encryption', 'Training'];
@@ -24072,6 +24691,57 @@ test('Repairing is a no-op when every conflict already names a live partner', as
     const r = await repairOrphanedConflicts(cid);
     eq(r.repaired, 0, 'a healthy pair must not be touched');
   } finally { await DB.del('questions', a.uuid); await DB.del('questions', b.uuid); }
+});
+
+test('Unmerge takes back the "merged source disagreed" doubt the merge put on the answer', async () => {
+  const cid = 'test-unmerge-' + Date.now();
+  const opts = ['Data loss tolerance', 'Time to restore service', 'Backup window', 'Retention period'];
+  const canon = mkQ('What does RTO measure?', opts, 1, { courseId: cid, qid: 'T-Q-000001', status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  const dup = mkQ('What does RTO measure?', opts, 0, { courseId: cid, qid: 'T-Q-000002', status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  await recomputeFingerprint(canon); await recomputeFingerprint(dup);
+  await DB.put('questions', canon); await DB.put('questions', dup);
+  try {
+    await mergeQuestions(canon.uuid, dup.uuid, 'test');
+    let c = await DB.get('questions', canon.uuid);
+    eq(c.answerVerified, 'doubtful', 'the merge records the disagreement as doubt about the answer');
+    eq(c.status, 'needs_answer', 'and asks for a confirmation');
+    await unmergeQuestion(dup.uuid);
+    c = await DB.get('questions', canon.uuid);
+    eq(c.answerVerified, 'verified', 'unmerge must take the merge-only doubt back off the answer');
+    eq(c.verifyNote, '', 'and the note about a source that is no longer merged');
+    assert(c.status !== 'needs_answer', 'the record must not be held out of practice for a merge that was undone');
+  } finally { await DB.del('questions', canon.uuid); await DB.del('questions', dup.uuid); }
+});
+
+test('Merging carries the absorbed record\'s practice history to the survivor, and Unmerge gives it back', async () => {
+  const cid = 'test-merge-hist-' + Date.now();
+  const opts = ['Firewall', 'Log review', 'Encryption', 'Training'];
+  const canon = mkQ('Which is a detective control?', opts, 1, { courseId: cid, status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  const dup = mkQ('Which one is a detective control?', opts, 1, { courseId: cid, status: 'possible_dup', answerVerified: 'verified', domainId: 'D1' });
+  canon.qid = 'TST-Q-000901'; dup.qid = 'TST-Q-000902';
+  await recomputeFingerprint(canon); await recomputeFingerprint(dup);
+  const sid = 'test-session-merge-' + Date.now();
+  const hist = [
+    { questionUuid: dup.uuid, sessionId: sid, courseId: cid, ts: '2026-09-01T10:00:00Z', correct: true, confidence: 'sure', ms: 4000 },
+    { questionUuid: dup.uuid, sessionId: sid, courseId: cid, ts: '2026-09-02T10:00:00Z', correct: true, confidence: 'sure', ms: 3000 }
+  ];
+  rebuildQuestionStats(dup, hist);
+  await DB.put('questions', canon); await DB.put('questions', dup);
+  for (const a of hist) await DB.put('attempts', a);
+  try {
+    eq((await DB.get('questions', canon.uuid)).stats.attempts, 0, 'survivor starts unseen');
+    await mergeQuestions(canon.uuid, dup.uuid, 'test');
+    const after = await DB.get('questions', canon.uuid);
+    eq(after.stats.attempts, 2, 'the two answers given to the absorbed copy now count for the survivor');
+    eq(after.srStage > 0, true, 'and it is scheduled, not treated as never seen');
+    eq(JSON.stringify(historyUuids(after)), JSON.stringify([canon.uuid, dup.uuid]), 'its history is read from both uuids');
+    await unmergeQuestion(dup.uuid);
+    eq((await DB.get('questions', canon.uuid)).stats.attempts, 0, 'Unmerge hands the history back');
+    eq((await DB.get('questions', dup.uuid)).stats.attempts, 2, 'and the split-off record still has its own');
+  } finally {
+    await DB.del('questions', canon.uuid); await DB.del('questions', dup.uuid);
+    for (const a of await DB.byIndex('attempts', 'sessionId', sid)) await DB.del('attempts', a.id);
+  }
 });
 
 /* ---- per-course option count ---- */
@@ -24138,6 +24808,31 @@ test('An answer key printed separately is matched back by question number', () =
   eq(out.candidates[0].answerLetter, 'B', 'question 1 should take its answer from the key');
   eq(out.candidates[1].answerLetter, 'C', 'question 2 should take its answer from the key');
   assert(out.candidates[0].answerFromKey, 'the source of the answer must be recorded');
+});
+test('An answer key printed one pair per line is read, not parsed as questions', () => {
+  const txt = ['Q1. Which is a preventive control?', 'A. Log review', 'B. Authorisation', '',
+    'Q2. Which is detective?', 'A. Authorisation', 'B. Segregation', '',
+    'Answer key', '1. B', '2. A'].join('\n');
+  const out = parseText(txt, { template: 'auto' });
+  eq(out.candidates.length, 2, 'the two key lines must not become two extra questions');
+  eq(out.candidates[0].answerLetter, 'B');
+  eq(out.candidates[1].answerLetter, 'A');
+});
+test('A bracketed answer key is harvested', () => {
+  const txt = ['Q1. Which is a preventive control?', 'A. Log review', 'B. Authorisation', '',
+    'Q2. Which is detective?', 'A. Authorisation', 'B. Segregation', '',
+    'Answer key', '1. (b)  2. (a)'].join('\n');
+  const out = parseText(txt, { template: 'auto' });
+  eq(out.candidates.length, 2, 'the key line must not become a question');
+  eq(out.candidates[0].answerLetter, 'B', '(b) must resolve to B');
+  eq(out.candidates[1].answerLetter, 'A');
+});
+test('Prose under the key header does not overwrite an answer', () => {
+  const txt = ['Q1. Which is a preventive control?', 'A. Log review', 'B. Authorisation', '',
+    'Answer key', '1. B', 'Note: see section 2(a) and para 1 c of the standard.'].join('\n');
+  const out = parseText(txt, { template: 'auto' });
+  eq(out.keyMap['1'], 'B', 'a paragraph reference is not an answer pair');
+  eq(out.candidates[0].answerLetter, 'B');
 });
 test('A key per section is scoped to that section, not merged document-wide', () => {
   const paper = (tag, a, b) => [tag, '', '1. Stem alpha for ' + tag + '?', 'A. aa', 'B. bb', 'C. cc', 'D. dd', '',
@@ -24210,6 +24905,20 @@ test('A stray capital letter does not become a phantom option', () => {
   eq(out.candidates.length, 1);
   eq(out.candidates[0].options.length, 2, 'only the real options should be captured');
 });
+test('Auto-detect reads bulleted options, and leaves a bulleted list inside a stem alone', () => {
+  const bulleted = ['1. Which control is preventive?', '- Log review', '- Authorisation', '- Reconciliation', '- Audit trail', 'Answer: B'].join('\n');
+  const out = parseText(bulleted, { template: 'auto' });
+  eq(out.candidates.length, 1);
+  eq(out.candidates[0].options.length, 4, 'auto-detect must read bullets as options, as its description promises');
+  eq(out.candidates[0].stem, 'Which control is preventive?', 'the bullets must not stay in the stem');
+  eq(out.candidates[0].options[1].text, 'Authorisation');
+  eq(out.candidates[0].answerLetter, 'B');
+  const stemList = ['2. Consider the following:', '- Statement I', '- Statement II', 'Which is correct?', 'A) I only', 'B) II only', 'Answer: A'].join('\n');
+  const out2 = parseText(stemList, { template: 'auto' });
+  eq(out2.candidates[0].options.length, 2, 'the lettered options are the options');
+  eq(out2.candidates[0].options[0].text, 'I only');
+  assert(out2.candidates[0].stem.indexOf('Statement I') >= 0, 'the statement list belongs to the stem');
+});
 test('Tabular questions parse from tab-separated rows', () => {
   const txt = 'Which is preventive?\tLog review\tAuthorisation\tReconciliation\tAudit trail\tB\tAuthorisation prevents.';
   const out = parseText(txt, { template: 'table' });
@@ -24223,6 +24932,16 @@ test('CSV rows map to candidates and resolve the answer letter', () => {
   eq(out.candidates.length, 1);
   eq(out.candidates[0].answerLetter, 'B');
   eq(out.candidates[0].domainRaw, 'D1');
+});
+test('Text files decode UTF-16 by BOM and Windows-1252 when the bytes are not UTF-8', () => {
+  const cp1252 = new Uint8Array([0x95, 0x20, 0x41, 0x75, 0x64, 0x69, 0x74, 0x6F, 0x72, 0x92, 0x73, 0x20, 0x96, 0x20, 0x63, 0x61, 0x66, 0xE9]);
+  eq(decodeTextBytes(cp1252), '• Auditor’s – café', 'cp1252 bytes must not become U+FFFD');
+  assert(RX.optionBullet.test(decodeTextBytes(cp1252)), 'a cp1252 bullet line must still read as a bullet option');
+  eq(decodeTextBytes(new Uint8Array([0xFF, 0xFE, 0x51, 0x00, 0x31, 0x00, 0x2E, 0x00])), 'Q1.', 'UTF-16LE with BOM must decode by its BOM');
+  eq(decodeTextBytes(new Uint8Array([0xFE, 0xFF, 0x00, 0x51, 0x00, 0x31])), 'Q1', 'UTF-16BE with BOM must decode by its BOM');
+  const utf8 = new TextEncoder().encode('﻿Auditor’s – café');
+  eq(decodeTextBytes(utf8), 'Auditor’s – café', 'genuine UTF-8 (with BOM) must decode unchanged and BOM-stripped');
+  eq(decodeTextBytes(new TextEncoder().encode('plain ascii')), 'plain ascii');
 });
 test('A missing answer produces a question that cannot be practised', () => {
   const out = parseText('1. Which is preventive?\nA) Log review\nB) Authorisation', { template: 'auto' });
@@ -24423,6 +25142,23 @@ test('Read-only blocks writes but never blocks reconnecting', async () => {
 
     FileStore.tier = 'manual'; FileStore.everConnected = true;
     assert(!FileStore.isReadOnly(), 'a browser with no file API is always editable');
+  } finally {
+    FileStore.tier = was.tier; FileStore.connected = was.connected; FileStore.everConnected = was.ever;
+  }
+});
+
+test('A refused settings write never shows as saved', async () => {
+  const was = { tier: FileStore.tier, connected: FileStore.connected, ever: FileStore.everConnected };
+  const before = Settings.get('confirmLeaveMock');
+  try {
+    FileStore.tier = 'folder'; FileStore.everConnected = true; FileStore.connected = false;
+    let blocked = false;
+    try { await Settings.set('confirmLeaveMock', !before); }
+    catch (e) { blocked = e.name === 'ReadOnlyError'; }
+    assert(blocked, 'the settings write must be refused while read-only');
+    eq(Settings.get('confirmLeaveMock'), before, 'a refused save must not be displayed as saved');
+    const row = await DB.get('settings', 'confirmLeaveMock');
+    eq(row ? row.v : Settings.defaults.confirmLeaveMock, before, 'the settings store must be untouched');
   } finally {
     FileStore.tier = was.tier; FileStore.connected = was.connected; FileStore.everConnected = was.ever;
   }
@@ -25178,6 +25914,25 @@ test('Duplicate detection stays fast as the bank grows', () => {
   assert(ms < 8000, 'duplicate detection took ' + ms + 'ms for 100 candidates against 3000 — far slower than expected');
 });
 
+test('A stem full of words the bank has never seen still finds its near-duplicate', async () => {
+  const mk = (stem) => { const q = mkQ(stem, ['Keys are rotated', 'Tokens need the vault', 'Receipts show the PAN', 'Testing uses live data'], 1); q.status = 'active'; q.answerVerified = 'verified'; return q; };
+  const bank = [];
+  for (let i = 0; i < 600; i++) bank.push(mk('Which control best addresses ledger exposure in scenario number ' + i + ' of the review?'));
+  const base = mk('An IS auditor reviewing the tokenisation of cardholder PAN data at a payment processor should FIRST confirm that the vault is segregated from the production environment and that truncation is applied before card numbers are printed on receipts during testing');
+  bank.push(base);
+  const ocr = mk('An IS auditor reviewing the tokenization of cardholder PAN data at a payment processer should FIRST confirm that the vauIt is segregatd from the production enviroment and that truncatlon is applied before card numbers are prlnted on reciepts during testlng');
+  for (const q of bank) await recomputeFingerprint(q);
+  await recomputeFingerprint(ocr);
+  const index = buildIndex(bank);
+  assert(candidatesFor(ocr, index, ocr.uuid).some(o => o.uuid === base.uuid), 'nine unseen tokens must not crowd the shared words out of the query keys');
+  const v = detectDuplicates([ocr], bank).get(ocr.uuid);
+  assert(v && v.other.uuid === base.uuid, 'the OCR transcription must be raised against its bank original');
+  const n1 = mk('Quantum ledger attestation frameworks require zeroknowledge proofs for custodial wallet escrow reconciliation under fiduciary mandates');
+  const n2 = mk('Quantum ledger attestation frameworks require zeroknowledge proofs for custodial wallet escrow reconciliation under fiduciary mandate');
+  addToIndex(index, n1);
+  assert(candidatesFor(n2, index, n2.uuid).some(o => o.uuid === n1.uuid), 'a batch member indexed on new words must still be reachable');
+});
+
 test('Comparison caches never reach the data file', () => {
   const q = mkQ('cached question', ['a', 'b'], 0);
   simParts(q);
@@ -25562,6 +26317,22 @@ test('Attempt history stays linked to the version answered', () => {
   eq(att.questionVersion, 1, 'the old attempt must still point at version 1');
   eq(next.version, 2);
 });
+test('A mock attempt keeps the version that was answered, not the version at submission', async () => {
+  const cid = 'test-qver-' + Date.now();
+  const q = mkQ('Original wording', ['a', 'b', 'c', 'd'], 0, { courseId: cid, status: 'active', answerVerified: 'verified' });
+  await DB.put('questions', q);
+  const s = { id: 'sess-' + Date.now(), courseId: cid, mode: 'mock', responses: {}, flags: {}, optionOrders: {}, questionUuids: [q.uuid], status: 'active' };
+  await DB.put('sessions', s);
+  try {
+    const rec = { selectedOptionId: q.options[0].id, correct: true, ms: 500, confidence: null, mistake: null, at: nowISO(), qVersion: q.version, marks: 1 };
+    const edited = Object.assign({}, q, { stem: 'Edited wording', version: q.version + 1 });
+    const att = await Session.commit(s, edited, rec);
+    eq(att.questionVersion, 1, 'the attempt points at the version that was on screen when answered');
+  } finally {
+    for (const a of await DB.byIndex('attempts', 'sessionId', s.id)) await DB.del('attempts', a.id);
+    await DB.del('questions', q.uuid); await DB.del('sessions', s.id);
+  }
+});
 
 async function runSelfTests() {
   const body = h('div', { class: 'stack' });
@@ -25778,6 +26549,72 @@ test('JSON case studies carry their own questions, in order', () => {
   eq(plain.candidates[0].caseRef, '', 'and the question is standalone');
 });
 
+test('JSON bank export brings its answer back through correctOptionId', () => {
+  const out = jsonToCandidates({ schema: 'mcq-mastery-bank/1', questions: [{
+    stem: 'Exported record with an id-keyed answer?',
+    options: [{ id: 'o1', text: 'a' }, { id: 'o2', text: 'b' }, { id: 'o3', text: 'c' }],
+    correctOptionId: 'o3'
+  }] });
+  eq(out.candidates.length, 1);
+  eq(out.candidates[0].answerLetter, 'C');
+  eq(out.candidates[0].conf.answer, 1);
+});
+
+test('attachImageIds links each staged question to the photo of its own page', () => {
+  const saved = State.staging;
+  State.staging = { items: [
+    { q: { imageId: null, sourceRefs: [{ filename: '01 a.jpg.txt' }] } },
+    { q: { imageId: null, sourceRefs: [{ filename: '02 b.jpg.txt' }] } },
+    { q: { imageId: 'keep', sourceRefs: [{ filename: '02 b.jpg.txt' }] } }
+  ] };
+  attachImageIds([{ filename: '01 a.jpg.txt', imageId: 'img-a' }, { filename: '02 b.jpg.txt', imageId: 'img-b' }]);
+  assert(State.staging.items[0].q.imageId === 'img-a' && State.staging.items[1].q.imageId === 'img-b', 'each page keeps its own photo');
+  assert(State.staging.items[2].q.imageId === 'keep', 'an existing link is not overwritten');
+  State.staging = saved;
+});
+test('imageWorkflow refuses to run while a batch is staged', async () => {
+  const prev = State.staging;
+  const q = mkQ('Staged question', ['A', 'B', 'C', 'D'], 0);
+  State.staging = { batch: { id: 'stub' }, meta: {}, items: [{ q, keep: true, dup: null, decision: 'import' }], unresolved: [], sources: [], rejected: [], caseStudies: [] };
+  // Counted, not asserted absent: an earlier test's own leftover modal (not
+  // this closure's doing) must not be mistaken for one this call opened.
+  const modalsBefore = $$('.modal-bg').length;
+  try {
+    await imageWorkflow(null);
+    eq($$('.modal-bg').length, modalsBefore, 'no image dialog should open while a batch is staged');
+    eq(State.staging.items[0].q, q, 'the staged batch must be the same object afterwards');
+    eq(q.imageId, null, 'staged items must not receive an imageId');
+  } finally { State.staging = prev; }
+});
+test('A photo whose only question was tombstoned does not survive the merge', async () => {
+  const empty = { courses: [], sources: [], batches: [], attempts: [], sessions: [], settings: [], audit: [], idRegister: [], presets: [], notes: [], caseStudies: [], questionVersions: [] };
+  const local = { savedAt: '2026-01-02T00:00:00Z', stores: Object.assign({}, empty, {
+    questions: [
+      { uuid: 'q-kept', courseId: 'c1', imageId: 'img-kept', updatedAt: '2026-01-01T00:00:00Z' },
+      { uuid: 'q-gone', courseId: 'c1', imageId: 'img-gone', updatedAt: '2026-01-01T00:00:00Z' }
+    ],
+    images: [{ id: 'img-kept', dataUrl: 'data:,a' }, { id: 'img-gone', dataUrl: 'data:,b' }, { id: 'img-orphan', dataUrl: 'data:,c' }],
+    tombstones: [] }) };
+  const remote = { savedAt: '2026-01-03T00:00:00Z', stores: Object.assign({}, empty, {
+    questions: [], images: [{ id: 'img-gone', dataUrl: 'data:,b' }],
+    tombstones: [{ qid: 'T-1', uuid: 'q-gone', retiredAt: '2026-01-03T00:00:00Z', reason: 'test' }] }) };
+  const { merged } = await mergeBankPayloads(local, remote);
+  eq(merged.stores.questions.length, 1, 'the tombstoned question goes');
+  eq(merged.stores.images.map(i => i.id).join(','), 'img-kept', 'only the photo a surviving question names is kept');
+});
+test('Reaping photos removes only the ones no question still names', async () => {
+  const a = mkQ('img a', ['x', 'y'], 0, { imageId: 'img-shared' });
+  const b = mkQ('img b', ['x', 'y'], 0, { imageId: 'img-only' });
+  await DB.put('images', { id: 'img-shared', dataUrl: 'data:,s' });
+  await DB.put('images', { id: 'img-only', dataUrl: 'data:,o' });
+  await DB.put('questions', a);
+  try {
+    await reapOrphanImages([b.imageId, a.imageId]);
+    assert(await DB.get('images', 'img-shared'), 'a photo another question still names stays');
+    assert(!(await DB.get('images', 'img-only')), 'a photo nobody names is gone');
+  } finally { await DB.del('questions', a.uuid); await DB.del('images', 'img-shared'); await DB.del('images', 'img-only'); }
+});
+
 /* ---- the document route: .pdf / .docx / .txt sheets ---- */
 
 test('A PDF header need not sit at byte zero', async () => {
@@ -25836,6 +26673,26 @@ test('Every page of a PDF is read, not just the first', async () => {
   eq(out.candidates[1].stem, 'Second page question?');
   eq(out.candidates[2].stem, 'Third page question?');
   eq(out.candidates[2].answerLetter, 'A');
+});
+
+test('Text set in a two-byte font is read through its /ToUnicode map', async () => {
+  const gid = (t) => t.split('').map(ch => ('000' + (ch.charCodeAt(0) - 29).toString(16)).slice(-4)).join('');
+  const obj = (n, body) => n + ' 0 obj\n' + body + '\nendobj\n';
+  const stream = (body) => '<< /Length ' + body.length + ' >>\nstream\n' + body + '\nendstream';
+  const lines = ['Q1. Does the map get used?', 'A) Yes', 'B) No', 'Answer: A'];
+  const content = 'BT /F1 10 Tf 40 800 Td 12 TL ' + lines.map(l => '<' + gid(l) + '> Tj T*').join(' ') + ' ET';
+  const cmap = 'begincmap\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n' +
+    '1 beginbfchar\n<0003> <0020>\nendbfchar\n1 beginbfrange\n<0004> <005E> <0021>\nendbfrange\nendcmap';
+  const pdf = '%PDF-1.4\n' +
+    obj(3, '<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>') +
+    obj(4, stream(content)) +
+    obj(5, '<< /Type /Font /Subtype /Type0 /BaseFont /AAAAAA+Arial /Encoding /Identity-H /ToUnicode 6 0 R >>') +
+    obj(6, stream(cmap));
+  const text = await pdfToText(new TextEncoder().encode(pdf).buffer);
+  eq(text.split('\n')[0], 'Q1. Does the map get used?', 'glyph ids come back as the characters they stand for');
+  const out = parseText(text, { template: 'lettered' });
+  eq(out.candidates.length, 1);
+  eq(out.candidates[0].answerLetter, 'A');
 });
 
 test('An indirect /Length ("/Length 11 0 R") is not misread as a direct length', async () => {
@@ -26169,6 +27026,16 @@ test('A nested parenthesis inside a PDF string survives', () => {
     '(b) Escaped instead', 'and the escaped spelling of the same thing still works');
 });
 
+test('WinAnsi high bytes come out as the punctuation they encode, not C1 controls', () => {
+  eq(extractPdfOps('BT /F1 10 Tf 1 0 0 1 40 800 Tm (The auditor\\222s report \\226 \\223draft\\224) Tj ET'),
+    'The auditor’s report – “draft”');
+  eq(extractPdfOps('BT /F1 10 Tf 1 0 0 1 40 800 Tm <9520507265> Tj ET'), '• Pre', 'the hex-string path too');
+  eq(extractPdfOps('BT /F1 10 Tf 1 0 0 1 40 800 Tm (auditor\x92s) Tj ET'), 'auditor’s', 'and a raw, unescaped byte');
+  const out = parseText(extractPdfOps('BT /F1 10 Tf 1 0 0 1 40 800 Tm (1. Which is preventive?) Tj 0 -14 Td (\\225 Log review) Tj 0 -14 Td (\\225 Authorisation) Tj 0 -14 Td (Answer \\226 B) Tj ET'), { template: 'bullets' });
+  eq(out.candidates[0].options.length, 2, 'WinAnsi bullets are options');
+  eq(out.candidates[0].answerLetter, 'B', 'and "Answer – B" keeps its letter');
+});
+
 test('A heading after the options ends the question instead of joining it', () => {
   // From a real import, where option (c) came back holding "Product
   // Development CASE SCENARIOS 17 CASE SCENARIO 5 Ajay S, founder and CEO
@@ -26192,6 +27059,23 @@ test('A heading after the options ends the question instead of joining it', () =
   eq(out.candidates[0].options[2].text, 'Product Development', 'the last option keeps only its own text');
   eq(out.candidates[1].stem, 'What should Ajay do FIRST?');
   assert(out.unresolved.some(u => u.text === 'CASE SCENARIOS'), 'the heading is reported, not silently dropped');
+});
+
+test('A page number between two options does not truncate the question', () => {
+  const out = parseText([
+    '1. Which control is preventive?',
+    'A) Log review',
+    'B) Authorisation',
+    '17',
+    'C) Reconciliation',
+    'D) Audit trail',
+    'Answer: C'
+  ].join('\n'), { template: 'auto' });
+  eq(out.candidates.length, 1);
+  eq(out.candidates[0].options.length, 4, 'the options after the page number are still the same question');
+  eq(out.candidates[0].options[2].text, 'Reconciliation');
+  eq(out.candidates[0].answerLetter, 'C', 'and the answer line still reaches it');
+  eq(out.unresolved.length, 0, 'nothing was orphaned');
 });
 
 test('An option that wraps onto the next line is still joined up', () => {
@@ -26263,6 +27147,24 @@ test('The .xlsx the app writes is one the app can read back', async () => {
   eq(back[2][1], '', 'an interior blank cell is restored, not closed up');
 });
 
+test('A formula cell whose cached result is text reads as that text', async () => {
+  if (!HAS_CS) return 'skipped — this browser has no Compression Streams';
+  const sheet = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<worksheet xmlns="' + XLSX_NS + '"><sheetData>' +
+    '<row r="1"><c r="A1" t="inlineStr"><is><t>Question</t></is></c><c r="B1" t="inlineStr"><is><t>A</t></is></c></row>' +
+    '<row r="2"><c r="A2" s="1" t="str"><f>TRIM(Raw!B2)</f><v>Segregation of duties</v></c>' +
+    '<c r="B2" t="str"><f>Raw!C2&amp;""</f><v>Tom &amp; Jerry</v></c></row>' +
+    '</sheetData></worksheet>';
+  const blob = await zipFiles([
+    { name: '[Content_Types].xml', data: XLSX_PARTS.types },
+    { name: 'xl/workbook.xml', data: '<workbook/>' },
+    { name: 'xl/worksheets/sheet1.xml', data: sheet }
+  ]);
+  const back = await xlsxToRows(await new Blob([blob]).arrayBuffer());
+  eq(back[1][0], 'Segregation of duties', 'the cached formula result is the cell value');
+  eq(back[1][1], 'Tom & Jerry', 'and its entities are decoded');
+});
+
 test('A workbook and a spreadsheet import to exactly the same questions', async () => {
   if (!HAS_CS) return 'skipped — this browser has no Compression Streams';
   // What actually matters: both formats are the same rows, so both must
@@ -26281,6 +27183,33 @@ test('A workbook and a spreadsheet import to exactly the same questions', async 
     eq(x.caseSeq, c.caseSeq, 'case sequence ' + i);
     eq(x.options.length, c.options.length, 'option count ' + i);
   });
+});
+
+test('Every tab of a workbook is read, in tab order, not just sheet1.xml', async () => {
+  if (!HAS_CS) return 'skipped — this browser has no Compression Streams';
+  const sheet = (rows) => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="' + XLSX_NS + '"><sheetData>' +
+    rows.map((cells, r) => '<row r="' + (r + 1) + '">' + cells.map((v, c) => '<c r="' + xlsxCol(c) + (r + 1) + '" t="inlineStr"><is><t>' + esc(v) + '</t></is></c>').join('') + '</row>').join('') +
+    '</sheetData></worksheet>';
+  const workbook = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="' + XLSX_NS + '" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' +
+    '<sheet name="Domain 1" sheetId="2" r:id="rId2"/><sheet name="Domain 2" sheetId="1" r:id="rId1"/><sheet name="Scratch" sheetId="3" state="hidden" r:id="rId3"/></sheets></workbook>';
+  const rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>' +
+    '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/></Relationships>';
+  const blob = await zipFiles([
+    { name: '[Content_Types].xml', data: XLSX_PARTS.types },
+    { name: '_rels/.rels', data: XLSX_PARTS.rels },
+    { name: 'xl/workbook.xml', data: workbook },
+    { name: 'xl/_rels/workbook.xml.rels', data: rels },
+    { name: 'xl/worksheets/sheet1.xml', data: sheet([['Question', 'A', 'B', 'Answer'], ['Second tab?', 'x', 'y', 'B']]) },
+    { name: 'xl/worksheets/sheet2.xml', data: sheet([['Question', 'A', 'B', 'Answer'], ['First tab?', 'x', 'y', 'A']]) },
+    { name: 'xl/worksheets/sheet3.xml', data: sheet([['Question', 'A', 'B', 'Answer'], ['Hidden?', 'x', 'y', 'A']]) }
+  ]);
+  const back = await xlsxToRows(await blob.arrayBuffer());
+  eq(back.length, 3, 'one header plus one row from each visible tab — the repeated header is dropped');
+  eq(back[1][0], 'First tab?', 'tab order wins over part-name order');
+  eq(back[2][0], 'Second tab?', 'the second tab arrives at all');
+  eq(rowsToCandidates(back).candidates.length, 2, 'and both reach the importer');
 });
 
 test('The .docx the app writes is one the app can read back', async () => {
@@ -26593,6 +27522,12 @@ test('Case study IDs are their own sequence and never collide with question IDs'
     await DB.del('courses', cid);
     await DB.del('idRegister', cid);
   }
+});
+test('Question IDs sort by sequence number, not as text', () => {
+  const ids = ['ZZC-2024-D1-Q-100', 'ZZC-2024-D1-Q-2', 'ZZC-2024-D1-Q-10'];
+  const sorted = ids.slice().sort((a, b) => IdRegister.seqOf(a) - IdRegister.seqOf(b));
+  eq(sorted.join(','), 'ZZC-2024-D1-Q-2,ZZC-2024-D1-Q-10,ZZC-2024-D1-Q-100', 'the bank must order Q-2 before Q-10 before Q-100');
+  eq(IdRegister.seqOf('(no id)'), 0, 'a record with no ID sorts first, not last');
 });
 
 test('Case studies reach the file, the backup and the merge', async () => {
@@ -27875,6 +28810,171 @@ test('A paper with nothing left to mark is not a failed paper', () => {
   eq(v.level, 'ready');
 });
 
+test('A mock still submits when one of its questions has left the bank', async () => {
+  const gone = 'gone-' + Date.now();
+  // The suite can run before any course has been selected, unlike the app
+  // proper — fall back to a fixture so State.course.id resolves either way.
+  const prevCourse = State.course;
+  if (!State.course) State.course = { id: 'test-course' };
+  const s = {
+    id: 'sess-gone-' + Date.now(), courseId: State.course.id, mode: 'mock',
+    questionUuids: [gone], responses: {}, flags: {}, optionOrders: {},
+    status: 'active', startedAt: nowISO()
+  };
+  s.responses[gone] = { selectedOptionId: 'o1', correct: true, ms: 1000, confidence: null, mistake: null, at: nowISO(), qVersion: 1, marks: 1 };
+  await DB.put('sessions', s);
+  const before = await DB.count('attempts');
+  try {
+    await Session.finish(s);
+    eq(s.status, 'complete', 'the paper is submitted rather than throwing');
+    eq(await DB.count('attempts'), before, 'and a question that is gone scores nothing');
+  } finally { await DB.del('sessions', s.id); State.course = prevCourse; }
+});
+
+test('Finishing a session twice at once runs one commit loop, not two', async () => {
+  const origQ = State.questions, origCommit = Session.commit;
+  const savedFs = FileStore.connected, savedDrive = DriveSync.connected;
+  const q = mkQ('x', ['a', 'b', 'c', 'd'], 0, { courseId: 'test-finish', status: 'active', answerVerified: 'verified' });
+  const s = { id: 'sess-' + Date.now(), courseId: 'test-finish', mode: 'mock', status: 'active', flags: {}, optionOrders: {}, questionUuids: [q.uuid],
+    responses: { [q.uuid]: { selectedOptionId: q.options[0].id, correct: true, ms: 500, at: nowISO(), qVersion: q.version, marks: 1 } } };
+  let commits = 0;
+  try {
+    State.questions = async () => [q];
+    Session.commit = async () => { commits++; await new Promise(r => setTimeout(r, 20)); };
+    FileStore.connected = false; DriveSync.connected = false;
+    await Promise.all([Session.finish(s), Session.finish(s)]);
+    eq(commits, 1, 'the answer was committed once, not once per caller');
+    eq(s.status, 'complete');
+    await Session.finish(s);
+    eq(commits, 1, 'and a finished session is never re-walked');
+  } finally {
+    State.questions = origQ; Session.commit = origCommit;
+    FileStore.connected = savedFs; DriveSync.connected = savedDrive;
+    await DB.del('sessions', s.id);
+  }
+});
+
+test('A second runSession() on the session already being run is a no-op', async () => {
+  const saved = { s: State.session, v: State.view, r: State.runnerStop };
+  const ghost = { id: 'test-run-twice', status: 'active', mode: 'mock', questionUuids: [], responses: {}, flags: {} };
+  const firstStop = async () => true;
+  try {
+    State.session = ghost; State.view = 'runner'; State.runnerStop = firstStop;
+    await runSession({ id: 'test-run-twice', status: 'active', mode: 'mock', questionUuids: [], responses: {}, flags: {} });
+    assert(State.session === ghost, 'the running session object must be left alone');
+    eq(State.runnerStop, firstStop, 'the first runner\'s cleanup must still be the one on State');
+  } finally { State.session = saved.s; State.view = saved.v; State.runnerStop = saved.r; }
+});
+
+test('An automatic repaint never draws the dashboard over a live paper', async () => {
+  const savedView = State.view, savedSession = State.session, savedStop = State.runnerStop;
+  const target = $('#view');
+  const marker = h('div', { id: 'runnerMarker' });
+  try {
+    target.textContent = ''; target.appendChild(marker);
+    State.session = { status: 'active', mode: 'mock' };
+    State.runnerStop = async () => { throw new Error('the leave guard must not fire for a repaint'); };
+    State.view = 'runner';
+    await go(State.view);
+    assert($('#runnerMarker') === marker, 'the paper is still on screen');
+    eq(State.view, 'runner', 'and the view is still the runner');
+  } finally {
+    State.session = savedSession; State.runnerStop = savedStop; State.view = savedView;
+    target.textContent = '';
+  }
+});
+
+test('The mock clock checkpoint writes locally without waking the sync layer', async () => {
+  const prev = _writeHook; let hooked = 0; _writeHook = () => { hooked++; };
+  const s = { id: 'selftest-ckpt-' + Date.now(), courseId: 'selftest-course', status: 'active', elapsedMs: 15000 };
+  try {
+    await Session.checkpoint(s);
+    eq(hooked, 0, 'a timer tick is not an edit and must not reach the folder or Drive');
+    eq((await DB.get('sessions', s.id)).elapsedMs, 15000, 'but the clock reading is on disk for a resume');
+    await Session.save(s);
+    eq(hooked, 1, 'an answer-path save still goes through the hook');
+  } finally { _writeHook = prev; await DB.delRaw('sessions', s.id); }
+});
+
+test('putManyRaw rejects with the failing request\'s error, never null', async () => {
+  const realTx = DB.tx;
+  const err = Object.assign(new Error('full'), { name: 'QuotaExceededError' });
+  const stub = { error: null, objectStore: () => ({ put: () => ({}) }), abort() {} };
+  DB.tx = () => stub;
+  try {
+    const p = DB.putManyRaw('settings', [{ k: '__t_bulk' }]);
+    stub.onerror({ target: { error: err } });
+    let got = null; await p.catch(e => { got = e; });
+    eq(got && got.name, 'QuotaExceededError', 'caller sees the request error, not null');
+  } finally { DB.tx = realTx; }
+});
+test('putManyRaw is atomic when a row has no key', async () => {
+  let got = null;
+  await DB.putManyRaw('settings', [{ k: '__t_atomic', v: 1 }, { noKey: true }]).catch(e => { got = e; });
+  eq(got && got.name, 'DataError', 'the bad row is reported');
+  eq(await DB.get('settings', '__t_atomic'), undefined, 'the good row before it was NOT committed');
+  await DB.delRaw('settings', '__t_atomic');
+});
+test('DB.putAll writes several stores in one transaction, or none of them', async () => {
+  const id = 'test-putall-' + Date.now();
+  await DB.putAll({ batches: [{ id, courseId: id, startedAt: nowISO(), report: null }], sources: [{ id, courseId: id, admitted: 1 }] });
+  eq((await DB.get('batches', id)).id, id, 'first store must be written');
+  eq((await DB.get('sources', id)).admitted, 1, 'second store must be written in the same call');
+  let threw = false;
+  try { await DB.putAll({ batches: [{ id: id + '-2', courseId: id }], sources: [{ nokey: true }] }); } catch (e) { threw = true; }
+  eq(threw, true, 'a row that cannot be queued must reject the whole write');
+  eq(await DB.get('batches', id + '-2'), undefined, 'the good store must not have been committed when the other failed');
+  await DB.del('batches', id); await DB.del('sources', id);
+});
+
+test('Questions.byCourse returns exactly and only that course\'s rows, in store order', async () => {
+  const cid = 'test-course-bycourse-' + Date.now(), other = cid + '-other';
+  const a = mkQ('Which is a detective control?', ['Firewall', 'Log review', 'Encryption', 'Training'], 1, { courseId: cid });
+  const b = mkQ('Which is a preventive control?', ['Firewall', 'Log review', 'Encryption', 'Training'], 0, { courseId: cid });
+  const c = mkQ('Which is a corrective control?', ['Backup', 'Log review', 'Encryption', 'Training'], 0, { courseId: other });
+  await DB.put('questions', a); await DB.put('questions', b); await DB.put('questions', c);
+  try {
+    const rows = await Questions.byCourse(cid);
+    eq(rows.length, 2, 'only the two rows filed under this course');
+    eq(rows.map(q => q.uuid).sort().join(','), [a.uuid, b.uuid].sort().join(','));
+    eq(rows.map(q => q.uuid).join(','), rows.map(q => q.uuid).sort().join(','), 'rows arrive in primary-key order, as the cursor did');
+    eq((await Questions.byCourse(undefined)).length, 0, 'no course id means no rows, never the whole store');
+  } finally {
+    await DB.del('questions', a.uuid); await DB.del('questions', b.uuid); await DB.del('questions', c.uuid);
+  }
+});
+test('The dashboard reads the session store once per render', async () => {
+  // ROUTES.dashboard reads State.course throughout; the suite can run before
+  // any course has been selected, unlike the app proper.
+  const prevCourse = State.course, prevCourses = State.courses;
+  const cid = 'test-dashboard-' + Date.now();
+  State.course = { id: cid, code: 'TDB', name: 'Dashboard test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  State.invalidate();
+  const root = h('div');
+  const orig = DB.byIndex;
+  let sessionReads = 0;
+  DB.byIndex = function (store, index, value) {
+    if (store === 'sessions') sessionReads++;
+    return orig.call(this, store, index, value);
+  };
+  try { await ROUTES.dashboard(root); } finally {
+    DB.byIndex = orig;
+    State.course = prevCourse; State.courses = prevCourses; State.invalidate();
+  }
+  eq(sessionReads, 1, 'one getAll of the session store, not three');
+});
+
+test('A non-pausable mock is charged for real time on resume even without a Leave stamp', () => {
+  const now = 10000000;
+  const closed = { elapsedMs: 5000, lastTickAt: now - 3600000, leftAt: null };
+  eq(resumeGapMs(closed, true, false, now), 3600000, 'a reloaded/discarded tab owes the gap since the last persisted tick');
+  const left = { elapsedMs: 5000, lastTickAt: now - 3600000, leftAt: now - 1800000 };
+  eq(resumeGapMs(left, true, false, now), 1800000, 'an explicit Leave stamp still wins over the older tick');
+  eq(resumeGapMs(closed, true, true, now), 0, 'a pausable mock resumes for free');
+  eq(resumeGapMs(closed, false, false, now), 0, 'practice modes never owe time');
+});
+
 /* ---- taking the app away with you ---- */
 
 test('A copy is refused while the bank would not travel with it', async () => {
@@ -28940,6 +30040,28 @@ test('resumeLatest sees an unfinished session, so configureMode is gated', async
     // point of this batch (C4) is that the suite must not leave damage behind.
     await DB.del('sessions', 'sess-gate');
   }
+});
+test('A mode shortcut refuses to open while a session is unfinished', async () => {
+  // D17 (batch D): C7 above landed the same resumeLatest gate inside
+  // configureMode itself, but only ever exercised resumeLatest in isolation.
+  // This drives configureMode end to end, the way a dashboard shortcut does.
+  const cid = 'test-shortcut-' + Date.now();
+  const prev = State.course;
+  State.course = { id: cid, code: 'T', name: 'Shortcut', blueprint: [] };
+  const s = { id: 'sess-' + Date.now(), courseId: cid, mode: 'mock', responses: {}, flags: {}, optionOrders: {}, questionUuids: [], status: 'active', startedAt: nowISO() };
+  await DB.put('sessions', s);
+  try {
+    await configureMode('spaced');
+    assert(!document.querySelector('#modalRoot .modal'), 'no configure dialog opens over an unfinished session');
+    eq((await DB.byIndex('sessions', 'courseId', cid)).filter(x => x.status === 'active').length, 1, 'still exactly one active session for the course');
+  } finally {
+    await DB.del('sessions', s.id); State.course = prev;
+  }
+});
+test('No mode promises a preset the app cannot load back', () => {
+  Object.keys(MODES).forEach(m => {
+    assert(!/preset/i.test(MODES[m].desc), m + ' offers presets, but nothing in the app lists or applies a saved preset');
+  });
 });
 
 test('Every disconnected state offers a way out, on every browser', () => {
