@@ -479,12 +479,6 @@ body:has(.game-root) .view{padding-bottom:16px}
   background:linear-gradient(90deg,#4c4c7c,#c7c7f5 32%,#eaeaff 47%,#9a9ad6 66%,#3f3f68);transition:transform .07s ease-out}
 .bp-shot{position:fixed;z-index:70;width:24px;height:7px;border-radius:6px;pointer-events:none;
   background:linear-gradient(90deg,rgba(255,255,255,0),#ffe066 40%,#fff);box-shadow:0 0 11px #ffe066}
-.bp-flash{position:absolute;top:44%;left:50%;transform:translate(-50%,-50%);z-index:30;pointer-events:none;
-  font-size:clamp(20px,5.5vw,32px);font-weight:800;opacity:0;text-align:center;max-width:86%;text-shadow:0 0 22px currentColor}
-.bp-flash.show{animation:bpFlash 1.5s forwards}
-.bp-flash.good{color:#00ff88}.bp-flash.bad{color:#ff4d6d}
-@keyframes bpFlash{0%{opacity:0;transform:translate(-50%,-50%) scale(.6)}18%{opacity:1;transform:translate(-50%,-50%) scale(1.08)}
-  72%{opacity:1;transform:translate(-50%,-50%) scale(1)}100%{opacity:0;transform:translate(-50%,-50%) scale(.9)}}
 .bp-balloon.is-answer .bp-body{outline:3px solid #00ff88;box-shadow:0 0 22px #00ff88;animation:bpAnswer 1s ease-in-out infinite alternate}
 @keyframes bpAnswer{to{box-shadow:0 0 34px #00ff88}}
 .bp-balloon.is-answer{z-index:22}
@@ -528,20 +522,6 @@ body:has(.game-root) .view{padding-bottom:16px}
   .bp-string{height:16px}
   .bp-skip{display:none}          /* the Read label alone is enough at 330px */
 }
-@media(prefers-reduced-motion:reduce){
-  /* `.bp-balloon{animation-duration:26s!important}` used to live here, and it
-     had never once worked. Among same-origin !important declarations the
-     cascade goes by specificity, so `.bp-balloon` won the animation-DURATION
-     longhand — but animation-NAME is only ever declared by the global
-     `*{animation:none!important}` shorthand at the end of this sheet, so it
-     resolved to none. Name none plus duration 26s is no animation at all: the
-     balloons never moved, never escaped, and the round never ended. The game
-     hung on round one for every reduced-motion player.
-     It runs its own clock in JS now, so parked balloons are a supported mode
-     rather than a dead one, and there is nothing to rescue here. */
-  .bp-flash.show{animation-duration:1s}
-}
-
 /* --- Kab Banega Crorepati ---------------------------------------------- */
 .game-root.kbc{background:
     radial-gradient(1000px 560px at 50% 34%, #2b2f8a 0%, transparent 62%),
@@ -1530,7 +1510,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.32', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.33', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -11594,7 +11574,7 @@ ROUTES.notes = async (root) => {
   const domainSel = h('select', {}, [h('option', { value: '' }, 'No domain — general')].concat(State.course.blueprint.map(d => h('option', { value: d.id }, d.id + ' · ' + d.name))));
   const topicInput = h('input', { type: 'text', placeholder: 'Optional' });
   ub.appendChild(h('div', { class: 'grid g2' }, [
-    h('div', { class: 'field' }, [h('label', { text: 'File — PDF, image, text, or HTML' }), fileInput]),
+    h('div', { class: 'field' }, [h('label', { text: 'File — PDF, Word, Excel, image, text, or HTML' }), fileInput]),
     h('div', { class: 'field' }, [h('label', { text: 'Title' }), titleInput]),
     h('div', { class: 'field' }, [h('label', { text: 'Domain' }), domainSel]),
     h('div', { class: 'field' }, [h('label', { text: 'Topic' }), topicInput])
@@ -20818,11 +20798,13 @@ const DriveSync = {
       // _mergeInRemote() only wrote the merge into IndexedDB. The message
       // below promises the FILE itself is caught up, so make that true
       // before it is said — the same guarantee this call always gave.
-      await FileStore.flushNow();
+      const flushOk = await FileStore.flushNow();
       const pushOk = outcome.contributed ? await this.push() : true;
-      await showMergeReport(outcome.report, 'Synced with Google Drive', pushOk
-        ? 'Both copies were combined, written to your file, and pushed to Drive — all three now match.'
-        : 'Both copies were combined and written to your file, but pushing to Drive failed: ' + (this.problem || 'unknown error') + '. Try Sync again once that is fixed.');
+      await showMergeReport(outcome.report, 'Synced with Google Drive', !flushOk
+        ? 'Both copies were combined in this browser, but the file could not be written. Try Sync again once that is fixed.'
+        : pushOk
+          ? 'Both copies were combined, written to your file, and pushed to Drive — all three now match.'
+          : 'Both copies were combined and written to your file, but pushing to Drive failed: ' + (this.problem || 'unknown error') + '. Try Sync again once that is fixed.');
     } finally {
       clearTimeout(this._debounceTimer);
       this.connected = wasConnected;
@@ -20878,7 +20860,7 @@ const DriveSync = {
    capped in size — the same trade-off images already make. ========================================================================== */
 
 const NOTES_SUBFOLDER = 'notes';
-const NOTES_ACCEPT = '.pdf,.png,.jpg,.jpeg,.webp,.txt,.md,.html,.htm';
+const NOTES_ACCEPT = '.pdf,.png,.jpg,.jpeg,.webp,.txt,.md,.html,.htm,.docx,.xlsx';
 
 /** Whether the browser renders this type INERTLY — no script, no stylesheet
     that can carry script. It has to be an allowlist, never "not HTML": a
@@ -21104,9 +21086,6 @@ async function requireNoteBackup(rec) {
 }
 
 /* ---------- storage status bar ---------- */
-/** Due today, counted over a plain list of question records — the same rule
-    the dashboard uses, so a number reported about a transfer can be compared
-    against the number on screen without translating between two definitions. */
 /** How many questions are due right now — counted by the same rule the
     Practice screen uses. It used to test `status === 'active'` instead, which
     is a different question: a question can be active and still unaskable
@@ -21599,11 +21578,18 @@ function mergeSessionRows(localRows, remoteRows) {
       const keep = (String(a.at || '') > String(b.at || '')) ? a : b;
       // Committed anywhere is committed everywhere: the attempt it produced is
       // in the log both sides now hold, and re-committing would double it.
-      out.responses[k] = Object.assign({}, keep, { committed: !!(a.committed || b.committed) });
+      // Only ever ADD the flag, never stamp an explicit false onto a response
+      // that never carried the key — that turned a byte-identical merge into
+      // a reported "update" on nothing but key shape.
+      out.responses[k] = Object.assign({}, keep);
+      if (a.committed || b.committed) out.responses[k].committed = true;
     });
     out.flags = Object.assign({}, other.flags || {}, base.flags || {});
     byId.set(their.id, out);
-    if (took || JSON.stringify(out) !== JSON.stringify(mine)) updated++;
+    // stableStringify, not JSON.stringify: responses/flags keys can merge in
+    // a different order than they started in, and a plain JSON.stringify
+    // reads that reordering as changed content when nothing actually differs.
+    if (took || stableStringify(out) !== stableStringify(mine)) updated++;
   });
   return { rows: Array.from(byId.values()), added, updated };
 }
@@ -22376,8 +22362,10 @@ async function connectFlow() {
       const { merged, report } = await mergeBankPayloads(localPayload, existing.payload);
       await applyMergedBank(merged, report);
       FileStore._diskQuestionCount = existing.count;
-      await FileStore.flushNow();
-      await showMergeReport(report, 'Merged with your file', 'Both copies were combined and written to the file \u2014 this browser and the file now match.');
+      const ok = await FileStore.flushNow();
+      await showMergeReport(report, 'Merged with your file', ok
+        ? 'Both copies were combined and written to the file \u2014 this browser and the file now match.'
+        : 'Both copies were combined in this browser, but the file could not be written.');
       break;
     }
     }
@@ -22589,7 +22577,6 @@ async function gameQuestions(opts) {
   const all = await State.questions();
   let pool = eligiblePool(all);
   if (opts.optionCount) pool = pool.filter(q => (q.options || []).length === opts.optionCount);
-  if (opts.domains && opts.domains.length) pool = pool.filter(q => opts.domains.indexOf(q.domainId) >= 0);
   let out = pool.map(toGameQuestion).filter(Boolean);
   if (opts.shuffle !== false) out = shuffle(out, opts.rng || Math.random);
   // A game with small labels plays better on short answers, so it can ask for
@@ -23512,9 +23499,15 @@ function GameAudio() {
     stopSequencer();
     if (!engine || !ctx) { engine = null; return; }
     const e = engine; engine = null;
+    const t = ctx.currentTime;
+    // padChord() only ever stops the PREVIOUS voicing when it crossfades into
+    // a new one, and nothing outside a resolve/walk-away cue stops the
+    // ratchet — left running here, quitting mid-suspense oscillated for the
+    // life of the page.
+    padVoices.forEach(pv => { try { pv.osc.stop(t + 0.45); } catch (err) {} });
+    if (ratchet) { try { ratchet.osc.stop(t + 0.45); } catch (err) {} }
     padVoices = []; ratchet = null; suspended = false;
     cycleOrigin = 0; slotInCycle = 0; cycleIx = 0;
-    const t = ctx.currentTime;
     try { kbcHold(e.bedGain.gain, t, NEAR_SILENT_A, 0.35); } catch (err) {}
     e.drone.forEach(d => { try { d.osc.stop(t + 0.45); } catch (err) {} });
     try { e.lfo.stop(t + 0.45); e.gamak.stop(t + 0.45); } catch (err) {}
@@ -23527,8 +23520,6 @@ function GameAudio() {
   }
 
   const CUES = {
-    // rising minor arpeggio, unresolved — the "answer locked" hold
-    suspense() { chord([196, 233, 294], 1.6, 'sawtooth', 0.07, 0.18); },
     // a bright major triad that RESOLVES, which is what makes it read as relief
     right() { [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => note(f, 0.28, 'triangle', 0.2, i * 0.075)); },
     // the same shape falling and flattened
@@ -23567,8 +23558,13 @@ function GameAudio() {
     },
     isMuted() { return muted; },
     stopAll() {
-      stopBed();
+      // Clearing first, then stopping the bed, so the node-disconnect timer
+      // stopBed() is about to schedule is not the very thing this line
+      // cancels — it used to run the other way round, and every stopAll()
+      // silently cancelled its own bed's cleanup, leaking every node the
+      // bed had built.
       timers.forEach(clearInterval); timers.length = 0;
+      stopBed();
       // Drop this game's own mixer, leave the shared context alive and idle.
       if (master) {
         try {
@@ -23604,9 +23600,9 @@ const BALLOON_COLORS = [
    longer buys speed — it buys length. Five lives throughout: one heart per
    wrong answer, and the game ends when the last one goes. */
 const BALLOON_TIERS = {
-  gentle: { label: 'Short',  rounds: 8,  lives: 5, desc: 'Eight questions' },
-  brisk:  { label: 'Medium', rounds: 10, lives: 5, desc: 'Ten questions' },
-  frantic:{ label: 'Long',   rounds: 12, lives: 5, desc: 'Twelve questions' }
+  gentle: { label: 'Short',  rounds: 8,  lives: 5 },
+  brisk:  { label: 'Medium', rounds: 10, lives: 5 },
+  frantic:{ label: 'Long',   rounds: 12, lives: 5 }
 };
 
 /* ---------- reading the round before it moves ----------
@@ -23723,6 +23719,15 @@ async function runBalloonPop(questions) {
   let readMs = 0, roundDur = 0, tagPlan = 'none', still = false, skipOn = false;
 
   const audio = GameAudio();
+  // The only mute lives in KBC — same keyboard affordance here, no visible
+  // control. "Sound", not "Music": this game has no bed, only sfx.
+  const onMuteKey = (e) => {
+    if (e.key !== 'm' && e.key !== 'M') return;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName || '')) || e.target.isContentEditable) return;
+    audio.setMuted(!audio.isMuted());
+    toast(audio.isMuted() ? 'Sound off' : 'Sound on', 'info', 1400);
+  };
+  document.addEventListener('keydown', onMuteKey);
 
   function stopEverything() {
     if (readTimer) { clearTimeout(readTimer); readTimer = null; }
@@ -23732,6 +23737,11 @@ async function runBalloonPop(questions) {
     balloons.forEach(b => { if (b.el) b.el.remove(); });
     balloons = [];
     audio.stopAll();
+    // A shot already in flight (its impact scheduled by a bare setTimeout in
+    // shootAt) still finds phase === 'live' and b.alive === true after this
+    // — emptying `balloons` does not touch the balloon object it closed over.
+    // Idle closes that window: impact()'s own guard already checks phase.
+    phase = 'idle';
   }
   // Leaving the screen mid-round must not leave timers, listeners and
   // oscillators running behind it — go() replaces #view without telling
@@ -23743,6 +23753,7 @@ async function runBalloonPop(questions) {
   function teardown() {
     stopEverything();
     window.removeEventListener('resize', onResize);
+    document.removeEventListener('keydown', onMuteKey);
     clearInterval(guard);
   }
 
@@ -23761,8 +23772,11 @@ async function runBalloonPop(questions) {
       h('p', { class: 'game-sub', text: 'A question goes up, and its options float away with it. Pop the right one before it escapes.' }),
       h('div', { class: 'tier-pick' }, Object.keys(BALLOON_TIERS).map(k => {
         const t = BALLOON_TIERS[k];
+        // The bank may not actually have t.rounds eligible questions — bpPickRounds
+        // clamps to what exists, so the menu must not promise a number it cannot draw.
+        const n = Math.min(t.rounds, questions.length);
         return h('button', { class: 'tier-btn', onclick: () => { tierKey = k; tier = t; start(); } }, [
-          h('div', {}, [h('b', { text: t.label }), h('div', { class: 'tiny dim', text: t.rounds + ' rounds · ' + t.desc })])
+          h('div', {}, [h('b', { text: t.label }), h('div', { class: 'tiny dim', text: n + ' rounds' })])
         ]);
       })),
       h('div', { class: 'row', style: 'justify-content:center;margin-top:14px' },
@@ -23861,6 +23875,9 @@ async function runBalloonPop(questions) {
     if (e.ctrlKey || e.metaKey || e.altKey || /^F\d{1,2}$/.test(e.key)) return;
     if (e.key === 'Escape' || e.key === 'Tab' || e.key === 'Shift' ||
         e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') return;
+    // The mute toggle is its own single-key command, not "any key" — without
+    // this, pressing M during the reading beat would mute AND launch early.
+    if (e.key === 'm' || e.key === 'M') return;
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName || '') || e.target.isContentEditable) return;
     if ($('.modal-bg')) return;
     e.preventDefault();
@@ -23965,7 +23982,6 @@ async function runBalloonPop(questions) {
     host.appendChild(h('div', { class: 'bp-launcher', id: 'bp-launcher' }, [
       h('div', { class: 'bp-barrel', id: 'bp-barrel' }), h('div', { class: 'bp-hub' }), h('div', { class: 'bp-base' })
     ]));
-    host.appendChild(h('div', { class: 'bp-flash', id: 'bp-flash' }));
   }
 
   /** Score and lives are the feedback for what just happened, so they have to
@@ -24321,6 +24337,12 @@ function kbcMoney(n) {
   const s = String(Math.round(n)), last = s.slice(-3), rest = s.slice(0, -3);
   return '₹' + (rest ? rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' : '') + last;
 }
+
+// Pure functions of the rung about to be played (0-based; rung 0 means
+// nothing has been locked in yet), lifted out of runKBC's own closure so
+// they can be unit-tested without mounting the game.
+function kbcSecured(rung) { let a = 0; KBC_SAFE.forEach(s => { if (s <= rung - 1) a = KBC_PRIZES[s]; }); return a; }
+function kbcBanked(rung) { return rung > 0 ? KBC_PRIZES[rung - 1] : 0; }
 
 /* The host has three jobs: raise the stakes, mislead you, and be funny when
    you fall. Pools are separated by stake so the same tease never lands twice
@@ -24939,8 +24961,8 @@ async function runKBC(questions) {
     if (t) t.textContent = text;
   };
   const money = (i) => kbcMoney(KBC_PRIZES[i]);
-  const secured = () => { let a = 0; KBC_SAFE.forEach(s => { if (s <= rung - 1) a = KBC_PRIZES[s]; }); return a; };
-  const banked = () => (rung > 0 ? KBC_PRIZES[rung - 1] : 0);
+  const secured = () => kbcSecured(rung);
+  const banked = () => kbcBanked(rung);
 
   function menu() {
     teardown();
@@ -25308,7 +25330,6 @@ async function runKBC(questions) {
   function useLifeline(key) {
     if (used[key] || locked) return;
     used[key] = true;
-    const btn = host.querySelector('.kbc-ll[disabled], .kbc-ll');
     Array.prototype.forEach.call(host.querySelectorAll('.kbc-ll'), (el, i) => {
       if (['fifty', 'audience', 'phone'][i] === key) { el.classList.add('used'); el.disabled = true; }
     });
@@ -25326,6 +25347,9 @@ async function runKBC(questions) {
       Array.prototype.forEach.call($('#kbc-opts').children, el => {
         if (wrong.indexOf(Number(el.dataset.i)) >= 0) el.classList.add('gone');
       });
+      // The option already picked can itself be one of the two hidden — Lock
+      // X must not go on offering an answer 50:50 just took off the board.
+      if (hidden.indexOf(picked) >= 0) { picked = -1; host.classList.remove('armed'); walkAwayBtn(); }
       say('Two gone. Easier now. Or is it.');
       return;
     }
@@ -27861,6 +27885,28 @@ test('a sitting continued on a second device keeps both devices\u2019 answers', 
   eq(Object.keys(r.rows[0].responses).sort().join(','), 'q1,q2', 'taking the winning row whole used to discard the other side\u2019s answers');
   assert(r.rows[0].flags.q1, 'and its flags with them');
 });
+test('mergeSessionRows reports no update for a session merged into a byte-identical copy', () => {
+  const mine = { id: 's3', courseId: 'c', status: 'active', updatedAt: '2026-09-01T10:00:00Z',
+    responses: { q1: { at: '2026-09-01T09:00:00Z' }, q2: { at: '2026-09-01T09:05:00Z', committed: true } }, flags: { q2: true } };
+  const theirs = JSON.parse(JSON.stringify(mine));
+  const r = mergeSessionRows([mine], [theirs]);
+  eq(r.updated, 0, 'a response that never carried a committed key must not come back stamped committed:false just because neither side had it set');
+});
+test('mergeSessionRows reports no update when responses/flags differ only in key order', () => {
+  const mine = { id: 's4', courseId: 'c', status: 'active', updatedAt: '2026-09-01T10:00:00Z',
+    responses: { q1: { at: '2026-09-01T09:00:00Z', committed: false }, q2: { at: '2026-09-01T09:05:00Z', committed: true } },
+    flags: { q1: false, q2: true } };
+  // Same session, same content, built with responses/flags keys inserted in
+  // the opposite order \u2014 a real shape two devices independently producing
+  // the same merge result can land in.
+  const reordered = {
+    id: 's4', courseId: 'c', status: 'active', updatedAt: '2026-09-01T10:00:00Z',
+    responses: { q2: { committed: true, at: '2026-09-01T09:05:00Z' }, q1: { committed: false, at: '2026-09-01T09:00:00Z' } },
+    flags: { q2: true, q1: false }
+  };
+  const r = mergeSessionRows([mine], [reordered]);
+  eq(r.updated, 0, 'a plain JSON.stringify comparison reads key-order alone as changed content; the merge must not');
+});
 test('a mock finished on one device commits the answers only the other device held', async () => {
   const cid = 'test-merge-commit-' + Date.now();
   const q = mkQ('x', ['a', 'b', 'c', 'd'], 0, { courseId: cid, status: 'active', answerVerified: 'verified', domainId: 'D1' });
@@ -28325,6 +28371,22 @@ test('Neither the question nor the tier moves the clock any more', () => {
     'and the length-scaling functions are gone, not merely unused');
 });
 
+test('The tier menu cannot promise more rounds than the bank can actually supply', () => {
+  // Pinned by source rather than by mounting the game: runBalloonPop() mounts
+  // into the real #view and starts a real audio engine, and this exact test
+  // file already records that re-mounting a game mid-suite (KBC's own case,
+  // a few tests below) hung the harness outright — not worth risking twice
+  // for a menu-label fix. bpPickRounds already clamps the actual draw to
+  // Math.min(rounds, pool.length); the menu must say the same number, not
+  // the tier's nominal one.
+  const src = runBalloonPop.toString();
+  assert(/Math\.min\(t\.rounds,\s*questions\.length\)/.test(src),
+    'the menu must clamp what it promises to what the bank can actually supply');
+  assert(!/t\.rounds \+ ' rounds/.test(src),
+    'the old unclamped label must be gone, not merely joined by a clamped one');
+  Object.keys(BALLOON_TIERS).forEach(k => assert(BALLOON_TIERS[k].desc === undefined, k + ' no longer carries a redundant, unclamped description'));
+});
+
 test('The reading beat outlasts a full read of the worst question', () => {
   // Adult silent reading of non-fiction runs about 238 wpm, and an English
   // word averages six characters with its space — roughly 42 ms a character.
@@ -28622,6 +28684,39 @@ test('A game question carries the explanation and qid a reveal needs', () => {
   eq(g.explanation, 'Because the control is preventive.', 'the examiner note reaches the game');
   eq(g.qid, 'Q-0001', 'and so does the qid the end screen prints');
   eq(g.correctText, 'c');
+});
+test('toGameQuestion refuses a question whose correct answer no longer exists', () => {
+  const q = mkQ('Stem', ['a', 'b', 'c', 'd'], 1);
+  q.correctOptionId = 'not-a-real-option-id';
+  eq(toGameQuestion(q), null, 'a dangling correctOptionId must not silently read as "no correct answer marked"');
+});
+test('toGameQuestion drops difficulty until it has actually been graded', () => {
+  const q = mkQ('Stem', ['a', 'b', 'c', 'd'], 0, { difficulty: 'hard', difficultyVerified: 'unverified' });
+  eq(toGameQuestion(q).difficulty, null, 'the stored default must not be read as a real judgement nobody has made');
+  q.difficultyVerified = 'verified';
+  eq(toGameQuestion(q).difficulty, 'hard', 'once verified, the real difficulty must come through');
+});
+test('kbcMoney formats every rung of the real ladder cleanly', () => {
+  eq(kbcMoney(0), '₹0', 'an unplayed ladder is worth nothing, not "₹NaN" or a blank string');
+  eq(kbcMoney(1000), '₹1,000', 'a sub-lakh rung is comma-grouped, not a raw run of digits');
+  eq(kbcMoney(160000), '₹1.6 Lakh', 'units switch to Lakh at exactly one lakh');
+  eq(kbcMoney(10000000), '₹1 Crore', 'units switch to Crore at exactly one crore');
+  eq(gameById('kbc').minQuestions, KBC_PRIZES.length, 'the game must ask for exactly as many questions as the ladder has rungs');
+  KBC_PRIZES.forEach(n => {
+    const s = kbcMoney(n);
+    assert(/^₹[\d,.]+( (Lakh|Crore))?$/.test(s), 'every real prize amount must render as plain digits/commas or a clean Lakh/Crore figure, not ' + s);
+    assert(!/\.\d{2,}/.test(s), 'no floating-point noise past one decimal place in ' + s);
+  });
+});
+test('kbcSecured and kbcBanked are pure functions of the rung, independent of runKBC', () => {
+  eq(kbcBanked(0), 0, 'nothing is banked before the first question is answered');
+  eq(kbcBanked(1), KBC_PRIZES[0], 'clearing rung 0 banks the first prize');
+  eq(kbcBanked(15), KBC_PRIZES[14], 'clearing the whole ladder banks the top prize');
+  eq(kbcSecured(0), 0, 'nothing is secured before the first safe rung is passed');
+  eq(kbcSecured(KBC_SAFE[0]), 0, 'reaching the first safe rung does not yet secure it — it must be passed, not just reached');
+  eq(kbcSecured(KBC_SAFE[0] + 1), KBC_PRIZES[KBC_SAFE[0]], 'passing the first safe rung secures it for good');
+  eq(kbcSecured(KBC_SAFE[1] + 1), KBC_PRIZES[KBC_SAFE[1]], 'passing the second safe rung raises the floor to it, not just adds to the first');
+  eq(kbcSecured(KBC_PRIZES.length), KBC_PRIZES[KBC_SAFE[KBC_SAFE.length - 1]], 'winning outright still secures no more than the last safe rung passed');
 });
 
 test('Only active, verified questions can enter a session', () => {
@@ -33409,6 +33504,49 @@ test('_catchUpWithDrive really pulls and merges through a stubbed fetch, not jus
     Object.assign(D, saved);
   }
 });
+test('A catch-up that contributes nothing still refreshes the synced signature', async () => {
+  // _mergeInRemote()'s own `contributed` means "Drive needs this back" — an
+  // empty remote merged against this suite's real (non-empty) local bank
+  // IS a contribution by that definition, so the test above cannot exercise
+  // this branch; it needs contributed stubbed false directly, the same way
+  // the Sync-with-Drive bridge test above stubs _mergeInRemote's outcome.
+  const D = DriveSync;
+  const keys = ['connected', 'fileId', '_catchingUp', '_pushing', '_holdPush', 'lastSyncedModifiedTime'];
+  const saved = {}; keys.forEach(k => { saved[k] = D[k]; });
+  const was = { pull: D.pull, push: D.push, _mergeInRemote: D._mergeInRemote, _fetchModifiedTime: D._fetchModifiedTime };
+  const savedDirtySince = await FileStore.meta('driveDirtySince');
+  const savedSyncedSig = await FileStore.meta('driveSyncedSignature');
+  try {
+    Object.assign(D, { connected: true, fileId: 'test-file', _catchingUp: false, _pushing: false,
+      _holdPush: null, lastSyncedModifiedTime: '2026-01-01T00:00:00.000Z' });
+    D._fetchModifiedTime = async () => '2026-02-01T00:00:00.000Z';   // Drive has moved, so the fast path is skipped
+    D.pull = async () => ({ stores: {} });
+    let pushCalls = 0;
+    D.push = async () => { pushCalls++; return true; };
+    D._mergeInRemote = async () => ({ applied: true, contributed: false, removed: 0, report: { stores: {} } });
+    // Cleared, not left whatever a previous test happened to leave behind —
+    // _catchUpWithDrive reads driveDirtySince itself, and a stray truthy
+    // value would make `contributed` true for a reason unrelated to this test.
+    await FileStore.delMeta('driveDirtySince');
+    // Deliberately stale, so the assertion below proves the signature was
+    // actually REFRESHED rather than merely having started out correct.
+    await FileStore.setMeta('driveSyncedSignature', 'stale-signature-from-before-this-catch-up');
+
+    await D._catchUpWithDrive();
+    eq(pushCalls, 0, 'nothing contributed — no reason to push');
+    // A merge that contributed nothing still leaves this browser level with
+    // Drive — without refreshing the fingerprint here, the next boot reads
+    // "behind" off a stale signature and re-uploads the whole bank for no
+    // reason every single time.
+    eq(await FileStore.meta('driveSyncedSignature'), await D._localSignature(),
+      'a no-op merge must still refresh the synced signature to match what is actually here now');
+  } finally {
+    Object.assign(D, saved);
+    D.pull = was.pull; D.push = was.push; D._mergeInRemote = was._mergeInRemote; D._fetchModifiedTime = was._fetchModifiedTime;
+    if (savedDirtySince === undefined) await FileStore.delMeta('driveDirtySince'); else await FileStore.setMeta('driveDirtySince', savedDirtySince);
+    if (savedSyncedSig === undefined) await FileStore.delMeta('driveSyncedSignature'); else await FileStore.setMeta('driveSyncedSignature', savedSyncedSig);
+  }
+});
 
 test('A rejected token is thrown away rather than reused', async () => {
   const D = DriveSync;
@@ -33557,6 +33695,40 @@ test('The Sync-with-Drive bridge merges through _mergeInRemote, and only pushes 
     eq(pushCalls, 1, 'a real contribution must reach Drive');
     eq(flushCalls, 1);
     eq(reportCalls, 1);
+  } finally {
+    D.connected = was.connected; D.fileId = was.fileId; D.hasLiveToken = was.hasLiveToken;
+    D.pull = was.pull; D.push = was.push; D._mergeInRemote = was._mergeInRemote;
+    window.requireSafetyBackup = realRequireSafetyBackup;
+    window.showMergeReport = realShowMergeReport;
+    FileStore.flushNow = realFlushNow;
+  }
+});
+
+test('The Sync-with-Drive bridge does not claim the file was written when the write failed', async () => {
+  // flushNow() can genuinely fail (verifyFile() refusing a stale write, a
+  // caught I/O error) — the merge report used to say "written to your file"
+  // unconditionally, regardless of what flushNow() actually returned.
+  const D = DriveSync;
+  const was = { connected: D.connected, fileId: D.fileId, hasLiveToken: D.hasLiveToken, pull: D.pull, push: D.push, _mergeInRemote: D._mergeInRemote };
+  const realRequireSafetyBackup = window.requireSafetyBackup;
+  const realShowMergeReport = window.showMergeReport;
+  const realFlushNow = FileStore.flushNow;
+  let reportedBody = null;
+  try {
+    D.connected = false;
+    D.fileId = 'fake-bridge-file';
+    D.hasLiveToken = () => true;
+    D.pull = async () => ({ stores: { questions: [{ uuid: 'q1' }] } });
+    D.push = async () => true;
+    D._mergeInRemote = async () => ({ applied: true, contributed: true, removed: 0, report: { stores: {} } });
+    window.requireSafetyBackup = async () => true;
+    window.showMergeReport = async (report, title, body) => { reportedBody = body; };
+    FileStore.flushNow = async () => false;   // the write itself failed
+
+    await D._syncBridgeRun();
+    assert(reportedBody && reportedBody.indexOf('could not be written') >= 0,
+      'a failed flushNow() must be reported honestly, not silently dropped');
+    assert(reportedBody.indexOf('written to your file') < 0, 'and must not claim a success it does not have');
   } finally {
     D.connected = was.connected; D.fileId = was.fileId; D.hasLiveToken = was.hasLiveToken;
     D.pull = was.pull; D.push = was.push; D._mergeInRemote = was._mergeInRemote;
