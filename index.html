@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.15', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.16', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1787,6 +1787,27 @@ const DB = {
     try { vals.forEach(v => os.put(v)); }
     catch (e) { try { t.abort(); } catch (_) { /* already finished */ } return Promise.reject(e); }
     return new Promise((res, rej) => { t.oncomplete = () => res(vals); t.onerror = fail(rej); t.onabort = fail(rej); });
+  },
+  /* Clears and refills several stores as ONE transaction — every store
+     commits together, or (on any failure) IndexedDB rolls all of them back
+     together, including the clear()s. Built for _loadFromDisk()'s full-bank
+     rebuild, which used to clear and refill one store at a time in its own
+     separate transaction: a throw partway through left some stores already
+     replaced and others still holding whatever they had before, a state no
+     single transaction could ever produce on its own. */
+  clearAndPutManyRaw(storeRows) {
+    const names = Object.keys(storeRows);
+    if (!names.length) return Promise.resolve();
+    const t = this.tx(names, 'readwrite');
+    const fail = (rej) => (ev) => rej((ev && ev.target && ev.target.error) || t.error || new Error('The bank rebuild failed.'));
+    try {
+      names.forEach(s => {
+        const os = t.objectStore(s);
+        os.clear();
+        (storeRows[s] || []).forEach(v => os.put(v));
+      });
+    } catch (e) { try { t.abort(); } catch (_) { /* already finished */ } return Promise.reject(e); }
+    return new Promise((res, rej) => { t.oncomplete = () => res(); t.onerror = fail(rej); t.onabort = fail(rej); });
   },
 
   /* --- guarded writes: everything in the app uses these --- */
@@ -18506,6 +18527,13 @@ const FileStore = {
     const p = await this.perm(h, true);
     if (p !== 'granted') return false;
     this.connected = true; this.needsReconnect = false;
+    // The 30s/focus/visibility poll only ever gets armed from the initial
+    // boot-success path and the folder-connect flow — a reconnect after a
+    // permission lapse or a recovery is exactly as "connected" as either of
+    // those, and needs the same watch, not a silently unmonitored session
+    // until the next full page load re-arms it. Idempotent: a second call
+    // here is a no-op.
+    this.startWatch();
     return true;
   },
 
@@ -18585,12 +18613,16 @@ const FileStore = {
     // explicit restore.
     const keepLocalSettings = (await DB.all('settings')).filter(r => isDeviceLocalSetting(r.k));
     const names = syncStores();
-    for (const s of names) {
+    // One transaction across every store: either the whole bank moves over
+    // to what the file holds, or (on any failure) none of it does — never
+    // the half-old, half-new mix a per-store sequence of transactions could
+    // leave behind if something threw partway through.
+    const storeRows = {};
+    names.forEach(s => {
       const rows = Array.isArray(payload.stores[s]) ? payload.stores[s] : [];
-      await DB.clearRaw(s);
-      const toWrite = s === 'settings' ? rows.filter(r => !isDeviceLocalSetting(r.k)).concat(keepLocalSettings) : rows;
-      if (toWrite.length) await DB.putManyRaw(s, toWrite);
-    }
+      storeRows[s] = s === 'settings' ? rows.filter(r => !isDeviceLocalSetting(r.k)).concat(keepLocalSettings) : rows;
+    });
+    await DB.clearAndPutManyRaw(storeRows);
     this.lastSavedAt = payload.savedAt || null;
     this.lastSnapshotAt = payload.savedAt || null;
     this._lastQuestionCount = (payload.stores.questions || []).length;
@@ -18604,8 +18636,10 @@ const FileStore = {
     this._journal = [];
     this._journalBytes = 0;
 
-    // Everything answered since that snapshot lives in the journal.
-    const replayed = await this.replayJournal();
+    // Everything answered since THIS snapshot lives in the journal — passed
+    // explicitly so a journal stamped for some other generation is caught
+    // rather than trusted (see replayJournal's own comment).
+    const replayed = await this.replayJournal(payload.savedAt);
     if (replayed > 0) {
       // Fold the journal into a clean snapshot so it never grows forever.
       this.needSnapshot = true;
@@ -18620,8 +18654,20 @@ const FileStore = {
    * A truncated final line is expected — the tab may have been closed
    * mid-write — so a line that will not parse ends the replay rather than
    * failing it.
+   *
+   * `expectedSnapshotAt`, when given, is the savedAt of the snapshot this
+   * journal is about to be replayed on top of. A truncation stamps its
+   * first line with the snapshot generation it left the journal relative
+   * to (see _writeSnapshot); if that stamp is here and does not match, the
+   * journal was built against a different generation than what is
+   * actually on disk now — a merge, another device's write, or an
+   * earlier truncation that silently failed — and replaying it would
+   * reintroduce data the snapshot on disk has already moved past, so it
+   * is skipped rather than trusted. No stamp at all (a journal from
+   * before this existed, or a caller that does not pass the argument)
+   * proves nothing either way and is replayed exactly as it always was.
    */
-  async replayJournal() {
+  async replayJournal(expectedSnapshotAt) {
     if (!this.dirHandle) return 0;
     let jh;
     try { jh = await this.dirHandle.getFileHandle(JOURNAL_FILE, { create: false }); }
@@ -18630,9 +18676,21 @@ const FileStore = {
     if (!file.size) return 0;
     const text = await file.text();
     const lines = text.split('\n');
+    let start = 0;
+    if (expectedSnapshotAt !== undefined && lines.length) {
+      const first = lines[0].trim();
+      if (first) {
+        let marker = null;
+        try { marker = JSON.parse(first); } catch (e) { /* not a marker line */ }
+        if (marker && marker.snapshotAt !== undefined) {
+          start = 1;
+          if (marker.snapshotAt !== expectedSnapshotAt) return 0;
+        }
+      }
+    }
     let applied = 0;
-    for (const line of lines) {
-      const t = line.trim();
+    for (let i = start; i < lines.length; i++) {
+      const t = lines[i].trim();
       if (!t) continue;
       let e;
       try { e = JSON.parse(t); } catch (err) { break; }
@@ -18974,12 +19032,21 @@ const FileStore = {
         this._stamp = null;
         return false;
       }
-      // The snapshot now contains everything the journal described.
+      // The snapshot now contains everything the journal described. Left
+      // truly empty, a truncation that silently fails here (this write
+      // throws, or something external appends before the NEXT snapshot
+      // manages to run) is indistinguishable on replay from one that
+      // succeeded — replayJournal() would trust a journal built against a
+      // snapshot generation the one actually on disk has already moved
+      // past. A one-line marker naming that generation lets it tell the
+      // difference instead of just hoping nothing has gone wrong.
       try {
         const jh = await this.dirHandle.getFileHandle(JOURNAL_FILE, { create: true });
         const w3 = await jh.createWritable();
-        await w3.write(''); await w3.close();
-        this._journalStamp = 0;
+        const marker = JSON.stringify({ snapshotAt: payload.savedAt }) + '\n';
+        const markerBytes = new TextEncoder().encode(marker);
+        await w3.write(marker); await w3.close();
+        this._journalStamp = markerBytes.length;
       } catch (e) { this._journalStamp = null; }
     } else if (this.fileHandle) {
       const w = await this.fileHandle.createWritable();
@@ -26469,6 +26536,63 @@ test('Replaying a journal survives a half-written final line', async () => {
   }
 });
 
+test('replayJournal() applies its entries when the marker matches the snapshot being loaded', async () => {
+  const q = mkQ('replay with matching stamp', ['a', 'b'], 0);
+  const text = [
+    JSON.stringify({ snapshotAt: 'T1' }),
+    JSON.stringify({ o: 'p', s: 'questions', v: q })
+  ].join('\n');
+  const was = FileStore.dirHandle;
+  FileStore.dirHandle = { getFileHandle: async () => ({ getFile: async () => ({ size: text.length, text: async () => text }) }) };
+  try {
+    const applied = await FileStore.replayJournal('T1');
+    eq(applied, 1, 'the one real entry after the marker must replay');
+    const back = await DB.get('questions', q.uuid);
+    assert(back, 'and actually land in the store');
+  } finally {
+    FileStore.dirHandle = was;
+    await DB.del('questions', q.uuid);
+  }
+});
+test('replayJournal() discards a journal stamped for a different snapshot generation', async () => {
+  const q = mkQ('must NOT replay — stale generation', ['a', 'b'], 0);
+  const text = [
+    JSON.stringify({ snapshotAt: 'OLD-GENERATION' }),
+    JSON.stringify({ o: 'p', s: 'questions', v: q })
+  ].join('\n');
+  const was = FileStore.dirHandle;
+  FileStore.dirHandle = { getFileHandle: async () => ({ getFile: async () => ({ size: text.length, text: async () => text }) }) };
+  try {
+    // The snapshot actually on disk (and just loaded) is a NEWER generation
+    // than the one this journal was truncated against — a merge, another
+    // device's write, or an earlier truncation here that silently failed.
+    const applied = await FileStore.replayJournal('NEW-GENERATION');
+    eq(applied, 0, 'nothing must replay — this journal describes a generation the current snapshot has already moved past');
+    const back = await DB.get('questions', q.uuid);
+    assert(!back, 'the stale entry must not have reached the store');
+  } finally {
+    FileStore.dirHandle = was;
+  }
+});
+test('replayJournal() still trusts an old-format journal with no marker at all, even once a generation is being checked', async () => {
+  const q = mkQ('old-format journal, no marker', ['a', 'b'], 0);
+  const text = JSON.stringify({ o: 'p', s: 'questions', v: q });
+  const was = FileStore.dirHandle;
+  FileStore.dirHandle = { getFileHandle: async () => ({ getFile: async () => ({ size: text.length, text: async () => text }) }) };
+  try {
+    // A journal written before this marker existed carries no proof either
+    // way, so a caller now passing a generation to check must not start
+    // silently discarding data that was always safe to replay.
+    const applied = await FileStore.replayJournal('ANY-GENERATION');
+    eq(applied, 1, 'an unstamped journal must replay exactly as it always did');
+    const back = await DB.get('questions', q.uuid);
+    assert(back, 'and land in the store');
+  } finally {
+    FileStore.dirHandle = was;
+    await DB.del('questions', q.uuid);
+  }
+});
+
 test('A second journal append does not read its own UTF-8 write as an outside edit', async () => {
   const was = { dir: FileStore.dirHandle, conn: FileStore.connected, j: FileStore._journal,
                 stamp: FileStore._journalStamp, bytes: FileStore._journalBytes,
@@ -26668,6 +26792,26 @@ test('Reconnecting mid-session never reloads a file this tab is already ahead of
   }
 });
 
+test('reconnect() arms the folder watch, not just the connected flag', async () => {
+  const was = {
+    watching: FileStore._watching, timer: FileStore._watchTimer,
+    connected: FileStore.connected, needsReconnect: FileStore.needsReconnect, dirHandle: FileStore.dirHandle
+  };
+  FileStore._watching = false;
+  if (FileStore._watchTimer) { clearInterval(FileStore._watchTimer); FileStore._watchTimer = null; }
+  FileStore.dirHandle = { queryPermission: async () => 'granted' };
+  try {
+    const ok = await FileStore.reconnect();
+    assert(ok, 'permission was stubbed granted');
+    assert(FileStore._watching, 'reconnect() must arm the watch, exactly as the boot-success and connect-folder paths already do — otherwise a reconnect after a permission lapse leaves the 30s/focus/visibility poll permanently unarmed until the next full page load');
+  } finally {
+    if (FileStore._watchTimer) clearInterval(FileStore._watchTimer);
+    FileStore._watching = was.watching; FileStore._watchTimer = was.timer;
+    FileStore.connected = was.connected; FileStore.needsReconnect = was.needsReconnect;
+    FileStore.dirHandle = was.dirHandle;
+  }
+});
+
 test('A safety backup falls back to a download rather than reporting failure', async () => {
   const was = { c: FileStore.connected, d: FileStore.dirHandle, t: FileStore.tier, e: FileStore.everConnected };
   const realDownload = self.download, realToast = self.toast;
@@ -26816,21 +26960,23 @@ test('A load that dies half-way still arms the loss guard', async () => {
   const was = { d: FileStore._diskQuestionCount, q: FileStore._lastQuestionCount, s: FileStore._shrinkOk,
                 dir: FileStore.dirHandle, fh: FileStore.fileHandle,
                 sz: FileStore._lastSize, st: FileStore._stamp };
-  const realClear = DB.clearRaw, realPutMany = DB.putManyRaw;
+  const realClearAndPutMany = DB.clearAndPutManyRaw;
   try {
     FileStore._diskQuestionCount = 0; FileStore._shrinkOk = null; FileStore.fileHandle = null;
     const text = JSON.stringify({ app: 'mcq-mastery', schema: APP.schema, savedAt: '2026-01-01T00:00:00.000Z',
       stores: { questions: [{ uuid: 'a' }, { uuid: 'b' }] } });
     FileStore.dirHandle = { getFileHandle: async () => ({ getFile: async () => ({ size: text.length, lastModified: 1, text: async () => text, arrayBuffer: async () => new TextEncoder().encode(text).buffer }) }) };
-    DB.clearRaw = async () => { };
-    DB.putManyRaw = async () => { throw new Error('quota'); };
+    // The rebuild is now one atomic transaction (clearAndPutManyRaw) rather
+    // than a clear+putMany pair per store — stub the one call that actually
+    // touches the DB to fail the same way a real quota error would.
+    DB.clearAndPutManyRaw = async () => { throw new Error('quota'); };
     let threw = false;
     try { await FileStore.loadFromDisk(); } catch (e) { threw = true; }
     assert(threw, 'a rebuild that cannot write must surface as an error');
     eq(FileStore._diskQuestionCount, 2, 'the guard must know what the file holds even though the load failed');
     assert(FileStore.lossCheck(0), 'an emptied browser bank must never overwrite that file');
   } finally {
-    DB.clearRaw = realClear; DB.putManyRaw = realPutMany;
+    DB.clearAndPutManyRaw = realClearAndPutMany;
     FileStore._diskQuestionCount = was.d; FileStore._lastQuestionCount = was.q; FileStore._shrinkOk = was.s;
     FileStore.dirHandle = was.dir; FileStore.fileHandle = was.fh;
     FileStore._lastSize = was.sz; FileStore._stamp = was.st;
@@ -30562,6 +30708,26 @@ test('DB.putAll writes several stores in one transaction, or none of them', asyn
   eq(threw, true, 'a row that cannot be queued must reject the whole write');
   eq(await DB.get('batches', id + '-2'), undefined, 'the good store must not have been committed when the other failed');
   await DB.del('batches', id); await DB.del('sources', id);
+});
+test('DB.clearAndPutManyRaw rebuilds several stores as one transaction, or none of them', async () => {
+  const id = 'test-cpmr-' + Date.now();
+  await DB.putRaw('batches', { id, courseId: id, startedAt: nowISO(), report: null });
+  try {
+    let threw = null;
+    try {
+      await DB.clearAndPutManyRaw({
+        batches: [{ id: id + '-2', courseId: id, startedAt: nowISO(), report: null }],
+        sources: [{ nokey: true }]
+      });
+    } catch (e) { threw = e; }
+    assert(threw, 'a row that cannot be queued must reject the whole call');
+    eq(threw.name, 'DataError');
+    const still = await DB.get('batches', id);
+    assert(still, 'batches’ own clear() must have rolled back with everything else — the row from before the failed rebuild must still be there');
+    eq(await DB.get('batches', id + '-2'), undefined, 'and the new row must never have landed either');
+  } finally {
+    await DB.delRaw('batches', id);
+  }
 });
 
 test('Questions.byCourse returns exactly and only that course\'s rows, in store order', async () => {
