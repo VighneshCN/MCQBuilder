@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.19', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.20', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -8335,7 +8335,9 @@ ROUTES.practice = async (root, preselect) => {
     ]));
   }
 
-  const noteCount = (await NotesStore.list(State.course.id)).length;
+  // Just the count, not every note's full content (up to 2000 KB of base64
+  // each for a browser-only note) — countBy reads the index, not the rows.
+  const noteCount = await DB.countBy('notes', 'courseId', State.course.id);
   if (noteCount) {
     root.appendChild(h('div', { class: 'card', style: 'margin-bottom:16px' }, h('div', { class: 'card-b' },
       h('button', { class: 'method-row', onclick: () => go('notes') }, [
@@ -19935,6 +19937,7 @@ const DriveSync = {
       await this._recordSyncedStamp();
       updateStorageBar();
       toast('Google Drive connected.', 'ok');
+      NotesStore.migrateLocal().catch(() => {});
     } catch (e) {
       this.connected = false;
       this.setupError = 'Signed in to Google, but could not set up the Drive file: ' + e.message;
@@ -20669,6 +20672,12 @@ const NotesStore = {
   },
 
   async save(file, meta) {
+    // Without this, a folder still holding a valid handle (every read-only
+    // problem state leaves dirHandle set — only forget() clears it) writes
+    // the file into notes/ for real, and only THEN has its DB row refused
+    // by the write veto: a real file on disk with no record pointing at
+    // it, invisible to list() forever.
+    if (FileStore.isReadOnly()) throw new Error(READONLY_MSG);
     const target = this.target();
     const rec = {
       id: uuid(), courseId: meta.courseId, domainId: meta.domainId || null, topic: (meta.topic || '').trim(),
@@ -20677,13 +20686,7 @@ const NotesStore = {
       createdAt: nowISO(), updatedAt: nowISO()
     };
     if (target === 'folder') {
-      const dir = await FileStore.dirHandle.getDirectoryHandle(NOTES_SUBFOLDER, { create: true });
-      const safe = rec.id + '-' + file.name.replace(/[\\/:*?"<>|]/g, '_');
-      const fh = await dir.getFileHandle(safe, { create: true });
-      const w = await fh.createWritable();
-      await w.write(await file.arrayBuffer());
-      await w.close();
-      rec.folderFilename = safe;
+      rec.folderFilename = await this._writeFolderFile(rec.id, file);
     } else if (target === 'drive') {
       rec.driveFileId = await DriveSync.uploadNoteFile(file, rec.title);
     } else {
@@ -20693,6 +20696,49 @@ const NotesStore = {
     }
     await DB.put('notes', rec);
     return rec;
+  },
+
+  /** Shared with migrateLocal() below, so the two can't drift apart. */
+  async _writeFolderFile(id, file) {
+    const dir = await FileStore.dirHandle.getDirectoryHandle(NOTES_SUBFOLDER, { create: true });
+    const safe = id + '-' + file.name.replace(/[\\/:*?"<>|]/g, '_');
+    const fh = await dir.getFileHandle(safe, { create: true });
+    const w = await fh.createWritable();
+    await w.write(await file.arrayBuffer());
+    await w.close();
+    return safe;
+  },
+
+  /** A note saved before any folder/Drive was connected keeps its full
+      content — up to notesMaxKB, 2000 KB by default — as base64 right on
+      the row. Nothing ever moved it out again once a real backend became
+      available, so it rode inside every folder snapshot and every
+      whole-file Drive push forever, on every future sync, even though a
+      free destination for it has existed the whole time. Best-effort and
+      silent: called after a folder/Drive connection succeeds. A row this
+      misses (offline, a mid-upload failure) is simply left exactly as it
+      was — still readable, still synced, just not yet migrated — and is
+      tried again the next time a connection succeeds. */
+  async migrateLocal() {
+    const target = this.target();
+    if (target === 'indexeddb') return 0;
+    const rows = (await DB.all('notes')).filter(r => r.storage === 'indexeddb');
+    let moved = 0;
+    for (const rec of rows) {
+      let blob;
+      try { blob = await this.readBlob(rec); } catch (e) { continue; }
+      const file = new File([blob], rec.filename || rec.title, { type: rec.mimeType });
+      try {
+        if (target === 'folder') rec.folderFilename = await this._writeFolderFile(rec.id, file);
+        else rec.driveFileId = await DriveSync.uploadNoteFile(file, rec.title);
+      } catch (e) { continue; }   // the copy already on this row is untouched — try again next time
+      rec.storage = target;
+      rec.content = null;
+      rec.updatedAt = nowISO();
+      await DB.put('notes', rec);
+      moved++;
+    }
+    return moved;
   },
 
   async readBlob(rec) {
@@ -20727,10 +20773,14 @@ const NotesStore = {
         const dir = await FileStore.dirHandle.getDirectoryHandle(NOTES_SUBFOLDER, { create: false });
         await dir.removeEntry(rec.folderFilename);
         fileDeleted = true;
-      } else if (rec.storage === 'drive' && DriveSync.connected) {
-        await DriveSync.deleteDriveFile(rec.driveFileId);
-        fileDeleted = true;
-      } else if (rec.storage === 'folder' || rec.storage === 'drive') {
+      } else if (rec.storage === 'drive') {
+        // The return value, not an unconditional true — deleteDriveFile
+        // already handles a lapsed token itself (_ensureToken), and a real
+        // failure here (network, 403) must not be reported as done: the
+        // caller only removes the DB row and writes a tombstone once this
+        // resolves true.
+        fileDeleted = await DriveSync.deleteDriveFile(rec.driveFileId);
+      } else if (rec.storage === 'folder') {
         fileDeleted = false;
       }
     } catch (e) { fileDeleted = false; }
@@ -21993,6 +22043,7 @@ async function connectFlow() {
   }
   FileStore.startWatch();
   updateStorageBar();
+  NotesStore.migrateLocal().catch(() => {});
   await go(State.view || 'dashboard');
 }
 
@@ -32185,6 +32236,57 @@ test('NotesStore.target() treats a configured Drive backend as Drive through a l
   } finally {
     FileStore.dirHandle = savedDir; DriveSync.connected = savedConn; DriveSync.configured = savedConf;
   }
+});
+
+test('NotesStore save/readBlob/remove round-trips through IndexedDB storage', async () => {
+  const savedDir = FileStore.dirHandle, savedConn = DriveSync.connected, savedConf = DriveSync.configured;
+  try {
+    FileStore.dirHandle = null; DriveSync.connected = false; DriveSync.configured = false;
+    eq(NotesStore.target(), 'indexeddb', 'test setup: nothing connected');
+    const file = new File(['hello revision notes'], 'note.txt', { type: 'text/plain' });
+    const rec = await NotesStore.save(file, { courseId: 'test-course-notes', title: 'Scratch note' });
+    eq(rec.storage, 'indexeddb');
+    assert(rec.content, 'the bytes are kept as a data URL right on the row');
+    assert(await DB.get('notes', rec.id), 'and the row is really in the DB, not just the object handed back');
+    const blob = await NotesStore.readBlob(rec);
+    eq(await blob.text(), 'hello revision notes', 'the bytes read back are exactly what was saved');
+    const fileDeleted = await NotesStore.remove(rec);
+    eq(fileDeleted, null, 'indexeddb storage has no separate file to delete — nothing to report either way');
+    eq(await DB.get('notes', rec.id), undefined, 'the row is gone');
+    assert(await DB.get('tombstones', 'NOTE:' + rec.id), 'and a tombstone exists so a merge cannot resurrect it');
+  } finally {
+    FileStore.dirHandle = savedDir; DriveSync.connected = savedConn; DriveSync.configured = savedConf;
+  }
+});
+
+test('NotesStore.remove() reports what Drive actually did, not an unconditional success (B70)', async () => {
+  const real = DriveSync.deleteDriveFile;
+  const rec = { id: 'scratch-note-b70', storage: 'drive', driveFileId: 'whatever', courseId: 'c' };
+  try {
+    DriveSync.deleteDriveFile = async () => false;   // a real failure: network error, 403, ...
+    eq(await NotesStore.remove(rec), false, 'a failed Drive delete must be reported as failed, not silently true');
+  } finally {
+    DriveSync.deleteDriveFile = real;
+    await DB.del('notes', rec.id).catch(() => {});
+    await DB.del('tombstones', 'NOTE:' + rec.id).catch(() => {});
+  }
+});
+
+test('dueTodayIn counts only genuinely practice-eligible, due questions — not every active+due row', () => {
+  const now = new Date();
+  const past = new Date(now.getTime() - 86400000).toISOString();
+  const future = new Date(now.getTime() + 86400000).toISOString();
+  const base = { status: 'active', answerVerified: 'verified', options: [{ id: 'a' }, { id: 'b' }], correctOptionId: 'a' };
+  const list = [
+    Object.assign({}, base, { uuid: 'due-eligible', nextReviewAt: past }),
+    Object.assign({}, base, { uuid: 'not-due-yet', nextReviewAt: future }),
+    Object.assign({}, base, { uuid: 'due-but-unverified', nextReviewAt: past, answerVerified: 'unverified' }),
+    Object.assign({}, base, { uuid: 'due-but-conflicted', nextReviewAt: past, conflict: true }),
+    Object.assign({}, base, { uuid: 'due-but-no-review-date', nextReviewAt: null })
+  ];
+  eq(dueTodayIn(list), 1, 'only the row that is both due and actually eligible for practice counts — status==="active" alone is not enough');
+  eq(dueTodayIn([]), 0, 'an empty list is zero');
+  eq(dueTodayIn(null), 0, 'and a missing list does not throw');
 });
 
 test('_catchUpWithDrive really pulls and merges through a stubbed fetch, not just by inspecting its own source', async () => {
