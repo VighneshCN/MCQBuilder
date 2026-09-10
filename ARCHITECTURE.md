@@ -1199,9 +1199,12 @@ behind the connected check, because those really are the local file's business.
 
 The uploaded bytes are gzipped where the browser can (`CompressionStream`), and
 a bank file is read as "gzip or JSON", decided by the two bytes gzip always
-starts with rather than by anything recorded. Question text and base64 images
-compress by roughly an order of magnitude, which on a phone is the difference
-between a sync that finishes and one that drops; a browser without compression
+starts with rather than by anything recorded. Question text compresses by
+roughly an order of magnitude, which on a phone is the difference between a
+sync that finishes and one that drops; a stored image barely shrinks further —
+it was already downscaled to 900px wide and JPEG-encoded at quality 0.72 when
+it was captured (`imageMaxKB` budgets the result), so there is little
+redundancy left in those bytes for gzip to find. A browser without compression
 uploads exactly what it did before, and either shape stays readable for ever.
 
 Deleting a course writes a course-level tombstone (`COURSE:<id>` in the same

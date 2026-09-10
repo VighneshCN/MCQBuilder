@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.25', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.26', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -3043,8 +3043,12 @@ async function rescanCourseForPairs(courseId, onProgress, onlyUuids) {
     candidate rather than in conflictWith. And a partner can simply have
     been deleted since. Re-derive each against the live bank, so it either
     finds the partners it actually has or stops claiming to be a conflict. */
-async function repairOrphanedConflicts(courseId) {
-  const all = await Questions.byCourse(courseId);
+/** allQuestions lets a caller that already holds the course's bank (the
+    review queue, off State.questions()) skip a second full-course read;
+    omitted, it reads its own — every self-test calling this passes only
+    courseId, and still gets the same fresh list it always did. */
+async function repairOrphanedConflicts(courseId, allQuestions) {
+  const all = allQuestions || await Questions.byCourse(courseId);
   const byUuid = new Map(all.map(q => [q.uuid, q]));
   const isLive = (q) => q && q.status !== 'merged' && q.status !== 'rejected';
   const live = all.filter(isLive);
@@ -14476,9 +14480,14 @@ async function renderReviewQueue(root) {
   // other side is unresolvable by construction, so clear those out rather
   // than listing rows nothing can act on. Cheap — it only inspects records
   // already carrying the flag, and does nothing at all when none are broken.
-  const repair = await repairOrphanedConflicts(State.course.id);
+  // Read once and hand the same list to the repair: it mutates the records
+  // it fixes in place, on this exact array, so State's own cache is already
+  // correct afterwards — no need to invalidate it and read the course all
+  // over again, on every render of this screen including after each single
+  // verify/classify action.
+  const all = await State.questions();
+  const repair = await repairOrphanedConflicts(State.course.id, all);
   if (repair.repaired) {
-    State.invalidate();
     setTimeout(() => toast(
       repair.repaired + ' record(s) were flagged as conflicting with nothing on the other side. ' +
       (repair.becameConflict ? repair.becameConflict + ' matched to a real partner. ' : '') +
@@ -14486,7 +14495,6 @@ async function renderReviewQueue(root) {
       (repair.cleared ? repair.cleared + ' had no disagreement left and were cleared. ' : ''),
       'info', 9000), 400);
   }
-  const all = await State.questions();
   const queue = all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0);
   // Both banks queue here — a case-study question needing its answer
   // confirmed is confirmed in the same place as any other. Which bank it
@@ -18213,6 +18221,9 @@ const JOURNAL_MAX_BYTES = 400 * 1024;
 const SNAPSHOT_MAX_AGE_MS = 10 * 60 * 1000;
 /** More records than this in one go, and a snapshot is cheaper than journalling. */
 const BULK_JOURNAL_LIMIT = 40;
+/** How much of a freshly written file verifyWritten() reads back to confirm
+    the write, rather than the whole thing. */
+const WRITE_VERIFY_TAIL_BYTES = 4096;
 
 /** Everything except fsmeta, which holds the handle and must never be exported. */
 function syncStores() { return Object.keys(STORES).filter(n => n !== 'fsmeta'); }
@@ -19166,7 +19177,7 @@ const FileStore = {
       await w2.write(text); await w2.close();
 
       // Read it back. A save that cannot be parsed again is not a save.
-      const check = await this.verifyWritten(real, qCount);
+      const check = await this.verifyWritten(real, qCount, text);
       if (!check.ok) {
         toast('Your data file did not verify after saving: ' + check.why + ' The previous version is kept as ' + BACKUP_FILE + '.', 'bad', 14000);
         this._stamp = null;
@@ -19191,7 +19202,7 @@ const FileStore = {
     } else if (this.fileHandle) {
       const w = await this.fileHandle.createWritable();
       await w.write(text); await w.close();
-      const check = await this.verifyWritten(this.fileHandle, qCount);
+      const check = await this.verifyWritten(this.fileHandle, qCount, text);
       if (!check.ok) {
         toast('Your data file did not verify after saving: ' + check.why, 'bad', 14000);
         this._stamp = null;
@@ -19234,11 +19245,43 @@ const FileStore = {
     return await this.flush(asSnapshot ? 'snapshot' : true);
   },
 
-  /** Read a freshly written file back and confirm it is what we meant. */
-  async verifyWritten(handle, expectedCount) {
+  /** Read a freshly written file back and confirm it is what we meant.
+      Given expectedText (the exact string _writeSnapshot just wrote), this
+      confirms the write by size and a tail slice instead of a full
+      JSON.parse — proving five bytes agree should not cost re-reading and
+      re-parsing a bank that can be tens of megabytes, on every single save.
+      Without it (a caller that never had the text in hand — a self-test
+      driving this directly, say), it falls back to the original full-file
+      parse, so the contract still holds when there is nothing cheaper to
+      check against. */
+  async verifyWritten(handle, expectedCount, expectedText) {
     try {
       const f = await handle.getFile();
       if (!f.size) return { ok: false, why: 'the file came back empty.' };
+      if (expectedText != null) {
+        // Byte length, not JS string length — a stem with an em dash or any
+        // other multi-byte character makes those two numbers disagree, and
+        // conflating them here is exactly the bug the journal's own byte
+        // count already had to be fixed for once before.
+        const wantBytes = new TextEncoder().encode(expectedText);
+        if (f.size !== wantBytes.length) {
+          return { ok: false, why: 'it is ' + f.size + ' byte(s) instead of the ' + wantBytes.length + ' this save wrote.' };
+        }
+        // A truncated or otherwise corrupted write overwhelmingly shows up at
+        // the end of the file — createWritable()'s close() is where a
+        // partial flush would be cut off — so that is what gets read back,
+        // as raw bytes: decoding a slice that does not start on a UTF-8
+        // character boundary to text first could turn a perfectly good tail
+        // into a spurious mismatch.
+        const tailLen = Math.min(wantBytes.length, WRITE_VERIFY_TAIL_BYTES);
+        const wantTail = wantBytes.subarray(wantBytes.length - tailLen);
+        const gotTail = new Uint8Array(await f.slice(f.size - tailLen).arrayBuffer());
+        if (!bytesEq(gotTail, wantTail)) {
+          return { ok: false, why: 'it could not be read back (the end of the file does not match what was written).' };
+        }
+        this._stamp = { size: f.size, lastModified: f.lastModified };
+        return { ok: true };
+      }
       const parsed = JSON.parse(await f.text());
       if (!parsed || !parsed.stores) return { ok: false, why: 'it is missing its contents.' };
       const got = (parsed.stores.questions || []).length;
@@ -26086,6 +26129,44 @@ test('Repairing is a no-op when every conflict already names a live partner', as
   } finally { await DB.del('questions', a.uuid); await DB.del('questions', b.uuid); }
 });
 
+test('repairOrphanedConflicts reuses a caller-supplied list instead of reading the course again', async () => {
+  const cid = 'test-orphan-reuse-' + Date.now();
+  const q = mkQ('Which of these is a preventive control?',
+    ['Firewall', 'Audit log', 'IDS', 'Post-incident review'], 0,
+    { courseId: cid, status: 'answer_conflict', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  q.conflictWith = [];
+  await recomputeFingerprint(q);
+  await DB.put('questions', q);
+  const orig = Questions.byCourse;
+  let calls = 0;
+  Questions.byCourse = function (...args) { calls++; return orig.apply(this, args); };
+  try {
+    const list = await orig(cid);   // the caller's own, single read
+    const r = await repairOrphanedConflicts(cid, list);
+    eq(calls, 0, 'passing the list in must skip the function\'s own course read entirely');
+    eq(r.repaired, 1, 'the orphan is still found in the supplied list');
+    // The object repairOrphanedConflicts mutated is the exact one in `list` —
+    // the whole point of passing it in — so the caller sees the repair
+    // without reading the course again either.
+    const same = list.find(x => x.uuid === q.uuid);
+    assert(!same.conflict, 'the caller\'s own array reflects the repair directly');
+  } finally { Questions.byCourse = orig; await DB.del('questions', q.uuid); }
+});
+test('The review queue reads its course once and hands the same list to the orphan repair', () => {
+  const src = renderReviewQueue.toString();
+  const stateCall = src.indexOf('await State.questions()');
+  const repairCall = src.indexOf('repairOrphanedConflicts(');
+  assert(stateCall >= 0 && repairCall > stateCall, 'the course must be read before the repair runs');
+  assert(/repairOrphanedConflicts\(State\.course\.id, all\)/.test(src), 'and the same list passed straight in, not re-read inside the repair');
+  assert((src.match(/await State\.questions\(\)/g) || []).length === 1, 'the course must be read exactly once per render, not again after the repair');
+  // Scoped to the repair step itself, not the whole function — later actions
+  // in this same screen (verify, classify, dismiss) still invalidate the
+  // cache for their own, unrelated reasons.
+  const queueLine = src.indexOf('const queue = all.filter');
+  assert(queueLine > repairCall, 'the queue must be built after the repair, from the same list');
+  assert(!/State\.invalidate\(\)/.test(src.slice(repairCall, queueLine)), 'no cache invalidation is needed once the repair mutates the very list State already holds');
+});
+
 test('Rescan writes back a conflict flag it corrected on a record whose status and pairings did not change', async () => {
   const cid = 'test-rescan-flag-' + Date.now();
   const q = mkQ('Which of the following is one of the functionalities of a DLP solution?', ['Enhancing user productivity', 'Managing network configurations', 'Improving system performance', 'Preventing data exfiltration'], 3, { courseId: cid, status: 'active', conflict: true, answerVerified: 'verified', domainId: 'D1' });
@@ -27403,7 +27484,17 @@ test('The rollback copy is taken from the file on disk, not from a copy held in 
           write: async (d) => { files[name] = (d && d.__text !== undefined) ? d.__text : d; },
           close: async () => { }
         }),
-        getFile: async () => ({ __text: files[name], size: (files[name] || '').length, lastModified: 2, text: async () => files[name] })
+        // A real File is a Blob: verifyWritten()'s fast path reads size and a
+        // tail slice, never the whole text, so the fake has to answer both —
+        // size in bytes, not JS string length, or a stem with anything
+        // outside ASCII would make this fixture lie about its own size.
+        getFile: async () => {
+          const bytes = new TextEncoder().encode(files[name] || '');
+          return {
+            __text: files[name], size: bytes.length, lastModified: 2, text: async () => files[name],
+            slice: (start) => ({ arrayBuffer: async () => bytes.slice(start).buffer })
+          };
+        }
       })
     };
     FileStore._cache = { questions: [] }; FileStore._dirtyStores = new Set();
@@ -27802,6 +27893,54 @@ test('A save that cannot be read back is reported, not trusted', async () => {
 
   r = await FileStore.verifyWritten(bad(JSON.stringify({ stores: { questions: [1, 2, 3, 4, 5] } }), 40), 5);
   assert(r.ok, 'a correct file must pass verification');
+});
+
+test('Given the text it wrote, verifyWritten checks size and a tail slice instead of parsing the file', async () => {
+  const fakeHandle = (writtenText) => {
+    const bytes = new TextEncoder().encode(writtenText);
+    return {
+      getFile: async () => ({
+        size: bytes.length, lastModified: 1, text: async () => writtenText,
+        slice: (start) => ({ arrayBuffer: async () => bytes.slice(start).buffer })
+      })
+    };
+  };
+  // Long enough that the tail slice covers only part of the file — the case
+  // this fix exists for; a bank of any real size is always in this shape.
+  // A multi-byte character in the tail (an em dash, same as a real stem
+  // might hold) makes this fixture's true byte count diverge from its JS
+  // string length — the exact confusion verifyWritten's own byte-count
+  // comparison has to get right, or a perfectly good save with any non-ASCII
+  // text anywhere would fail its own verification.
+  const big = JSON.stringify({ savedAt: 'x', stores: { questions: [1, 2, 3] }, pad: 'p'.repeat(WRITE_VERIFY_TAIL_BYTES * 2) + ' — café' });
+
+  let r = await FileStore.verifyWritten(fakeHandle(big), 3, big);
+  assert(r.ok, 'a byte-identical file must pass, without ever calling JSON.parse');
+
+  r = await FileStore.verifyWritten(fakeHandle(big.slice(0, -1)), 3, big);
+  assert(!r.ok, 'a truncated file must fail verification');
+  assert(/byte/.test(r.why), 'and by size — the cheapest check, needing no read at all');
+
+  // Corrupted only at the very end: same size, caught by the tail slice.
+  const lastChar = big[big.length - 1];
+  const tailCorrupted = big.slice(0, -1) + (lastChar === 'x' ? 'y' : 'x');
+  r = await FileStore.verifyWritten(fakeHandle(tailCorrupted), 3, big);
+  assert(!r.ok, 'a same-length file corrupted at the tail must fail verification');
+  assert(/end of the file/.test(r.why), 'and say so specifically');
+
+  // Corrupted only deep inside the padding, well before the tail window —
+  // the accepted trade-off for not re-reading the whole file: this fast path
+  // does not, and is not meant to, catch it. The rollback copy _writeSnapshot
+  // keeps alongside is the safety net for the rare write that lands wrong
+  // somewhere no tail check reaches.
+  const headCorrupted = 'X' + big.slice(1);
+  r = await FileStore.verifyWritten(fakeHandle(headCorrupted), 3, big);
+  assert(r.ok, 'corruption outside the tail window is the known, accepted gap this trade-off leaves');
+
+  // Falling back to the full parse when there is no expectedText to check
+  // against still works exactly as it always did.
+  r = await FileStore.verifyWritten(fakeHandle(big), 3);
+  assert(r.ok, 'the no-expectedText fallback must still pass a genuinely correct file');
 });
 
 /* ---- scaling ---- */
