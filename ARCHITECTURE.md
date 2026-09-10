@@ -720,10 +720,11 @@ it — and the one occasion it matters is the one where it is not routine.
 `driveSyncSettled()` is the decision, pure and asserted: same file, both
 stamps present, stamps equal. Anything else — no record, a different file,
 differing stamps, a stamp that could not be read — returns false and the full
-dialog runs, because the cost of asking needlessly is a dialog and the cost of
-skipping wrongly is a merge that never happened. Settled means "Drive has not
-moved", not "the two are level", so a `driveDirtySince` left by an earlier
-session is still pushed on the way through.
+merge runs (`pull()` then `_mergeInRemote()`), because the cost of merging
+needlessly is one download and the cost of skipping wrongly is a merge that
+never happened. Settled means "Drive has not moved", not "the two are level",
+so a `driveDirtySince` left by an earlier session is still pushed on the way
+through.
 
 It also saves downloading the whole bank on every reconnect, since the
 `modifiedTime` check is a metadata request and `pull()` no longer runs.
@@ -1094,20 +1095,27 @@ rare case where a debounced push is lost (a backgrounded tab throttling
 `setTimeout`).
 
 Treated as closely as Drive's API allows like the local file: connecting
-reads what is already there, offering the same reconciliation choice the
-local folder's `connectFlow()` uses (`_reconcileOnConnect()`) — see "Merging
-instead of choosing" below; merge is the default there, not an all-or-
-nothing pick. Every later boot checks Drive's `modifiedTime` — a metadata-
-only call, not a download — against what this browser last recorded; a
-newer remote copy is loaded in automatically, the same way opening the app
-just reads the local file. It only asks first when this browser *also* has
-changes that never reached Drive (tracked as a `driveDirtySince` flag in
-`fsmeta`, set the moment a write is pending and cleared on a successful
-push) — a genuine conflict, not routine catching-up, mirroring how the
-local folder only asks when a file changed under it *and* something was
-still unsaved. A manual "Catch up from Drive" and "Sync now" remain in
-Settings for forcing either direction early, and "Sync with Drive" (below)
-offers a one-off merge without switching away from a connected local folder.
+reads what is already there and merges it in (`_reconcileOnConnect()` calling
+`_mergeInRemote()`) *without* offering a choice — see "Merging instead of
+choosing" below. Connecting Drive is itself the decision: somebody who picks
+their own account and their own file has already said what they want, one
+bank in both places, and asking them to choose between the two copies
+afterwards would be the app second-guessing an instruction it had just been
+given. `showMergeReport()` names afterwards what was combined; nothing is
+discarded, and the state from before is kept in `fsmeta` so "Undo the last
+automatic merge" covers this too. Every later boot checks Drive's
+`modifiedTime` — a metadata-only call, not a download — against what this
+browser last recorded; a newer remote copy is merged in the same silent way,
+the same way opening the app just reads the local file. `driveDirtySince` (set
+in `fsmeta` the moment a write is pending, cleared on a successful push) is
+not a question either — `_catchUpWithDrive()` reads it before the pull only
+to decide whether the merged result needs pushing back. The one thing that
+stops and asks, on either path, is a deletion recorded elsewhere that is
+about to apply here (`_mergeInRemote()`'s own prompt) — because it is the
+only way a merge can take work away rather than only add it. A manual "Catch
+up from Drive" and "Sync now" remain in Settings for forcing either
+direction early, and "Sync with Drive" (below) offers a one-off merge
+without switching away from a connected local folder.
 
 "Catch up from Drive" used to be "Load from Drive", and it *replaced* this
 browser's bank with Drive's: every answer here that Drive had not seen was
@@ -1119,31 +1127,45 @@ same reconciliation, and the wholesale-replace path (`_applyRemote`) is gone
 rather than hidden, so there is no route left through the app that can lose an
 answer to a sync.
 
-Every one of these reconciliation choices backs up whichever side is at
-risk before it acts — not just a note saying nothing was deleted. Discarding
-this browser's bank, or merging (a merge can still overwrite a same-key
-record with the other side's newer version), runs the same
-`requireSafetyBackup()` used before a replace-restore or a course wipe;
-discarding Drive's copy, or an existing local file connected to without
-being loaded — content that was never in this browser's IndexedDB to begin
-with — runs `requireExternalBackup()`, which builds the same backup ZIP
-shape (`buildBackupFromPayload()`) directly from that content and downloads
-it. Every path stops if the backup fails (only a danger-styled override goes on), and asks a final
-"Continue" before proceeding even when it succeeds. Merge is styled as the
-primary action in these dialogs; the two "keep only one side, discard the
-other" choices are both styled as danger — not "keep the bigger bank is
-primary, overwrite is danger" as a two-choice version of this dialog used
-to be, since merge itself is now the safe default and either single-sided
-choice is a deliberate discard.
+Those reconciliation dialogs are the **local folder's** — `connectFlow()`'s
+"There is already a bank in that location", and `recoveryFlow()`'s "That
+file was changed outside the app". Each backs up whichever side is at risk
+before it acts — not just a note saying nothing was deleted. Discarding this
+browser's bank, or merging (a merge can still overwrite a same-key record
+with the other side's newer version), runs the same `requireSafetyBackup()`
+used before a replace-restore or a course wipe; discarding the file's copy,
+or an existing local file connected to without being loaded — content that
+was never in this browser's IndexedDB to begin with — runs
+`requireExternalBackup()`, which builds the same backup ZIP shape
+(`buildBackupFromPayload()`) directly from that content and downloads it.
+Every path stops if the backup fails (only a danger-styled override goes
+on), and asks a final "Continue" before proceeding even when it succeeds.
+Merge is styled as the primary action in both dialogs; the two "keep only
+one side, discard the other" choices live behind a plain "Choose one side
+instead" button, in a separate danger-styled `chooseOneSideDialog()` — not
+"keep the bigger bank is primary, overwrite is danger" as a two-choice
+version of this dialog used to be, since merge itself is now the safe
+default and either single-sided choice is a deliberate discard, kept out of
+the footer competing for the same attention.
+
+Drive has no such dialog — connecting merges, per above, and the only copy
+it leaves behind is the in-app `preMergeSnapshot` in `fsmeta` that "Undo the
+last automatic merge" restores. The one Drive path that does force a real
+`requireSafetyBackup()` is `syncBridge()`, which merges two banks that may
+have diverged for a long time while the local folder stays the connection.
 
 `DriveSync.driveLossCheck()` is Drive's mirror of `FileStore.lossCheck()` —
 the last line of defence in `push()` itself, independent of any dialog.
 It tracks the last known remote question count (`_remoteQuestionCount`,
 persisted as `driveQuestionCount` in `fsmeta`) and refuses a push that
 would silently collapse it — an empty or badly shrunken local bank pushed
-by a stray auto-sync, not a deliberate choice. The explicit "overwrite
-Drive" choice in the reconciliation dialogs calls `allowDriveShrink()`
-first, the same one-shot consent pattern `FileStore.allowShrink()` uses.
+by a stray auto-sync, not a deliberate choice. `allowDriveShrink()` is the
+one-shot consent that lets a legitimate shrink through — the same pattern
+`FileStore.allowShrink()` uses — called by a course delete or wipe, a
+replace-restore, an undo of an automatic merge, and by the merge engine
+itself when honouring a tombstone recorded on either side legitimately
+shrinks the bank. No reconciliation dialog calls it, because Drive has
+none to call it from.
 
 Auth is Google Identity Services' token client: no backend server, no client
 secret (a static page cannot keep one confidential), no long-lived refresh
@@ -1152,9 +1174,12 @@ never written to IndexedDB, the snapshot file, or any export — so it is gone
 on reload and silently re-requested next time, succeeding only if the browser
 still has an active Google session and prior consent. The `drive.file` scope
 requested is Google's narrowest: the app can only ever see files it created
-itself. Only the Drive file's id, a connected flag, and the last-synced
-`modifiedTime` are persisted (in `fsmeta`, alongside the folder handle,
-exempt from every export for the same reason). An OAuth client ID identifies
+itself. Eight `fsmeta` keys carry the connection across reloads —
+`driveFileId`, `driveConnected`, `driveModifiedTime`, `driveSyncedSignature`,
+`driveLastSyncedAt`, `driveQuestionCount`, `driveDirtySince` and
+`driveAccountHint` — all cleared together by `disconnect()`, alongside the
+folder handle, and all exempt from every export for the same reason. An
+OAuth client ID identifies
 the app to Google, not any one person — it is not a secret, and only works
 from its registered origin(s) — so it needs setting up once per deployment,
 not once per visitor: `DEFAULT_DRIVE_CLIENT_ID` holds it for whoever deploys
@@ -1394,17 +1419,20 @@ Every point where this browser's state and a payload from somewhere else
 (Drive, or an existing local file) meet used to force an all-or-nothing
 "keep this / keep that" pick. `mergeBankPayloads()` (and its write-through
 partner `applyMergedBank()`) combine the two into one bank that keeps
-everything both sides hold, and it is the default action in every
-reconciliation dialog that reaches it — "keep only one side" remains
-available in the same dialog, styled as danger, as a deliberate escape
-hatch, not the default.
+everything both sides hold, and it is the default action wherever it
+reaches a local-folder reconciliation dialog — "keep only one side" remains
+available, styled as danger, behind its own "Choose one side instead"
+button, as a deliberate escape hatch, not the default. Drive has no dialog
+of its own to reach: connecting it merges directly, with no choice offered
+at all (see "Google Drive sync" above).
 
 It covers, without any dialog needing its own bespoke merge logic, every
 point local and remote content can meet:
 
-- First-ever connect to a local folder, or to Drive, when this browser
-  already has data of its own (`connectFlow()`'s "There is already a bank
-  in that location", `DriveSync._reconcileOnConnect()`'s Drive equivalent).
+- First-ever connect to a local folder, when this browser already has data
+  of its own (`connectFlow()`'s "There is already a bank in that
+  location"); connecting Drive the same way, but merging straight through
+  `DriveSync._reconcileOnConnect()` rather than any dialog.
 - Switching backends (local → Drive, Drive → local): the switch flow
   disconnects the old backend first and lands in one of the two dialogs
   above, so no separate code path was needed for this case.

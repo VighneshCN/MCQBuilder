@@ -213,7 +213,7 @@ nine different requested counts.
 
 ### Reconnecting to Drive (2)
 143. A reconnect only skips the merge question when it is genuinely settled
-144. Merging is the primary action wherever the two copies meet
+144. Merging is what happens wherever the two copies meet — not a question
 
 ### The rail on a phone (1)
 145. Every disconnected state offers a way out, on every browser
@@ -536,9 +536,16 @@ Automated tests cannot verify rendering or real browser storage.
 
 ### Reconnecting to Drive
 
-- [ ] Connect Drive, then disconnect and reconnect without changing anything:
-      the reconciliation dialog does NOT appear the second time
-- [ ] Change the bank on another device, then reconnect here: it DOES appear
+- [ ] Connect Drive, reload the page, then use the sidebar's Reconnect: no
+      dialog at all — same file, same modifiedTime, nothing to reconcile
+- [ ] Settings → Disconnect, then Connect Google Drive again without changing
+      anything: never asked to choose between the two copies — a "Connected
+      to Google Drive" summary appears saying what was combined
+- [ ] Change the bank on another device, then reconnect here: the same
+      summary appears and names what arrived — still no choice offered
+- [ ] Delete a course on another device, then reconnect here: "A deletion
+      made elsewhere is about to apply here" is the one dialog that actually
+      asks; declining leaves both copies exactly as they were
 - [ ] On a phone, every dialog's buttons are stacked full width with the
       primary action on top and Cancel at the bottom
 - [ ] On desktop they are still one right-aligned row

@@ -270,10 +270,12 @@ the same as it already did wherever it was made.
 
 If you deliberately want to throw one whole copy away instead of combining
 them — say, this browser has months of stale test data you never meant to
-keep — **"Keep only one copy?"** is the manual way out, offered wherever two
-copies first meet (connecting a folder or Drive to an existing file). It is
-the one route in the app that discards a bank wholesale, and it is never the
-default.
+keep — **"Keep only one copy?"** is the manual way out, offered when you
+connect a folder that already has a file in it, or when a file changes
+underneath the app. It is the one route in the app that discards a bank
+wholesale, and it is never the default. Connecting Drive does not offer
+it: connecting is itself the decision, and the two copies are simply
+merged.
 
 Every automatic merge also leaves a copy of what this browser held right
 before it ran. **Settings → Backup & Restore → "Undo the last automatic

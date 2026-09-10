@@ -15556,9 +15556,10 @@ async function backupExternalPayload(payload, filePrefix, reason) {
 
 /** Same "back up first, ask before proceeding without one" shape as
     requireSafetyBackup(), for content about to be overwritten that was
-    never in this browser's IndexedDB to begin with — a Drive copy, or an
-    existing local file connected to without being loaded. `label` names
-    it in the dialog copy ("the Drive copy", "the existing file"). */
+    never in this browser's IndexedDB to begin with — an existing local
+    file connected to without being loaded. Local-folder callers only:
+    Drive merges rather than overwrites, so it never reaches this. `label`
+    names the content in the dialog copy ("the existing file"). */
 async function requireExternalBackup(payload, filePrefix, label, reason, skip) {
   if (skip) { toast('Skipped backing up ' + label + ', as requested', 'warn'); return true; }
   toast('Backing up ' + label + ' first…');
