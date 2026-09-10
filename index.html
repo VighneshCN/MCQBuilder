@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.31', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.32', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -9682,25 +9682,7 @@ async function runSession(s) {
         h('span', { class: 'small muted', text: 'Answer: ' + letterOf(order.indexOf(q.correctOptionId)) + ' · ' + fmtDur(rec.ms) }),
         q.srReason ? h('span', { class: 'small dim', text: '· ' + q.srReason }) : null
       ]));
-      /* The rationale for the option they actually picked comes first, because
-         it is the one addressed to them. Getting it wrong for a reason you can
-         name is what turns a wrong answer into something learned; "the answer
-         was B" is not. The correct option's rationale follows when it is a
-         different one. */
-      const chosenOpt = q.options.find(o => o.id === rec.selectedOptionId);
-      const correctOpt = q.options.find(o => o.id === q.correctOptionId);
-      if (chosenOpt && chosenOpt.rationale && !rec.correct) {
-        rev.appendChild(h('div', { class: 'exp why-chosen' }, [
-          h('b', { text: 'Why ' + letterOf(order.indexOf(chosenOpt.id)) + ' is wrong. ' }),
-          chosenOpt.rationale
-        ]));
-      }
-      if (correctOpt && correctOpt.rationale) {
-        rev.appendChild(h('div', { class: 'exp why-correct' }, [
-          h('b', { text: 'Why ' + letterOf(order.indexOf(correctOpt.id)) + ' is right. ' }),
-          correctOpt.rationale
-        ]));
-      }
+      rationaleBlock(q, rec, order).forEach(n => rev.appendChild(n));
       // Every other option's reasoning, on request — useful on a question where
       // two distractors were both tempting, noise on one where they were not.
       const others = q.options.filter(o => o.rationale && o.id !== q.correctOptionId && o.id !== rec.selectedOptionId);
@@ -9718,8 +9700,6 @@ async function runSession(s) {
         }));
         rev.appendChild(box);
       }
-      if (q.explanation) rev.appendChild(h('div', { class: 'exp', text: q.explanation }));
-      else if (!q.options.some(o => o.rationale)) rev.appendChild(h('div', { class: 'notice warn' }, 'No explanation was captured for this question. Add one from the Question Bank so future revisions are useful.'));
       rev.appendChild(learningPointBox(q));
       shell.appendChild(rev);
     }
@@ -9847,6 +9827,40 @@ async function runSession(s) {
   // actually wants to do.
   await band(MODES[s.mode].label, 'In progress');
   render();
+}
+
+/** Why a question came out the way it did: the rationale for the option
+    actually chosen comes first, because it is the one addressed to the
+    person who chose it — getting it wrong for a reason you can name is what
+    turns a wrong answer into something learned; "the answer was B" is not.
+    The correct option's rationale follows when it is a different one, then
+    the question's own explanation, or a nudge to add one if neither exists.
+    rec is optional: a mock question left blank has no chosen option, so
+    there is nothing to say was wrong, only what was right.
+    Shared by the runner's own reveal screen and anywhere else a question is
+    reviewed after the fact (the results screen's Incorrect/Flagged cards).
+    Returns an array of nodes for the caller to place; never a DOM subtree
+    of its own, so a caller can interleave its own content between them. */
+function rationaleBlock(q, rec, order) {
+  const r = rec || {};
+  const chosenOpt = q.options.find(o => o.id === r.selectedOptionId);
+  const correctOpt = q.options.find(o => o.id === q.correctOptionId);
+  const nodes = [];
+  if (chosenOpt && chosenOpt.rationale && !r.correct) {
+    nodes.push(h('div', { class: 'exp why-chosen' }, [
+      h('b', { text: 'Why ' + letterOf(order.indexOf(chosenOpt.id)) + ' is wrong. ' }),
+      chosenOpt.rationale
+    ]));
+  }
+  if (correctOpt && correctOpt.rationale) {
+    nodes.push(h('div', { class: 'exp why-correct' }, [
+      h('b', { text: 'Why ' + letterOf(order.indexOf(correctOpt.id)) + ' is right. ' }),
+      correctOpt.rationale
+    ]));
+  }
+  if (q.explanation) nodes.push(h('div', { class: 'exp', text: q.explanation }));
+  else if (!q.options.some(o => o.rationale)) nodes.push(h('div', { class: 'notice warn' }, 'No explanation was captured for this question. Add one from the Question Bank so future revisions are useful.'));
+  return nodes;
 }
 
 function learningPointBox(q) {
@@ -10361,6 +10375,7 @@ async function showResults(s) {
           h('span', { style: 'color:var(--pencil)', text: rec.correct ? '' : 'You chose ' + letterOf(order.indexOf(rec.selectedOptionId)) + '. ' }),
           h('span', { style: 'color:var(--green)', text: 'Correct: ' + letterOf(order.indexOf(q.correctOptionId)) })
         ]) : null,
+        ...rationaleBlock(q, rec, order),
         h('button', { class: 'btn sm', style: 'margin-top:6px', onclick: () => openQuestion(q.uuid), text: 'Open question' })
       ]));
     });
@@ -30321,6 +30336,77 @@ test('At the defaults, marks and the question count are the same number', () => 
   eq(m.net, sc.correct, 'marks earned must equal questions correct');
   eq(Math.round(m.pct), Math.round(sc.accuracy * 100), 'and the percentage must equal accuracy');
   assert(m.plain, 'and it must know that it has nothing extra to say');
+});
+
+test('rationaleBlock explains the option chosen, the option that was right, or neither, correctly', () => {
+  const q = mkQ('Which control is preventive?', ['Firewall', 'Log review', 'Encryption', 'Training'], 0);
+  q.options[0].rationale = 'Blocks unauthorised access before it happens.';
+  q.options[1].rationale = 'Detective — finds out after the fact, not before.';
+  const order = q.options.map(o => o.id);
+  const has = (nodes, cls) => nodes.some(n => n.classList && n.classList.contains(cls));
+
+  // Wrong answer: the option actually chosen is explained, and so is the
+  // right one — reading only "the answer was A" teaches nothing on its own.
+  const wrong = rationaleBlock(q, { selectedOptionId: q.options[1].id, correct: false }, order);
+  assert(has(wrong, 'why-chosen'), 'the chosen option\'s own rationale must say why it is wrong');
+  assert(has(wrong, 'why-correct'), 'and the correct option\'s rationale must say why it is right');
+
+  // Correct but only guessed: chosen IS correct, so there is nothing to call
+  // "wrong" — but confirming why the guess was actually right is the whole
+  // point of showing this for a lucky guess at all.
+  const guessedRight = rationaleBlock(q, { selectedOptionId: q.options[0].id, correct: true }, order);
+  assert(!has(guessedRight, 'why-chosen'), 'a right answer has no "why it is wrong" to show');
+  assert(has(guessedRight, 'why-correct'), 'but still confirms why the guess was actually right');
+
+  // Left blank: no rec at all — rec is deliberately optional for this case.
+  const blank = rationaleBlock(q, null, order);
+  assert(!has(blank, 'why-chosen'), 'nothing was chosen, so nothing can be called wrong');
+  assert(has(blank, 'why-correct'), 'the right answer is still worth seeing even for a blank');
+
+  // Neither option on this question carries a rationale: fall through to
+  // the question's own explanation, or a nudge to add one if there is none.
+  const bare = mkQ('A question with no option-level reasoning?', ['a', 'b'], 0);
+  bare.explanation = 'The stem itself is the only reasoning on record.';
+  const bareOrder = bare.options.map(o => o.id);
+  const withExplanation = rationaleBlock(bare, { selectedOptionId: bare.options[1].id, correct: false }, bareOrder);
+  eq(withExplanation.length, 1, 'no option rationale exists here, so only the explanation is worth showing');
+  eq(withExplanation[0].textContent, bare.explanation);
+
+  bare.explanation = '';
+  const nothing = rationaleBlock(bare, { selectedOptionId: bare.options[1].id, correct: false }, bareOrder);
+  eq(nothing.length, 1);
+  assert(/No explanation was captured/.test(nothing[0].textContent), 'a question with no reasoning at all says so, rather than showing nothing');
+});
+
+test('The results screen shows why a wrong answer was wrong, not just its letter', async () => {
+  const was = { course: State.course, courses: State.courses, view: State.view };
+  const course = makeCourse('RRB', 'Rationale-on-results test course', CISA_BLUEPRINT, { id: 'test-course' });
+  const q = mkQ('Which control is preventive?', ['Firewall', 'Log review', 'Encryption', 'Training'], 0);
+  q.options[0].rationale = 'Blocks unauthorised access before it happens.';
+  q.options[1].rationale = 'Detective — finds out after the fact, not before.';
+  const s = {
+    id: 'test-rationale-results', courseId: 'test-course', mode: 'mock', status: 'complete',
+    questionUuids: [q.uuid], optionOrders: {}, flags: {},
+    responses: { [q.uuid]: { selectedOptionId: q.options[1].id, correct: false, ms: 1000, at: nowISO() } },
+    marks: { [q.uuid]: 1 }, startedAt: nowISO(), endedAt: nowISO(), seed: 1,
+    marking: { passPct: 60, negativeFraction: 0, scaledScore: null }
+  };
+  try {
+    State.course = course; State.courses = [course];
+    await DB.put('questions', q);
+    State.invalidate();
+    await showResults(s);
+    const view = $('#view');
+    const heading = Array.from(view.querySelectorAll('.card-h h3')).find(h3 => h3.textContent === 'Incorrect');
+    assert(heading, 'an incorrect answer must still get its own group');
+    const card = heading.closest('.card');
+    assert(card.querySelector('.exp.why-chosen'), 'the results screen must show why the chosen option was wrong, not just its letter');
+    assert(card.querySelector('.exp.why-correct'), 'and why the correct option was right');
+  } finally {
+    await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses; State.view = was.view;
+    State.invalidate();
+  }
 });
 
 test('A mock question left blank gets its own group on the results screen', async () => {
