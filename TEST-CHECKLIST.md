@@ -556,8 +556,10 @@ Automated tests cannot verify rendering or real browser storage.
 - [ ] On desktop the rail is unchanged — Light / Keys / Licence still in the
       footer
 - [ ] Settings → About and licence still reaches both the licence and the
-      keyboard shortcuts, which is where the phone's hidden footer sends people says nothing about durability and asks the browser
-      nothing — check `Durability.asked` is still false
+      keyboard shortcuts, which is where the phone's hidden footer sends
+      people — neither screen says anything about durability, and on
+      Firefox merely visiting them must not itself trigger the storage
+      permission prompt
 - [ ] Import questions with no folder and no Drive: Settings → Where your data
       lives explains it, offers folder/install/backup, and shows the button
 - [ ] Connect a folder: the whole block disappears

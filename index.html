@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.30', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.31', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -16943,7 +16943,7 @@ ROUTES.settings = async (root) => {
     // whatever was on disk over this browser's bank with no such gate, or
     // "reconnected" to a file that was not there.
     const st = FileStore.status();
-    const fixable = st.key === 'missing' || st.key === 'changed' || st.key === 'loss';
+    const fixable = st.key === 'missing' || st.key === 'empty' || st.key === 'changed' || st.key === 'loss';
     localBlock.appendChild(h('div', { class: 'eyebrow' }, 'Local folder'));
     localBlock.appendChild(h('div', { class: 'notice bad small' }, fixable
       ? st.label + '. This browser still holds your full bank; the app has stopped writing until you choose which copy to keep.'
@@ -18264,7 +18264,6 @@ const Durability = {
   supported: false,
   granted: false,
   checked: false,
-  asked: false,
 
   api() {
     return (typeof navigator !== 'undefined' && navigator.storage &&
@@ -18287,7 +18286,6 @@ const Durability = {
     this.supported = !!s;
     this.checked = true;
     if (!s) return false;
-    this.asked = true;
     try { this.granted = await s.persist(); } catch (e) { this.granted = false; }
     return this.granted;
   },
@@ -18302,9 +18300,6 @@ const Durability = {
   }
 };
 
-/** True when losing browser storage would lose something that exists nowhere
-    else. A connected folder or Drive makes eviction a non-event: boot reloads
-    the bank from the file. */
 /**
  * A bank file is JSON, or that JSON gzipped — told apart by the two bytes gzip
  * always starts with rather than by anything we have to remember or record.
@@ -18385,6 +18380,12 @@ async function pruneOrphanImages() {
   return gone.length;
 }
 
+/** True when losing browser storage would lose something that exists nowhere
+    else. A connected folder or Drive makes eviction a non-event, since boot
+    reloads the bank from the file — and so, for the same reason, does a
+    folder this browser has connected before but cannot reach at this exact
+    moment (see the reconnect-pending check below): the file is still there,
+    untouched, the moment permission is granted again. */
 function browserIsOnlyCopy() {
   if (FileStore.connected) return false;
   // A folder this browser has connected before, merely awaiting a fresh
@@ -18595,7 +18596,6 @@ const FileStore = {
   _cache: null,
   _journal: [],
   _journalBytes: 0,
-  _lastQuestionCount: 0,
   _diskQuestionCount: 0,   // what the file on disk actually holds
   _lastSize: 0,            // bytes of the last snapshot, drives the cadence
   _shrinkOk: null,         // one-shot consent for a deliberate reduction
@@ -18604,7 +18604,7 @@ const FileStore = {
   _watching: false,
   _watchTimer: null,
   _recovering: false,
-  problem: null,         // null | 'missing' | 'changed' | 'noaccess'
+  problem: null,         // null | 'missing' | 'empty' | 'changed' | 'noaccess' | 'loss'
 
   capability() {
     if (typeof window === 'undefined') return 'manual';
@@ -18786,8 +18786,7 @@ const FileStore = {
     await DB.clearAndPutManyRaw(storeRows);
     this.lastSavedAt = payload.savedAt || null;
     this.lastSnapshotAt = payload.savedAt || null;
-    this._lastQuestionCount = (payload.stores.questions || []).length;
-    this._diskQuestionCount = this._lastQuestionCount;
+    this._diskQuestionCount = (payload.stores.questions || []).length;
     this._shrinkOk = null;
     await this.stampFile();
     this.problem = null;
@@ -19012,6 +19011,7 @@ const FileStore = {
     this.problem = kind;
     if (this._recovering) return;
     if (kind === 'missing') toast('Your data file is no longer in that folder. The app is now read-only.', 'bad', 10000);
+    else if (kind === 'empty') toast('Your data file is empty (0 bytes). The app is now read-only.', 'bad', 10000);
     else if (kind === 'changed') toast('Your data file was changed outside the app. The app is now read-only so it cannot overwrite it.', 'bad', 10000);
     else toast('Lost access to your data file. The app is now read-only.', 'bad', 10000);
     updateStorageBar();
@@ -19241,7 +19241,6 @@ const FileStore = {
 
     this._lastSize = text.length;
     this._diskQuestionCount = qCount;
-    this._lastQuestionCount = qCount;
 
     this._journal = [];
     this._journalBytes = 0;
@@ -19349,6 +19348,7 @@ const FileStore = {
     if (this.tier === 'manual') return { key: 'manual', label: 'In this browser only', tone: 'warn' };
     if (this.connected) return { key: 'connected', label: 'Saving to ' + (this.locationName || 'your file'), tone: 'ok' };
     if (this.problem === 'missing') return { key: 'missing', label: 'Read-only — your data file is gone', tone: 'bad' };
+    if (this.problem === 'empty') return { key: 'empty', label: 'Read-only — your data file is empty', tone: 'bad' };
     if (this.problem === 'changed') return { key: 'changed', label: 'Read-only — file changed outside the app', tone: 'bad' };
     // Checked before the generic needsReconnect fallback below (onLossRisk
     // sets both problem and needsReconnect) — otherwise this state could
@@ -21138,7 +21138,7 @@ function updateStorageBar() {
       text: FileStore.dirty ? 'unsaved changes…' : (FileStore.lastSavedAt ? 'saved ' + fmtDate(FileStore.lastSavedAt, true) : '')
     }));
   }
-  if (st.key === 'missing' || st.key === 'changed' || st.key === 'loss') {
+  if (st.key === 'missing' || st.key === 'empty' || st.key === 'changed' || st.key === 'loss') {
     bar.appendChild(h('button', { class: 'btn sm primary', onclick: () => recoveryFlow(FileStore.problem), text: 'Fix this' }));
   } else if (st.key === 'reconnect') {
     bar.appendChild(h('button', { class: 'btn sm primary', onclick: () => reconnectFlow(), text: 'Reconnect' }));
@@ -21231,6 +21231,33 @@ async function recoveryFlow(kind) {
           h('p', {}, [h('b', { text: DATA_FILE }), ' is no longer in ', h('b', { text: FileStore.locationName || 'that folder' }), '. It may have been deleted, moved, or renamed, or the folder itself may have gone.']),
           h('div', { class: 'notice small' }, 'Nothing has been lost yet. This browser still holds your full bank — ' + qHere + ' question(s) — including everything answered since the file was last written. The app has stopped writing so it cannot quietly recreate a file you meant to remove.'),
           h('p', { class: 'small muted' }, 'If you deleted it on purpose, disconnect instead: Settings → Where your data lives.')
+        ]),
+        actions: [
+          { label: 'Stay read-only', value: '' },
+          { label: 'Choose a different folder…', value: 'reconnect' },
+          { label: 'Write the file again here', value: 'recreate', kind: 'primary' }
+        ]
+      });
+      if (choice === 'recreate') {
+        FileStore.connected = true; FileStore.needsReconnect = false; FileStore.problem = null;
+        FileStore._stamp = null; FileStore.needSnapshot = true; FileStore.dirty = true;
+        const ok = await FileStore.flushNow('snapshot');
+        toast(ok ? 'Your data file has been written again.' : 'Could not write the file.', ok ? 'ok' : 'bad');
+      } else if (choice === 'reconnect') {
+        FileStore._recovering = false;
+        await FileStore.forget();
+        await connectFlow();
+        return;
+      }
+    }
+
+    if (kind === 'empty') {
+      const choice = await modal({
+        title: 'Your data file is empty',
+        body: h('div', { class: 'stack' }, [
+          h('p', {}, [h('b', { text: DATA_FILE }), ' in ', h('b', { text: FileStore.locationName || 'that folder' }), ' is empty (0 bytes). It may have been cleared, truncated mid-write, or replaced by an empty placeholder.']),
+          h('div', { class: 'notice small' }, 'Nothing has been lost yet. This browser still holds your full bank — ' + qHere + ' question(s) — including everything answered since the file was last written. The app has stopped writing so it cannot mistake an empty file for one it is safe to overwrite.'),
+          h('p', { class: 'small muted' }, 'If you meant to clear it, disconnect instead: Settings → Where your data lives.')
         ]),
         actions: [
           { label: 'Stay read-only', value: '' },
@@ -27460,6 +27487,36 @@ test('A file deleted while the app was closed is not resurrected on next launch'
   }
 });
 
+test('A zero-byte data file is reported as empty, not as gone (B124)', async () => {
+  const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, p: FileStore.problem, t: FileStore.tier, e: FileStore.everConnected };
+  const realToast = globalThis.toast;
+  let toastMsg = null;
+  try {
+    FileStore.tier = 'folder'; FileStore.everConnected = true; FileStore.connected = true;
+    FileStore._stamp = null; FileStore.problem = null;
+    FileStore.dirHandle = {
+      getFileHandle: async () => ({ getFile: async () => ({ size: 0, arrayBuffer: async () => new ArrayBuffer(0) }) })
+    };
+    globalThis.toast = (msg) => { toastMsg = msg; };
+
+    const res = await FileStore.loadFromDisk();
+    eq(res, 'empty', 'the loader must tell an empty file apart from a missing one');
+
+    // This is the boot decision B124 is about: passing the real result
+    // through instead of collapsing every non-"loaded" outcome to 'missing'.
+    await FileStore.onProblem(res === 'empty' ? 'empty' : 'missing');
+    assert(FileStore.isReadOnly(), 'the app must be read-only, the same as a missing file');
+    eq(FileStore.problem, 'empty', 'not folded into "missing" — the storage bar and Settings both key off this');
+    assert(/is empty \(0 bytes\)/.test(toastMsg || ''), 'the toast must say the file is empty, not that it is gone: ' + toastMsg);
+    eq(FileStore.status().key, 'empty');
+  } finally {
+    globalThis.toast = realToast;
+    FileStore.connected = was.c; FileStore.dirHandle = was.d; FileStore._stamp = was.s;
+    FileStore.problem = was.p; FileStore.tier = was.t; FileStore.everConnected = was.e;
+    FileStore.needsReconnect = false; FileStore._recovering = false;
+  }
+});
+
 test('A load that fails leaves the app read-only, so the next answer cannot overwrite the file', async () => {
   const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, p: FileStore.problem, t: FileStore.tier, e: FileStore.everConnected, n: FileStore.needsReconnect, z: FileStore._lastSize };
   try {
@@ -27568,17 +27625,16 @@ test('External OCR reports a lapsed folder permission instead of blaming the env
   }
 });
 test('Once a file is known to exist, the write path never creates it', async () => {
-  const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, p: FileStore.problem, t: FileStore.tier, e: FileStore.everConnected, q: FileStore._lastQuestionCount, dq: FileStore._diskQuestionCount, sh: FileStore._shrinkOk };
+  const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, p: FileStore.problem, t: FileStore.tier, e: FileStore.everConnected, dq: FileStore._diskQuestionCount, sh: FileStore._shrinkOk };
   try {
     FileStore.tier = 'folder'; FileStore.everConnected = true; FileStore.connected = true;
     FileStore._stamp = { size: 10, lastModified: 1 };   // we believe a file is there
-    FileStore._lastQuestionCount = 0;
     // The payload below is deliberately empty, and the loss guard reads
-    // _diskQuestionCount, not _lastQuestionCount. On a browser with a real
-    // folder connected that field holds the file's true count, so the write
-    // would be refused as a loss before the path under test is reached — and
-    // the person running the tests would be shown a save-blocked alarm about
-    // a save nobody asked for. Zero what lossCheck actually reads.
+    // _diskQuestionCount. On a browser with a real folder connected that
+    // field holds the file's true count, so the write would be refused as a
+    // loss before the path under test is reached — and the person running
+    // the tests would be shown a save-blocked alarm about a save nobody
+    // asked for. Zero what lossCheck actually reads.
     FileStore._diskQuestionCount = 0;
     const asked = [];
     FileStore.dirHandle = {
@@ -27600,17 +27656,17 @@ test('Once a file is known to exist, the write path never creates it', async () 
   } finally {
     FileStore.connected = was.c; FileStore.dirHandle = was.d; FileStore._stamp = was.s;
     FileStore.problem = was.p; FileStore.tier = was.t; FileStore.everConnected = was.e;
-    FileStore._lastQuestionCount = was.q; FileStore._diskQuestionCount = was.dq;
+    FileStore._diskQuestionCount = was.dq;
     FileStore._shrinkOk = was.sh; FileStore._cache = null;
     FileStore.needsReconnect = false; FileStore._recovering = false;
   }
 });
 test('The rollback copy is taken from the file on disk, not from a copy held in RAM', async () => {
   const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, t: FileStore.tier,
-    e: FileStore.everConnected, dq: FileStore._diskQuestionCount, q: FileStore._lastQuestionCount, sz: FileStore._lastSize };
+    e: FileStore.everConnected, dq: FileStore._diskQuestionCount, sz: FileStore._lastSize };
   try {
     FileStore.tier = 'folder'; FileStore.everConnected = true; FileStore.connected = true;
-    FileStore._diskQuestionCount = 0; FileStore._lastQuestionCount = 0;
+    FileStore._diskQuestionCount = 0;
     FileStore._stamp = { size: 9, lastModified: 1 };        // the last write verified
     const previous = JSON.stringify({ savedAt: 'older', stores: { questions: [] } });
     const files = {}; files[DATA_FILE] = previous;
@@ -27641,7 +27697,7 @@ test('The rollback copy is taken from the file on disk, not from a copy held in 
   } finally {
     FileStore.connected = was.c; FileStore.dirHandle = was.d; FileStore._stamp = was.s;
     FileStore.tier = was.t; FileStore.everConnected = was.e;
-    FileStore._diskQuestionCount = was.dq; FileStore._lastQuestionCount = was.q;
+    FileStore._diskQuestionCount = was.dq;
     FileStore._lastSize = was.sz; FileStore._cache = null;
   }
 });
@@ -27674,12 +27730,12 @@ test('The write-path test neutralises the counter the loss guard actually reads'
   const t = TESTS.find(x => x.name === 'Once a file is known to exist, the write path never creates it');
   assert(t, 'the write-path test must still exist');
   const src = t.fn.toString();
-  assert(/_diskQuestionCount\s*=\s*0/.test(src), 'lossCheck reads _diskQuestionCount, so the test must zero that field, not only _lastQuestionCount');
+  assert(/_diskQuestionCount\s*=\s*0/.test(src), 'lossCheck reads _diskQuestionCount, so the test must zero that field');
   assert(/_diskQuestionCount\s*=\s*was\./.test(src), 'and must put the real count back afterwards');
 });
 
 test('A load that dies half-way still arms the loss guard', async () => {
-  const was = { d: FileStore._diskQuestionCount, q: FileStore._lastQuestionCount, s: FileStore._shrinkOk,
+  const was = { d: FileStore._diskQuestionCount, s: FileStore._shrinkOk,
                 dir: FileStore.dirHandle, fh: FileStore.fileHandle,
                 sz: FileStore._lastSize, st: FileStore._stamp };
   const realClearAndPutMany = DB.clearAndPutManyRaw;
@@ -27699,7 +27755,7 @@ test('A load that dies half-way still arms the loss guard', async () => {
     assert(FileStore.lossCheck(0), 'an emptied browser bank must never overwrite that file');
   } finally {
     DB.clearAndPutManyRaw = realClearAndPutMany;
-    FileStore._diskQuestionCount = was.d; FileStore._lastQuestionCount = was.q; FileStore._shrinkOk = was.s;
+    FileStore._diskQuestionCount = was.d; FileStore._shrinkOk = was.s;
     FileStore.dirHandle = was.dir; FileStore.fileHandle = was.fh;
     FileStore._lastSize = was.sz; FileStore._stamp = was.st;
   }
@@ -27955,7 +28011,7 @@ test('The shrink consent is one-shot, not a standing permission', async () => {
     dirty: FileStore.dirty, journal: FileStore._journal, jb: FileStore._journalBytes,
     js: FileStore._journalStamp, need: FileStore.needSnapshot, prob: FileStore.problem,
     saved: FileStore.lastSavedAt, snap: FileStore.lastSnapshotAt,
-    size: FileStore._lastSize, lq: FileStore._lastQuestionCount
+    size: FileStore._lastSize
   };
   try {
     FileStore._diskQuestionCount = 100;
@@ -27985,14 +28041,14 @@ test('The shrink consent is one-shot, not a standing permission', async () => {
     FileStore.dirty = q.dirty; FileStore._journal = q.journal; FileStore._journalBytes = q.jb;
     FileStore._journalStamp = q.js; FileStore.needSnapshot = q.need; FileStore.problem = q.prob;
     FileStore.lastSavedAt = q.saved; FileStore.lastSnapshotAt = q.snap;
-    FileStore._lastSize = q.size; FileStore._lastQuestionCount = q.lq;
+    FileStore._lastSize = q.size;
     updateStorageBar();
   }
 });
 
 test('Running the write tests leaves the real pending queue alone', async () => {
   const F = FileStore;
-  const was = { c: F.connected, dir: F.dirHandle, dirty: F.dirty, j: F._journal, jb: F._journalBytes, js: F._journalStamp, ns: F.needSnapshot, p: F.problem, sa: F.lastSavedAt, sn: F.lastSnapshotAt, ls: F._lastSize, lq: F._lastQuestionCount, dq: F._diskQuestionCount, sk: F._shrinkOk, st: F._stamp };
+  const was = { c: F.connected, dir: F.dirHandle, dirty: F.dirty, j: F._journal, jb: F._journalBytes, js: F._journalStamp, ns: F.needSnapshot, p: F.problem, sa: F.lastSavedAt, sn: F.lastSnapshotAt, ls: F._lastSize, dq: F._diskQuestionCount, sk: F._shrinkOk, st: F._stamp };
   try {
     F.connected = true; F.dirty = true; F.needSnapshot = true;
     F._journal = [{ o: 'p', s: 'questions', v: { uuid: 'answered-just-now' } }];
@@ -28007,7 +28063,7 @@ test('Running the write tests leaves the real pending queue alone', async () => 
   } finally {
     F.connected = was.c; F.dirHandle = was.dir; F.dirty = was.dirty; F._journal = was.j;
     F._journalBytes = was.jb; F._journalStamp = was.js; F.needSnapshot = was.ns; F.problem = was.p;
-    F.lastSavedAt = was.sa; F.lastSnapshotAt = was.sn; F._lastSize = was.ls; F._lastQuestionCount = was.lq;
+    F.lastSavedAt = was.sa; F.lastSnapshotAt = was.sn; F._lastSize = was.ls;
     F._diskQuestionCount = was.dq; F._shrinkOk = was.sk; F._stamp = was.st; F._cache = null;
   }
 });
@@ -33685,6 +33741,32 @@ test('FileStore.status() reports a blocked write as its own state, not folded in
   }
 });
 
+test('recoveryFlow(\'empty\') offers the same actions as a missing file, worded for an empty one', async () => {
+  const was = {
+    problem: FileStore.problem, connected: FileStore.connected, needsReconnect: FileStore.needsReconnect,
+    stamp: FileStore._stamp, needSnapshot: FileStore.needSnapshot, dirty: FileStore.dirty,
+    flushNow: FileStore.flushNow, recovering: FileStore._recovering
+  };
+  const realModal = globalThis.modal;
+  let modalTitle = null, modalActionValues = null, flushMode = null;
+  try {
+    FileStore.problem = 'empty'; FileStore.connected = false; FileStore.needsReconnect = true; FileStore._recovering = false;
+    FileStore.flushNow = async (mode) => { flushMode = mode; return true; };
+    globalThis.modal = async (o) => { modalTitle = o.title; modalActionValues = o.actions.map(a => a.value); return 'recreate'; };
+    await recoveryFlow('empty');
+    eq(modalTitle, 'Your data file is empty', 'must not reuse the "gone" dialog title for a file that is still there, just empty');
+    eq(modalActionValues.length, 3, 'the same three-way choice a missing file offers');
+    assert(modalActionValues.indexOf('recreate') >= 0 && modalActionValues.indexOf('reconnect') >= 0, 'write again here, or choose a different folder');
+    eq(flushMode, 'snapshot', 'choosing to write it again does a real snapshot write, the same recovery a missing file gets');
+    eq(FileStore.problem, null, 'no longer read-only once recreated');
+  } finally {
+    globalThis.modal = realModal;
+    FileStore.problem = was.problem; FileStore.connected = was.connected; FileStore.needsReconnect = was.needsReconnect;
+    FileStore._stamp = was.stamp; FileStore.needSnapshot = was.needSnapshot; FileStore.dirty = was.dirty;
+    FileStore.flushNow = was.flushNow; FileStore._recovering = was.recovering;
+  }
+});
+
 test('Settings offers the recovery dialog, not a bare Reconnect, when the file is gone or was rewritten', async () => {
   const was = { t: FileStore.tier, c: FileStore.connected, n: FileStore.needsReconnect, p: FileStore.problem, e: FileStore.everConnected,
     course: State.course, courses: State.courses };
@@ -33695,7 +33777,7 @@ test('Settings offers the recovery dialog, not a bare Reconnect, when the file i
     State.course = makeCourse('ZTEST', 'Settings test course', CISA_BLUEPRINT, {});
     State.courses = [State.course];
     FileStore.tier = 'folder'; FileStore.everConnected = true; FileStore.connected = false; FileStore.needsReconnect = true;
-    for (const p of ['missing', 'changed', 'loss']) {
+    for (const p of ['missing', 'empty', 'changed', 'loss']) {
       FileStore.problem = p;
       root.textContent = '';
       await ROUTES.settings(root);
@@ -34030,10 +34112,11 @@ async function boot() {
       if (res === 'loaded') {
         FileStore.startWatch();
       } else {
-        // A remembered folder that no longer holds our file. Recreating it
-        // here would quietly undo a deletion the person may have meant, and
-        // would look identical to nothing being wrong. Stop and ask instead.
-        await FileStore.onProblem('missing');
+        // A remembered folder that no longer holds our file, or holds a
+        // zero-byte one. Recreating or overwriting it here would quietly
+        // undo something the person may have meant, and would look
+        // identical to nothing being wrong. Stop and ask instead.
+        await FileStore.onProblem(res === 'empty' ? 'empty' : 'missing');
       }
     } catch (e) {
       FileStore.connected = false;
