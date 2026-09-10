@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.26', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.27', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -31491,6 +31491,28 @@ test('Per-course question count comes from the index, not a full read', async ()
     State.course = was.course; State.courses = was.courses;
   }
 });
+test('Questions.byCourse stays index-backed, never a cursor scan of the whole store', async () => {
+  // DB.each() is the only caller of openCursor anywhere in the DAL — every
+  // other read goes through getAll() on an index or the whole store. Proving
+  // byCourse() never calls DB.each is exactly proving it never falls back to
+  // stepping every row in the store looking for the ones that match.
+  const cid = 'test-bycourse-index-' + Date.now();
+  const q = mkQ('index, not a scan', ['a', 'b'], 0, { courseId: cid, status: 'active' });
+  await DB.put('questions', q);
+  const origEach = DB.each, origByIndex = DB.byIndex;
+  let eachCalls = 0, byIndexCalls = 0;
+  DB.each = function (...args) { eachCalls++; return origEach.apply(this, args); };
+  DB.byIndex = function (...args) { byIndexCalls++; return origByIndex.apply(this, args); };
+  try {
+    const got = await Questions.byCourse(cid);
+    eq(got.length, 1, 'the question is still found');
+    eq(eachCalls, 0, 'byCourse must never fall back to a cursor scan');
+    eq(byIndexCalls, 1, 'exactly one indexed request, not a scan');
+  } finally {
+    DB.each = origEach; DB.byIndex = origByIndex;
+    await DB.del('questions', q.uuid);
+  }
+});
 test('The dashboard reads the session store once per render', async () => {
   // ROUTES.dashboard reads State.course throughout; the suite can run before
   // any course has been selected, unlike the app proper.
@@ -31930,6 +31952,48 @@ test('A merge writing Drive’s own rows back does not arm a push', async () => 
   } finally {
     D.connected = saved.c; D.configured = saved.g;
     D._applyingMerge = saved.a; D._pendingChange = saved.p; D._firstUnpushedChangeAt = saved.f;
+    if (savedMark) await FileStore.setMeta('driveDirtySince', savedMark);
+    else await FileStore.delMeta('driveDirtySince');
+  }
+});
+
+test('A real catch-up against a content-identical remote never arms or fires a Drive push', async () => {
+  // The test above proves DriveSync.touch()'s own guard in isolation. This
+  // drives the real _mergeInRemote() end to end — building an actual local
+  // payload, merging it against a byte-identical "remote" copy, and letting
+  // applyMergedBank() make its real DB writes — to prove the guard actually
+  // holds across that whole path, not just at the one call site tested above.
+  const D = DriveSync;
+  const saved = {
+    c: D.connected, g: D.configured, a: D._applyingMerge, p: D._pendingChange,
+    f: D._firstUnpushedChangeAt, t: D._debounceTimer, push: D.push
+  };
+  const savedMark = await FileStore.meta('driveDirtySince');
+  let pushCalls = 0;
+  D.push = async () => { pushCalls++; };
+  try {
+    clearTimeout(D._debounceTimer); D._debounceTimer = null;
+    D.connected = true; D.configured = true;
+    D._applyingMerge = false;
+    D._pendingChange = false; D._firstUnpushedChangeAt = null;
+    await FileStore.delMeta('driveDirtySince');
+
+    const local = await FileStore.buildPayload();
+    const remote = JSON.parse(JSON.stringify(local));   // content-identical, by construction
+
+    await D._mergeInRemote(remote);
+
+    // A timer that was never armed has nothing a real debounce wait could
+    // flush into a push — this is the direct proof of that, not an
+    // inference from waiting DRIVE_PUSH_DEBOUNCE_MS in a test.
+    eq(D._debounceTimer, null, 'a merge that changed nothing must not arm a debounced push');
+    assert(!D._pendingChange, 'and must not mark anything as this browser\'s own unpushed work');
+    eq(pushCalls, 0, 'so no push is ever made — stubbed here to prove it outright, not just infer it from timer state');
+  } finally {
+    D.push = saved.push;
+    clearTimeout(D._debounceTimer);
+    D.connected = saved.c; D.configured = saved.g; D._applyingMerge = saved.a;
+    D._pendingChange = saved.p; D._firstUnpushedChangeAt = saved.f; D._debounceTimer = saved.t;
     if (savedMark) await FileStore.setMeta('driveDirtySince', savedMark);
     else await FileStore.delMeta('driveDirtySince');
   }
