@@ -119,9 +119,12 @@ have used for decades.
 Debounced 700 ms. Cost is proportional to what actually changed.
 
 **Snapshot.** The whole bank is rewritten to `mcq-mastery-data.json` when a
-session ends, after an import, when the tab closes or is hidden, when the
-journal passes 400 KB, or on a timer. The journal is then emptied, because the
-snapshot supersedes it.
+session ends, after an import, when the tab closes, when the journal passes
+400 KB, or on a timer. The journal is then emptied, because the snapshot
+supersedes it. Hiding the tab (backgrounding it, switching apps) writes too,
+but only through the same journal append every other change makes — a full
+rewrite there, every single time, regardless of whether anything was even
+pending, was the fix this replaced.
 
 **Load.** Read the snapshot, then replay the journal on top. The two together
 are always the complete picture.
@@ -882,6 +885,26 @@ differs. `answerChangeReport()` classifies on **first against final**, not on
 each hop, because the hops say nothing about instinct and nobody remembers
 them. A change that lands back where it started is counted as a change and
 appears in none of the three outcomes, because it changed nothing.
+
+The exam-centre ceremony (`examDayFlow()`) runs once per session, gated by
+`!s.seatedAt` — resuming a mock after a reload or a browser restart skips
+straight past it, since `seatedAt` is stamped the moment the ceremony ends,
+skipped or completed, before the clock starts. `simSkipped` records which of
+the two happened, purely for later inspection; nothing else branches on it.
+`session.announced` holds the in-exam time warnings `examAnnouncer()` has
+already fired, so a resumed session does not repeat one moments after it
+last spoke.
+
+`leftAt` and `lastTickAt` are what `resumeGapMs()` reads to decide how much
+real time a resumed mock owes. `lastTickAt` is stamped on every one-second
+tick while the session runs (and persisted by the same periodic checkpoint
+that already exists for the elapsed-time counter); `leftAt` only on a
+guarded Leave/Pause. With pausing disabled (`mockAllowPause`, off by
+default) the gap is charged from whichever of the two is more recent — a
+closed, reloaded or crashed tab included, none of which ever ran the guard
+— so the one exit nobody had to confirm cannot be a free pause. With
+pausing allowed, only an explicit `leftAt` counts, so a reload or crash
+costs nothing, matching what a real pause means.
 
 ## The distractors
 

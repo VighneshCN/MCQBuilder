@@ -682,6 +682,34 @@ You are asked which you want: everything you have ever got wrong, or only what
 you have not since put right. The second uses the same test Last-mile revision
 uses, so the page you print and the session you sit cannot disagree.
 
+### Sitting a timed mock
+
+A timed mock opens with a short exam-centre simulation before the clock
+starts — arrival, registration, a hall ticket, a door check, handing in
+phones and watches, taking your seat, a countdown. It runs once, the first
+time you start that particular mock; resuming later returns you to the
+desk, not the gate. Settings → **Exam centre simulation before a timed
+mock** turns it off; it is on by default.
+
+Registration asks your name once, for the hall ticket — kept in this
+browser only, never exported, never attached to a question. Leave it blank
+and you sit as "Candidate". Press **Skip to seat** in the top bar, or
+**Esc**, at any point, and you are straight at the paper — the same one
+the full ceremony leads to either way.
+
+One scene offers full screen, kept to a genuine click because that is the
+only moment a browser will actually grant it. Declining costs nothing; the
+paper runs exactly the same either way.
+
+Leaving mid-mock — closing the tab, navigating away, a phone putting the
+app to sleep — is not a free pause by default: the confirmation says so
+plainly ("Pausing is disabled in Settings, so the timer keeps running"),
+and the time you were away is charged the moment you come back, the same
+as a real hall. Settings → **Allow pausing a mock exam** turns that off:
+the same button then reads **Pause** rather than **Leave**, and stopping
+really does stop the clock until you resume. Off by default, because the
+real exam does not pause either.
+
 ### Would that have been a pass?
 
 Counting questions is not how any exam is marked. Settings → **How this exam is
