@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.16', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.17', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -16812,7 +16812,7 @@ ROUTES.settings = async (root) => {
     // whatever was on disk over this browser's bank with no such gate, or
     // "reconnected" to a file that was not there.
     const st = FileStore.status();
-    const fixable = st.key === 'missing' || st.key === 'changed';
+    const fixable = st.key === 'missing' || st.key === 'changed' || st.key === 'loss';
     localBlock.appendChild(h('div', { class: 'eyebrow' }, 'Local folder'));
     localBlock.appendChild(h('div', { class: 'notice bad small' }, fixable
       ? st.label + '. This browser still holds your full bank; the app has stopped writing until you choose which copy to keep.'
@@ -18233,6 +18233,13 @@ async function pruneOrphanImages() {
 
 function browserIsOnlyCopy() {
   if (FileStore.connected) return false;
+  // A folder this browser has connected before, merely awaiting a fresh
+  // permission grant (or the recovery dialog, for 'loss'), is not "nowhere
+  // else" — the data is still sitting in that file; this app just cannot
+  // reach it this moment. The storage bar's own Reconnect/Fix this button
+  // is already the correct fix for that state; this only stops the risk
+  // banner and Settings from talking over it with "connect something new".
+  if (FileStore.everConnected && FileStore.needsReconnect) return false;
   if (typeof DriveSync !== 'undefined' && DriveSync.configured) return false;
   return true;
 }
@@ -19124,30 +19131,7 @@ const FileStore = {
       if (FileStore._recovering) return;
       FileStore._recovering = true;
       try {
-        const choice = await modal({
-          title: 'Save blocked to protect your questions',
-          body: h('div', { class: 'stack' }, [
-            h('div', { class: 'notice bad' }, reason),
-            h('p', {}, 'Writing now would remove questions from your file that nothing asked to remove, so the save was refused. Your file is untouched.'),
-            h('p', { class: 'small muted' }, 'This usually means something went wrong loading the file at startup. Reloading the page is the safe first move — your file still holds everything.'),
-            h('p', { class: 'small muted' }, 'Only continue if you genuinely intended to reduce the bank to ' + newCount + ' question(s).')
-          ]),
-          actions: [
-            { label: 'Leave the file alone', value: '' },
-            { label: 'Reload the file from disk', value: 'reload', kind: 'primary' },
-            { label: 'I meant this — save anyway', value: 'force', kind: 'danger' }
-          ]
-        });
-        if (choice === 'reload') {
-          FileStore.connected = true; FileStore.needsReconnect = false; FileStore.problem = null;
-          try { await FileStore.loadFromDisk(); toast('Reloaded from your file. Nothing was lost.', 'ok'); }
-          catch (e) { toast('Could not reload: ' + e.message, 'bad', 9000); }
-        } else if (choice === 'force') {
-          FileStore.connected = true; FileStore.needsReconnect = false; FileStore.problem = null;
-          FileStore.allowShrink('confirmed by the user');
-          FileStore.needSnapshot = true; FileStore.dirty = true;
-          await FileStore.flushNow('snapshot');
-        }
+        await lossRecoveryChoice(reason, newCount);
       } finally {
         FileStore._recovering = false;
         updateStorageBar();
@@ -19161,6 +19145,12 @@ const FileStore = {
     if (this.connected) return { key: 'connected', label: 'Saving to ' + (this.locationName || 'your file'), tone: 'ok' };
     if (this.problem === 'missing') return { key: 'missing', label: 'Read-only — your data file is gone', tone: 'bad' };
     if (this.problem === 'changed') return { key: 'changed', label: 'Read-only — file changed outside the app', tone: 'bad' };
+    // Checked before the generic needsReconnect fallback below (onLossRisk
+    // sets both problem and needsReconnect) — otherwise this state could
+    // never be told apart from an ordinary lapsed permission, and both the
+    // storage bar and Settings would offer a bare Reconnect instead of the
+    // three-way choice a blocked write actually needs.
+    if (this.problem === 'loss') return { key: 'loss', label: 'Read-only — save was blocked to protect your file', tone: 'bad' };
     if (this.needsReconnect) return { key: 'reconnect', label: 'Read-only — reconnect your file', tone: 'bad' };
     return { key: 'local', label: 'In this browser only', tone: 'warn' };
   }
@@ -20832,6 +20822,44 @@ function updateStorageBar() {
 }
 
 /**
+ * The three-way choice for a write FileStore refused to protect the file:
+ * stay read-only, reload from disk, or confirm the shrink was genuinely
+ * meant. Shared by the moment a write is actually refused (onLossRisk,
+ * which knows the exact reason and the count it was refused with) and by
+ * reaching the same 'loss' state again later through Fix this / Reconnect
+ * (recoveryFlow, which knows neither — the refusal was earlier, maybe a
+ * different page load — so it falls back to counting what's in the bank
+ * right now).
+ */
+async function lossRecoveryChoice(reason, newCount) {
+  const count = newCount != null ? newCount : await DB.count('questions');
+  const choice = await modal({
+    title: 'Save blocked to protect your questions',
+    body: h('div', { class: 'stack' }, [
+      reason ? h('div', { class: 'notice bad' }, reason) : null,
+      h('p', {}, 'Writing would remove questions from your file that nothing asked to remove, so the save was refused. Your file is untouched.'),
+      h('p', { class: 'small muted' }, 'This usually means something went wrong loading the file at startup. Reloading the page is the safe first move — your file still holds everything.'),
+      h('p', { class: 'small muted' }, 'Only continue if you genuinely intended to reduce the bank to ' + count + ' question(s).')
+    ].filter(Boolean)),
+    actions: [
+      { label: 'Leave the file alone', value: '' },
+      { label: 'Reload the file from disk', value: 'reload', kind: 'primary' },
+      { label: 'I meant this — save anyway', value: 'force', kind: 'danger' }
+    ]
+  });
+  if (choice === 'reload') {
+    FileStore.connected = true; FileStore.needsReconnect = false; FileStore.problem = null;
+    try { await FileStore.loadFromDisk(); toast('Reloaded from your file. Nothing was lost.', 'ok'); }
+    catch (e) { toast('Could not reload: ' + e.message, 'bad', 9000); }
+  } else if (choice === 'force') {
+    FileStore.connected = true; FileStore.needsReconnect = false; FileStore.problem = null;
+    FileStore.allowShrink('confirmed by the user');
+    FileStore.needSnapshot = true; FileStore.dirty = true;
+    await FileStore.flushNow('snapshot');
+  }
+}
+
+/**
  * The file is gone, or someone else wrote it. Both are recoverable, but only
  * the person knows which copy they meant to keep, so this asks rather than
  * assumes. Nothing is written until they choose.
@@ -20970,6 +20998,15 @@ async function recoveryFlow(kind) {
       });
       if (choice) await reconnectFlow();
     }
+
+    if (kind === 'loss') {
+      // Reached later than the moment the write was actually refused — via
+      // the storage bar's or Settings' "Fix this", after a reload, or from
+      // reconnectFlow() declining to run a bare reconnect for this problem
+      // — so neither the original reason text nor the exact count it was
+      // refused with survive to be shown; the same three-way choice does.
+      await lossRecoveryChoice(null, null);
+    }
   } finally {
     FileStore._recovering = false;
     updateStorageBar();
@@ -20978,6 +21015,14 @@ async function recoveryFlow(kind) {
 }
 
 async function reconnectFlow() {
+  // A blocked write is not an access problem a permission re-grant can fix
+  // — the file and this browser's bank disagree by more than the loss
+  // guard allows, and running the ordinary reconnect logic below would
+  // silently pick one of "reload" or "keep writing over it" for you, with
+  // none of the three-way choice this state actually needs. Route there
+  // instead, exactly as the storage bar's and Settings' own "Fix this"
+  // (rather than "Reconnect") already do once status() reports 'loss'.
+  if (FileStore.problem === 'loss') { await recoveryFlow('loss'); return; }
   try {
     const ok = await FileStore.reconnect();
     if (!ok) { toast('Permission was not granted. Still read-only.', 'bad'); updateStorageBar(); return; }
@@ -21913,7 +21958,13 @@ async function disconnectFlow() {
     actions: [{ label: 'Cancel', value: false }, { label: 'Disconnect', value: true, kind: 'danger' }]
   });
   if (!ok) return;
-  await FileStore.flushNow();
+  // A plain flushNow() may only append to the journal rather than rewrite
+  // the real data file — forget() right after severs the connection
+  // entirely, so an answer that landed in the journal only would exist
+  // nowhere else this promise ("everything saved up to now") covers:
+  // README tells anyone copying the bank by hand to take data.json alone
+  // and treat the journal as disposable.
+  await FileStore.flushNow('snapshot');
   await FileStore.forget();
   updateStorageBar();
   toast('Disconnected. Your file was saved first.', 'ok');
@@ -21955,7 +22006,11 @@ async function driveConnectFlow() {
       actions: [{ label: 'Cancel', value: false }, { label: 'Switch to Google Drive', value: true, kind: 'primary' }]
     });
     if (!ok) return;
-    await FileStore.flushNow();
+    // Same reasoning as disconnectFlow(): forget() severs the folder right
+    // after, so a plain flushNow() leaving the last answer journal-only
+    // would leave it nowhere this "keeps everything saved up to now"
+    // promise actually covers once the folder is gone.
+    await FileStore.flushNow('snapshot');
     await FileStore.forget();
     updateStorageBar();
   } else if (FileStore.needsReconnect) {
@@ -32182,6 +32237,34 @@ test('Every disconnected state offers a way out, on every browser', () => {
   }
 });
 
+test('browserIsOnlyCopy() does not call a folder merely awaiting reconnection "nowhere else"', () => {
+  const was = { connected: FileStore.connected, everConnected: FileStore.everConnected, needsReconnect: FileStore.needsReconnect };
+  const savedDrive = typeof DriveSync !== 'undefined' ? { configured: DriveSync.configured } : null;
+  try {
+    if (savedDrive) DriveSync.configured = false;
+    FileStore.connected = false; FileStore.everConnected = false; FileStore.needsReconnect = false;
+    assert(browserIsOnlyCopy(), 'a browser that has never had a folder is genuinely browser-only');
+    FileStore.everConnected = true; FileStore.needsReconnect = true;
+    assert(!browserIsOnlyCopy(), 'a folder merely awaiting reconnection is not "nowhere else" — the file still holds it');
+    FileStore.connected = true; FileStore.needsReconnect = false;
+    assert(!browserIsOnlyCopy(), 'and an actually-connected folder obviously is not either');
+  } finally {
+    FileStore.connected = was.connected; FileStore.everConnected = was.everConnected; FileStore.needsReconnect = was.needsReconnect;
+    if (savedDrive) DriveSync.configured = savedDrive.configured;
+  }
+});
+test('FileStore.status() reports a blocked write as its own state, not folded into an ordinary lapsed permission', () => {
+  const was = { connected: FileStore.connected, needsReconnect: FileStore.needsReconnect, problem: FileStore.problem, tier: FileStore.tier };
+  try {
+    // onLossRisk() always sets both of these together — needsReconnect is
+    // what used to intercept 'loss' before it ever reached its own check.
+    FileStore.tier = 'folder'; FileStore.connected = false; FileStore.needsReconnect = true; FileStore.problem = 'loss';
+    eq(FileStore.status().key, 'loss', 'a blocked write must not read as a bare "reconnect your file"');
+  } finally {
+    FileStore.connected = was.connected; FileStore.needsReconnect = was.needsReconnect; FileStore.problem = was.problem; FileStore.tier = was.tier;
+  }
+});
+
 test('Settings offers the recovery dialog, not a bare Reconnect, when the file is gone or was rewritten', async () => {
   const was = { t: FileStore.tier, c: FileStore.connected, n: FileStore.needsReconnect, p: FileStore.problem, e: FileStore.everConnected,
     course: State.course, courses: State.courses };
@@ -32192,7 +32275,7 @@ test('Settings offers the recovery dialog, not a bare Reconnect, when the file i
     State.course = makeCourse('ZTEST', 'Settings test course', CISA_BLUEPRINT, {});
     State.courses = [State.course];
     FileStore.tier = 'folder'; FileStore.everConnected = true; FileStore.connected = false; FileStore.needsReconnect = true;
-    for (const p of ['missing', 'changed']) {
+    for (const p of ['missing', 'changed', 'loss']) {
       FileStore.problem = p;
       root.textContent = '';
       await ROUTES.settings(root);
@@ -32208,6 +32291,49 @@ test('Settings offers the recovery dialog, not a bare Reconnect, when the file i
   } finally {
     FileStore.tier = was.t; FileStore.connected = was.c; FileStore.needsReconnect = was.n; FileStore.problem = was.p; FileStore.everConnected = was.e;
     State.course = was.course; State.courses = was.courses;
+  }
+});
+
+test('reconnectFlow() routes a blocked write to the recovery dialog instead of a bare reconnect', async () => {
+  const was = { problem: FileStore.problem, reconnect: FileStore.reconnect, recovering: FileStore._recovering };
+  const realModal = globalThis.modal;
+  let reconnectCalled = false, modalTitle = null;
+  try {
+    FileStore.problem = 'loss';
+    FileStore._recovering = false;
+    FileStore.reconnect = async () => { reconnectCalled = true; return true; };
+    globalThis.modal = async (o) => { modalTitle = o.title; return ''; }; // 'Leave the file alone'
+    await reconnectFlow();
+    assert(!reconnectCalled, 'the ordinary reconnect must never run for a blocked write — it would silently pick reload or force with no choice offered');
+    eq(modalTitle, 'Save blocked to protect your questions', 'the three-way recovery dialog must be the one actually shown');
+  } finally {
+    globalThis.modal = realModal;
+    FileStore.problem = was.problem; FileStore.reconnect = was.reconnect; FileStore._recovering = was.recovering;
+  }
+});
+
+test('disconnectFlow() forces a real snapshot before severing the folder, not just a journal append', async () => {
+  const was = {
+    modal: globalThis.modal, connected: FileStore.connected, dirty: FileStore.dirty,
+    verifyFile: FileStore.verifyFile, writeSnapshot: FileStore._writeSnapshot,
+    appendJournal: FileStore._appendJournal, forget: FileStore.forget
+  };
+  let snapshotCalled = false, journalCalled = false, forgetCalled = false;
+  try {
+    globalThis.modal = async () => true; // 'Disconnect'
+    FileStore.connected = true; FileStore.dirty = true;
+    FileStore.verifyFile = async () => 'ok';
+    FileStore._writeSnapshot = async () => { snapshotCalled = true; return true; };
+    FileStore._appendJournal = async () => { journalCalled = true; return true; };
+    FileStore.forget = async () => { forgetCalled = true; };
+    await disconnectFlow();
+    assert(snapshotCalled, 'disconnecting must force a real snapshot write, not leave it to snapshotDue()');
+    assert(!journalCalled, 'a journal-only append is not enough the moment before the folder is severed — "your file...keeps everything saved up to now" must be true of data.json itself');
+    assert(forgetCalled, 'and the folder is still actually disconnected afterwards');
+  } finally {
+    globalThis.modal = was.modal; FileStore.connected = was.connected; FileStore.dirty = was.dirty;
+    FileStore.verifyFile = was.verifyFile; FileStore._writeSnapshot = was.writeSnapshot;
+    FileStore._appendJournal = was.appendJournal; FileStore.forget = was.forget;
   }
 });
 
