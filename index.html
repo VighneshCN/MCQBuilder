@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.22', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.23', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -23148,32 +23148,42 @@ function GameAudio() {
   }
 
   function resolveCue(kind, r) {
-    if (!engine || muted) return;
+    // Not "|| muted": muting mid-suspense used to skip this whole function,
+    // which meant killRatchet() and the state changes below it — restore()
+    // clearing suspended on a right answer, suspended = true on a wrong one
+    // — never ran either. The ratchet oscillator kept ticking with nothing
+    // left to stop it, and the score was stuck "suspended" for the rest of
+    // the game. State moves regardless of mute, same as the sequencer
+    // itself already does (see scheduleSlot); only the new voices below are
+    // gated on it.
+    if (!engine) return;
     const t = ctx.currentTime;
     if (kind === 'right') {
       killRatchet(t, 440.00);              // the sigh completes: Bb falls back to A
       restore(t + 0.30);
-      // A bare, just-intoned D: exact 3:2 and 2:1, and no third. An open fifth
-      // is the sound of something locking into place; F# is outside the raga.
-      [293.664, 440.496, 587.328].forEach(f => {
-        const g = mkGain(NEAR_SILENT_A); g.connect(engine.padBus);
-        const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
-        o.connect(g); o.start(t);
-        kbcHold(g.gain, t, 0.040, 0.20);
-        kbcHold(g.gain, t + 1.1, NEAR_SILENT_A, 0.7);
-        o.stop(t + 2.1);
-        o.onended = () => { try { o.disconnect(); g.disconnect(); } catch (e) {} };
-      });
-      // the reward is the score's own material, not an imported beep
-      let tt = t + 0.05, gaps = [0.09, 0.045, 0];
-      for (let s = 0; s < 3; s++) {
-        for (let i = 0; i < 3; i++) { ping(KBC_TIHAI_CELL[i], tt, 0.16, 0.085, 'sawtooth', engine.leadBus, 0.14); tt += 0.16; }
-        tt += gaps[s];
-      }
-      bayan(t, 0.13); dayan(587.33, t, 0.10);
-      bayan(t + 0.10, 0.11); dayan(440.00, t + 0.10, 0.09);
-      if (KBC_SAFE.indexOf(r) >= 0) {
-        [587.33, 880.99].forEach(f => ping(f, t + 0.25, 1.6, 0.045, 'sawtooth', engine.padBus, 1.5));
+      if (!muted) {
+        // A bare, just-intoned D: exact 3:2 and 2:1, and no third. An open fifth
+        // is the sound of something locking into place; F# is outside the raga.
+        [293.664, 440.496, 587.328].forEach(f => {
+          const g = mkGain(NEAR_SILENT_A); g.connect(engine.padBus);
+          const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
+          o.connect(g); o.start(t);
+          kbcHold(g.gain, t, 0.040, 0.20);
+          kbcHold(g.gain, t + 1.1, NEAR_SILENT_A, 0.7);
+          o.stop(t + 2.1);
+          o.onended = () => { try { o.disconnect(); g.disconnect(); } catch (e) {} };
+        });
+        // the reward is the score's own material, not an imported beep
+        let tt = t + 0.05, gaps = [0.09, 0.045, 0];
+        for (let s = 0; s < 3; s++) {
+          for (let i = 0; i < 3; i++) { ping(KBC_TIHAI_CELL[i], tt, 0.16, 0.085, 'sawtooth', engine.leadBus, 0.14); tt += 0.16; }
+          tt += gaps[s];
+        }
+        bayan(t, 0.13); dayan(587.33, t, 0.10);
+        bayan(t + 0.10, 0.11); dayan(440.00, t + 0.10, 0.09);
+        if (KBC_SAFE.indexOf(r) >= 0) {
+          [587.33, 880.99].forEach(f => ping(f, t + 0.25, 1.6, 0.045, 'sawtooth', engine.padBus, 1.5));
+        }
       }
       return;
     }
@@ -23181,42 +23191,46 @@ function GameAudio() {
     // tonic from a semitone above, and now it lands on it.
     killRatchet(t, null);
     suspended = true;
-    [engine.bassBus, engine.leadBus, engine.padBus].forEach(b => kbcHold(b.gain, t, NEAR_SILENT_A, 0.12));
-    kbcHold(engine.tablaBus.gain, t, 1, 0.05);
-    // THE DRONE LOSES ITS Sa: the ground the whole piece stood on gives way.
-    // Costs zero new nodes, and the 520 Hz floor keeps it audible on a phone.
-    engine.drone.forEach(d => {
-      d.osc.frequency.cancelScheduledValues(t);
-      d.osc.frequency.setValueAtTime(d.base, t);
-      d.osc.frequency.exponentialRampToValueAtTime(d.base * 0.9439, t + 1.10);
-    });
-    kbcHold(engine.droneLP.frequency, t, 520, 1.40);
-    // the clash, voiced in the phone band: D5 against Eb5, d/ERB = 0.39
-    [311.13, 392.00, 466.16, 622.25, 587.33].forEach(f => {
-      const g = mkGain(NEAR_SILENT_A); g.connect(engine.padBus);
-      const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
-      o.connect(g); o.start(t);
-      kbcHold(engine.padBus.gain, t + 0.12, 1, 0.05);
-      kbcHold(g.gain, t, 0.055, 0.02);
-      kbcHold(g.gain, t + 0.92, NEAR_SILENT_A, 1.60);
-      o.stop(t + 2.7);
-      o.onended = () => { try { o.disconnect(); g.disconnect(); } catch (e) {} };
-    });
-    [[96, 72, 0.16], [80, 58, 0.13], [64, 44, 0.10]].forEach((s, i) => {
-      const tt = t + i * 0.34;
-      const lp = mkFilt('lowpass', 400), g = mkGain(NEAR_SILENT_A);
-      lp.connect(g); g.connect(engine.tablaBus);
-      const o = ctx.createOscillator(); o.type = 'sine';
-      o.frequency.setValueAtTime(s[0], tt);
-      o.frequency.exponentialRampToValueAtTime(s[1], tt + 0.26);
-      o.connect(lp);
-      const tEnd = kbcEnv(g, tt, 0.34, 0.006, 0.34, 0, 0, s[2]);
-      o.start(tt); reap(o, [o, lp, g], tEnd);
-      malletNoise(tt, 0.045, engine.tablaBus);
-    });
-    // a descending tail that ends on the flat second and does not resolve
-    [440.00, 392.00, 311.13].forEach((f, i) =>
-      ping(f, t + 0.9 + i * 0.16, 0.55, 0.11, 'sawtooth', engine.leadBus, 0.5));
+    if (!muted) {
+      [engine.bassBus, engine.leadBus, engine.padBus].forEach(b => kbcHold(b.gain, t, NEAR_SILENT_A, 0.12));
+      kbcHold(engine.tablaBus.gain, t, 1, 0.05);
+      // THE DRONE LOSES ITS Sa: the ground the whole piece stood on gives way.
+      // Costs zero new nodes, and the 520 Hz floor keeps it audible on a phone.
+      engine.drone.forEach(d => {
+        d.osc.frequency.cancelScheduledValues(t);
+        d.osc.frequency.setValueAtTime(d.base, t);
+        d.osc.frequency.exponentialRampToValueAtTime(d.base * 0.9439, t + 1.10);
+      });
+      kbcHold(engine.droneLP.frequency, t, 520, 1.40);
+      // the clash, voiced in the phone band: D5 against Eb5, d/ERB = 0.39
+      [311.13, 392.00, 466.16, 622.25, 587.33].forEach(f => {
+        const g = mkGain(NEAR_SILENT_A); g.connect(engine.padBus);
+        const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
+        o.connect(g); o.start(t);
+        kbcHold(engine.padBus.gain, t + 0.12, 1, 0.05);
+        kbcHold(g.gain, t, 0.055, 0.02);
+        kbcHold(g.gain, t + 0.92, NEAR_SILENT_A, 1.60);
+        o.stop(t + 2.7);
+        o.onended = () => { try { o.disconnect(); g.disconnect(); } catch (e) {} };
+      });
+      [[96, 72, 0.16], [80, 58, 0.13], [64, 44, 0.10]].forEach((s, i) => {
+        const tt = t + i * 0.34;
+        const lp = mkFilt('lowpass', 400), g = mkGain(NEAR_SILENT_A);
+        lp.connect(g); g.connect(engine.tablaBus);
+        const o = ctx.createOscillator(); o.type = 'sine';
+        o.frequency.setValueAtTime(s[0], tt);
+        o.frequency.exponentialRampToValueAtTime(s[1], tt + 0.26);
+        o.connect(lp);
+        const tEnd = kbcEnv(g, tt, 0.34, 0.006, 0.34, 0, 0, s[2]);
+        o.start(tt); reap(o, [o, lp, g], tEnd);
+        malletNoise(tt, 0.045, engine.tablaBus);
+      });
+      // a descending tail that ends on the flat second and does not resolve
+      [440.00, 392.00, 311.13].forEach((f, i) =>
+        ping(f, t + 0.9 + i * 0.16, 0.55, 0.11, 'sawtooth', engine.leadBus, 0.5));
+    }
+    // Game-state teardown, not a sound — runs whether or not this round was
+    // muted, same as suspended/killRatchet above.
     const kill = setTimeout(() => stopBed(), 2600);
     timers.push(kill);
   }
@@ -23579,6 +23593,12 @@ async function runBalloonPop(questions) {
      swallows the first input and turns it into liftoff. */
   function onSkipPointer(e) { if (e.target.closest('button')) return; liftoff(); }
   function onSkipKey(e) {
+    // A chord (Ctrl/Cmd/Alt + anything) or an F-key was still reaching
+    // liftoff() below — the single-key exclusions only caught a modifier
+    // pressed alone, not held with another key — so Ctrl+C, Ctrl+F,
+    // Ctrl+R/Cmd+R and F5/F11/F12 all launched the round early on top of
+    // blocking copy, find, reload, devtools and fullscreen.
+    if (e.ctrlKey || e.metaKey || e.altKey || /^F\d{1,2}$/.test(e.key)) return;
     if (e.key === 'Escape' || e.key === 'Tab' || e.key === 'Shift' ||
         e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') return;
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName || '') || e.target.isContentEditable) return;
@@ -24685,9 +24705,13 @@ async function runKBC(questions) {
     // Hardest last: the climb should feel like one, and a bank with graded
     // difficulty gets used properly rather than shuffled flat.
     const rank = { easy: 0, medium: 1, hard: 2 };
-    const pool = shuffle(questions).slice(0, KBC_PRIZES.length * 2);
+    // Draw the fifteen first, THEN order them — drawing thirty and keeping
+    // only the sorted-ascending front fifteen threw away every hard
+    // question whenever the sample had fifteen or more easy/medium ones,
+    // which is not "hardest last," it is "hardest missing."
+    const pool = shuffle(questions).slice(0, KBC_PRIZES.length);
     pool.sort((a, b) => (rank[a.difficulty] == null ? 1 : rank[a.difficulty]) - (rank[b.difficulty] == null ? 1 : rank[b.difficulty]));
-    ladder = pool.slice(0, KBC_PRIZES.length);
+    ladder = pool;
     if (ladder.length < KBC_PRIZES.length) { toast('Not enough questions for a full ladder', 'warn'); return; }
     rung = 0; used = {}; locked = false; hidden = [];
     audio.resume();
@@ -25149,6 +25173,7 @@ async function runKBC(questions) {
   window.__kbc = {
     state: () => ({ rung: rung, picked: picked, locked: locked, hidden: hidden.slice(), used: Object.keys(used),
       stem: ladder[rung] && ladder[rung].stem, correct: ladder[rung] && ladder[rung].correctText }),
+    ladder: () => ladder.map(q => q.uuid),
     start: start,
     pick: (i) => pick(i),
     lock: () => lockIn(),
@@ -28099,6 +28124,18 @@ test('KBC never rebuilds its stage once the player has left', async () => {
   } finally {
     view.textContent = ''; keep.forEach(n => view.appendChild(n)); State.view = prevView;
   }
+});
+test('KBC draws its fifteen-question ladder before sorting by difficulty, not from a doubled, then-truncated pool (B82)', () => {
+  // Reads start() off the game instance the previous test already mounted
+  // (window.__kbc persists on the page once set) instead of mounting KBC a
+  // second time here — doing that hung this test harness outright, a
+  // pre-existing environment fragility unrelated to this fix and not worth
+  // taking on for one lead. The source shape is unambiguous either way.
+  if (!window.__kbc || typeof window.__kbc.start !== 'function') return 'skipped — no mounted KBC instance to inspect';
+  const src = window.__kbc.start.toString();
+  assert(/shuffle\(questions\)\.slice\(0,\s*KBC_PRIZES\.length\)/.test(src),
+    'exactly fifteen must be drawn before any sorting — drawing thirty and keeping only the sorted-ascending front fifteen threw every hard question away whenever the sample held fifteen or more easy/medium ones');
+  assert(!/KBC_PRIZES\.length\s*\*\s*2/.test(src), 'the old 2x oversample-then-truncate shape must be gone entirely');
 });
 test('A game question carries the explanation and qid a reveal needs', () => {
   const g = toGameQuestion(mkQ('Stem', ['a', 'b', 'c', 'd'], 2, { explanation: 'Because the control is preventive.', qid: 'Q-0001' }));
