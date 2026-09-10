@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.20', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.21', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -2525,6 +2525,14 @@ const CaseStudies = {
       reached once they have been dealt with — the caller decides whether that
       means deleting them too, and passes them in. */
   async remove(cs) {
+    // Without this, a case study deleted here leaves no record of the
+    // deletion — the merge union has no way to tell "never existed on the
+    // other side" from "existed and was removed", so the next sync with a
+    // device that still holds it hands it straight back. Every other
+    // course-scoped deletion (a course wipe's sessions, batches, etc.)
+    // already writes this same tombstone shape; case studies deleted one
+    // at a time through this path never did.
+    await DB.put('tombstones', rowTombstone(cs.id, 'case study removed'));
     await DB.del('caseStudies', cs.id);
     await audit('delete', 'caseStudy', cs.csid || cs.id, { title: cs.title }, null, '');
   }
@@ -2978,24 +2986,32 @@ async function recheckQuestion(q, opts) {
     the lists and status did not change. Untouched records are left alone so
     a sweep never bumps updatedAt bank-wide (that would make this copy win
     every later newest-wins merge). */
-async function rescanCourseForPairs(courseId, onProgress) {
+async function rescanCourseForPairs(courseId, onProgress, onlyUuids) {
   const all = await Questions.byCourse(courseId);
   const live = all.filter(x => x.status !== 'merged' && x.status !== 'rejected');
+  // Pairing has to be judged against the WHOLE live course either way — a
+  // touched question can only be compared correctly against untouched ones
+  // still sitting in the index — onlyUuids only narrows which records get
+  // re-checked and re-written, never what they are checked against.
   const index = buildIndex(live);
   const byUuid = new Map(live.map(x => [x.uuid, x]));
+  const targets = onlyUuids ? live.filter(x => onlyUuids.has(x.uuid)) : live;
   let newConflicts = 0, newDups = 0, cleared = 0, checked = 0;
-  for (const q of live) {
-    const before = q.status, beforeConflict = !!q.conflict;
+  for (const q of targets) {
+    const before = q.status, beforeConflict = !!q.conflict, beforeStamp = q.updatedAt;
     const r = await recheckQuestion(q, { bank: live, index, byUuid });
     if (r.changed || q.status !== before || !!q.conflict !== beforeConflict) {
-      q.updatedAt = nowISO();
+      // Arithmetic over facts already on both sides of a merge, not an edit —
+      // restamping it handed the rescanning device every one of these rows in
+      // every future merge, for content nobody there actually touched.
+      q.updatedAt = beforeStamp;
       await DB.put('questions', q);
       newConflicts += r.newConflicts.length;
       newDups += r.newDups.length;
       if (!r.newConflicts.length && !r.newDups.length && r.changed) cleared++;
     }
     checked++;
-    if (onProgress && checked % 25 === 0) onProgress(checked, live.length);
+    if (onProgress && checked % 25 === 0) onProgress(checked, targets.length);
   }
   return { checked, newConflicts, newDups, cleared };
 }
@@ -9592,7 +9608,12 @@ async function runSession(s) {
       const recall = h('div', {});
       rev.appendChild(recall);
       (async () => {
-        const prior = (await DB.byIndex('attempts', 'questionUuid', q.uuid))
+        // attemptsOf, not a plain index lookup by this uuid alone — a merged
+        // duplicate's absorbed history lives under the uuid(s) it merged
+        // FROM, and "have you missed this before" is exactly the question
+        // that answer should include, not silently restart from zero the
+        // moment a duplicate is merged away.
+        const prior = (await attemptsOf(q))
           .filter(a => a.sessionId !== s.id);
         const line = repeatMissLine(prior, q, !!rec.correct);
         if (line) recall.appendChild(h('div', { class: 'notice ' + line.tone + ' small', style: 'margin:0 0 4px' }, line.text));
@@ -10636,7 +10657,10 @@ ROUTES.bank = async (root) => {
 async function openQuestion(uuidStr) {
   const q = await Questions.get(uuidStr);
   if (!q) { toast('That question no longer exists', 'bad'); return; }
-  const attempts = (await DB.byIndex('attempts', 'questionUuid', uuidStr)).sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  // attemptsOf, not a plain index lookup — a merge survivor's Attempts/
+  // Mastery tabs must show the absorbed duplicate's history too, the same
+  // history q.stats.attempts (built by repairDerivedStats) already counts.
+  const attempts = (await attemptsOf(q)).sort((a, b) => new Date(b.ts) - new Date(a.ts));
   const versions = (await DB.byIndex('questionVersions', 'questionUuid', uuidStr)).sort((a, b) => b.version - a.version);
   /* What has been DONE to this record, as opposed to what it has been changed
      to. Every verify, reject, archive, merge, restore and repair already writes
@@ -15806,6 +15830,14 @@ async function applyRestore(payload, mode) {
   // the backup's older row would otherwise put straight back.
   const keepLocal = mode === 'replace' ? (await DB.all('settings')).filter(r => isDeviceLocalSetting(r.k)) : [];
   if (mode === 'replace') for (const s of BACKUP_STORES) await DB.clear(s);
+  // Restoring is a deliberate statement about what this bank should be, made
+  // now — and written with the stamps the backup file happened to carry, the
+  // very next merge with Drive/a folder compared those old stamps against
+  // whatever they were meant to replace and put the old copy straight back.
+  // Hoisted above the loop (it used to be computed only for questions,
+  // afterwards) so every MERGE_STAMP_GUARDED store restored here shares the
+  // one timestamp for this whole operation, not just questions.
+  const restoredAt = nowISO();
   for (const s of BACKUP_STORES) {
     const rows = (mode === 'replace' && s === 'settings')
       ? (payload[s] || []).filter(r => !isDeviceLocalSetting(r.k)).concat(keepLocal)
@@ -15841,10 +15873,16 @@ async function applyRestore(payload, mode) {
       const liveStamps = new Map();
       await DB.each(s, r => { liveStamps.set(r[kp], r.updatedAt || ''); });
       const keep = rows.filter(r => !((liveStamps.get(r[kp]) || '') > (r.updatedAt || '')));
+      keep.forEach(r => { r.updatedAt = restoredAt; });
       await DB.putMany(s, keep);
       report.stores[s] = keep.length;
       continue;
     }
+    // Every other guarded store lands here too, in replace mode (merge mode
+    // routed settings/idRegister/the append-only logs away above, and the
+    // guarded stores through the branch just above this one) — restamp
+    // whichever of those this branch is actually writing, the same reason.
+    if (MERGE_STAMP_GUARDED.indexOf(s) >= 0) rows.forEach(r => { r.updatedAt = restoredAt; });
     await DB.putMany(s, rows);
     report.stores[s] = rows.length;
   }
@@ -15877,11 +15915,6 @@ async function applyRestore(payload, mode) {
     const seq = IdRegister.seqOf(q.qid);
     if (seq > (maxSeqByCourse.get(q.courseId) || 0)) maxSeqByCourse.set(q.courseId, seq);
   }
-  // Restoring is a deliberate statement about what this bank should be, made
-  // now. Written with the stamps the backup file happened to carry, the very
-  // next merge with Drive compared those old stamps against the copies the
-  // restore was meant to replace and put the old ones straight back.
-  const restoredAt = nowISO();
   // …and a restore is also a statement that these questions are BACK, which
   // is a different claim from "recently edited". A tombstone written by the
   // wipe this backup was taken before still sits on every other device, and
@@ -17960,7 +17993,11 @@ async function recomputeAll() {
   const all = await State.questions();
   let n = 0;
   for (const q of all) {
-    const hist = await DB.byIndex('attempts', 'questionUuid', q.uuid);
+    // attemptsOf, not a plain index lookup by this row's own uuid alone —
+    // repairDerivedStats already fixed exactly this for its own mastery
+    // rebuild; a raw lookup here regresses the same bug this button's own
+    // job is to correct, for a merge survivor's absorbed history.
+    const hist = await attemptsOf(q);
     q.stats.mastery = masteryOf(q, hist).score;
     await recomputeFingerprint(q);
     await DB.put('questions', q);
@@ -19579,7 +19616,13 @@ const DriveSync = {
   async _mergeInRemote(remote) {
     const localPayload = await FileStore.buildPayload();
     const { merged, report } = await mergeBankPayloads(localPayload, remote);
-    const removed = (report.stores.questions && report.stores.questions.tombstoned) || 0;
+    // removedHere, not tombstoned: tombstoned is the union-wide figure (see
+    // mergeBankPayloads) and counts a row this browser never held in the
+    // first place — its own earlier wipe, synced late — as a "deletion
+    // made elsewhere" the same as a genuine one. Only removedHere is
+    // actually about to take something away from this browser, which is
+    // the one thing this prompt exists to ask about.
+    const removed = (report.stores.questions && report.stores.questions.removedHere) || 0;
     if (removed > 0) {
       const go = await modal({
         title: 'A deletion made elsewhere is about to apply here',
@@ -21324,6 +21367,7 @@ function appendOnlyContentKey(store, row) {
 function mergeAppendOnlyRows(store, localRows, remoteRows) {
   const seen = new Map((localRows || []).map(r => [appendOnlyContentKey(store, r), r]));
   let added = 0;
+  const addedRows = [];
   (remoteRows || []).forEach(r => {
     const k = appendOnlyContentKey(store, r);
     if (!seen.has(k)) {
@@ -21335,10 +21379,14 @@ function mergeAppendOnlyRows(store, localRows, remoteRows) {
       // exists to avoid. Strip it so IndexedDB hands out a fresh,
       // guaranteed non-colliding one on write.
       const clean = Object.assign({}, r); delete clean.id;
-      seen.set(k, clean); added++;
+      seen.set(k, clean); added++; addedRows.push(clean);
     }
   });
-  return { rows: Array.from(seen.values()), added };
+  // addedRows: only the rows genuinely new to this side, before any
+  // tombstone filtering the caller applies — applyMergedBank uses this to
+  // know exactly which questions' history actually grew, instead of
+  // treating every attempt ever recorded as a reason to rebuild.
+  return { rows: Array.from(seen.values()), added, addedRows };
 }
 
 /** idRegister is the one store a plain "newest wins" merge would actively
@@ -21480,7 +21528,20 @@ async function mergeBankPayloads(localPayload, remotePayload) {
   const goneQ = q => retiredUuids.has(q.uuid) || retiredCourses.has(q.courseId);
   const revivedQuestions = qr.rows.filter(goneQ).length;
   merged.stores.questions = qr.rows.filter(q => !goneQ(q));
-  report.stores.questions = { added: qr.added, updated: qr.updated, tombstoned: revivedQuestions };
+  // qr.rows is the union of BOTH sides — tombstoned counts a row this
+  // browser never even held (the other side's stale copy, hit by this
+  // browser's OWN tombstone) the same as one genuinely being taken away
+  // from here. _mergeInRemote's "a deletion made elsewhere is about to
+  // apply here" prompt reads tombstoned directly, so a student who wiped
+  // a course locally and then synced was told their own questions "were
+  // deleted on another device" and "this browser still holds them" —
+  // both false — and a confused Not now froze their pushes on a merge
+  // that had nothing left here to lose in the first place. removedHere,
+  // counted only over what localPayload actually held, is the number
+  // that prompt actually needs; tombstoned stays the sum, unchanged for
+  // every other reader (the merge report table, the shrink-guard math).
+  const removedHere = (localPayload.stores.questions || []).filter(goneQ).length;
+  report.stores.questions = { added: qr.added, updated: qr.updated, tombstoned: revivedQuestions, removedHere };
   merged.touchedQuestionUuids = qr.touchedKeys.filter(k => !retiredUuids.has(k));
 
   ['attempts', 'questionVersions', 'audit'].forEach(s => {
@@ -21490,6 +21551,15 @@ async function mergeBankPayloads(localPayload, remotePayload) {
       : r.rows;
     merged.stores[s] = rows;
     report.stores[s] = { added: r.added, tombstoned: s === 'attempts' ? (r.rows.length - rows.length) : 0 };
+    // Exactly which questions this merge actually brought new answer history
+    // for — applyMergedBank rebuilds derived stats only for these, instead of
+    // every question this bank has ever answered the moment any attempt
+    // arrives from the other side.
+    if (s === 'attempts') {
+      merged.newAttemptQuestionUuids = r.addedRows
+        .filter(a => !retiredUuids.has(a.questionUuid) && !retiredCourses.has(a.courseId))
+        .map(a => a.questionUuid);
+    }
   });
 
   const ir = mergeIdRegisterRows(localPayload.stores.idRegister || [], remotePayload.stores.idRegister || []);
@@ -21687,8 +21757,13 @@ async function applyMergedBank(merged, report) {
   await commitMergedSessionAnswers(merged);
 
   const changedHistory = new Set(touched);
-  const addedAttempts = (report && report.stores && report.stores.attempts && report.stores.attempts.added) || 0;
-  if (addedAttempts) (merged.stores.attempts || []).forEach(a => { if (a && a.questionUuid) changedHistory.add(a.questionUuid); });
+  // merged.stores.attempts is the WHOLE merged log, both sides — walking all
+  // of it here the moment any single attempt arrived added every question
+  // this bank has ever answered to changedHistory, one DB.get + rebuild each,
+  // on every sync that brought in one new answer. newAttemptQuestionUuids
+  // (built alongside addedRows in mergeAppendOnlyRows/mergeBankPayloads) is
+  // only the uuids whose history genuinely grew.
+  (merged.newAttemptQuestionUuids || []).forEach(uuid => { if (uuid) changedHistory.add(uuid); });
   if (changedHistory.size) {
     const rebuilt = [];
     for (const uuid of changedHistory) {
@@ -21705,7 +21780,12 @@ async function applyMergedBank(merged, report) {
   if (touched.size) {
     const byCourse = new Map();
     merged.stores.questions.forEach(q => { if (touched.has(q.uuid)) { if (!byCourse.has(q.courseId)) byCourse.set(q.courseId, []); byCourse.get(q.courseId).push(q.uuid); } });
-    for (const courseId of byCourse.keys()) await rescanCourseForPairs(courseId);
+    // The per-course uuid list built above, not just its keys — without
+    // it every merge that touched even one question in a course rescanned
+    // the whole course for pairing, on top of the same stamp-bumping the
+    // comment on rescanCourseForPairs itself already says a sweep must
+    // never do.
+    for (const [courseId, uuids] of byCourse) await rescanCourseForPairs(courseId, null, new Set(uuids));
   }
   // A merge can bring in courses this browser has never seen — the whole point
   // of merging with a Drive file written elsewhere. Without re-adopting, an
@@ -25866,6 +25946,30 @@ test('Rescan writes back a conflict flag it corrected on a record whose status a
   } finally { await DB.del('questions', q.uuid); }
 });
 
+test('rescanCourseForPairs(courseId, onProgress, onlyUuids) only re-checks the given uuids, and never bumps their stamp (B78)', async () => {
+  const cid = 'test-rescan-scoped-' + Date.now();
+  const opts = ['Enhancing user productivity', 'Managing network configurations', 'Improving system performance', 'Preventing data exfiltration'];
+  const dirty = mkQ('Which of the following is one of the functionalities of a DLP solution?', opts, 3, { courseId: cid, status: 'active', conflict: true, answerVerified: 'verified', domainId: 'D1' });
+  dirty.conflictWith = []; dirty.dupWith = [];
+  await recomputeFingerprint(dirty);
+  const untouched = mkQ('Which control best prevents unauthorised access?', ['MFA', 'Logging', 'Backups', 'Patching'], 0, { courseId: cid, status: 'active', answerVerified: 'verified', domainId: 'D1' });
+  await recomputeFingerprint(untouched);
+  const oldStamp = '2020-01-01T00:00:00.000Z';
+  dirty.updatedAt = oldStamp; untouched.updatedAt = oldStamp;
+  await DB.put('questions', dirty); await DB.put('questions', untouched);
+  try {
+    const r = await rescanCourseForPairs(cid, null, new Set([dirty.uuid]));
+    eq(r.checked, 1, 'only the one named uuid is checked — a merge that touched one question must not re-scan the whole course');
+    const freshDirty = await DB.get('questions', dirty.uuid);
+    assert(!freshDirty.conflict, 'the named row is still actually rechecked and fixed');
+    eq(freshDirty.updatedAt, oldStamp, 'clearing a stale derived flag is not an edit — the stamp must not move, or this device would win every future merge for content nobody here touched');
+    const freshUntouched = await DB.get('questions', untouched.uuid);
+    eq(freshUntouched.updatedAt, oldStamp, 'a uuid outside onlyUuids is never even written');
+  } finally {
+    await DB.del('questions', dirty.uuid); await DB.del('questions', untouched.uuid);
+  }
+});
+
 test('Unmerge takes back the "merged source disagreed" doubt the merge put on the answer', async () => {
   const cid = 'test-unmerge-' + Date.now();
   const opts = ['Data loss tolerance', 'Time to restore service', 'Backup window', 'Retention period'];
@@ -25915,6 +26019,16 @@ test('Merging carries the absorbed record\'s practice history to the survivor, a
     await DB.del('questions', canon.uuid); await DB.del('questions', dup.uuid);
     for (const a of await DB.byIndex('attempts', 'sessionId', sid)) await DB.del('attempts', a.id);
   }
+});
+
+test('The question-detail view and the mastery recompute button both read absorbed merge history, not just their own uuid (B87)', () => {
+  // Both used to fetch attempts by DB.byIndex('attempts', 'questionUuid', uuid)
+  // directly — correct for a question that was never on the losing end of a
+  // merge, silently wrong for one that was. attemptsOf() is the one helper
+  // that already gets this right (historyUuids), and repairDerivedStats
+  // already proved it matters for exactly this class of bug.
+  assert(/attemptsOf\(q\)/.test(openQuestion.toString()), 'openQuestion’s Attempts/Mastery tabs must include absorbed duplicate history');
+  assert(/attemptsOf\(q\)/.test(recomputeAll.toString()), 'recomputeAll must not regress the exact bug repairDerivedStats already fixed once');
 });
 
 /* ---- per-course option count ---- */
@@ -31779,6 +31893,34 @@ test('A note removed on one device does not come back from the other', async () 
   eq(merged.stores.notes.length, 0, 'the union does not resurrect a note removed elsewhere');
   eq(retiredCourseIds(removedSide.stores.tombstones).size, 0, 'and a note tombstone is never read as a course one');
   eq(retiredNoteIds([courseTombstone('x', 'X')]).size, 0, 'nor a course tombstone as a note one');
+});
+
+test('mergeBankPayloads reports removedHere separately from the union-wide tombstoned figure, so a student’s own wipe is never read as a deletion made elsewhere (B76)', async () => {
+  const stores = extra => Object.assign({
+    courses: [], sources: [], batches: [], attempts: [], sessions: [], audit: [], images: [],
+    idRegister: [], tombstones: [], presets: [], notes: [], caseStudies: [], questionVersions: [],
+    questions: [], settings: []
+  }, extra || {});
+  const q1 = { uuid: 'q1', courseId: 'c', updatedAt: '2026-01-01T00:00:00Z' };
+
+  // This browser wiped q1 itself and has not synced yet — it no longer
+  // holds the row at all; the stale remote copy is what the union revives
+  // and the local tombstone then drops again.
+  const localOwnWipe = { savedAt: '2026-02-01T00:00:00Z', stores: stores({
+    tombstones: [{ qid: 'q1', uuid: 'q1', retiredAt: '2026-02-01T00:00:00Z' }] }) };
+  const remoteStale = { savedAt: '2026-01-01T00:00:00Z', stores: stores({ questions: [q1] }) };
+  const a = await mergeBankPayloads(localOwnWipe, remoteStale);
+  eq(a.report.stores.questions.tombstoned, 1, 'the union-wide figure still counts the row the union briefly revived');
+  eq(a.report.stores.questions.removedHere, 0, 'but nothing is actually being taken away from THIS browser — it never held q1 in this payload');
+
+  // The other device deleted q1 and this browser has not caught up — a
+  // genuine deletion, made elsewhere, is about to reach here.
+  const localBehind = { savedAt: '2026-01-01T00:00:00Z', stores: stores({ questions: [q1] }) };
+  const remoteDeleted = { savedAt: '2026-02-01T00:00:00Z', stores: stores({
+    tombstones: [{ qid: 'q1', uuid: 'q1', retiredAt: '2026-02-01T00:00:00Z' }] }) };
+  const b = await mergeBankPayloads(localBehind, remoteDeleted);
+  eq(b.report.stores.questions.tombstoned, 1);
+  eq(b.report.stores.questions.removedHere, 1, 'here it genuinely is — this browser is about to lose a question it currently holds');
 });
 
 test('A bank file may be gzipped or plain, and is told apart by its own bytes', async () => {
