@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.8', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.9', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -11175,16 +11175,30 @@ async function questionComposer(opts) {
     return false;
   }
 
-  const res = await modal({
-    title: cs ? 'Add a question to ' + (cs.csid || 'this case study') : 'Write a question',
-    body, wide: true, sticky: true,
-    actions: [
-      { label: 'Done', value: null },
-      { label: 'Save & add another', value: 'again', before: () => commit(true) },
-      { label: 'Save', value: 'save', kind: 'primary', before: () => commit(false) }
-    ]
-  });
-  void res;
+  /** Sticky stops a backdrop click, but Escape, the ✕ button and "Done" all
+      resolve the same falsy way — none of them are covered by that. "Save &
+      add another" never reaches here: its `before` handler keeps the modal
+      open by returning false, so this only ever runs once the dialog is
+      truly about to close, and only sees whatever draft is sitting in it
+      at that moment (freshly blank right after a save-and-continue). */
+  function hasWork() {
+    return !!(draft.stem.trim() || draft.explanation.trim() || draft.options.some(o => (o.text || '').trim()));
+  }
+  let res;
+  for (; ;) {
+    res = await modal({
+      title: cs ? 'Add a question to ' + (cs.csid || 'this case study') : 'Write a question',
+      body, wide: true, sticky: true,
+      actions: [
+        { label: 'Done', value: null },
+        { label: 'Save & add another', value: 'again', before: () => commit(true) },
+        { label: 'Save', value: 'save', kind: 'primary', before: () => commit(false) }
+      ]
+    });
+    if (res || !hasWork()) break;
+    const discard = await confirmBox('Discard this question?', 'The question you were writing has not been saved.', true, 'Discard');
+    if (discard) break;
+  }
   return saved;
 }
 
@@ -11646,10 +11660,23 @@ async function openCaseStudy(csOrId, isNew) {
   drawQuestions();
   body.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Its questions' }), qList]));
 
-  const res = await modal({
-    title: isNew ? 'New case study' : 'Case study ' + (cs.csid || ''), body, wide: true, sticky: true,
-    actions: [{ label: 'Close', value: null }, { label: isNew ? 'Create' : 'Save changes', value: 'save', kind: 'primary' }]
-  });
+  // Same gap as Question detail's editor: sticky only blocks a backdrop
+  // click, and Escape/✕ close exactly like Close does. Checked the same way.
+  function hasUnsavedChanges() {
+    return edit.title !== (cs.title || '') || edit.text !== (cs.text || '') ||
+      (edit.domainId || null) !== (cs.domainId || null) ||
+      edit.topic !== (cs.topic || '') || edit.tags !== (cs.tags || []).join(', ');
+  }
+  let res;
+  for (; ;) {
+    res = await modal({
+      title: isNew ? 'New case study' : 'Case study ' + (cs.csid || ''), body, wide: true, sticky: true,
+      actions: [{ label: 'Close', value: null }, { label: isNew ? 'Create' : 'Save changes', value: 'save', kind: 'primary' }]
+    });
+    if (res === 'save' || !hasUnsavedChanges()) break;
+    const discard = await confirmBox('Discard your changes?', 'Nothing you edited on this case study has been saved yet.', true, 'Discard');
+    if (discard) break;
+  }
   if (res !== 'save') { if (!isNew) go('cases'); return; }
   if (!edit.title.trim() && !edit.text.trim()) { toast('Give it a title or a scenario before saving', 'bad'); return; }
   cs.title = edit.title.trim();
@@ -12050,7 +12077,19 @@ async function sourceDialog(files) {
   const trust = h('input', { type: 'checkbox' });
   const notes = h('textarea', { style: 'min-height:50px', placeholder: 'Copyright or usage note, edition, anything worth recording' });
 
-  const res = await modal({
+  // Escape/✕ close exactly like Cancel despite sticky, same gap as every
+  // other editing dialog in the app — checked the same way, against a
+  // snapshot of what these plain DOM fields held when the dialog opened.
+  const initial = { title: title.value, author: author.value, type: type.value, mod: mod.value, chap: chap.value, dom: dom.value, tmpl: tmpl.value, trust: trust.checked, notes: notes.value };
+  function hasUnsavedChanges() {
+    return title.value !== initial.title || author.value !== initial.author || type.value !== initial.type ||
+      mod.value !== initial.mod || chap.value !== initial.chap || dom.value !== initial.dom ||
+      tmpl.value !== initial.tmpl || trust.checked !== initial.trust || notes.value !== initial.notes ||
+      Object.keys(columnMaps).length > 0;
+  }
+  let res;
+  for (; ;) {
+    res = await modal({
     title: 'Source details', wide: true, sticky: true,
     body: h('div', { class: 'stack' }, [
       h('div', { class: 'notice small' }, 'These details are attached to every question from this batch, so a question can always be traced back to where it came from.'),
@@ -12085,7 +12124,11 @@ async function sourceDialog(files) {
       ].filter(Boolean))))])
     ]),
     actions: [{ label: 'Cancel', value: false }, { label: 'Extract questions', value: true, kind: 'primary' }]
-  });
+    });
+    if (res || !hasUnsavedChanges()) break;
+    const discard = await confirmBox('Discard these source details?', 'Nothing entered here — including any column mapping you set up — has been saved yet.', true, 'Discard');
+    if (discard) break;
+  }
   if (!res) return;
   await runParse(files, {
     title: title.value.trim() || 'Untitled source', author: author.value.trim(), type: type.value,
@@ -12121,6 +12164,10 @@ async function columnMapDialog(rows, autoMap, filename) {
   const chosen = {};
   for (let i = 0; i < width; i++) chosen[i] = '';
   Object.keys(autoMap || {}).forEach(f => { chosen[autoMap[f]] = f; });
+  // Escape/✕ close exactly like Cancel despite sticky, same gap as every
+  // other editing dialog in the app — checked against what auto-detection
+  // already assigned, so accepting its guesses untouched is not "work".
+  const initialChosen = Object.assign({}, chosen);
 
   let headerless = false;
   const body = h('div', { class: 'stack' });
@@ -12203,16 +12250,25 @@ async function columnMapDialog(rows, autoMap, filename) {
   ]));
   body.appendChild(verdict);
 
-  const res = await modal({
-    title: 'Which column is which?', body, wide: true, sticky: true,
-    actions: [
-      { label: 'Cancel', value: null },
-      {
-        label: 'Continue', value: 'go', kind: 'primary',
-        before: () => { if (problems().length) { toast('Tell it which column is the question, and at least two options', 'bad'); return false; } return true; }
-      }
-    ]
-  });
+  function hasUnsavedChanges() {
+    return headerless || Object.keys(chosen).some(k => chosen[k] !== initialChosen[k]);
+  }
+  let res;
+  for (; ;) {
+    res = await modal({
+      title: 'Which column is which?', body, wide: true, sticky: true,
+      actions: [
+        { label: 'Cancel', value: null },
+        {
+          label: 'Continue', value: 'go', kind: 'primary',
+          before: () => { if (problems().length) { toast('Tell it which column is the question, and at least two options', 'bad'); return false; } return true; }
+        }
+      ]
+    });
+    if (res || !hasUnsavedChanges()) break;
+    const discard = await confirmBox('Discard this column mapping?', 'The columns you assigned have not been saved.', true, 'Discard');
+    if (discard) break;
+  }
   if (!res) return null;
   return headerless ? { headerless: true } : { map: assigned() };
 }
@@ -13088,11 +13144,19 @@ async function pasteTextWorkflow() {
     preview.textContent = out.candidates.length + ' question(s) detected · ' + out.candidates.filter(c => c.answerLetter).length + ' with an answer · ' + out.unresolved.length + ' unresolved line(s).';
   }, 350);
   ta.addEventListener('input', run); tmpl.addEventListener('change', run);
-  const ok = await modal({
-    title: 'Paste raw text', wide: true, sticky: true,
-    body: h('div', { class: 'stack' }, [ta, h('div', { class: 'row' }, [h('span', { class: 'eyebrow', text: 'Template' }), tmpl, h('div', { class: 'spacer' }), preview])]),
-    actions: [{ label: 'Cancel', value: false }, { label: 'Continue', value: true, kind: 'primary' }]
-  });
+  // Escape/✕ close exactly like Cancel despite sticky, same gap as every
+  // other editing dialog in the app — here "work" is simply text present.
+  let ok;
+  for (; ;) {
+    ok = await modal({
+      title: 'Paste raw text', wide: true, sticky: true,
+      body: h('div', { class: 'stack' }, [ta, h('div', { class: 'row' }, [h('span', { class: 'eyebrow', text: 'Template' }), tmpl, h('div', { class: 'spacer' }), preview])]),
+      actions: [{ label: 'Cancel', value: false }, { label: 'Continue', value: true, kind: 'primary' }]
+    });
+    if (ok || !ta.value.trim()) break;
+    const discard = await confirmBox('Discard this text?', 'What you pasted has not been imported.', true, 'Discard');
+    if (discard) break;
+  }
   if (!ok || !ta.value.trim()) return;
   const blob = new Blob([ta.value], { type: 'text/plain' });
   const f = new File([blob], 'pasted-' + todayKey() + '.txt', { type: 'text/plain' });
@@ -17146,11 +17210,26 @@ async function courseDialog(course) {
   const total = () => { const t = bp.reduce((s, d) => s + (+d.weight || 0), 0); totalEl.textContent = t + '%'; totalEl.style.color = t === 100 ? 'var(--green)' : 'var(--amber)'; };
   drawRows(); total();
 
+  // Escape/✕ close exactly like Cancel despite sticky, same gap as every
+  // other editing dialog in the app — checked against a snapshot of these
+  // fields (and the blueprint rows) taken right after the form is built.
+  const initial = { code: code.value, name: name.value, prefix: prefix.value, optCount: optCount.value, enforceOpts: enforceOpts.checked, bp: JSON.stringify(bp) };
+  function hasUnsavedChanges() {
+    return code.value !== initial.code || name.value !== initial.name || prefix.value !== initial.prefix ||
+      optCount.value !== initial.optCount || enforceOpts.checked !== initial.enforceOpts ||
+      JSON.stringify(bp) !== initial.bp;
+  }
+
   // Optional one-click starting points — picking one adds that course
   // immediately, with its blueprint and weights already set. Nothing here
   // is preselected or required: the blank form below still works for any
   // other course, unfilled and with no CISA/DISA assumption.
   let quickAdding = false;
+  // Quick add closes this same modal itself, having already done something
+  // real (switched courses, or created a different course entirely) — the
+  // unsaved-changes check below must stand down for that close, not ask
+  // about a form quick add never touched.
+  let quickAdded = false;
   const quickAddBtns = [];
   const quickAdd = isNew ? h('div', { class: 'field' }, [
     h('label', { text: 'Quick add' }),
@@ -17178,6 +17257,7 @@ async function courseDialog(course) {
             // different id registers issuing the same-looking Question IDs.
             const dup = State.courses.find(x => x.code.trim().toUpperCase() === t.code.trim().toUpperCase());
             if (dup) {
+              quickAdded = true;
               if (box && box._close) box._close(null);
               if (dup.archived) {
                 toast(dup.code + ' already exists but is archived — unarchive it from Settings instead of adding a new one', 'warn', 6000);
@@ -17195,6 +17275,7 @@ async function courseDialog(course) {
             await audit('create', 'course', c.id, null, { code: c.code, domains: c.blueprint.length }, 'Added via quick add');
             State.courses = await DB.all('courses');
             await State.setCourse(c.id);
+            quickAdded = true;
             if (box && box._close) box._close(null);
             toast(c.code + ' created — its bank starts empty', 'ok');
             renderShell(); go('settings');
@@ -17210,7 +17291,9 @@ async function courseDialog(course) {
     h('div', { class: 'tiny dim', text: 'Adds that course right away, with its exam blueprint and weights already set. Building a course for something else? Just fill in the form below.' })
   ]) : null;
 
-  const res = await modal({
+  let res;
+  for (; ;) {
+    res = await modal({
     title: isNew ? 'Add a course' : 'Edit ' + course.code, wide: true, sticky: true,
     body: h('div', { class: 'stack' }, [
       quickAdd,
@@ -17242,7 +17325,11 @@ async function courseDialog(course) {
       !isNew && course.archived ? { label: 'Delete permanently', value: 'delete', kind: 'danger' } : null,
       { label: isNew ? 'Create course' : 'Save', value: 'save', kind: 'primary' }
     ].filter(Boolean)
-  });
+    });
+    if (res || quickAdded || !hasUnsavedChanges()) break;
+    const discard = await confirmBox('Discard your changes?', 'Nothing entered on this course has been saved yet.', true, 'Discard');
+    if (discard) break;
+  }
   if (!res) return;
   if (res === 'delete') { await deleteCourseForever(course); return; }
   if (res === 'arch') {
@@ -30237,6 +30324,54 @@ test('Cancelling a modal never leaves its opener wearing a focus ring', async ()
     assert(document.activeElement !== btn, 'a real confirm clears the opener too');
   } finally {
     btn.remove();
+  }
+});
+
+test('B21: Escape/close with unsaved course-editor content asks before discarding, and lets you go back in', async () => {
+  const beforeCount = State.courses.length;
+  const fieldByLabel = (label) => {
+    const field = Array.from(document.querySelectorAll('.modal-bg .field')).find(f => {
+      const lab = f.querySelector('label');
+      return lab && lab.textContent.trim() === label;
+    });
+    return field && field.querySelector('input');
+  };
+  let p;
+  try {
+    p = courseDialog(null);
+    await new Promise(r => setTimeout(r, 50)); // let the dialog actually mount
+    const codeInput = fieldByLabel('Short code');
+    assert(codeInput, 'the course-code field must be on screen');
+    codeInput.value = 'ZZTEST';
+    codeInput.dispatchEvent(new Event('input'));
+
+    // First Escape: unsaved work must be caught, not silently dropped — and
+    // declining the confirm must reopen the SAME dialog with what was typed
+    // still there, not a blank one.
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise(r => setTimeout(r, 50));
+    let buttons = Array.from(document.querySelectorAll('.modal-bg .modal-f button'));
+    let btn = buttons.find(b => b.textContent === 'Cancel');
+    assert(btn, 'a confirm must appear, asking whether to discard');
+    btn.click();
+    await new Promise(r => setTimeout(r, 50));
+    const reopened = fieldByLabel('Short code');
+    assert(reopened, 'declining discard must reopen the course editor');
+    eq(reopened.value, 'ZZTEST', 'and what was typed must still be there');
+
+    // Second Escape, this time confirming discard: the dialog closes for
+    // real and nothing gets created.
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise(r => setTimeout(r, 50));
+    buttons = Array.from(document.querySelectorAll('.modal-bg .modal-f button'));
+    btn = buttons.find(b => b.textContent === 'Discard');
+    assert(btn, 'the same confirm must appear again');
+    btn.click();
+    await p;
+    eq(document.querySelectorAll('.modal-bg').length, 0, 'the dialog is fully closed');
+    eq(State.courses.length, beforeCount, 'declining to keep it must not have created a course');
+  } finally {
+    document.querySelectorAll('.modal-bg').forEach(el => el.remove());
   }
 });
 
