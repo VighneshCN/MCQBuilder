@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.10', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.11', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -18975,14 +18975,23 @@ const DRIVE_RESUME_FIRST_MS = 30 * 1000;      // first unattended attempt at get
 const DRIVE_RESUME_MAX_MS = 10 * 60 * 1000;   // …doubling to this, so a browser that can never renew stops hammering
 const DRIVE_RESUME_MIN_GAP_MS = 15 * 1000;    // two events arriving together are one attempt
 const DRIVE_SAFETY_TIMER_MS = 60 * 1000;      // coarse fallback if a debounced push is ever lost
-const DRIVE_TOKEN_TIMEOUT_MS = 20 * 1000;     // an INTERACTIVE sign-in: a person may be reading Google's screen
 /* A silent renewal shows nothing and needs no thought, so it either answers
-   quickly or it has been blocked — which on Safari it always is. Waiting the
-   full interactive timeout for that verdict is where most of a slow reconnect
-   went: twenty seconds of a spinner to learn something knowable in five. */
+   quickly or it has been blocked — which on Safari it always is (its tracking
+   protection blocks exactly the hidden accounts.google.com frame a silent
+   request depends on). An interactive request has no such frame to block: it
+   is a real, visible popup, and Google Identity always eventually calls one
+   of _requestToken's two callbacks for it — granted, denied, or the person
+   just closing it — so only the silent path needs a timeout of its own. */
 const DRIVE_SILENT_TOKEN_TIMEOUT_MS = 5 * 1000;
 const DRIVE_REMOTE_WATCH_MS = 45 * 1000;      // how often a connected tab asks whether Drive has moved
 const DRIVE_REMOTE_CHECK_MIN_MS = 15 * 1000;  // …and the floor between checks however many events fire
+// None of the raw Drive REST calls had a timeout at all: a stalled request —
+// a connected-but-dead network, the common case a service worker exists for
+// — left _catchingUp (or _pushing) true for the life of the page, since the
+// enclosing finally{} that clears it is never reached while still awaiting.
+// Every fetch() to Drive below carries one of these two.
+const DRIVE_FETCH_TIMEOUT_MS = 15 * 1000;       // metadata / small requests
+const DRIVE_FETCH_TIMEOUT_LONG_MS = 60 * 1000;  // whole-bank or note-file payloads
 /* The one hold another attempt can lift by itself: this browser failed to READ
    Drive. Named, so the place that sets it and the retry in checkRemote() cannot
    drift apart — the other hold, a deletion waiting to be applied, must never be
@@ -19212,6 +19221,11 @@ const DriveSync = {
     const dirtySince = await FileStore.meta('driveDirtySince');
     try {
       const remoteModified = await this._fetchModifiedTime();
+      // undefined means the check itself failed — never read that as "Drive
+      // has not moved" (the fast path just below): that silently drops the
+      // very hold this function exists to arm on a genuine problem. Thrown
+      // here, it lands in the catch below exactly like any other failure.
+      if (!force && remoteModified === undefined) throw new Error('Could not reach Drive to check whether it had moved.');
       // `force` is the manual "catch up now" button: merge whether or not
       // Drive's stamp has moved, because the person pressing it is telling us
       // this browser's belief about that stamp is what they doubt.
@@ -19491,8 +19505,12 @@ const DriveSync = {
       let timer = null;
       const ok = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
       const no = (e) => { if (done) return; done = true; clearTimeout(timer); reject(e); };
-      timer = setTimeout(() => no(new Error('Google did not answer. On Safari this usually means the sign-in frame was blocked — connect again and it will ask properly.')),
-        silent ? DRIVE_SILENT_TOKEN_TIMEOUT_MS : DRIVE_TOKEN_TIMEOUT_MS);
+      // Interactive gets no timer at all: a first-time consent screen (the
+      // unverified-app warning, the scope checkbox) routinely takes longer to
+      // read than any fixed ceiling would allow, and unlike the silent path
+      // there is no hidden frame to get stuck behind — the popup finishing
+      // (however long that takes) is exactly what settles this.
+      if (silent) timer = setTimeout(() => no(new Error('Google did not answer. On Safari this usually means the sign-in frame was blocked — connect again and it will ask properly.')), DRIVE_SILENT_TOKEN_TIMEOUT_MS);
 
       client.callback = (resp) => {
         if (resp.error) { no(new Error(resp.error)); return; }
@@ -19611,7 +19629,7 @@ const DriveSync = {
         // allows this call. A failure here is harmless — it only costs the hint.
         try {
           const who = await fetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)',
-            { headers: { 'Authorization': 'Bearer ' + this.accessToken } });
+            { headers: { 'Authorization': 'Bearer ' + this.accessToken }, signal: AbortSignal.timeout(DRIVE_FETCH_TIMEOUT_MS) });
           if (who.ok) {
             const j = await who.json();
             this._accountHint = (j.user && j.user.emailAddress) || null;
@@ -19745,9 +19763,13 @@ const DriveSync = {
         if (!anyway) return false;
       }
     }
-    if (this.accessToken && window.google && google.accounts && google.accounts.oauth2) {
-      try { google.accounts.oauth2.revoke(this.accessToken, () => { }); } catch (e) { }
-    }
+    // Revoking here used to sign out every other device's silent renewal too
+    // — the whole OAuth grant, not just this tab's copy of it — while every
+    // message this action shows (here, in Settings, and on the "switch to a
+    // folder" path that calls this too) promises a purely local, reversible
+    // "forgets it here". The token itself is never persisted and expires
+    // within the hour on its own; forgetting driveFileId/driveConnected
+    // below is what a local disconnect actually needs to do.
     clearTimeout(this._debounceTimer);
     clearTimeout(this._resumeTimer); this._resumeDelay = null;
     if (this._pushTimer) { clearInterval(this._pushTimer); this._pushTimer = null; }
@@ -19893,6 +19915,11 @@ const DriveSync = {
          device put there. Catching up first costs one metadata call and turns
          the overwrite into a merge. */
       const remoteNow = await this._fetchModifiedTime();
+      // undefined means that metadata call itself failed — network, 5xx, a
+      // dead token. Falling through and uploading anyway is exactly the
+      // blind overwrite the comment above describes; refuse instead, the
+      // same as any other failure in this method (caught below).
+      if (remoteNow === undefined) throw new Error('Could not confirm whether Drive had moved before pushing.');
       if (remoteNow && this.lastSyncedModifiedTime && remoteNow !== this.lastSyncedModifiedTime) {
         this._pushing = false;
         // A catch-up already in progress will merge this and push whatever
@@ -19937,7 +19964,8 @@ const DriveSync = {
           'Authorization': 'Bearer ' + this.accessToken,
           'Content-Type': encoded ? 'application/gzip' : 'application/json'
         },
-        body
+        body,
+        signal: AbortSignal.timeout(DRIVE_FETCH_TIMEOUT_LONG_MS)
       });
       let res;
       try {
@@ -19982,7 +20010,7 @@ const DriveSync = {
   async pull() {
     if (!(await this._ensureToken())) throw new Error('Could not reach Google Drive.');
     const res = await fetch('https://www.googleapis.com/drive/v3/files/' + this.fileId + '?alt=media', {
-      headers: { 'Authorization': 'Bearer ' + this.accessToken }
+      headers: { 'Authorization': 'Bearer ' + this.accessToken }, signal: AbortSignal.timeout(DRIVE_FETCH_TIMEOUT_LONG_MS)
     });
     if (await this._handleAuthFailure(res)) throw new Error('Google sign-in is no longer valid.');
     if (!res.ok) throw new Error('Drive returned ' + res.status);
@@ -19994,21 +20022,31 @@ const DriveSync = {
 
   /** Metadata-only — a few bytes, not the whole file — used to notice a
       change on Drive without downloading it every time. */
+  /** null means "asked Drive and it genuinely has no modifiedTime" (never
+      actually happens on a real files.get response, but kept distinct on
+      principle); undefined means "could not ask" — no token, a non-2xx
+      response, or a network error. The two used to collapse to the same
+      null, which every caller reads as falsy and most callers correctly
+      treat as "nothing to act on" — but the two callers that use this
+      result to decide whether it is SAFE to push (below) or to skip a
+      catch-up (_catchUpWithDrive) must not read "could not ask" as "Drive
+      has not moved": that silently dropped the boot hold and let a push
+      overwrite Drive without knowing whether it had moved under it. */
   async _fetchModifiedTime() {
-    if (!(await this._ensureToken())) return null;
+    if (!(await this._ensureToken())) return undefined;
     try {
       const res = await fetch('https://www.googleapis.com/drive/v3/files/' + this.fileId + '?fields=modifiedTime', {
-        headers: { 'Authorization': 'Bearer ' + this.accessToken }
+        headers: { 'Authorization': 'Bearer ' + this.accessToken }, signal: AbortSignal.timeout(DRIVE_FETCH_TIMEOUT_MS)
       });
       // A 401 here would otherwise read as "Drive has not changed", which is
       // the most misleading answer available: it is the input to
       // driveSyncSettled(), so a dead token would make a reconnect skip the
       // merge question on the grounds that nothing had moved.
-      if (await this._handleAuthFailure(res)) return null;
-      if (!res.ok) return null;
+      if (await this._handleAuthFailure(res)) return undefined;
+      if (!res.ok) return undefined;
       const j = await res.json();
       return j.modifiedTime || null;
-    } catch (e) { return null; }
+    } catch (e) { return undefined; }
   },
 
   /**
@@ -20091,7 +20129,7 @@ const DriveSync = {
   async _findExisting() {
     const q = encodeURIComponent("name='" + DRIVE_FILE_NAME + "' and trashed=false");
     const res = await fetch('https://www.googleapis.com/drive/v3/files?q=' + q + '&spaces=drive&fields=files(id)', {
-      headers: { 'Authorization': 'Bearer ' + this.accessToken }
+      headers: { 'Authorization': 'Bearer ' + this.accessToken }, signal: AbortSignal.timeout(DRIVE_FETCH_TIMEOUT_MS)
     });
     // "Not found" and "not allowed to look" are opposite answers, and this
     // used to give the same null for both. connect() reads null as "there is
@@ -20114,7 +20152,8 @@ const DriveSync = {
     const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + this.accessToken, 'Content-Type': 'multipart/related; boundary=' + boundary },
-      body
+      body,
+      signal: AbortSignal.timeout(DRIVE_FETCH_TIMEOUT_MS)
     });
     if (!res.ok) throw new Error('Could not create the Drive file (status ' + res.status + ').');
     return (await res.json()).id;
@@ -20136,7 +20175,8 @@ const DriveSync = {
     const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + this.accessToken, 'Content-Type': 'multipart/related; boundary=' + boundary },
-      body
+      body,
+      signal: AbortSignal.timeout(DRIVE_FETCH_TIMEOUT_LONG_MS)
     });
     if (!res.ok) throw new Error('Could not upload to Drive (status ' + res.status + ').');
     return (await res.json()).id;
@@ -20146,7 +20186,7 @@ const DriveSync = {
     if (!(await this._ensureToken())) return false;
     try {
       const res = await fetch('https://www.googleapis.com/drive/v3/files/' + fileId, {
-        method: 'DELETE', headers: { 'Authorization': 'Bearer ' + this.accessToken }
+        method: 'DELETE', headers: { 'Authorization': 'Bearer ' + this.accessToken }, signal: AbortSignal.timeout(DRIVE_FETCH_TIMEOUT_MS)
       });
       return res.ok || res.status === 404;
     } catch (e) { return false; }
@@ -20316,10 +20356,16 @@ function blobToDataUrl(blob) {
 const NotesStore = {
   /** Where a new note's bytes would land right now, so the UI can say so
       before the person commits to uploading. Folder wins over Drive when
-      both are connected — it is instant and needs no network round trip. */
+      both are connected — it is instant and needs no network round trip.
+      Checked against `configured`, not just `connected`: Drive is still the
+      linked backend through a routine "signed out" moment (Safari, mainly)
+      even though today's in-memory token has lapsed — uploadNoteFile()
+      already renews silently or fails with its own clear reconnect message,
+      which is a better answer than falling back to the 2 MB browser cap and
+      telling someone to connect the Drive that's already connected. */
   target() {
     if (FileStore.dirHandle) return 'folder';
-    if (DriveSync.connected) return 'drive';
+    if (DriveSync.connected || DriveSync.configured) return 'drive';
     return 'indexeddb';
   },
 
@@ -20360,7 +20406,7 @@ const NotesStore = {
     }
     if (rec.storage === 'drive') {
       if (!(await DriveSync._ensureToken())) throw new Error('Reconnect Google Drive to open this note.');
-      const res = await fetch('https://www.googleapis.com/drive/v3/files/' + rec.driveFileId + '?alt=media', { headers: { 'Authorization': 'Bearer ' + DriveSync.accessToken } });
+      const res = await fetch('https://www.googleapis.com/drive/v3/files/' + rec.driveFileId + '?alt=media', { headers: { 'Authorization': 'Bearer ' + DriveSync.accessToken }, signal: AbortSignal.timeout(DRIVE_FETCH_TIMEOUT_LONG_MS) });
       if (!res.ok) throw new Error('Drive returned ' + res.status);
       return await res.blob();
     }
@@ -31249,6 +31295,82 @@ test('A push that meets a moved Drive stamp while a catch-up is already running 
   }
 });
 
+test('A failed Drive metadata check is never read as "Drive has not moved" — push refuses, catch-up holds', async () => {
+  const D = DriveSync;
+  const keys = ['connected', 'fileId', 'accessToken', 'tokenExpiresAt', 'lastSyncedModifiedTime', '_catchingUp', '_pushing', '_holdPush', 'problem'];
+  const saved = {}; keys.forEach(k => { saved[k] = D[k]; });
+  const realFetch = globalThis.fetch;
+  try {
+    Object.assign(D, { connected: true, fileId: 'test-file', accessToken: 'tok', tokenExpiresAt: Date.now() + 3600000,
+      lastSyncedModifiedTime: '2026-01-01T00:00:00.000Z', _catchingUp: false, _pushing: false, _holdPush: null, problem: null });
+    // Every Drive request fails outright — a network error, not an auth or
+    // status error, so this exercises the "could not even ask" path rather
+    // than any of the paths that already had their own handling.
+    globalThis.fetch = async () => { throw new Error('simulated network failure'); };
+
+    const sent = await D.push();
+    eq(sent, false, 'a push that cannot confirm Drive has not moved must refuse, not upload blind');
+    assert(D.problem, 'and say why, same as any other failure in push()');
+
+    D.problem = null;
+    await D._catchUpWithDrive();
+    eq(D._holdPush, DRIVE_HOLD_UNREAD, 'a boot catch-up that cannot even read Drive must hold pushes, not quietly declare itself reconciled');
+  } finally {
+    globalThis.fetch = realFetch;
+    Object.assign(D, saved);
+  }
+});
+
+test('NotesStore.target() treats a configured Drive backend as Drive through a lapsed token, not just a live one', () => {
+  const savedDir = FileStore.dirHandle, savedConn = DriveSync.connected, savedConf = DriveSync.configured;
+  try {
+    FileStore.dirHandle = null;
+    DriveSync.connected = false; DriveSync.configured = true;
+    eq(NotesStore.target(), 'drive', 'configured but not currently connected (a routine Safari sign-out) is still Drive, not a silent fall back to the browser');
+    DriveSync.connected = true; DriveSync.configured = true;
+    eq(NotesStore.target(), 'drive');
+    DriveSync.connected = false; DriveSync.configured = false;
+    eq(NotesStore.target(), 'indexeddb', 'genuinely never connected is the only case that falls back');
+  } finally {
+    FileStore.dirHandle = savedDir; DriveSync.connected = savedConn; DriveSync.configured = savedConf;
+  }
+});
+
+test('_catchUpWithDrive really pulls and merges through a stubbed fetch, not just by inspecting its own source', async () => {
+  const D = DriveSync;
+  const keys = ['connected', 'fileId', 'accessToken', 'tokenExpiresAt', 'lastSyncedModifiedTime', '_catchingUp', '_pushing', '_holdPush', 'problem'];
+  const saved = {}; keys.forEach(k => { saved[k] = D[k]; });
+  const realFetch = globalThis.fetch;
+  const remoteStamp = '2026-02-01T00:00:00.000Z';
+  try {
+    Object.assign(D, { connected: true, fileId: 'test-file', accessToken: 'tok', tokenExpiresAt: Date.now() + 3600000,
+      lastSyncedModifiedTime: '2026-01-01T00:00:00.000Z', _catchingUp: false, _pushing: false,
+      _holdPush: DRIVE_HOLD_UNREAD, problem: 'stale from a previous failure' });
+    // An empty-but-well-formed remote — nothing for the merge to contribute —
+    // so the only thing under test is that the real pull-then-merge body ran
+    // end to end, not what it decided to do with real content (that half is
+    // already covered by the pure mergeBankPayloads/mergeKeyedRowsUnionOnly
+    // tests elsewhere in this suite).
+    const remotePayload = { schema: APP.schema, savedAt: nowISO(), stores: {} };
+    BACKUP_STORES.forEach(s => { remotePayload.stores[s] = []; });
+    const remoteBytes = new TextEncoder().encode(JSON.stringify(remotePayload));
+    let sawMetaGet = false, sawMediaGet = false;
+    globalThis.fetch = async (url) => {
+      if (String(url).indexOf('alt=media') >= 0) { sawMediaGet = true; return { ok: true, status: 200, arrayBuffer: async () => remoteBytes.buffer }; }
+      sawMetaGet = true;
+      return { ok: true, status: 200, json: async () => ({ modifiedTime: remoteStamp }) };
+    };
+    await D._catchUpWithDrive();
+    assert(sawMetaGet, 'the real function must ask whether Drive moved');
+    assert(sawMediaGet, 'and really pull it — not stop at inspecting its own source text, which is all the old test did');
+    eq(D._holdPush, null, 'a successful catch-up clears a stale hold left over from before');
+    eq(D.lastSyncedModifiedTime, remoteStamp, 'and records the stamp it just reconciled to');
+  } finally {
+    globalThis.fetch = realFetch;
+    Object.assign(D, saved);
+  }
+});
+
 test('A rejected token is thrown away rather than reused', async () => {
   const D = DriveSync;
   const saved = { t: D.accessToken, e: D.tokenExpiresAt, c: D.connected, p: D.problem };
@@ -31852,13 +31974,18 @@ async function boot() {
     }
   });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden' && FileStore.connected && FileStore.dirty) FileStore.flushNow('snapshot');
+    // Neither call is forced: flushNow() already respects snapshotDue() and
+    // only does anything at all while dirty, and maybePush() only uploads
+    // while a change is actually still unpushed. Hiding the tab used to force
+    // a full snapshot rewrite and a full Drive upload unconditionally, every
+    // single time, even with nothing pending.
+    if (document.visibilityState === 'hidden' && FileStore.connected && FileStore.dirty) FileStore.flushNow();
     // Not hooked into beforeunload like the local write above: a fetch()
     // started that late routinely gets killed before it completes, especially
     // for a payload of any size. Going hidden fires earlier — backgrounding a
     // tab or switching apps on a phone — and the page usually survives long
     // enough afterward for the upload to actually finish.
-    if (document.visibilityState === 'hidden' && typeof DriveSync !== 'undefined' && DriveSync.connected) DriveSync.maybePush(true);
+    if (document.visibilityState === 'hidden' && typeof DriveSync !== 'undefined' && DriveSync.connected) DriveSync.maybePush();
     // Coming back the other way: if Drive is the backend but the token has
     // gone, try once, quietly. It will not help on Safari — a silent request
     // is exactly what that browser refuses — but it costs one blocked call and
