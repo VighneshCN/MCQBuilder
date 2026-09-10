@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.13', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.14', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -6632,6 +6632,20 @@ const Session = {
     let composition = null;
     let spec = config.composition;
     const hasSpec = spec && ((spec.domainMix && spec.domainMix.length) || (spec.difficultyMix && spec.difficultyMix.length) || (spec.seenMix && spec.seenMix.seenPct != null));
+    // A domain filter narrows `filtered` to only the domains still in play;
+    // weighting by the FULL blueprint regardless used to go looking for a
+    // share of every domain it excludes too, which `filtered` can never
+    // have any of — so both weightedPick() below and effectiveComposition()
+    // used to report a "shortfall" for a domain the candidate had just
+    // explicitly asked to leave out, occasionally (composeTest + strict)
+    // refusing to build the paper at all over a shortage that was never
+    // real. The blueprint the weighting is drawn from is narrowed the same
+    // way the pool already was; composeTest's own blueprint argument is left
+    // full, since it is only ever used there for a domain's printed name.
+    const domainFilter = (config.filters && config.filters.domains) || [];
+    const weightingBlueprint = domainFilter.length
+      ? (State.course.blueprint || []).filter(d => domainFilter.indexOf(d.id) >= 0)
+      : State.course.blueprint;
 
     if (wanted <= 0) {
       // Either Case study practice (whose whole paper is the case block) or a
@@ -6648,7 +6662,7 @@ const Session = {
       // however the bank happened to be imported. The weighting is a quota in
       // its own right, so it is supplied here when the candidate has not
       // overridden it, rather than lost by omission.
-      spec = effectiveComposition(spec, mode, config.weighted, State.course.blueprint);
+      spec = effectiveComposition(spec, mode, config.weighted, weightingBlueprint);
       const r = composeTest(filtered, spec, wanted, rng, State.course.blueprint);
       if (r.shortfalls.length && spec.strict !== false) {
         const err = new Error(describeShortfalls(r.shortfalls, wanted));
@@ -6669,7 +6683,7 @@ const Session = {
       shortfalls = r.shortfalls;
       composition = { spec: JSON.parse(JSON.stringify(spec)), parts: r.parts, substituted: r.substituted, unreachable: r.unreachable };
     } else if (mode === 'mock' || (config.weighted && filtered.length)) {
-      const r = weightedPick(filtered, State.course.blueprint, wanted, rng);
+      const r = weightedPick(filtered, weightingBlueprint, wanted, rng);
       chosen = r.questions; notes = r.notes; shortfalls = r.shortfalls;
     } else if (mode === 'weak') {
       chosen = weakFirstPick(filtered, wanted, rng, Settings.get('weakMinSample'));
@@ -8088,7 +8102,13 @@ function studyPlanCard(plan) {
         (plan.unseenPerDay >= plan.perDay
           ? 'Today’s whole share should be questions you have never seen'
           : 'Aim for ' + plan.unseenPerDay + ' of today’s ' + plan.perDay + ' to be questions you have never seen') +
-        ' — that covers the whole bank once by ' +
+        // Not a claim today alone earns: unseenPerDay is a PACE (the unseen
+        // count divided across the whole coverage window), and it is keeping
+        // to it every day — not just today — that reaches coverageBy. perDay
+        // itself is recalculated fresh each day from whatever the backlog and
+        // days-left happen to be then, so today's numbers are not a one-off
+        // ticket to that date.
+        ' — keep to about that pace and the whole bank is covered once by ' +
         fmtDate(dateKeyToLocal(plan.coverageBy).toISOString()) + ', leaving the rest of the run-in to fix what needs fixing.')
         : plan.phase === 'consolidate' ? h('div', { class: 'small muted', style: 'margin:0' },
           'You have seen every question at least once. What is left is making it stick: ' +
@@ -8110,7 +8130,25 @@ function studyPlanCard(plan) {
         ]),
         h('button', {
           class: 'btn sm', text: 'Practise that',
-          onclick: () => configureMode('domain', { domains: [plan.focus.id] })
+          // Domain mode only ever draws from the standalone pool — a domain
+          // that is furthest behind purely on the strength of its case-study
+          // questions (a real, reachable state: domainReadiness counts every
+          // question by its own domainId, case or not) would open a domain
+          // configurator with nothing in it. casestudy mode can reach those
+          // questions, but only by picking whole scenarios — it deliberately
+          // has no domain filter of its own, so the scenarios have to be
+          // found here and handed over as a caseStudies preset instead.
+          onclick: async () => {
+            const all = await State.questions();
+            if (eligiblePool(all).some(q => q.domainId === plan.focus.id)) {
+              configureMode('domain', { domains: [plan.focus.id] });
+              return;
+            }
+            const caseRecords = await CaseStudies.byCourse(State.course.id);
+            const caseIds = Array.from(new Set(
+              drawableCasePool(all, caseRecords).filter(q => q.domainId === plan.focus.id).map(q => q.caseStudyId)));
+            configureMode('casestudy', caseIds.length ? { caseStudies: caseIds } : null);
+          }
         })
       ]) : null,
 
@@ -8559,6 +8597,9 @@ async function configureMode(mode, preset) {
   };
   const f = cfg.filters;
   if (preset && preset.domains) f.domains = preset.domains.filter(Boolean);
+  // Only meaningful for isCaseMode (the chip row below is not even drawn
+  // otherwise), so callers that only ever preset domains are unaffected.
+  if (preset && preset.caseStudies) f.caseStudies = preset.caseStudies.filter(Boolean);
 
   // Read here, not beside the marks line below: drawSectionNote() runs while
   // this dialog is still being assembled, so a const declared further down is
@@ -27584,6 +27625,33 @@ test('a new paper carries no dead pool counters', async () => {
   } finally {
     if (s) await DB.del('sessions', s.id);
     await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses;
+    State.invalidate();
+  }
+});
+
+test('A weighted mock with a domain filter does not report a shortfall for the domain it excluded', async () => {
+  const was = { course: State.course, courses: State.courses };
+  const course = makeCourse('WDF', 'Weighted domain-filter test course',
+    [{ id: 'D1', name: 'Domain one', weight: 50 }, { id: 'D2', name: 'Domain two', weight: 50 }],
+    { id: 'test-course' });
+  const mk = (n, dom) => mkQ('q' + n + ' ' + dom, ['a', 'b'], 0, { status: 'active', answerVerified: 'verified', domainId: dom });
+  const d1qs = Array.from({ length: 8 }, (_, i) => mk(i, 'D1'));
+  const d2qs = Array.from({ length: 5 }, (_, i) => mk(i, 'D2'));
+  let s = null;
+  try {
+    State.course = course; State.courses = [course];
+    for (const q of d1qs.concat(d2qs)) await DB.put('questions', q);
+    State.invalidate();
+    s = await Session.create('mock', { count: 6, minutes: 30, filters: { domains: ['D1'] }, weighted: true });
+    assert(!s.shortfalls.length, 'D2 was excluded on purpose, not short — it must not appear as a shortfall: ' + JSON.stringify(s.shortfalls));
+    assert(!s.selectionNotes.some(n => n.domainId === 'D2'), 'a domain the filter excluded must not even appear in the composition notes');
+    eq(s.questionUuids.length, 6);
+    const byId = new Map(d1qs.concat(d2qs).map(q => [q.uuid, q]));
+    assert(s.questionUuids.every(u => byId.get(u).domainId === 'D1'), 'every question drawn must actually come from the domain that was left in');
+  } finally {
+    if (s) await DB.del('sessions', s.id);
+    for (const q of d1qs.concat(d2qs)) await DB.del('questions', q.uuid);
     State.course = was.course; State.courses = was.courses;
     State.invalidate();
   }

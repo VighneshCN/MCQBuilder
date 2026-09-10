@@ -250,7 +250,11 @@ case-study questions still pair, including across different scenarios, because
 that is a real duplicate.
 
 **Spaced repetition never surfaces one**, by construction rather than by rule:
-it filters `eligiblePool()`. Anything due surfaces inside Case study practice.
+it filters `eligiblePool()`. The only other mode that can reach a case-study
+question is Case study practice — and `pickCaseBlock()` (above) has no notion
+of due at all, so being overdue buys a question no priority there either:
+which whole scenarios come up is decided purely by their size against the
+number asked for, not by what any of their questions need.
 
 ## Marking, and the two things frozen with a paper
 
