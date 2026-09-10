@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.24', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.25', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1788,6 +1788,20 @@ const DB = {
     catch (e) { try { t.abort(); } catch (_) { /* already finished */ } return Promise.reject(e); }
     return new Promise((res, rej) => { t.oncomplete = () => res(vals); t.onerror = fail(rej); t.onabort = fail(rej); });
   },
+  /* Same shape, the other direction: every key removed as ONE transaction
+     instead of one transaction per row. A course wipe or delete used to call
+     del() once per question (and again per attempt, per session…) — each its
+     own transaction, each its own journal write, each its own storage-bar
+     repaint — so retiring a few hundred questions was a few hundred of all
+     three in a row. */
+  delManyRaw(store, keys) {
+    if (!keys.length) return Promise.resolve([]);
+    const t = this.tx(store, 'readwrite'), os = t.objectStore(store);
+    const fail = (rej) => (ev) => rej((ev && ev.target && ev.target.error) || t.error || new Error('The bulk delete from ' + store + ' failed.'));
+    try { keys.forEach(k => os.delete(k)); }
+    catch (e) { try { t.abort(); } catch (_) { /* already finished */ } return Promise.reject(e); }
+    return new Promise((res, rej) => { t.oncomplete = () => res(keys); t.onerror = fail(rej); t.onabort = fail(rej); });
+  },
   /* Clears and refills several stores as ONE transaction — every store
      commits together, or (on any failure) IndexedDB rolls all of them back
      together, including the clear()s. Built for _loadFromDisk()'s full-bank
@@ -1833,6 +1847,7 @@ const DB = {
     return map;
   },
   del(store, key) { return this._guard(store, () => this.delRaw(store, key), 'd', key); },
+  delMany(store, keys) { return this._guard(store, () => this.delManyRaw(store, keys), 'dm', keys); },
   clear(store) { return this._guard(store, () => this.clearRaw(store), 'c', null); },
 
   /**
@@ -7764,11 +7779,15 @@ ROUTES.dashboard = async (root) => {
   // before folding; so does this, or the same bank reads differently on two
   // devices and the readiness verdict flips with it. Sorted on a copy: the
   // `attempts` array below is also read for guessRate and the time average.
-  attempts.slice().sort((a, b) => new Date(a.ts) - new Date(b.ts))
+  // ts is always nowISO() — a fixed-width, Z-suffixed UTC string — so plain
+  // string comparison orders it identically to parsing both sides into a
+  // Date, without building two Date objects per comparison in a sort that
+  // runs over every attempt in the course on every dashboard recompute.
+  attempts.slice().sort((a, b) => a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0)
     .forEach(a => { if (!firstAttempts.has(a.questionUuid)) firstAttempts.set(a.questionUuid, a); });
   const firstArr = Array.from(firstAttempts.values());
   const firstAcc = firstArr.length ? firstArr.filter(a => a.correct).length / firstArr.length : null;
-  const recent = attempts.slice().sort((a, b) => new Date(b.ts) - new Date(a.ts)).slice(0, 100);
+  const recent = attempts.slice().sort((a, b) => a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0).slice(0, 100);
   const recAcc = recent.length ? recent.filter(a => a.correct).length / recent.length : null;
   const guessRate = (() => { const c = attempts.filter(a => a.correct); return c.length ? c.filter(a => a.confidence === 'guessed').length / c.length : 0; })();
   const due = active.filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date());
@@ -14981,10 +15000,13 @@ ROUTES.analytics = async (root) => {
   // under "Last 7 days" the tile counts only questions genuinely met for the
   // first time in those days, so it agrees with the table's all-time column.
   const firstMap = new Map();
-  allAttempts.slice().sort((a, b) => new Date(a.ts) - new Date(b.ts)).forEach(a => { if (!firstMap.has(a.questionUuid)) firstMap.set(a.questionUuid, a); });
+  // ts is always nowISO() — a fixed-width, Z-suffixed UTC string — so plain
+  // string comparison orders it identically to a Date subtraction, without
+  // building two Date objects per comparison for every attempt in the course.
+  allAttempts.slice().sort((a, b) => a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0).forEach(a => { if (!firstMap.has(a.questionUuid)) firstMap.set(a.questionUuid, a); });
   const inView = new Set(attempts.map(a => a.id));
   const firstArr = Array.from(firstMap.values()).filter(a => inView.has(a.id));
-  const newestFirst = attempts.slice().sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  const newestFirst = attempts.slice().sort((a, b) => a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0);
   const recent = newestFirst.slice(0, 100);
   // The same figure for the attempts before these, so the tile says which way
   // the number is moving instead of leaving that to memory across re-renders
@@ -17831,17 +17853,25 @@ async function deleteCourseForever(course) {
   // notes, sources and case studies — and pushed them all back, so the course
   // reappeared everywhere, empty, and deleting it again restarted the loop.
   await DB.put('tombstones', courseTombstone(course.id, course.code));
+  // One transaction per store instead of one per row: a course with a few
+  // hundred questions used to open (and journal, and repaint the storage bar
+  // for) a few hundred separate deletes here alone. Reads that genuinely
+  // differ row by row — which versions belong to which question, which notes
+  // live outside IndexedDB — still happen per row; only the delete itself,
+  // once every key is known, is batched.
+  const versionIds = [];
   for (const q of qs) {
     if (q.qid) await DB.put('tombstones', { qid: q.qid, uuid: q.uuid, retiredAt: nowISO(), reason: 'course deleted' });
-    await DB.del('questions', q.uuid);
-    for (const v of await DB.byIndex('questionVersions', 'questionUuid', q.uuid)) await DB.del('questionVersions', v.id);
+    for (const v of await DB.byIndex('questionVersions', 'questionUuid', q.uuid)) versionIds.push(v.id);
   }
+  await DB.delMany('questions', qs.map(q => q.uuid));
+  await DB.delMany('questionVersions', versionIds);
   await reapOrphanImages(qs.map(q => q.imageId));
-  for (const a of atts) await DB.del('attempts', a.id);
-  for (const s of sess) await DB.del('sessions', s.id);
-  for (const s of srcs) await DB.del('sources', s.id);
-  for (const b of batches) await DB.del('batches', b.id);
-  for (const p of presets) await DB.del('presets', p.id);
+  await DB.delMany('attempts', atts.map(a => a.id));
+  await DB.delMany('sessions', sess.map(s => s.id));
+  await DB.delMany('sources', srcs.map(s => s.id));
+  await DB.delMany('batches', batches.map(b => b.id));
+  await DB.delMany('presets', presets.map(p => p.id));
   // Row only for a note whose bytes sit outside IndexedDB: the safety backup
   // above cannot hold them (requireNoteBackup, the single-note path, exists
   // precisely because of that), so destroying them here would be the one
@@ -17849,11 +17879,15 @@ async function deleteCourseForever(course) {
   // course deletion already does when it arrives from another device —
   // applyTombstoneRemovals drops COURSE_SCOPED rows and never touches a file.
   // An IndexedDB-only note IS inside the backup, so it goes with the course.
+  // NotesStore.remove() does its own multi-step work (file/Drive deletion,
+  // tombstoning) per note, so only the plain IndexedDB-only rows batch.
+  const externalNoteIds = [];
   for (const n of notes) {
-    if (n.storage === 'folder' || n.storage === 'drive') await DB.del('notes', n.id);
+    if (n.storage === 'folder' || n.storage === 'drive') externalNoteIds.push(n.id);
     else await NotesStore.remove(n);
   }
-  for (const c of cases) await DB.del('caseStudies', c.id);
+  await DB.delMany('notes', externalNoteIds);
+  await DB.delMany('caseStudies', cases.map(c => c.id));
   await pruneOrphanImages();
   await DB.del('idRegister', course.id);
   await DB.del('courses', course.id);
@@ -18107,26 +18141,30 @@ async function wipeCourse() {
   FileStore.allowShrink('course wipe: ' + State.course.code);
   if (typeof DriveSync !== 'undefined') DriveSync.allowDriveShrink('course wipe: ' + State.course.code);
 
+  // One transaction per store instead of one per row (see delManyRaw) — the
+  // tombstone puts and the per-question version reads still happen row by
+  // row, since each names a different fact; only the deletes, once every key
+  // is known, are batched.
+  const versionIds = [];
   for (const q of all) {
     if (q.qid) await DB.put('tombstones', { qid: q.qid, uuid: q.uuid, retiredAt: nowISO(), reason: 'course wipe' });
-    await DB.del('questions', q.uuid);
-    for (const v of await DB.byIndex('questionVersions', 'questionUuid', q.uuid)) await DB.del('questionVersions', v.id);
+    for (const v of await DB.byIndex('questionVersions', 'questionUuid', q.uuid)) versionIds.push(v.id);
   }
+  await DB.delMany('questions', all.map(q => q.uuid));
+  await DB.delMany('questionVersions', versionIds);
   await reapOrphanImages(all.map(q => q.imageId));
-  for (const a of await DB.byIndex('attempts', 'courseId', State.course.id)) await DB.del('attempts', a.id);
+  const wipedAttempts = await DB.byIndex('attempts', 'courseId', State.course.id);
+  await DB.delMany('attempts', wipedAttempts.map(a => a.id));
   // Tombstoned like the questions, or a device that still holds them pushes
   // them back on the next merge — sessions whose questions no longer exist,
   // on every device, for ever.
-  for (const s of await DB.byIndex('sessions', 'courseId', State.course.id)) {
-    await DB.put('tombstones', rowTombstone(s.id, 'course wipe'));
-    await DB.del('sessions', s.id);
-  }
+  const wipedSessions = await DB.byIndex('sessions', 'courseId', State.course.id);
+  for (const s of wipedSessions) await DB.put('tombstones', rowTombstone(s.id, 'course wipe'));
+  await DB.delMany('sessions', wipedSessions.map(s => s.id));
   // A scenario with every one of its questions gone is not a case study any
   // more, just an orphan passage the integrity check would flag forever.
-  for (const c of cases) {
-    await DB.put('tombstones', rowTombstone(c.id, 'course wipe'));
-    await DB.del('caseStudies', c.id);
-  }
+  for (const c of cases) await DB.put('tombstones', rowTombstone(c.id, 'course wipe'));
+  await DB.delMany('caseStudies', cases.map(c => c.id));
   await pruneOrphanImages();
   await audit('delete', 'course-data', State.course.id, { questions: all.length, caseStudies: cases.length }, null, 'Course questions deleted after a safety backup; IDs tombstoned');
   State.invalidate();
@@ -18827,6 +18865,16 @@ const FileStore = {
       // bulk journal entry cannot capture reliably.
       if (n > BULK_JOURNAL_LIMIT || STORES[store].auto) this.needSnapshot = true;
       else payload.forEach(v => this._journal.push({ o: 'p', s: store, v: v }));
+    } else if (op === 'dm') {
+      // Same cutoff as 'm', for the same reason — and none of that op's
+      // auto-increment worry: a delete needs only the key the caller already
+      // has, never one IndexedDB has yet to hand out. Below the cutoff, each
+      // key becomes its own ordinary 'd' journal entry — replay() already
+      // applies those one at a time, so there is no bulk-delete entry shape
+      // to invent.
+      const n = (payload && payload.length) || 0;
+      if (n > BULK_JOURNAL_LIMIT) this.needSnapshot = true;
+      else payload.forEach(k => this._journal.push({ o: 'd', s: store, k: k }));
     } else if (op === 'd') {
       this._journal.push({ o: 'd', s: store, k: payload });
     } else if (op === 'p') {
@@ -21911,7 +21959,7 @@ async function applyTombstoneRemovals(merged) {
     for (const store of COURSE_SCOPED) {
       let rows = [];
       try { rows = await DB.byIndex(store, 'courseId', courseId); } catch (e) { rows = []; }
-      for (const row of rows) if (row && row.id != null) await DB.del(store, row.id);
+      await DB.delMany(store, rows.filter(row => row && row.id != null).map(row => row.id));
     }
     try { await DB.del('idRegister', courseId); } catch (e) { /* nothing registered */ }
     if (typeof Settings !== 'undefined' && Settings.clearCourse) await Settings.clearCourse(courseId);
@@ -21921,9 +21969,11 @@ async function applyTombstoneRemovals(merged) {
   // A note removed on another device. Notes carry no uuid and no answer
   // history, so this stands on its own — ahead of the question pass and its
   // early return, and not counted as a question deletion.
+  const noteIdsHere = [];
   for (const noteId of retiredNoteIds(tombs)) {
-    if (await DB.get('notes', noteId)) await DB.del('notes', noteId);
+    if (await DB.get('notes', noteId)) noteIdsHere.push(noteId);
   }
+  await DB.delMany('notes', noteIdsHere);
 
   // A session or case study tombstoned elsewhere (a course wipe) goes the same
   // way; putMany could not have removed it either.
@@ -21931,7 +21981,8 @@ async function applyTombstoneRemovals(merged) {
   if (retired.size) for (const store of ['sessions', 'caseStudies']) {
     const gone = [];
     await DB.each(store, r => { if (r && retired.has(r.id)) gone.push(r.id); });
-    for (const id of gone) { await DB.del(store, id); rowsGone++; }
+    await DB.delMany(store, gone);
+    rowsGone += gone.length;
   }
   if (!retired.size && !coursesGone) return 0;
   if (!retired.size) {
@@ -21947,14 +21998,16 @@ async function applyTombstoneRemovals(merged) {
   const here = new Set();
   const heldImages = new Set();
   await DB.each('questions', q => { if (retired.has(q.uuid) && !kept.has(q.uuid)) { here.add(q.uuid); if (q.imageId) heldImages.add(q.imageId); } });
-  let removed = 0;
+  const retiredAttemptIds = [], retiredVersionIds = [];
   for (const uuid of here) {
-    await DB.del('questions', uuid);
     const hist = await DB.byIndex('attempts', 'questionUuid', uuid);
-    for (const a of hist) if (a.id != null) await DB.del('attempts', a.id);
-    for (const v of await DB.byIndex('questionVersions', 'questionUuid', uuid)) if (v.id != null) await DB.del('questionVersions', v.id);
-    removed++;
+    for (const a of hist) if (a.id != null) retiredAttemptIds.push(a.id);
+    for (const v of await DB.byIndex('questionVersions', 'questionUuid', uuid)) if (v.id != null) retiredVersionIds.push(v.id);
   }
+  await DB.delMany('questions', Array.from(here));
+  await DB.delMany('attempts', retiredAttemptIds);
+  await DB.delMany('questionVersions', retiredVersionIds);
+  const removed = here.size;
   await reapOrphanImages(heldImages);
   // Both backends refuse a push that shrinks the bank, which is right when a
   // bank collapses unexpectedly and wrong here: this shrank because somebody
@@ -26920,6 +26973,40 @@ test('Broad changes escalate to a full snapshot rather than a huge journal', asy
   }
 });
 
+test('A batched delete journals one ordinary entry per key, below the bulk limit', async () => {
+  const was = { connected: FileStore.connected, dir: FileStore.dirHandle };
+  try {
+    FileStore.connected = true; FileStore.dirHandle = {};
+    FileStore._journal = []; FileStore.needSnapshot = false;
+
+    FileStore.touch('questions', 'dm', ['u1', 'u2', 'u3']);
+    eq(FileStore._journal.length, 3, 'three keys should produce three journal entries, not one bulk entry');
+    for (const e of FileStore._journal) {
+      eq(e.o, 'd', 'each entry must be an ordinary single delete — replay() knows no other shape');
+      eq(e.s, 'questions');
+    }
+    eq(FileStore._journal.map(e => e.k).sort().join(','), 'u1,u2,u3', 'every key must be carried');
+    assert(!FileStore.needSnapshot, 'a small batch must stay journalled');
+
+    // Unlike putMany's 'm', a batched delete needs only keys the caller
+    // already has — there is no generated-key problem an auto-increment store
+    // creates for a bulk PUT, so this must not escalate to a snapshot just
+    // because the store happens to be auto-increment.
+    FileStore._journal = []; FileStore.needSnapshot = false;
+    FileStore.touch('attempts', 'dm', [101, 102]);
+    assert(!FileStore.needSnapshot, 'a small batched delete on an auto-increment store must still journal');
+    eq(FileStore._journal.length, 2);
+
+    FileStore._journal = []; FileStore.needSnapshot = false;
+    const many = Array.from({ length: BULK_JOURNAL_LIMIT + 1 }, (_, i) => 'k' + i);
+    FileStore.touch('questions', 'dm', many);
+    assert(FileStore.needSnapshot, 'a batch past the bulk limit must still escalate to a snapshot');
+  } finally {
+    FileStore.connected = was.connected; FileStore.dirHandle = was.dir;
+    FileStore._journal = []; FileStore.needSnapshot = false;
+  }
+});
+
 test('Replaying a journal survives a half-written final line', async () => {
   const q = mkQ('replay me', ['a', 'b'], 0);
   const good = [
@@ -31161,6 +31248,47 @@ test('putManyRaw is atomic when a row has no key', async () => {
   eq(await DB.get('settings', '__t_atomic'), undefined, 'the good row before it was NOT committed');
   await DB.delRaw('settings', '__t_atomic');
 });
+test('delManyRaw removes every key as one transaction', async () => {
+  await DB.putManyRaw('settings', [{ k: '__t_dmr_1', v: 1 }, { k: '__t_dmr_2', v: 2 }, { k: '__t_dmr_3', v: 3 }]);
+  await DB.delManyRaw('settings', ['__t_dmr_1', '__t_dmr_2', '__t_dmr_3']);
+  eq(await DB.get('settings', '__t_dmr_1'), undefined, 'first key gone');
+  eq(await DB.get('settings', '__t_dmr_2'), undefined, 'second key gone');
+  eq(await DB.get('settings', '__t_dmr_3'), undefined, 'third key gone');
+});
+test('delManyRaw rejects with the failing request\'s error, never null', async () => {
+  const realTx = DB.tx;
+  const err = Object.assign(new Error('full'), { name: 'QuotaExceededError' });
+  const stub = { error: null, objectStore: () => ({ delete: () => ({}) }), abort() {} };
+  DB.tx = () => stub;
+  try {
+    const p = DB.delManyRaw('settings', ['__t_bulk']);
+    stub.onerror({ target: { error: err } });
+    let got = null; await p.catch(e => { got = e; });
+    eq(got && got.name, 'QuotaExceededError', 'caller sees the request error, not null');
+  } finally { DB.tx = realTx; }
+});
+test('delManyRaw is atomic when a key is invalid', async () => {
+  await DB.putRaw('settings', { k: '__t_dmr_atomic', v: 1 });
+  let got = null;
+  await DB.delManyRaw('settings', ['__t_dmr_atomic', undefined]).catch(e => { got = e; });
+  eq(got && got.name, 'DataError', 'the bad key is reported');
+  const still = await DB.get('settings', '__t_dmr_atomic');
+  assert(!!still, 'the good row before it was NOT deleted — an aborted transaction commits nothing');
+  await DB.delRaw('settings', '__t_dmr_atomic');
+});
+test('DB.delMany goes through the same guard as every other write', async () => {
+  await DB.putMany('batches', [{ id: '__t_dm_1', courseId: '__t_dm' }, { id: '__t_dm_2', courseId: '__t_dm' }]);
+  await DB.delMany('batches', ['__t_dm_1', '__t_dm_2']);
+  eq(await DB.get('batches', '__t_dm_1'), undefined, 'first row gone');
+  eq(await DB.get('batches', '__t_dm_2'), undefined, 'second row gone');
+
+  const wasVeto = _writeVeto;
+  _writeVeto = () => true;
+  let threw = null;
+  try { await DB.delMany('batches', ['__t_dm_1']); } catch (e) { threw = e; }
+  _writeVeto = wasVeto;
+  eq(threw && threw.name, 'ReadOnlyError', 'a batched delete must refuse to run while read-only, exactly like a single del()');
+});
 test('DB.putAll writes several stores in one transaction, or none of them', async () => {
   const id = 'test-putall-' + Date.now();
   await DB.putAll({ batches: [{ id, courseId: id, startedAt: nowISO(), report: null }], sources: [{ id, courseId: id, admitted: 1 }] });
@@ -31244,6 +31372,40 @@ test('The dashboard reads the session store once per render', async () => {
     State.course = prevCourse; State.courses = prevCourses; State.invalidate();
   }
   eq(sessionReads, 1, 'one getAll of the session store, not three');
+});
+
+test('String comparison orders nowISO() timestamps exactly like Date subtraction', () => {
+  // Dashboard and Analytics both sort attempts by .ts with a plain string
+  // comparator instead of building two Date objects per comparison — sound
+  // only because nowISO() (new Date().toISOString()) is always a fixed-width,
+  // millisecond-precision, Z-suffixed UTC string, which therefore sorts
+  // identically either way. Every attempt in the app is stamped this way
+  // (Session.commit writes ts: rec.at, and rec.at is always nowISO()).
+  const stamps = [
+    '2024-01-01T00:00:00.000Z', '2024-01-01T00:00:00.001Z', '2024-01-01T00:00:00.999Z',
+    '2024-12-31T23:59:59.999Z', '2025-01-01T00:00:00.000Z', '2030-06-15T09:30:45.123Z',
+    nowISO(), new Date(Date.now() - 1).toISOString(), new Date(Date.now() + 1).toISOString()
+  ];
+  const byString = stamps.slice().sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+  const byDate = stamps.slice().sort((a, b) => new Date(a) - new Date(b));
+  eq(byString.join('|'), byDate.join('|'), 'string order must match chronological order for every nowISO()-shaped timestamp');
+});
+
+test('Dashboard and Analytics compare .ts as a string, not by constructing two Dates per comparison', () => {
+  // Pinned by source so a future edit reverting either site back to
+  // `new Date(a.ts) - new Date(b.ts)` fails here, not only in a profiler —
+  // that form re-parses every timestamp on every pairwise comparison a sort
+  // over the whole course's attempts makes.
+  // Analytics also uses new Date(a.ts) once for something this fix leaves
+  // alone — filtering attempts to a date range needs a real getTime(), not
+  // an order — so the guard below targets the subtraction-comparator shape
+  // specifically, not every use of new Date() on a .ts field.
+  const dash = ROUTES.dashboard.toString();
+  assert(!/new Date\([a-z]\.ts\) [-] new Date\([a-z]\.ts\)/.test(dash), 'dashboard must not construct two Dates to compare .ts');
+  assert((dash.match(/\.ts [<>] [a-z]\.ts/g) || []).length >= 4, 'both dashboard sort sites must compare .ts directly');
+  const ana = ROUTES.analytics.toString();
+  assert(!/new Date\([a-z]\.ts\) [-] new Date\([a-z]\.ts\)/.test(ana), 'analytics must not construct two Dates to compare .ts');
+  assert((ana.match(/\.ts [<>] [a-z]\.ts/g) || []).length >= 4, 'both analytics sort sites must compare .ts directly');
 });
 
 test('A non-pausable mock is charged for real time on resume even without a Leave stamp', () => {
@@ -32893,11 +33055,28 @@ test('The "changed outside the app" recovery reads the file the same gzip-or-JSO
 test('Deleting a course never destroys a note file the backup cannot hold', () => {
   assert(BACKUP_STORES.indexOf('notes') >= 0, 'the metadata row is backed up');
   const src = deleteCourseForever.toString();
-  assert(/DB\.del\('notes'/.test(src), 'an external note is dropped by row');
+  assert(/DB\.delMany\('notes'/.test(src), 'an external note is deleted directly, not fed to the file-destroying remove()');
   assert(!/for \(const n of notes\) await NotesStore\.remove\(n\);/.test(src),
     'and never fed wholesale to the file-destroying remove()');
   assert(applyTombstoneRemovals.toString().indexOf('NotesStore.remove') < 0,
     'both ends of one deletion must agree');
+});
+
+test('Course wipe and delete batch their per-row deletes into one transaction per store', () => {
+  // A course with a few hundred questions used to open one IndexedDB
+  // transaction — and one journal write, and one storage-bar repaint — per
+  // question, then again per attempt, per session… delMany() collapses each
+  // store's deletes into one. This pins the batching down by name so a future
+  // edit reverting to a per-row del() loop, for either function, fails here
+  // rather than only showing up as "course delete got slow again".
+  const wipe = wipeCourse.toString();
+  for (const store of ['questions', 'questionVersions', 'attempts', 'sessions', 'caseStudies']) {
+    assert(new RegExp("DB\\.delMany\\('" + store + "'").test(wipe), 'wipeCourse batches ' + store);
+  }
+  const del = deleteCourseForever.toString();
+  for (const store of ['questions', 'questionVersions', 'attempts', 'sessions', 'sources', 'batches', 'presets', 'caseStudies']) {
+    assert(new RegExp("DB\\.delMany\\('" + store + "'").test(del), 'deleteCourseForever batches ' + store);
+  }
 });
 
 test('A mock reopens after a case-study count has been set', () => {
