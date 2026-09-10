@@ -5,7 +5,7 @@ Open the app with `#tools` on the URL (for example `index.html#tools`), then
 that hash is present. The suite runs against a scratch course, so it never
 touches your real bank.
 
-**Current result: 393 passed, 0 failed, of 393.**
+**Current result: 485 passed, 0 failed, of 485.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -60,7 +60,7 @@ nine different requested counts.
 25. Filters isolate incorrect, guessed and due questions
 47. Only active, verified questions can enter a session
 
-### Saving to your data file (8)
+### Saving to your data file (7)
 26. File sync covers every store except the handle store
 27. File payload round-trips questions and attempts including their keys
 28. Read-only blocks writes but never blocks reconnecting
@@ -167,7 +167,7 @@ nine different requested counts.
 109. The printed page is built in one place
 110. The offline switch is honest about where it cannot work
 
-### Out of the student's way (8)
+### Out of the student's way (10)
 111. What blocks practice is written once, in the status table
 112. A question nobody has filed still practises; one nobody can mark does not
 113. A bank that was already fine is completely unaffected
@@ -222,16 +222,16 @@ nine different requested counts.
 146. Cancelling a modal never leaves its opener wearing a focus ring
 
 ### Keeping the browser from throwing it away (3)
-137. Nothing is said about durability until it changes the answer
-138. An unprotected bank is told the truth, and told what fixes it
-139. A granted promise is not oversold
+147. Nothing is said about durability until it changes the answer
+148. An unprotected bank is told the truth, and told what fixes it
+149. A granted promise is not oversold
 
 ### Taking the app with you (3)
-140. A copy is refused while the bank would not travel with it
-141. The note in the box says the things that would otherwise be a support message
-142. The bundle is a real zip that a zip reader can read back
+150. A copy is refused while the bank would not travel with it
+151. The note in the box says the things that would otherwise be a support message
+152. The bundle is a real zip that a zip reader can read back
 
-### Everything else (4)
+### Everything else (5)
 29. Practice settings are per course, app preferences are shared
 34. Appearance resolves Light, Dark and Auto correctly
 46. The app never advertises question files it has not confirmed
@@ -564,9 +564,10 @@ Automated tests cannot verify rendering or real browser storage.
       footer
 - [ ] Settings → About and licence still reaches both the licence and the
       keyboard shortcuts, which is where the phone's hidden footer sends
-      people — neither screen says anything about durability, and on
-      Firefox merely visiting them must not itself trigger the storage
-      permission prompt
+      people
+- [ ] Neither the About and licence screen nor the keyboard-shortcuts panel
+      says anything about durability, and on Firefox merely visiting them
+      must not itself trigger the storage permission prompt
 - [ ] Import questions with no folder and no Drive: Settings → Where your data
       lives explains it, offers folder/install/backup, and shows the button
 - [ ] Connect a folder: the whole block disappears

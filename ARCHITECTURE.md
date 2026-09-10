@@ -45,8 +45,8 @@ every commit.
 08 · Shell              Rail, control band, router, dashboard
 09 · Practice           Mode setup, runner, mock palette, results
 10 · Question Bank      Search, filter, bulk control, detail and editing — then Notes, Case Studies
-11 · Add Questions      Intake, preview, reconciliation, admission — then Needs Checking
-12 · Add from Image     Capture, adjust, transcribe, verify
+11 · Add Questions      Intake, preview, reconciliation, admission
+12 · Add from Image     Capture, adjust, transcribe, verify — then Needs Checking
 13 · Analytics          Drill-down that keeps coverage and accuracy distinct — see "Analytics" below
 14 · Backup             Export, restore, safety backups, integrity checks
 15 · Settings           Course management, which is what makes this multi-course
@@ -105,7 +105,9 @@ Database `mcq_mastery`, schema version 4.
 Every course-owned record carries `courseId`. There is no global question pool;
 switching courses is a filter, not a migration.
 
-`fsmeta` holds the folder handle only. It is excluded from every export and
+`fsmeta` holds the local folder/file handle, the Google Drive connection's own
+bookkeeping (eight keys — see "Google Drive sync" below for the full list),
+and a few one-shot maintenance markers. It is excluded from every export and
 every write to the data file, and it is exempt from the read-only guard —
 recording a reconnection must work while the app is refusing everything else.
 
@@ -643,7 +645,7 @@ yet.
 ### Data arriving from elsewhere has to bring its courses
 
 `restoreFlow()` already re-read the course list after writing the stores.
-`_applyRemote()` and `applyMergedBank()` did not — they called
+`applyMergedBank()` did not — it called
 `State.invalidate()`, which only marks a question cache dirty. So pulling a bank
 from Drive onto an install with no course left `State.course` null, `go()` kept
 redirecting to onboarding, and the person sat looking at "add your first
@@ -699,9 +701,13 @@ sat unread in `this.problem` — the check for it came after that branch — and
 where reconnecting is the normal case got a label that never changed and
 nothing to press. It now shows the reason when there is one, and carries a
 **Reconnect** button. `retryQuietly()` also makes one silent attempt when the
-tab becomes visible — at most one at a time, at most once a minute, and silent
-on failure, because on Safari it will usually fail and a toast on every glance
-at the app would be worse than the problem.
+tab becomes visible — at most one at a time, at most once every 15 seconds
+(two events arriving together, like focus and visibilitychange, share the one
+attempt), and silent on failure, because on Safari it will usually fail and a
+toast on every glance at the app would be worse than the problem. A separate
+backoff timer keeps retrying unattended regardless, starting 30 seconds after
+a failure and doubling each time up to a 10-minute cap, so a browser that can
+never renew silently is not knocking on Google's door all day.
 
 ## Not re-asking a settled question
 
@@ -1489,7 +1495,7 @@ is not a safe default for every one of them:
   edited after.
 
 `applyMergedBank()` writes through the ordinary guarded `DB.putMany()` path
-(not the raw, untracked writes `loadFromDisk()`/`_applyRemote()` use to
+(not the raw, untracked writes `loadFromDisk()` uses to
 rebuild IndexedDB from a file that is already the source of truth) so
 whichever backend is actually connected at the time picks the change up
 through its normal dirty-tracking and pushes/flushes it out afterward,
@@ -1520,6 +1526,47 @@ capped by `notesMaxKB` — the same trade-off images already make. The `notes`
 object store itself holds only metadata (title, domain, topic, size, where the
 bytes actually are) plus that fallback content field, and syncs like any other
 store.
+
+## Games
+
+Two games — Kab Banega Crorepati (a quiz-show ladder) and Balloon Pop — built
+from a course's own question bank rather than authored content, so neither
+exists independent of what has actually been checked and verified.
+
+`gameQuestions(opts)` is the one seam every game draws through: it starts
+from `eligiblePool()`, the same Active-and-answer-verified pool practice
+itself uses, filters by option count when a game needs one fixed (KBC always
+asks for four; Balloon Pop takes any), and maps the survivors through
+`toGameQuestion()`. That reducer keeps only what a game screen ever needs —
+stem, options with a letter fixed to their stored order (so a balloon
+labelled C stays option C however the display shuffles it), the correct id
+and text, an explanation, a qid, a domain id — and reads `difficulty` as
+`null` unless `difficultyVerified === 'verified'`, so an ungraded record's
+stored default is never mistaken for a real judgement made about it. A
+dangling `correctOptionId` (the option it names no longer exists) makes the
+whole record `null` rather than a question with no marked answer.
+
+`course.games` is the shelf: which games a course offers. A course saved
+before games existed has no list at all, and an absent list reads as "the
+general-purpose games" — exactly what was available before — so upgrading
+never silently takes a game away. A course created since then starts with an
+explicit list, empty until the user adds to it; an explicit `[]` means none,
+deliberately, not "not decided yet".
+
+`gameAvailability(game, course, counts)` answers only whether the bank is
+big enough — enough practice-ready questions, or enough with the option
+count a game requires — never whether a game suits a subject. That second
+question, what it suits, is free text on the game's own record (`fits`) and
+is left entirely to the user: nothing stops adding a game to a course it was
+not written for, it will simply run and may not be worth playing there.
+
+Both games share one `AudioContext` (`SHARED_AC`), built once on first use
+and never closed — only ever suspended on teardown and resumed by whichever
+game opens next. Recreating a context per game would leave someone who has
+opened and quit a few games with no sound for the rest of the session, with
+nothing on screen to say why. Muting (`Settings.audioMuted`) is
+device-local: silencing games on a phone does not silence them on a laptop
+signed into the same bank.
 
 ## Analytics
 

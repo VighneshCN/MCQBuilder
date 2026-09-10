@@ -119,6 +119,38 @@ while ($true) {
         # engine's files are actually in the folder. Answering with a body
         # would work but wastes a multi-megabyte read on every check.
         $method = if ($parts.Length -ge 1) { $parts[0].ToUpperInvariant() } else { 'GET' }
+
+        # DNS rebinding turns "bound to loopback only" into a false promise:
+        # a malicious page's script can point a hostname's DNS at 127.0.0.1
+        # once the browser's same-origin checks have already passed, and go
+        # on reading whatever this server answers as though it were that
+        # page's own origin. The Host header still names the REBOUND
+        # hostname, never localhost/127.0.0.1/[::1] — checking it exactly is
+        # what defeats that, the same defence dev servers like Vite and
+        # webpack-dev-server ship by default. Headers have to be drained
+        # either way (a client that sent more than a request line is still
+        # going to send the rest), so the check costs nothing extra to make.
+        $hostHeader = $null
+        while ($true) {
+            $headerLine = $reader.ReadLine()
+            if ([string]::IsNullOrEmpty($headerLine)) { break }
+            if ($headerLine -match '^(?i)Host:\s*(.+)$') { $hostHeader = $Matches[1].Trim() }
+        }
+        $allowedHosts = @('localhost:8080', '127.0.0.1:8080', '[::1]:8080')
+        if (-not $hostHeader -or ($allowedHosts -notcontains $hostHeader.ToLowerInvariant())) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes('421 - this server only answers to localhost:8080')
+            $head = "HTTP/1.1 421 Misdirected Request`r`n" +
+                    "Content-Type: text/plain; charset=utf-8`r`n" +
+                    "Content-Length: $($bytes.Length)`r`n" +
+                    "Connection: close`r`n`r`n"
+            $headBytes = [System.Text.Encoding]::ASCII.GetBytes($head)
+            $stream.Write($headBytes, 0, $headBytes.Length)
+            if ($method -ne 'HEAD') { $stream.Write($bytes, 0, $bytes.Length) }
+            $stream.Flush()
+            $client.Close()
+            continue
+        }
+
         $target = if ($parts.Length -ge 2) { $parts[1] } else { '/' }
         $target = $target.Split('?')[0]
         $target = [System.Uri]::UnescapeDataString($target)

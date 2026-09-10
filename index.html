@@ -1510,7 +1510,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.33', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.34', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1696,7 +1696,10 @@ const STORES = {
       a caseStudyId — one register, partitioned at eligiblePool(), rather than
       a second copy of every mechanism questions already have. */
   caseStudies:     { keyPath: 'id', idx: ['courseId'] },
-  /** Holds the file/folder handle only. Never exported, never synced. */
+  /** Holds the local folder/file handle, the Google Drive connection's own
+      bookkeeping (fileId, modifiedTime, a content signature, the last-synced
+      stamp — see DriveSync), and a few one-shot maintenance markers. Never
+      exported, never synced. */
   fsmeta:          { keyPath: 'k' }
 };
 
@@ -2038,7 +2041,15 @@ function toast(msg, kind, ms) {
   if (!host) { try { console.warn('[toast]', msg); } catch (e) { } return; }
   const t = h('div', { class: 'toast ' + (kind || ''), role: 'status', text: msg });
   host.appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 260); }, ms || 3200);
+  // A one-line toast and a dense paragraph do not deserve the same clock —
+  // 3200ms is barely enough to read a short one and nowhere near enough for
+  // a long one, so callers with something to say kept hand-tuning their own
+  // ms. ~55ms/character (≈218wpm) reading speed, floored at the old default
+  // and capped at the longest ms anyone has hand-tuned elsewhere, so a
+  // caller that already picked its own duration (the ms || short-circuits)
+  // is completely unaffected either way.
+  const dur = ms || Math.min(12000, Math.max(3200, String(msg || '').length * 55));
+  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 260); }, dur);
 }
 function modal(opts) {
   return new Promise(resolve => {
@@ -6634,6 +6645,15 @@ const MODES = {
   casestudy: { label: 'Case study questions', reveal: true, confidence: true, caseBank: true, desc: 'Whole case studies, passage and all — the only mode besides a mock that asks them.' }
 };
 
+/** A session's mode can arrive from a device running an older or newer
+    build — merge is additive and never validated against this build's own
+    MODES table — so every consumer of a session's mode has to survive one
+    this table does not name, rather than throw on a bare lookup. reveal:true
+    is the safe fallback: "commit each answer as it happens", the lossless
+    behaviour. reveal:false (the mock path) over responses that may already
+    be committed elsewhere would be the wrong one to guess by default. */
+const modeOf = (m) => MODES[m] || { label: m, reveal: true, confidence: false };
+
 const Session = {
   async create(mode, config) {
     const all = await State.questions();
@@ -6745,7 +6765,7 @@ const Session = {
       const reason = pool0.length === 0
         ? (isCaseMode
           ? 'No case-study question in this course is Active with a verified answer yet. Confirm them on the review queue first.'
-          : 'No question in this course is Active with a verified answer yet. Confirm them on the Needs Checking screen first.')
+          : 'No question in this course is Active with a verified answer yet. Confirm them on the review queue first.')
         : 'No question matches those filters. ' + pool0.length + ' question(s) are eligible in total.';
       throw new Error(reason);
     }
@@ -6840,7 +6860,7 @@ const Session = {
         State.invalidate();
       }
     }
-    if (!already && MODES[s.mode].reveal) await this.commit(s, q, rec);
+    if (!already && modeOf(s.mode).reveal) await this.commit(s, q, rec);
     return rec;
   },
   /** Persist the attempt and update rolling stats. Attempts are never overwritten. */
@@ -6909,7 +6929,7 @@ const Session = {
   async _finishRun(s) {
     const all = await State.questions();
     const byId = new Map(all.map(q => [q.uuid, q]));
-    if (!MODES[s.mode].reveal) {
+    if (!modeOf(s.mode).reveal) {
       for (const uid of s.questionUuids) {
         const rec = s.responses[uid];
         // A question can leave the bank between answering and submitting — a
@@ -7931,7 +7951,7 @@ ROUTES.dashboard = async (root) => {
   tiles.appendChild(tile('Coverage', active.length ? Math.round((active.length - never.length) / active.length * 100) + '%' : '—', active.length ? never.length + ' never attempted' : 'Nothing available to practise yet'));
   tiles.appendChild(tile('Mastered', String(mastered.length), 'At or above ' + Settings.get('masteryTarget') + ' mastery', mastered.length ? 'good' : ''));
   tiles.appendChild(tile('Average response', attempts.length ? fmtDur(attempts.reduce((s, a) => s + (a.ms || 0), 0) / attempts.length) : '—', attempts.length ? 'Across all attempts' : 'No attempts yet'));
-  const unverified = all.filter(q => q.answerVerified !== 'verified' && q.status !== 'archived' && q.status !== 'merged').length;
+  const unverified = all.filter(q => q.answerVerified !== 'verified' && q.status !== 'archived' && q.status !== 'merged' && q.status !== 'rejected').length;
   tiles.appendChild(tile('Unverified', String(unverified), unverified ? 'Held out of practice until checked' : 'Everything is checked', unverified ? 'hot' : 'good'));
   tiles.appendChild(tile('Total records', String(all.length), 'Every status, including archived'));
   root.appendChild(tiles);
@@ -7990,7 +8010,7 @@ ROUTES.dashboard = async (root) => {
     scored.forEach(({ s, sc }) => {
       tb.appendChild(h('tr', {}, [
         h('td', { class: 'nowrap small', text: fmtDate(s.endedAt, true) }),
-        h('td', {}, h('span', { class: 'badge b-info', text: MODES[s.mode].label })),
+        h('td', {}, h('span', { class: 'badge b-info', text: modeOf(s.mode).label })),
         h('td', { class: 'num', text: sc.correct + ' / ' + sc.total }),
         h('td', { class: 'num', text: Math.round(sc.accuracy * 100) + '%' }),
         anyMarked ? h('td', { class: 'num', text: fmtMarks(sc.marks.net) + ' / ' + fmtMarks(sc.marks.total) }) : null,
@@ -8358,7 +8378,7 @@ ROUTES.practice = async (root, preselect) => {
     root.appendChild(h('div', { class: 'notice', style: 'margin-bottom:16px' }, [
       h('div', { class: 'row wrap' }, [
         h('div', { style: 'flex:1;min-width:220px' }, [
-          h('b', { text: 'Unfinished ' + MODES[resumable.mode].label.toLowerCase() + ' session' }),
+          h('b', { text: 'Unfinished ' + modeOf(resumable.mode).label.toLowerCase() + ' session' }),
           h('div', { class: 'small muted', text: done + ' of ' + resumable.questionUuids.length + ' answered · started ' + fmtDate(resumable.startedAt, true) })
         ]),
         h('button', { class: 'btn primary', onclick: () => runSession(resumable), text: 'Resume' }),
@@ -8397,7 +8417,7 @@ ROUTES.practice = async (root, preselect) => {
       h('p', { class: 'muted', text: all.length ? 'You have ' + all.length + ' record(s), but a question only becomes eligible once it is Active with a verified correct answer.' : 'Import a file of questions, or write one yourself — either way takes a couple of minutes.' }),
       h('div', { class: 'row', style: 'justify-content:center;margin-top:10px' }, [
         !all.length ? h('button', { class: 'btn', onclick: () => newQuestion({ onSaved: () => { } }).then(n => { if (n) go('practice'); }), text: 'Write a question' }) : null,
-        h('button', { class: 'btn primary', onclick: () => go(all.length ? 'review' : 'import'), text: all.length ? 'Open Needs Checking' : 'Open Add Questions' })
+        h('button', { class: 'btn primary', onclick: () => go(all.length ? 'review' : 'import'), text: all.length ? 'Open the review queue' : 'Open Add Questions' })
       ])
     ])));
     return;
@@ -8643,7 +8663,7 @@ async function configureMode(mode, preset) {
   // the same gate is enforced here, at the one point all of them pass.
   const live = await Session.resumeLatest(State.course.id);
   if (live) {
-    toast('Resume or discard your unfinished ' + MODES[live.mode].label.toLowerCase() + ' session first.', 'warn', 4200);
+    toast('Resume or discard your unfinished ' + modeOf(live.mode).label.toLowerCase() + ' session first.', 'warn', 4200);
     if (State.view !== 'practice') go('practice');
     return;
   }
@@ -8954,7 +8974,7 @@ async function configureMode(mode, preset) {
   recount();
 
   const res = await modal({
-    title: MODES[mode].label, body, wide: mode === 'custom',
+    title: modeOf(mode).label, body, wide: mode === 'custom',
     actions: [
       { label: 'Cancel', value: null },
       { label: 'Start', value: 'start', kind: 'primary' }
@@ -9193,7 +9213,15 @@ async function examDayFlow(session, course) {
   layer.appendChild(stage);
 
   const onKey = (e) => {
-    if (e.key === 'Escape') { e.preventDefault(); leave('skipped'); }
+    if (e.key === 'Escape') { e.preventDefault(); leave('skipped'); return; }
+    // The button says "⏎", so Enter has to mean it. But a focused button's
+    // native Enter-click is what advances every scene in this ceremony (and
+    // is the only context a browser will grant full screen in), and the
+    // registration input binds Enter to signing the register — so neither
+    // may be swallowed. Same carve-out the runner's own key handler makes.
+    if (e.key === 'Enter' && !e.target.matches('input,textarea,select,button')) {
+      e.preventDefault(); leave('skipped');
+    }
   };
   document.addEventListener('keydown', onKey);
   function leave(how) {
@@ -9567,13 +9595,13 @@ async function runSession(s) {
     if (!q) { target.appendChild(h('div', { class: 'notice bad' }, 'This question is no longer in the bank.')); return; }
     const rec = s.responses[q.uuid];
     const answered = !!rec;
-    const revealed = answered && MODES[s.mode].reveal;
+    const revealed = answered && modeOf(s.mode).reveal;
     const order = s.optionOrders[q.uuid] || q.options.map(o => o.id);
     const opts = order.map(id => q.options.find(o => o.id === id)).filter(Boolean);
 
     const head = h('div', { class: 'row wrap', style: 'margin-bottom:14px' }, [
       h('span', { class: 'docnum', text: (idx + 1) + ' / ' + s.questionUuids.length }),
-      h('span', { class: 'badge b-info', text: MODES[s.mode].label }),
+      h('span', { class: 'badge b-info', text: modeOf(s.mode).label }),
       // On a sectioned paper, which section you are in and whether it is
       // running to the time you gave it — computed from the answers already
       // in it, so it costs nothing and needs nothing stored.
@@ -9727,7 +9755,7 @@ async function runSession(s) {
 
   async function choose(q, optId) {
     const ms = Date.now() - qStart;
-    if (MODES[s.mode].confidence) {
+    if (modeOf(s.mode).confidence) {
       const ans = await askConfidence(q, optId);
       if (ans === null) return;
       const correct = optId === q.correctOptionId;
@@ -9790,7 +9818,7 @@ async function runSession(s) {
     const li = LETTERS.indexOf(k);
     const ni = '12345678'.indexOf(e.key);
     if ((li >= 0 && li < order.length) || (ni >= 0 && ni < order.length)) {
-      if (!s.responses[q.uuid] || !MODES[s.mode].reveal) { e.preventDefault(); choose(q, order[li >= 0 ? li : ni]); }
+      if (!s.responses[q.uuid] || !modeOf(s.mode).reveal) { e.preventDefault(); choose(q, order[li >= 0 ? li : ni]); }
       return;
     }
     if (k === 'F') { e.preventDefault(); s.flags[q.uuid] = !s.flags[q.uuid]; q.flagged = !!s.flags[q.uuid]; q.updatedAt = nowISO(); Promise.all([Session.save(s), DB.put('questions', q)]).then(() => { State.invalidate(); render(); }); }
@@ -9805,7 +9833,7 @@ async function runSession(s) {
   // of them — in front of somebody who is trying to read a question. Both move
   // to the results screen, where reproducing a paper is a thing anybody
   // actually wants to do.
-  await band(MODES[s.mode].label, 'In progress');
+  await band(modeOf(s.mode).label, 'In progress');
   render();
 }
 
@@ -10212,7 +10240,7 @@ async function showResults(s) {
   const target = $('#view');
   target.textContent = '';
   const mk = sc.marks;
-  await band('Session results', MODES[s.mode].label + ' · ' + fmtDate(s.endedAt || s.startedAt, true), [
+  await band('Session results', modeOf(s.mode).label + ' · ' + fmtDate(s.endedAt || s.startedAt, true), [
     { k: 'Score', v: sc.correct + '/' + sc.total },
     // Only worth its own tile once marks say something the count does not.
     mk.plain ? null : { k: 'Marks', v: fmtMarks(mk.net) + '/' + fmtMarks(mk.total) },
@@ -10576,6 +10604,10 @@ ROUTES.bank = async (root) => {
 
   function bankTable(slice) {
     const card = h('div', { class: 'card' });
+    // Read once per render, not once per row: the same bar colouring the
+    // "Mastered" filter above already judges by, so a course that raised its
+    // target no longer shows a green bar under a row that filter excludes.
+    const T = Settings.get('masteryTarget');
     const th = (label, key) => h('th', {
       class: key ? 'sortable' : '', onclick: key ? () => { if (BankState.sort === key) BankState.dir *= -1; else { BankState.sort = key; BankState.dir = 1; } draw(); } : null,
       text: label + (BankState.sort === key ? (BankState.dir > 0 ? ' ▲' : ' ▼') : '')
@@ -10593,7 +10625,7 @@ ROUTES.bank = async (root) => {
         h('td', {}, statusBadge(q)),
         h('td', { class: 'num', text: String(q.stats.attempts) }),
         h('td', { class: 'num', text: acc == null ? '—' : Math.round(acc * 100) + '%' }),
-        h('td', {}, h('div', { class: 'bar' }, h('i', { class: (q.stats.mastery || 0) >= 75 ? 'g' : (q.stats.mastery || 0) >= 50 ? 'a' : 'r', style: 'width:' + (q.stats.mastery || 0) + '%' }))),
+        h('td', {}, h('div', { class: 'bar' }, h('i', { class: (q.stats.mastery || 0) >= T ? 'g' : (q.stats.mastery || 0) >= T * 2 / 3 ? 'a' : 'r', style: 'width:' + (q.stats.mastery || 0) + '%' }))),
         h('td', { class: 'tiny nowrap', style: dueSoon ? 'color:var(--pencil)' : '', text: q.nextReviewAt ? fmtDate(q.nextReviewAt) : '—' })
       ]));
     });
@@ -10896,7 +10928,7 @@ async function openQuestion(uuidStr) {
       const statusOptions = MANUAL_STATUSES.indexOf(q.status) >= 0 ? MANUAL_STATUSES : [q.status].concat(MANUAL_STATUSES);
       const st = h('select', { onchange: e => edit.status = e.target.value }, statusOptions.map(k => h('option', {
         value: k, selected: edit.status === k, disabled: MANUAL_STATUSES.indexOf(k) < 0
-      }, STATUS[k].label + (MANUAL_STATUSES.indexOf(k) < 0 ? ' (set automatically — resolve from Needs Checking)' : ''))));
+      }, STATUS[k].label + (MANUAL_STATUSES.indexOf(k) < 0 ? ' (set automatically — resolve from the Review queue)' : ''))));
       const av = h('select', { onchange: e => edit.answerVerified = e.target.value }, Object.keys(VERIF).map(k => h('option', { value: k, selected: edit.answerVerified === k }, VERIF[k])));
       pane.appendChild(h('div', { class: 'grid g2', style: 'margin-top:12px' }, [
         h('div', { class: 'field' }, [h('label', { text: 'Record status' }), st]),
@@ -14984,6 +15016,10 @@ ROUTES.analytics = async (root) => {
   // so they can also be read apart without leaving the screen.
   const inBank = (q) => AnaState.bank === 'all' || (AnaState.bank === 'case') === isCaseQuestion(q);
   const all = everything.filter(inBank);
+  // "active questions" below spans both banks whenever there is a second one
+  // and nothing has narrowed the view away from it — worth saying, since the
+  // dashboard's own Active count is standalone-only by construction.
+  const bothBanks = caseTotal > 0 && AnaState.bank === 'all';
   const active = all.filter(isPracticeEligible);
   const byUuid = new Map(everything.map(q => [q.uuid, q]));
   const allAttempts = await DB.byIndex('attempts', 'courseId', State.course.id);
@@ -15049,10 +15085,10 @@ ROUTES.analytics = async (root) => {
   t('Overall accuracy', pct(attempts.filter(a => a.correct).length, attempts.length), 'Every attempt, including repeats');
   t('Recent accuracy', pct(recent.filter(a => a.correct).length, recent.length), 'Last ' + recent.length + ' attempts' +
     (prior.length >= 30 ? ' · was ' + pct(prior.filter(a => a.correct).length, prior.length) + ' over the ' + prior.length + ' before' : ''));
-  t('Mastered', pct(mastered, active.length), mastered + ' of ' + active.length + ' active questions' + (AnaState.days ? ' (all time)' : ''));
+  t('Mastered', pct(mastered, active.length), mastered + ' of ' + active.length + ' active questions' + (bothBanks ? ' across both banks' : '') + (AnaState.days ? ' (all time)' : ''));
   root.appendChild(tiles);
   root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:16px' },
-    'Coverage is separate from accuracy: you have seen ' + seen + ' of ' + active.length + ' active questions' + (AnaState.days ? ' in the last ' + AnaState.days + ' days' : '') + ' (' + pct(seen, active.length) + '). Repeating the same questions raises accuracy but not coverage.'));
+    'Coverage is separate from accuracy: you have seen ' + seen + ' of ' + active.length + ' active questions' + (bothBanks ? ' across both banks' : '') + (AnaState.days ? ' in the last ' + AnaState.days + ' days' : '') + ' (' + pct(seen, active.length) + '). Repeating the same questions raises accuracy but not coverage.'));
 
   const tabs = h('div', { class: 'btn-group', style: 'margin-bottom:14px' });
   [['domain', 'Domain'], ['topic', 'Topic'], ['module', 'Source module'], ['source', 'Source'], ['difficulty', 'Difficulty'], ['mistake', 'Mistake'], ['mode', 'Mode'], ['time', 'Time'], ['confidence', 'Confidence']]
@@ -16746,7 +16782,7 @@ async function integrityChecks() {
   const seenQid = new Map(), dupQid = [];
   all.forEach(q => { if (!q.qid) return; if (seenQid.has(q.qid)) dupQid.push(q); else seenQid.set(q.qid, q); });
   push('dupQid', 'Two questions share the same Question ID', dupQid.map(q => q.qid + ' (' + q.uuid.slice(0, 8) + ')'), 'Both were admitted on different devices before they synced. The next sync with Drive or a folder file gives the later one a new ID and keeps the old one as an alias; a merge-mode Restore from a backup does the same.');
-  push('noAnswer', 'Missing correct answer', all.filter(q => !q.correctOptionId && q.status !== 'rejected' && q.status !== 'merged').map(q => q.qid || q.uuid.slice(0, 8)), 'Set the answer on the Needs Checking screen.');
+  push('noAnswer', 'Missing correct answer', all.filter(q => !q.correctOptionId && q.status !== 'rejected' && q.status !== 'merged').map(q => q.qid || q.uuid.slice(0, 8)), 'Set the answer on the review queue.');
   push('badAnswer', 'The marked correct answer no longer matches any option', all.filter(q => q.correctOptionId && !q.options.some(o => o.id === q.correctOptionId)).map(q => q.qid), 'Reopen the question and pick the correct option again.');
   push('fewOptions', 'Fewer than two options', all.filter(q => (q.options || []).length < 2 && q.status !== 'rejected').map(q => q.qid || q.uuid.slice(0, 8)), 'Complete the options or reject the record.');
   push('activeUnverified', 'Marked Active but the answer isn’t verified', all.filter(q => q.status === 'active' && q.answerVerified !== 'verified').map(q => q.qid), 'These are already blocked from practice; verify the answer or move them to review.');
@@ -17629,7 +17665,7 @@ async function courseDialog(course) {
             quickAdded = true;
             if (box && box._close) box._close(null);
             toast(c.code + ' created — its bank starts empty', 'ok');
-            renderShell(); go('settings');
+            renderShell(); go('dashboard');
           } finally {
             quickAdding = false;
             quickAddBtns.forEach(b => b.disabled = false);
@@ -17772,7 +17808,7 @@ async function courseDialog(course) {
     toast('Course updated', 'ok');
     if (ruleChanged) await applyOptionCountRule(course);
   }
-  renderShell(); go('settings');
+  renderShell(); go(isNew ? 'dashboard' : 'settings');
 }
 
 /** Re-check every live question in a course against its option-count rule,
@@ -31923,6 +31959,82 @@ test('The dashboard reads the session store once per render', async () => {
   eq(sessionReads, 1, 'one getAll of the session store, not three');
 });
 
+test('Dashboard\'s Unverified tile excludes rejected records', async () => {
+  // A rejected record's answerVerified stays 'unverified' forever — nobody
+  // is ever going to check it — so counting it here contradicted the tile's
+  // own subtitle, "Held out of practice until checked".
+  const prevCourse = State.course, prevCourses = State.courses;
+  const cid = 'test-dashboard-unverified-' + Date.now();
+  State.course = { id: cid, code: 'TDBU', name: 'Unverified tile test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  State.invalidate();
+  const q = mkQ('Rejected question', ['a', 'b'], 0, { courseId: cid, domainId: 'D1', status: 'rejected', answerVerified: 'unverified' });
+  await DB.put('questions', q);
+  try {
+    const root = h('div');
+    await ROUTES.dashboard(root);
+    const tile = Array.prototype.slice.call(root.querySelectorAll('.tile')).find(t => t.textContent.indexOf('Unverified') >= 0);
+    assert(tile, 'the Unverified tile must render');
+    eq(tile.querySelector('b').textContent, '0', 'a rejected record must not count as merely "not yet checked"');
+  } finally {
+    await DB.del('questions', q.uuid);
+    State.course = prevCourse; State.courses = prevCourses; State.invalidate();
+  }
+});
+
+test('An unrecognised session mode does not crash the dashboard, the practice screen, or results', async () => {
+  // Merge is additive and never validated against this build's own MODES
+  // table — a session written by a newer or forked build, or a hand-edited
+  // backup, can carry a mode this table has never heard of. modeOf() must
+  // survive that everywhere a session's mode is read, not just the one
+  // place (commitMergedSessionAnswers) that already knew to guard for it.
+  const was = { course: State.course, courses: State.courses, view: State.view };
+  const cid = 'test-modeof-' + Date.now();
+  const course = { id: cid, code: 'TMO', name: 'Unknown mode test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.course = course; State.courses = [course];
+  State.invalidate();
+  const q = mkActive('Q', ['a', 'b'], 0, { courseId: cid, domainId: 'D1' });
+  await DB.put('questions', q);
+  const activeId = 'test-session-modeof-active-' + Date.now();
+  const doneId = 'test-session-modeof-done-' + Date.now();
+  const activeS = {
+    id: activeId, courseId: cid, mode: 'sprint', status: 'active',
+    questionUuids: [q.uuid], responses: {}, flags: {}, optionOrders: {}, startedAt: nowISO()
+  };
+  const doneS = {
+    id: doneId, courseId: cid, mode: 'sprint', status: 'complete',
+    questionUuids: [q.uuid], responses: {}, flags: {}, optionOrders: {}, marks: {},
+    startedAt: nowISO(), endedAt: nowISO(), marking: { passPct: 60, negativeFraction: 0, scaledScore: null }
+  };
+  try {
+    await DB.put('sessions', activeS);
+    const dashRoot = h('div');
+    await ROUTES.dashboard(dashRoot);   // must not throw while a live session carries an unrecognised mode
+    const practiceRoot = h('div');
+    await ROUTES.practice(practiceRoot);
+    assert(practiceRoot.textContent.indexOf('sprint') >= 0, 'an unrecognised mode still names itself, raw, on the resumable-session notice');
+
+    await DB.del('sessions', activeId);
+    await DB.put('sessions', doneS);
+    State.invalidate();
+    const dashRoot2 = h('div');
+    await ROUTES.dashboard(dashRoot2);
+    const badge = Array.prototype.slice.call(dashRoot2.querySelectorAll('.badge.b-info')).find(b => b.textContent === 'sprint');
+    assert(badge, 'the recent-sessions table still names an unrecognised mode, raw, rather than crashing');
+
+    await showResults(doneS);
+    // The mode label lands in the shared #band subtitle, not #view itself.
+    const band = $('#band');
+    assert(band.textContent.indexOf('sprint') >= 0, 'the results screen still names an unrecognised mode, raw, rather than crashing');
+  } finally {
+    await DB.del('sessions', activeId);
+    await DB.del('sessions', doneId);
+    await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses; State.view = was.view;
+    State.invalidate();
+  }
+});
+
 test('Dashboard\'s past-mock re-marking does not grow with how many mocks a course has sat', async () => {
   // markSession() walks every question in a paper to mark it — the same real
   // cost as re-reading the whole session store, just paid per mock instead of
@@ -32219,6 +32331,45 @@ test('Cancelling a modal never leaves its opener wearing a focus ring', async ()
   }
 });
 
+test('Creating a course lands you on the dashboard, not back in Settings', () => {
+  // The onboarding "Add your first course" card opens courseDialog(null) —
+  // reaching the Settings screen it had just replaced, rather than a
+  // greeting, on the one occasion an empty bank actually needs one.
+  const src = courseDialog.toString();
+  assert(/go\(isNew \? 'dashboard' : 'settings'\)/.test(src),
+    'the shared save tail must send a brand-new course to the dashboard, and an edited one back to Settings');
+  assert(/go\('dashboard'\)/.test(src),
+    'the quick-add "create a new course" button must also land on the dashboard, not Settings');
+});
+test('The Question Bank mastery bar follows the course mastery target, not a hardcoded 75', () => {
+  const src = ROUTES.bank.toString();
+  assert(!/>=\s*75\s*\?\s*'g'/.test(src),
+    'the green threshold must not be hardcoded — a course that raised its mastery target would show green under a row the "Mastered" filter on this same screen already excludes');
+  assert(/masteryTarget/.test(src), 'the bar must read the same masteryTarget setting the "Mastered" filter already uses');
+});
+test('A long toast message gets more time on screen than a short one, within limits', () => {
+  const realSetTimeout = window.setTimeout;
+  const delays = [];
+  window.setTimeout = (fn, ms) => { delays.push(ms); return realSetTimeout(fn, 0); };
+  try {
+    toast('Short.', 'ok');
+    eq(delays[0], 3200, 'a short message keeps the original floor');
+
+    delays.length = 0;
+    toast('A'.repeat(300), 'ok');
+    eq(delays[0], 12000, 'an extremely long message is capped, not left to grow without bound');
+
+    delays.length = 0;
+    toast('A'.repeat(120), 'ok');
+    eq(delays[0], 120 * 55, 'a moderately long message scales with its length between the floor and the cap');
+
+    delays.length = 0;
+    toast('Explicit duration wins regardless of length', 'ok', 999);
+    eq(delays[0], 999, 'a caller that already picked its own duration must be completely unaffected');
+  } finally {
+    window.setTimeout = realSetTimeout;
+  }
+});
 test('B21: Escape/close with unsaved course-editor content asks before discarding, and lets you go back in', async () => {
   const beforeCount = State.courses.length;
   const fieldByLabel = (label) => {
@@ -33868,6 +34019,32 @@ test('Skipping the exam-centre ceremony starts the paper instead of hanging', as
   btn.click();
   const how = await Promise.race([p, new Promise(r => setTimeout(() => r('HUNG'), 1500))]);
   eq(how, 'skipped', 'skipping on the first frame must resolve examDayFlow');
+});
+test('Enter skips the exam-centre ceremony too, matching the "Skip to seat ⏎" button label', async () => {
+  const session = { seed: 1234, startedAt: nowISO(), timeLimitMs: 3600000, questionUuids: ['a', 'b'] };
+  const p = examDayFlow(session, { code: 'TEST' });
+  await new Promise(r => setTimeout(r, 30));
+  document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  const how = await Promise.race([p, new Promise(r => setTimeout(() => r('HUNG'), 1500))]);
+  eq(how, 'skipped', 'Enter away from any control must skip, the same as the button it echoes');
+});
+test('Enter aimed at a real scene button does not get read as the skip shortcut', async () => {
+  // The button's own native Enter-click is what advances every scene (and,
+  // on "Hand over the tray", the only context a browser grants full screen
+  // in) — swallowing it here would replace "activate this button" with
+  // "skip the whole ceremony" for anyone tabbing through it by keyboard.
+  const session = { seed: 1234, startedAt: nowISO(), timeLimitMs: 3600000, questionUuids: ['a', 'b'] };
+  const p = examDayFlow(session, { code: 'TEST' });
+  await new Promise(r => setTimeout(r, 30));
+  const sceneBtn = document.querySelector('.sim-scene button');
+  assert(sceneBtn, 'the first scene must have its own advance button');
+  sceneBtn.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  const how = await Promise.race([p, new Promise(r => setTimeout(() => r('STILL_RUNNING'), 400))]);
+  eq(how, 'STILL_RUNNING', 'Enter targeted at a button must not resolve the ceremony as skipped');
+  // Clean up: skip for real so the pending promise settles and nothing lingers.
+  const skipBtn = document.querySelector('.sim .sim-bar button');
+  if (skipBtn) skipBtn.click();
+  await Promise.race([p, new Promise(r => setTimeout(r, 500))]);
 });
 
 test('The crop canvas opts out of browser panning so a touch drag reaches pointerup', () => {

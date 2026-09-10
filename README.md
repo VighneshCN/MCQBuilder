@@ -528,6 +528,26 @@ than treated as knowing it.
 Mock exams draw questions weighted to the course blueprint, and can carry a
 case-study section — see section 5.
 
+### Keyboard shortcuts
+
+While a paper is on screen:
+
+| Key | Does |
+|---|---|
+| `1`–`8` or `A`–`H` | Select the matching option (only in a timed mock can you change an answer once given) |
+| `→` / `N` / `Enter` | Next question |
+| `←` / `P` | Previous question |
+| `F` | Flag or unflag this question |
+| `?` | Show this list |
+| `Esc` | Close a dialog |
+
+Reach this list any time with the **Keys** button in the rail, from Settings
+→ **Keyboard shortcuts**, or by pressing `?`. Shortcuts are inert while
+typing in a field or while a dialog is open. Add Questions and the games
+have their own keys, shown where they apply — pasting an image with
+**Ctrl+V** opens Add from Image from anywhere in the app, not only from the
+Add Questions screen.
+
 ### How many a day, and how many days
 
 Set an exam date in Settings → **Practice and mock** — or from the dashboard —
@@ -1135,8 +1155,8 @@ was.
 speed does not degrade — selecting a 150-question mock from 2,000 takes about a
 millisecond. The constraint is attempt history, which grows without bound; at
 around 50 MB the periodic full rewrites become slow enough to be worth archiving
-old attempts. The app warns you past 12 MB and rewrites the file less often as
-it grows.
+old attempts. Full rewrites of the file happen less often as it grows — every 10
+minutes under 4 MB, every 30 minutes up to 15 MB, and once an hour beyond that.
 
 **Deliberately not included:** it does not read outside material and write
 questions for you, and it does not chat with you. It does not sync anywhere
@@ -1145,8 +1165,8 @@ only ever to an account and file you choose yourself.
 
 ## 8. If something goes wrong
 
-**"Storage unavailable" at startup** — you opened `index.html` directly, or you
-are in a private window. See section 1.
+**"Local storage is not available" at startup** — you opened `index.html`
+directly, or you are in a private window. See section 1.
 
 **A `.docx` will not import** — if it is a legacy `.doc`, open it in Word and
 save as `.docx`.
