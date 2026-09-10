@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.18', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.19', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1873,7 +1873,7 @@ const DB = {
       payload.updatedAt = nowISO();
     }
     const out = await run();
-    if (_writeHook) _writeHook(store, op, payload, out);
+    if (_writeHook) _writeHook(store, op, payload, out, deviceLocal);
     return out;
   },
 
@@ -19175,13 +19175,17 @@ const READONLY_MSG = 'The app is read-only because it cannot reach your data fil
 /* Hand the DAL its hooks. fsmeta is exempt from the veto: storing the handle
    is exactly what makes reconnecting possible, so it must work while
    read-only. */
-_writeHook = (store, op, payload, key) => {
+_writeHook = (store, op, payload, key, deviceLocal) => {
   FileStore.touch(store, op, payload, key);
   // Only one backend is ever the active connection, so at most one of these
   // two touch() calls does anything — each bails out immediately when it is
   // not the backend in use. DriveSync's test is "configured", not "connected":
   // a dropped token does not stop an edit needing to reach Drive eventually.
-  if (typeof DriveSync !== 'undefined') DriveSync.touch(store);
+  // deviceLocal (theme, active course, the offline flag…) is passed through
+  // so DriveSync.touch can tell it apart from a real change to the bank —
+  // see DriveSync.touch's own comment for why that distinction matters there
+  // specifically, in a way it does not for FileStore.touch.
+  if (typeof DriveSync !== 'undefined') DriveSync.touch(store, deviceLocal);
 };
 _writeVeto = (store) => store !== 'fsmeta' && FileStore.isReadOnly();
 
@@ -19468,12 +19472,18 @@ const DriveSync = {
    * minutes into a session has exactly the same catching up to do as one that
    * arrives at boot.
    */
+  /** Resolves to whether a real Drive upload happened as part of this call
+      (either branch can push). push()'s own recursive tail reads this so it
+      never re-uploads what a catch-up it just ran already sent — before
+      this returned anything, push() had no way to tell "the catch-up
+      already pushed" from "it didn't", and re-called itself unconditionally
+      once the hold cleared, uploading the whole bank a second time. */
   async _catchUpWithDrive(force) {
     // Boot, a tab coming forward and a network returning can all arrive within
     // a second of each other. Two catch-ups interleaving would each merge a
     // snapshot taken before the other applied, and the second would write the
     // first's result away again.
-    if (this._catchingUp) return;
+    if (this._catchingUp) return false;
     this._catchingUp = true;
     const dirtySince = await FileStore.meta('driveDirtySince');
     try {
@@ -19506,16 +19516,17 @@ const DriveSync = {
         const sig = await this._localSignature();
         const sentSig = await FileStore.meta('driveSyncedSignature');
         const reallyBehind = sentSig ? sig !== sentSig : false;
-        if (dirtySince || reallyBehind) { this._pendingChange = true; await this.maybePush(true); }
+        let pushed = false;
+        if (dirtySince || reallyBehind) { this._pendingChange = true; pushed = await this.maybePush(true); }
         // Drive was reached and matches what this browser last wrote. That is
         // a sync result, not a non-event: without recording it the status
         // lines have nothing to show but a promise of a sync to come.
         else if (remoteModified) { await this._markInSync(); updateStorageBar(); }
-        return;
+        return !!pushed;
       }
       const remote = await this.pull();
       const outcome = await this._mergeInRemote(remote);
-      if (!outcome.applied) return;      // declined; the hold is already set
+      if (!outcome.applied) return false;      // declined; the hold is already set
       const contributed = outcome.contributed || dirtySince;
       // The copy at this stamp has now been merged in. push() compares Drive's
       // stamp with this one before uploading, and until it was set here the
@@ -19523,7 +19534,8 @@ const DriveSync = {
       // returns at once while running) and pushed again — for ever. Persisted
       // at _recordSyncedStamp() below, as before.
       this.lastSyncedModifiedTime = remoteModified;
-      if (contributed) await this.push();
+      let pushed = false;
+      if (contributed) pushed = await this.push();
       this._holdPush = null;
       // Level with Drive without having pushed — the merge produced exactly
       // what was downloaded. Without refreshing the fingerprint the next boot
@@ -19535,12 +19547,14 @@ const DriveSync = {
       // the clock: push() marks it, a merge that only downloaded did not.
       await this._markInSync();
       updateStorageBar();
+      return !!pushed;
     } catch (e) {
       // Could not read Drive, or could not merge it. Whatever is here has NOT
       // been reconciled, so pushing it would overwrite a Drive copy this
       // browser never managed to look at. Hold until a catch-up succeeds.
       this._holdPush = DRIVE_HOLD_UNREAD;
       updateStorageBar();
+      return false;
     } finally {
       this._catchingUp = false;
     }
@@ -20049,8 +20063,17 @@ const DriveSync = {
   /** Called by the DAL after any successful write, mirroring
       FileStore.touch() — Drive has no cheap incremental append, so this just
       schedules a debounced whole-file push rather than journalling. */
-  touch(store) {
+  touch(store, deviceLocal) {
     if (store === 'fsmeta') return;
+    // A setting that describes THIS machine (theme, active course, the
+    // offline flag…) never reaches the shared bank at all — merge already
+    // filters DEVICE_LOCAL_SETTINGS out of anything it adopts from Drive —
+    // so scheduling a debounced whole-file push for one is pure waste: a
+    // real network upload, on every other device's watcher a real "Drive
+    // moved" wake that pulls, merges and finds precisely nothing it can
+    // keep. Toggling a theme on a phone used to be enough to wake every
+    // other signed-in device into a pull it had nothing to gain from.
+    if (deviceLocal) return;
     // A merge writing its own result back is not a change to upload — those
     // rows came from this browser and Drive in the first place, and pushing
     // them again is what made two devices ping-pong the whole bank.
@@ -20183,7 +20206,12 @@ const DriveSync = {
         // there is to send; calling it again returns immediately, and pushing
         // again from here only asks the same question without end.
         if (this._catchingUp) return false;
-        await this._catchUpWithDrive();
+        const alreadyPushed = await this._catchUpWithDrive();
+        // Re-calling push() here is only for a catch-up that RECONCILED but
+        // did not itself upload (a pure pull). One that already pushed as
+        // part of its own merge has nothing left to send — this was
+        // re-uploading the whole bank a second time, every time.
+        if (alreadyPushed) return true;
         return this._holdPush ? false : await this.push();
       }
       const payload = await FileStore.buildPayload();
@@ -20525,12 +20553,26 @@ const DriveSync = {
         return;
       }
       if (!(await requireSafetyBackup('merging this browser’s bank with Google Drive'))) return;
-      const localPayload = await FileStore.buildPayload();
-      const { merged, report } = await mergeBankPayloads(localPayload, remote);
-      await applyMergedBank(merged, report);
+      // _mergeInRemote() is the one routine _reconcileOnConnect() and
+      // _catchUpWithDrive() already merge through, and the one place that
+      // knows to stop and ask before a deletion made on another device
+      // applies here. This used to reimplement a shorter merge by hand
+      // instead — mergeBankPayloads() + applyMergedBank() with no consent
+      // gate at all — so a tombstoned question simply vanished from this
+      // browser the moment Sync was clicked. requireSafetyBackup() above
+      // still runs first regardless of what the merge finds: it is the one
+      // durable, off-app copy taken before a bridge merge of two banks that
+      // may have diverged for a long time, which is not what the softer,
+      // in-app-only preMergeSnapshot _mergeInRemote() keeps for its own
+      // undo is for.
+      const outcome = await this._mergeInRemote(remote);
+      if (!outcome.applied) return;      // declined; the hold is already set
+      // _mergeInRemote() only wrote the merge into IndexedDB. The message
+      // below promises the FILE itself is caught up, so make that true
+      // before it is said — the same guarantee this call always gave.
       await FileStore.flushNow();
-      const pushOk = await this.push();
-      await showMergeReport(report, 'Synced with Google Drive', pushOk
+      const pushOk = outcome.contributed ? await this.push() : true;
+      await showMergeReport(outcome.report, 'Synced with Google Drive', pushOk
         ? 'Both copies were combined, written to your file, and pushed to Drive — all three now match.'
         : 'Both copies were combined and written to your file, but pushing to Drive failed: ' + (this.problem || 'unknown error') + '. Try Sync again once that is fixed.');
     } finally {
@@ -21819,7 +21861,16 @@ async function connectFlow() {
     });
     return;
   }
-  if (DriveSync.connected) {
+  // Checked against configured, not just connected — the same reason
+  // NotesStore.target(), Settings' activeMode and updateStorageBar()'s
+  // driveOwns all are: Drive is still the linked backend through a
+  // routine "signed out" moment (Safari, mainly) even though today's
+  // in-memory token has lapsed. Missing this meant connecting a folder
+  // while merely signed out skipped this whole handoff — no modal, and
+  // critically no DriveSync.disconnect() — so DriveSync stayed configured
+  // underneath the newly-connected folder, and the sidebar kept showing
+  // Drive's stuck status and its own reconnect button instead.
+  if (DriveSync.connected || DriveSync.configured) {
     const ok = await modal({
       title: 'Switch to a local folder?',
       body: h('div', { class: 'stack' }, [
@@ -31386,6 +31437,89 @@ test('A Drive file that has been deleted is forgotten rather than retried foreve
   }
 });
 
+test('_reconcileOnConnect() skips the merge entirely when nothing has changed since last sync', async () => {
+  // The one branch its own "vanished file" test above never reaches: Drive
+  // genuinely has not moved, so there is nothing to merge — only a sync
+  // stamp to record, and a pending local edit (if any) still to push.
+  const D = DriveSync;
+  const was = { fileId: D.fileId, lastSyncedModifiedTime: D.lastSyncedModifiedTime, _fetchModifiedTime: D._fetchModifiedTime, maybePush: D.maybePush, _pendingChange: D._pendingChange };
+  const savedId = await FileStore.meta('driveFileId');
+  const savedStamp = await FileStore.meta('driveModifiedTime');
+  const savedDirty = await FileStore.meta('driveDirtySince');
+  let pushCalls = 0;
+  try {
+    D.fileId = 'F';
+    await FileStore.setMeta('driveFileId', 'F');
+    await FileStore.setMeta('driveModifiedTime', 'T1');
+    await FileStore.delMeta('driveDirtySince');
+    D._fetchModifiedTime = async () => 'T1';   // Drive has not moved
+    D.maybePush = async () => { pushCalls++; return true; };
+
+    const proceed = await D._reconcileOnConnect();
+    eq(proceed, true, 'nothing to reconcile is still a successful connect');
+    eq(D.lastSyncedModifiedTime, 'T1', 'the sync stamp is recorded even though nothing merged');
+    eq(pushCalls, 0, 'with no local edit pending, nothing pushes either');
+
+    // Settled means Drive has not moved — not that this browser has nothing
+    // of its own still waiting to go up from before this connect began.
+    await FileStore.setMeta('driveDirtySince', nowISO());
+    pushCalls = 0;
+    const proceed2 = await D._reconcileOnConnect();
+    eq(proceed2, true);
+    eq(pushCalls, 1, 'a pending edit from before this connect must still be pushed');
+  } finally {
+    Object.assign(D, was);
+    if (savedId) await FileStore.setMeta('driveFileId', savedId); else await FileStore.delMeta('driveFileId');
+    if (savedStamp) await FileStore.setMeta('driveModifiedTime', savedStamp); else await FileStore.delMeta('driveModifiedTime');
+    if (savedDirty) await FileStore.setMeta('driveDirtySince', savedDirty); else await FileStore.delMeta('driveDirtySince');
+  }
+});
+
+test('connect() rolls the whole attempt back when reconciliation is declined, and commits it when accepted', async () => {
+  const D = DriveSync;
+  const was = {
+    connected: D.connected, fileId: D.fileId, configured: D.configured, problem: D.problem, setupError: D.setupError,
+    hasLiveToken: D.hasLiveToken, _reconcileOnConnect: D._reconcileOnConnect, _findExisting: D._findExisting,
+    _createFile: D._createFile, _startTimer: D._startTimer, _recordSyncedStamp: D._recordSyncedStamp, _connecting: D._connecting
+  };
+  const savedMetaId = await FileStore.meta('driveFileId');
+  const savedMetaConn = await FileStore.meta('driveConnected');
+  let startTimerCalls = 0, recordStampCalls = 0;
+  try {
+    D.hasLiveToken = () => true;
+    D._findExisting = async () => 'existing-file-id';
+    D._createFile = async () => { throw new Error('must not create a new file when one was already found'); };
+    D._startTimer = () => { startTimerCalls++; };
+    D._recordSyncedStamp = async () => { recordStampCalls++; };
+    await FileStore.delMeta('driveFileId');
+    await FileStore.delMeta('driveConnected');
+
+    // 1. Declined at the reconcile step — the whole attempt must roll back,
+    //    not leave a half-connected Drive behind.
+    D.connected = false; D.fileId = null; D.configured = false; D._connecting = false;
+    D._reconcileOnConnect = async () => false;
+    await D.connect();
+    eq(D.connected, false, 'declining leaves Drive disconnected');
+    eq(D.fileId, null, 'and the file id forgotten — left set, resume would ask Google for a file named null forever');
+    eq(D.configured, false, 'and not configured either, so nothing tries to resume this on its own');
+    eq(await FileStore.meta('driveFileId'), undefined, 'nothing durable is written for a declined attempt');
+    eq(startTimerCalls, 0, 'no background timer for a connection that did not happen');
+
+    // 2. Accepted — the same attempt commits.
+    D._reconcileOnConnect = async () => true;
+    await D.connect();
+    eq(D.connected, true, 'accepting leaves Drive connected');
+    eq(D.configured, true);
+    eq(await FileStore.meta('driveFileId'), 'existing-file-id', 'the file id is persisted so a reload can resume silently');
+    eq(startTimerCalls, 1, 'the background watch/push timers are armed exactly once');
+    eq(recordStampCalls, 1);
+  } finally {
+    Object.assign(D, was);
+    if (savedMetaId) await FileStore.setMeta('driveFileId', savedMetaId); else await FileStore.delMeta('driveFileId');
+    if (savedMetaConn !== undefined) await FileStore.setMeta('driveConnected', savedMetaConn); else await FileStore.delMeta('driveConnected');
+  }
+});
+
 test('A deletion made on another device actually deletes, and can then be pushed', async () => {
   // applyMergedBank only ever put rows, never removed them. mergeBankPayloads
   // correctly dropped questions named by a tombstone, and then this threw that
@@ -31959,6 +32093,59 @@ test('A push that meets a moved Drive stamp while a catch-up is already running 
   }
 });
 
+test('push() does not upload a second time when the catch-up it ran already pushed', async () => {
+  const D = DriveSync;
+  const keys = ['connected', '_pushing', '_catchingUp', '_holdPush', 'lastSyncedModifiedTime'];
+  const saved = {}; keys.forEach(k => { saved[k] = D[k]; });
+  const realFetchTime = D._fetchModifiedTime, realCatchUp = D._catchUpWithDrive, realEnsureToken = D._ensureToken;
+  const realBuildPayload = FileStore.buildPayload;
+  let catchUpCalls = 0, buildPayloadCalled = false;
+  try {
+    Object.assign(D, { connected: true, _pushing: false, _catchingUp: false, _holdPush: null, lastSyncedModifiedTime: 'T1' });
+    D._ensureToken = async () => true;
+    D._fetchModifiedTime = async () => 'T2';   // Drive has moved since this browser last synced
+    // Stands in for a real catch-up that pulled, merged this browser's own
+    // pending change in, and — because it had one to contribute — already
+    // pushed as part of that merge. push() must take that at face value
+    // rather than re-calling itself and uploading the whole bank again.
+    D._catchUpWithDrive = async () => { catchUpCalls++; D.lastSyncedModifiedTime = 'T2'; return true; };
+    FileStore.buildPayload = async () => { buildPayloadCalled = true; return { stores: { questions: [] } }; };
+    const ok = await D.push();
+    eq(ok, true, 'push() reports success — the catch-up it ran already did the job');
+    eq(catchUpCalls, 1, 'exactly one catch-up, not a retry loop');
+    assert(!buildPayloadCalled, 'no second upload may even be built — the catch-up already sent one');
+  } finally {
+    Object.assign(D, saved);
+    D._fetchModifiedTime = realFetchTime; D._catchUpWithDrive = realCatchUp; D._ensureToken = realEnsureToken;
+    FileStore.buildPayload = realBuildPayload;
+  }
+});
+
+test('A device-local setting write never arms a Drive push, only a real bank change does', async () => {
+  const D = DriveSync;
+  const was = {
+    configured: D.configured, connected: D.connected, firstUnpushed: D._firstUnpushedChangeAt,
+    pending: D._pendingChange, applyingMerge: D._applyingMerge,
+    theme: Settings.get('theme'), passPct: Settings.get('passPct')
+  };
+  try {
+    D.configured = true; D.connected = false; D._applyingMerge = false;
+    D._firstUnpushedChangeAt = null; D._pendingChange = false;
+    await Settings.set('theme', was.theme === 'dark' ? 'light' : 'dark');
+    assert(!D._pendingChange, '"theme" is device-local — it must never arm a Drive push');
+    assert(!D._firstUnpushedChangeAt, 'nor start the "dirty since" clock');
+    // Contrast: an ordinary, shareable setting still must.
+    await Settings.set('passPct', was.passPct === 65 ? 66 : 65);
+    assert(D._pendingChange, 'a real, shareable setting change must still arm a push');
+    assert(D._firstUnpushedChangeAt, 'and start the clock');
+  } finally {
+    await Settings.set('theme', was.theme);
+    await Settings.set('passPct', was.passPct);
+    D.configured = was.configured; D.connected = was.connected; D._firstUnpushedChangeAt = was.firstUnpushed;
+    D._pendingChange = was.pending; D._applyingMerge = was.applyingMerge;
+  }
+});
+
 test('A failed Drive metadata check is never read as "Drive has not moved" — push refuses, catch-up holds', async () => {
   const D = DriveSync;
   const keys = ['connected', 'fileId', 'accessToken', 'tokenExpiresAt', 'lastSyncedModifiedTime', '_catchingUp', '_pushing', '_holdPush', 'problem'];
@@ -32121,7 +32308,8 @@ test('Merging is what happens wherever the two copies meet — not a question', 
   const paths = [
     { name: 'connecting to a Drive file that already has a bank', src: DriveSync._reconcileOnConnect.toString() },
     { name: 'catching up when Drive moved elsewhere', src: DriveSync._catchUpWithDrive.toString() },
-    { name: 'the manual catch-up button', src: DriveSync.pullNow.toString() }
+    { name: 'the manual catch-up button', src: DriveSync.pullNow.toString() },
+    { name: 'the one-off Sync-with-Drive bridge', src: DriveSync._syncBridgeRun.toString() }
   ];
   paths.forEach(d => {
     assert(/_mergeInRemote|_catchUpWithDrive/.test(d.src), d.name + ' must reconcile by merging');
@@ -32131,6 +32319,63 @@ test('Merging is what happens wherever the two copies meet — not a question', 
     'the wholesale "replace this browser with Drive" path is gone, not merely unlinked from a button');
   const merge = DriveSync._mergeInRemote.toString();
   assert(merge.indexOf('Apply the deletion') > 0, 'a deletion arriving from elsewhere is still the one thing that asks first');
+});
+
+test('The Sync-with-Drive bridge merges through _mergeInRemote, and only pushes what it actually gained', async () => {
+  // _syncBridgeRun() used to reimplement the merge by hand — no deletion
+  // consent, and an unconditional push even when nothing here was new. Drive
+  // this the same way _reconcileOnConnect() already is: real stubs for the
+  // three outcomes _mergeInRemote() can return, not just a source check.
+  const D = DriveSync;
+  const was = { connected: D.connected, fileId: D.fileId, hasLiveToken: D.hasLiveToken, pull: D.pull, push: D.push, _mergeInRemote: D._mergeInRemote };
+  const realRequireSafetyBackup = window.requireSafetyBackup;
+  const realShowMergeReport = window.showMergeReport;
+  const realFlushNow = FileStore.flushNow;
+  let pushCalls = 0, flushCalls = 0, reportCalls = 0, mergeCalls = 0;
+  const reset = () => { pushCalls = 0; flushCalls = 0; reportCalls = 0; mergeCalls = 0; };
+  try {
+    D.connected = false;                    // the local folder, not Drive, is the real connection
+    D.fileId = 'fake-bridge-file';
+    D.hasLiveToken = () => true;
+    D.pull = async () => ({ stores: { questions: [{ uuid: 'q1' }] } });   // non-empty: a merge, not a first push
+    D.push = async () => { pushCalls++; return true; };
+    window.requireSafetyBackup = async () => true;
+    window.showMergeReport = async () => { reportCalls++; };
+    FileStore.flushNow = async () => { flushCalls++; return true; };
+
+    // 1. A deletion made elsewhere, declined. _mergeInRemote() already asked
+    //    and already set the hold — the bridge must not push or report.
+    reset();
+    D._mergeInRemote = async () => { mergeCalls++; return { applied: false, removed: 1, report: {} }; };
+    await D._syncBridgeRun();
+    eq(mergeCalls, 1, 'the shared merge routine ran');
+    eq(pushCalls, 0, 'declining a deletion must not push');
+    eq(flushCalls, 0, 'nor write the file');
+    eq(reportCalls, 0, 'nor claim a merge completed');
+
+    // 2. Applied, but this browser held nothing Drive did not already have —
+    //    a pure catch-up. Nothing left worth uploading again.
+    reset();
+    D._mergeInRemote = async () => { mergeCalls++; return { applied: true, contributed: false, removed: 0, report: { stores: {} } }; };
+    await D._syncBridgeRun();
+    eq(pushCalls, 0, 'nothing contributed — Drive already matches, so no second upload');
+    eq(flushCalls, 1, 'the merged bank is still written to the local file');
+    eq(reportCalls, 1, 'the merge is still reported as complete');
+
+    // 3. Applied, and this browser held something Drive did not — must push.
+    reset();
+    D._mergeInRemote = async () => { mergeCalls++; return { applied: true, contributed: true, removed: 0, report: { stores: {} } }; };
+    await D._syncBridgeRun();
+    eq(pushCalls, 1, 'a real contribution must reach Drive');
+    eq(flushCalls, 1);
+    eq(reportCalls, 1);
+  } finally {
+    D.connected = was.connected; D.fileId = was.fileId; D.hasLiveToken = was.hasLiveToken;
+    D.pull = was.pull; D.push = was.push; D._mergeInRemote = was._mergeInRemote;
+    window.requireSafetyBackup = realRequireSafetyBackup;
+    window.showMergeReport = realShowMergeReport;
+    FileStore.flushNow = realFlushNow;
+  }
 });
 
 test('The file-changed recovery merges too, like every other place two copies meet', () => {
@@ -32171,6 +32416,34 @@ test('Adopting an existing file over this browser’s bank also refreshes Settin
   assert(reload > 0);
   assert(reload < src.indexOf('adoptCourses()'));
   assert(reload > src.indexOf('loadFromDisk'));
+});
+test('connectFlow() hands off from a signed-out-but-configured Drive bank, not just a signed-in one', async () => {
+  const was = {
+    tier: FileStore.tier, session: State.session,
+    connected: DriveSync.connected, configured: DriveSync.configured, disconnect: DriveSync.disconnect
+  };
+  const realModal = globalThis.modal;
+  let modalTitles = [], disconnectCalled = false;
+  try {
+    FileStore.tier = 'folder';
+    State.session = null;
+    // Signed out — routine on Safari, or simply a lapsed token — but still
+    // the linked backend, exactly the state connectFlow() used to skip
+    // straight past.
+    DriveSync.connected = false; DriveSync.configured = true;
+    DriveSync.disconnect = async () => { disconnectCalled = true; return true; };
+    // 'true' only for the first modal (the handoff prompt this fix is
+    // about); 'false' for whatever comes after, so the flow bails out
+    // cleanly before reaching a real folder/file picker.
+    globalThis.modal = async (o) => { modalTitles.push(o.title); return modalTitles.length === 1; };
+    await connectFlow();
+    assert(modalTitles.indexOf('Switch to a local folder?') >= 0, 'the handoff prompt must show for a signed-out-but-configured bank, not just a signed-in one');
+    assert(disconnectCalled, 'and DriveSync must actually be disconnected — not left configured underneath the newly-connected folder');
+  } finally {
+    globalThis.modal = realModal;
+    FileStore.tier = was.tier; State.session = was.session;
+    DriveSync.connected = was.connected; DriveSync.configured = was.configured; DriveSync.disconnect = was.disconnect;
+  }
 });
 test('Discarding this browser’s bank for the file on disk also refreshes Settings and adopted courses', () => {
   const src = recoveryFlow.toString();
