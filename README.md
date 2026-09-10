@@ -232,9 +232,10 @@ before you do.
 | `mcq-mastery-journal.jsonl` | Answers since the last full write. Emptied each time the bank is rewritten. |
 | `mcq-mastery-data.previous.json` | The prior verified version, kept for rollback. |
 | `mcq-mastery-safety-backup-*.zip` | Written automatically before anything that could overwrite or discard what this browser holds — deleting a course, restoring a backup (replace or merge), or merging with, or giving way to, a bank already in the folder. |
+| `notes/` | Files behind your course notes (§4) — the actual PDFs, photos and documents, one per note. |
 
-If you copy your bank elsewhere, take `mcq-mastery-data.json`. The others are
-derived and disposable.
+If you copy your bank elsewhere, take `mcq-mastery-data.json` and the
+`notes/` subfolder. The rest are derived and disposable.
 
 ### How your data is protected
 
@@ -250,6 +251,35 @@ derived and disposable.
   bank found elsewhere takes a verified backup first**, automatically. If the
   backup cannot be made, the app stops and says so; nothing goes ahead unless
   you choose the red "Delete anyway, without a backup" button.
+
+### When two copies meet
+
+Answer on your phone, then open your laptop, and the app has to combine two
+banks that grew apart — this happens every time a folder or Drive connection
+catches up, not just once. **Merging is additive, automatic, and silent**:
+every question, note, session and answer either side holds ends up on both,
+and nothing is ever discarded just because one copy is "older."
+
+The one thing a merge can take away is a **course wiped on the other
+device**. That is the only kind of deletion the app records, and it is the
+only thing merging ever asks you about: a dialog names how many questions are
+about to go, and **"Not now" leaves both copies exactly as they are** — this
+browser keeps its questions, and nothing is sent to the other side until you
+resolve it. Say yes and go on with your day; the deletion applies here too,
+the same as it already did wherever it was made.
+
+If you deliberately want to throw one whole copy away instead of combining
+them — say, this browser has months of stale test data you never meant to
+keep — **"Keep only one copy?"** is the manual way out, offered wherever two
+copies first meet (connecting a folder or Drive to an existing file). It is
+the one route in the app that discards a bank wholesale, and it is never the
+default.
+
+Every automatic merge also leaves a copy of what this browser held right
+before it ran. **Settings → Backup & Restore → "Undo the last automatic
+merge"** puts it back — but only the most recent one: the next merge
+overwrites that snapshot, so use it before doing anything else if a merge
+combined something you did not want combined.
 
 ## 3. Getting questions in
 
@@ -797,6 +827,25 @@ answer — but they **never write back**. No attempt is recorded, no review date
 moves. Playing cannot disturb your spaced-repetition schedule. They never draw
 case-study questions, for the same reason no other mode does.
 
+### Course notes
+
+**Notes** (from the sidebar) holds your own revision material for a course —
+a PDF of your summary sheet, a photo of a handwritten diagram, anything you
+want alongside your questions rather than turned into them. The app never
+reads them: they are stored, listed, and opened, nothing more.
+
+Where the bytes go follows the same rule as everything else: a note saved
+before you connect a folder or Drive is kept in the browser database, capped
+at 2000 KB so it does not grow the working copy without bound.
+Once a folder or Drive is connected, a new note's file goes straight there
+instead — a `notes/` subfolder next to your data file, or its own file on
+Drive — with no size cap, and an existing browser-only note is moved out to
+join it automatically the next time you connect one.
+
+Notes are a course-scoped store like questions or case studies: they sync
+and merge the same way, travel with a course-only backup, and a deletion is
+recorded so it does not come back from a device that has not caught up yet.
+
 ## 5. Case studies
 
 Some questions only make sense against a scenario — a page or two of context,
@@ -1059,8 +1108,10 @@ around 50 MB the periodic full rewrites become slow enough to be worth archiving
 old attempts. The app warns you past 12 MB and rewrites the file less often as
 it grows.
 
-**Deliberately not included:** it does not read your notes, chat with you,
-generate questions, or sync anywhere.
+**Deliberately not included:** it does not read outside material and write
+questions for you, and it does not chat with you. It does not sync anywhere
+on its own, either — Google Drive sync (§2) is opt-in, off by default, and
+only ever to an account and file you choose yourself.
 
 ## 8. If something goes wrong
 

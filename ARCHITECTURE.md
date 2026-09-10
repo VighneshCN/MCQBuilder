@@ -1399,10 +1399,17 @@ is not a safe default for every one of them:
   independently on two devices, or two answer keys that now disagree —
   lands in the review queue via the ordinary conflict/duplicate machinery
   instead of one side silently winning.
-- **sessions** — the same newest-wins keyed merge, not append-only: a
-  session has a real `id`, not an auto-increment one, and the same session
-  can genuinely be touched from two devices (started on a phone, resumed
-  later on a laptop).
+- **sessions** — keyed by a real `id`, not an auto-increment one (the same
+  session can genuinely be touched from two devices — started on a phone,
+  resumed later on a laptop) — but not plain newest-wins. A terminal status
+  (`complete`/`abandoned`) always outranks a non-terminal one regardless of
+  timestamp: otherwise a device still holding its own half-finished copy
+  could revert a sitting another device had already completed, and
+  "finishing" it there a second time would write every answer to the
+  attempts log again. Between two rows of the same terminality, newest
+  `updatedAt` wins as usual. Either way, the responses map, flags and
+  committed markers are unioned rather than the losing row's answers to
+  questions it alone holds being discarded (`mergeSessionRows`).
 - **attempts, questionVersions, audit** — append-only logs whose keys are
   auto-increment integers assigned independently by each IndexedDB, so the
   same integer on both sides is almost never the same real event. These
@@ -1417,9 +1424,12 @@ is not a safe default for every one of them:
   higher `lastSeq` always wins; both sides' allocation histories are
   unioned underneath it and re-capped at 500 entries, same as
   `IdRegister.next()` itself does.
-- **settings** — not merged key-by-key. A device's preferences are one
-  coherent set, not independent facts, so whichever whole payload has the
-  newer top-level `savedAt` is adopted wholesale.
+- **settings** — merged key-by-key (`mergeKeyedRows`), like every other
+  keyed store — not adopted wholesale by whichever side's payload has the
+  newer top-level `savedAt`. Device-local keys (`isDeviceLocalSetting` — a
+  vendored OCR path, theme, the offline flag, and the like) are excluded
+  from the incoming side before the merge runs, so this device's own copy
+  of those always survives regardless of which side is otherwise newer.
 - **images** — keyed union, no time comparison — captured once, never
   edited after.
 

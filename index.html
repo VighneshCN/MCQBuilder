@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.21', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.22', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -21227,9 +21227,16 @@ async function reconnectFlow() {
      then re-checked (rescanCourseForPairs) against the merged bank, so a
      genuine disagreement between two independently-edited copies lands in
      the review queue instead of one side silently winning.
-   - sessions: keyed the same way — a session has a real id, not an
-     auto-increment one, and the same id can genuinely be touched from two
-     devices (started on a phone, resumed later on a laptop).
+   - sessions: keyed by a real id, not an auto-increment one — the same
+     session can genuinely be touched from two devices (started on a
+     phone, resumed later on a laptop) — but not plain newest-wins. A
+     terminal status (complete/abandoned) always outranks a non-terminal
+     one regardless of timestamp, so a device still holding its own
+     half-finished copy cannot revert a sitting another device already
+     completed. Between two rows of the same terminality, newest
+     updatedAt wins as usual. Either way, the responses map, flags and
+     committed markers are unioned rather than the losing row's answers
+     discarded whole (mergeSessionRows).
    - attempts, questionVersions, audit: append-only logs whose keys are
      auto-increment integers assigned independently by each IndexedDB — the
      same integer on both sides is almost never the same real event, so
@@ -21240,9 +21247,12 @@ async function reconnectFlow() {
      watermark backwards and let an already-used id be re-issued to a
      different question. The higher lastSeq always wins, with both sides'
      allocation histories unioned underneath it.
-   - settings: not merged key-by-key — a device's preferences are one
-     coherent set, not independent facts. Whichever whole payload has the
-     newer top-level `savedAt` is adopted wholesale.
+   - settings: merged key-by-key, like every other keyed store — not
+     adopted wholesale by whichever side's payload has the newer top-level
+     savedAt. Device-local keys (isDeviceLocalSetting — a vendored OCR
+     path, theme, the offline flag, and the like) are excluded from the
+     incoming side before the merge runs, so this device's own copy of
+     those always survives regardless of which side is otherwise newer.
    - images: keyed union — captured once, essentially never edited after.
    ========================================================================== */
 
@@ -22041,7 +22051,19 @@ async function connectFlow() {
   let existing = { status: 'missing', count: 0, payload: null };
   try { existing = await FileStore.loadFromDiskPreview(); } catch (e) { existing = { status: 'missing', count: 0, payload: null }; }
 
-  if (existing.status === 'has-data') {
+  if (existing.status === 'has-data' && existing.count === 0) {
+    // Real data (courses, notes, settings, sessions, case studies or
+    // tombstones) but no questions — nothing the "there is already a
+    // bank" dialog below is actually about. mergeBankPayloads is additive
+    // by construction, so combining it with whatever this browser holds
+    // needs no confirmation, the same as connecting to a genuinely empty
+    // file below gets none.
+    const localPayload = await FileStore.buildPayload();
+    const { merged, report } = await mergeBankPayloads(localPayload, existing.payload);
+    await applyMergedBank(merged, report);
+    await FileStore.flushNow();
+    toast('Connected. Your bank is now saved to ' + (FileStore.locationName || 'your file') + '.', 'ok');
+  } else if (existing.status === 'has-data') {
     const here = await DB.count('questions');
     const dramaticLoss = here === 0 || here < existing.count * 0.5;
     for (; ;) {
@@ -22152,10 +22174,18 @@ FileStore.loadFromDiskPreview = async function () {
     const payload = await readBankBytes(await file.arrayBuffer());
     if (!payload || !payload.stores) return { status: 'unreadable', count: 0, payload: null, rawText, blob: file };
     const count = (payload.stores.questions || []).length;
+    // Any of these, not just questions — a file can hold real courses,
+    // notes, sessions, case studies, settings or tombstones with zero
+    // questions in it (a fresh course that has not been populated yet, a
+    // bank whose only course was just wiped). Calling that "empty" handed
+    // it to connectFlow's silent overwrite branch, discarding everything
+    // in it with no merge and no confirmation.
+    const anyData = count || ['courses', 'notes', 'sessions', 'caseStudies', 'settings', 'tombstones']
+      .some(s => (payload.stores[s] || []).length);
     // A caller that decides not to overwrite this file still wants the exact
     // bytes on hand — has-data is the common case a "grab the old copy first"
     // download acts on, not only the unreadable one.
-    return count ? { status: 'has-data', count, payload, blob: file } : { status: 'empty', count: 0, payload: null };
+    return anyData ? { status: 'has-data', count, payload, blob: file } : { status: 'empty', count: 0, payload: null };
   } catch (e) {
     // Bytes are there but not valid JSON — a half-synced cloud-drive
     // conflict, a truncated write, a manual edit gone wrong. This is not
@@ -31961,6 +31991,31 @@ test('A bank file taken from Drive is adopted by folder-connect, not called unre
     eq(seen.status, 'has-data', 'the gzip Drive writes is a bank file, not an unreadable one');
     eq(seen.count, 2, 'and its questions are counted before anything is allowed to overwrite them');
     assert(seen.blob, 'and the raw bytes travel with it, so an unreadable file is saved off byte-for-byte');
+  } finally { FileStore.dirHandle = was.dir; FileStore.fileHandle = was.fh; }
+});
+
+test('loadFromDiskPreview calls a file "has-data" for real courses/notes with zero questions, not "empty" (B80)', async () => {
+  const was = { dir: FileStore.dirHandle, fh: FileStore.fileHandle };
+  const fileFor = text => ({ getFile: async () => ({
+    size: text.length, arrayBuffer: async () => new TextEncoder().encode(text).buffer, text: async () => text
+  }) });
+  try {
+    FileStore.fileHandle = null;
+    // A course exists (a fresh one just created, or the only course's
+    // questions just wiped) but nothing has been admitted into it yet.
+    const withCourse = JSON.stringify({ app: 'mcq-mastery', schema: APP.schema, savedAt: nowISO(),
+      stores: { questions: [], courses: [{ id: 'c1', code: 'CISA' }] } });
+    FileStore.dirHandle = { getFileHandle: async () => fileFor(withCourse) };
+    const seen = await FileStore.loadFromDiskPreview();
+    eq(seen.status, 'has-data', 'a course with no questions yet is still real data, not an empty file');
+    eq(seen.count, 0, 'the question count itself is still reported accurately');
+    assert(seen.payload, 'and the payload travels with it, so connectFlow can actually merge it rather than silently overwrite it');
+
+    // Genuinely nothing anywhere is still empty.
+    const trulyEmpty = JSON.stringify({ app: 'mcq-mastery', schema: APP.schema, savedAt: nowISO(), stores: {} });
+    FileStore.dirHandle = { getFileHandle: async () => fileFor(trulyEmpty) };
+    const seenEmpty = await FileStore.loadFromDiskPreview();
+    eq(seenEmpty.status, 'empty', 'a file with nothing in any store is still called empty');
   } finally { FileStore.dirHandle = was.dir; FileStore.fileHandle = was.fh; }
 });
 
