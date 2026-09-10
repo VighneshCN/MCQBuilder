@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.14', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.15', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -7633,15 +7633,25 @@ async function refreshBadges() {
     your first course" while the person's entire bank sits in the database
     behind it. Returns true when a course is now selected. */
 async function adoptCourses() {
+  const prevIds = new Set((State.courses || []).map(c => c.id));
   State.courses = await DB.all('courses');
   const wanted = Settings.get('activeCourseId');
   const live = State.courses.filter(c => !c.archived);
   const picked = live.find(c => c.id === wanted) || live[0] || State.courses[0] || null;
-  const changed = (picked && picked.id) !== (State.course && State.course.id);
+  const selectionChanged = (picked && picked.id) !== (State.course && State.course.id);
+  // A course landing via a background merge — from another device, through
+  // Drive or a reconnected folder — never changes which course is SELECTED,
+  // only the list the rail switches between. Comparing just the selection
+  // missed exactly that: the new course sat in State.courses, invisible in
+  // the rail, until something unrelated happened to repaint the shell.
+  // Compared as a set, not by position: DB.all() makes no ordering promise,
+  // and a same-set reorder is not a change worth a repaint.
+  const nowIds = new Set(State.courses.map(c => c.id));
+  const listChanged = prevIds.size !== nowIds.size || Array.from(nowIds).some(id => !prevIds.has(id));
   State.course = picked;
   if (picked && picked.id !== wanted) await Settings.set('activeCourseId', picked.id);
   State.invalidate();
-  if (changed) renderShell();
+  if (selectionChanged || listChanged) renderShell();
   return !!picked;
 }
 
@@ -8209,8 +8219,16 @@ async function examDateDialog() {
    because the app already builds SVG this way and a chart library for one
    sparkline would be absurd. */
 function mockTrendCard(mocks, byId) {
-  if (mocks.length < 2) return null;
-  const pts = mocks.map(m => ({ s: m, pct: markSession(m, byId).pct, when: m.endedAt || m.startedAt }));
+  // A mock whose every question has since been deleted from the bank scores
+  // a literal, indistinguishable-from-real 0% — markSession() can only price
+  // what it can still find, so total stays 0 and pct falls out as a plain 0
+  // rather than something markedly absent. The readiness card two sections
+  // up already guards on this (mk.total > 0); the trend line needs the same
+  // guard, or a mock that went fine when it was sat plots as a flatlined
+  // failure forever, only because the bank moved on since.
+  const real = mocks.map(m => ({ s: m, mk: markSession(m, byId) })).filter(x => x.mk.total > 0);
+  if (real.length < 2) return null;
+  const pts = real.map(({ s: m, mk }) => ({ s: m, pct: mk.pct, when: m.endedAt || m.startedAt }));
   const passPct = clamp(Number(Settings.get('passPct')) || 60, 1, 99);
   const W = 620, H = 150, PADL = 34, PADB = 22, PADT = 12;
   const x = (i) => PADL + (pts.length === 1 ? (W - PADL - 8) / 2 : i * (W - PADL - 8) / (pts.length - 1));
@@ -8571,7 +8589,14 @@ async function configureMode(mode, preset) {
   const pool = isCaseMode ? casePool : eligiblePool(all);
   const caseCounts = new Map();
   casePool.forEach(q => caseCounts.set(q.caseStudyId, (caseCounts.get(q.caseStudyId) || 0) + 1));
-  const allCaseQs = all.filter(isCaseQuestion);
+  // Practice-eligible, same gate the standalone pool above is held to — NOT
+  // every record with a caseStudyId. A draft or answer-unverified case
+  // question is missing from casePool for the same reason a standalone one
+  // would be missing from eligiblePool(): it isn't ready, not because its
+  // scenario is broken. Counting it here anyway used to blame the scenario
+  // ("archived or has no text") for a gap a verified scenario had nothing to
+  // do with.
+  const eligibleCaseQs = caseEligiblePool(all);
   const body = h('div', { class: 'stack' });
   const mockOpening = mockOpeningFor(pool.length + casePool.length,
     Settings.get('mockCount'), Settings.get('mockMinutes'));
@@ -8767,7 +8792,7 @@ async function configureMode(mode, preset) {
     const readyCases = caseRecords.filter(c => caseCounts.get(c.id));
     const drawCaseNote = () => {
       const sizes = readyCases.map(c => caseCounts.get(c.id));
-      const held = allCaseQs.length - casePool.length;
+      const held = eligibleCaseQs.length - casePool.length;
       if (cfg.caseCount === 0) {
         caseNote.textContent = 'None. The paper will be exactly the standalone questions above, as it has always been.';
         return;
@@ -10213,8 +10238,13 @@ async function showResults(s) {
   // review list
   const wrong = s.questionUuids.filter(u => s.responses[u] && !s.responses[u].correct);
   const guessed = s.questionUuids.filter(u => s.responses[u] && s.responses[u].correct && s.responses[u].confidence === 'guessed');
+  // A mock lets you leave a question unanswered and move on. It scores the
+  // same as wrong, but "wrong" above requires a response to compare against
+  // the key — a blank one never appears there, or anywhere else on this
+  // screen, so there was nowhere to even see which questions these were.
+  const blank = s.questionUuids.filter(u => !s.responses[u]);
   const flagged = s.questionUuids.filter(u => s.flags[u]);
-  const groups = [['Incorrect', wrong], ['Correct but guessed', guessed], ['Flagged', flagged]];
+  const groups = [['Incorrect', wrong], ['Left blank', blank], ['Correct but guessed', guessed], ['Flagged', flagged]];
   groups.forEach(([label, list]) => {
     if (!list.length) return;
     const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [h('div', { class: 'card-h' }, [h('h3', { text: label }), h('span', { class: 'badge b-draft', text: String(list.length) })])]);
@@ -27657,6 +27687,25 @@ test('A weighted mock with a domain filter does not report a shortfall for the d
   }
 });
 
+test('Session.abandon() marks a session abandoned and persists it, not just in memory', async () => {
+  const s = {
+    id: uuid(), courseId: 'test-course', mode: 'learning', status: 'active', startedAt: nowISO(),
+    questionUuids: [], responses: {}, flags: {}, marks: {}, optionOrders: {}
+  };
+  await DB.put('sessions', s);
+  try {
+    assert(!s.endedAt, 'not ended yet');
+    await Session.abandon(s);
+    eq(s.status, 'abandoned');
+    assert(s.endedAt, 'an end time is stamped');
+    const fromDb = await DB.get('sessions', s.id);
+    eq(fromDb.status, 'abandoned', 'the abandonment must actually be written, not just held on the in-memory object');
+    eq(fromDb.endedAt, s.endedAt);
+  } finally {
+    await DB.del('sessions', s.id);
+  }
+});
+
 /* ---- archive round trip ---- */
 test('ZIP write then read returns the same bytes', async () => {
   if (typeof self.CompressionStream !== 'function' || !HAS_CS) { return 'skipped — this browser has no Compression Streams'; }
@@ -29054,6 +29103,28 @@ test('A scenario nobody can read is not one anybody can be asked about', () => {
   eq(drawableCasePool(qs, []).length, 0, 'and with no scenarios at all, none of them');
 });
 
+test('A draft case question is never counted as held back by its scenario', () => {
+  // Both questions belong to the SAME, perfectly readable scenario — the
+  // only difference between them is that one is still a draft, exactly the
+  // state that keeps a standalone question out of eligiblePool() too.
+  const ready = mkCaseQ('A ready question against a fine scenario?', ['a', 'b'], 0, 'fine', 1);
+  const draft = mkQ('A draft question against the same scenario?', ['a', 'b'], 0, { caseStudyId: 'fine', caseSeq: 2, status: 'draft' });
+  const qs = [ready, draft];
+  const records = [{ id: 'fine', text: 'A real, complete scenario.', archived: false }];
+  const casePool = drawableCasePool(qs, records);
+  eq(casePool.length, 1, 'only the ready one can actually be drawn');
+  eq(caseEligiblePool(qs).length, 1, 'the draft one is not practice-eligible at all, same rule as a standalone draft');
+  // This is what the mock-config dialog and the Practice screen both report
+  // as "held back because the scenario is archived or has no text" — it
+  // must be 0 here: the scenario is fine, the draft is just not ready yet.
+  eq(caseEligiblePool(qs).length - casePool.length, 0,
+    'a draft question must never be blamed on its scenario');
+  // The bug this guards: the old, wrong denominator (every case question,
+  // eligible or not) would have reported 1 held back, falsely.
+  eq(qs.filter(isCaseQuestion).length - casePool.length, 1,
+    'for contrast, that is exactly the wrong number the old code would have shown');
+});
+
 test('The due count and the mode behind it cannot disagree', () => {
   const due = new Date(Date.now() - 86400000).toISOString();
   const all = [
@@ -29209,6 +29280,75 @@ test('At the defaults, marks and the question count are the same number', () => 
   eq(m.net, sc.correct, 'marks earned must equal questions correct');
   eq(Math.round(m.pct), Math.round(sc.accuracy * 100), 'and the percentage must equal accuracy');
   assert(m.plain, 'and it must know that it has nothing extra to say');
+});
+
+test('A mock question left blank gets its own group on the results screen', async () => {
+  const was = { course: State.course, courses: State.courses, view: State.view };
+  const course = makeCourse('LBK', 'Left-blank results test course', CISA_BLUEPRINT, { id: 'test-course' });
+  const { s, byId } = mkPaper(3, 1, 1, 1, { passPct: 60, negativeFraction: 0, scaledScore: null });
+  s.startedAt = s.endedAt = nowISO(); s.status = 'complete'; s.optionOrders = {}; s.seed = 1;
+  try {
+    State.course = course; State.courses = [course];
+    for (const q of byId.values()) await DB.put('questions', q);
+    State.invalidate();
+    await showResults(s);
+    const view = $('#view');
+    const heading = Array.from(view.querySelectorAll('.card-h h3')).find(h3 => h3.textContent === 'Left blank');
+    assert(heading, 'a "Left blank" group must appear on the results screen');
+    const badge = heading.parentElement.querySelector('.badge');
+    eq(badge.textContent, '1', 'exactly the one blank question must be counted, not zero');
+  } finally {
+    for (const q of byId.values()) await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses; State.view = was.view;
+    State.invalidate();
+  }
+});
+
+test('mockTrendCard ignores a mock whose every question has since been deleted', () => {
+  const q1 = mkQ('t1', ['a', 'b'], 0);
+  const q2 = mkQ('t2', ['a', 'b'], 0);
+  const byId = new Map([[q1.uuid, q1], [q2.uuid, q2]]);
+  const mkMock = (uuids, correct, when) => ({
+    id: uuid(), mode: 'mock', questionUuids: uuids,
+    responses: Object.fromEntries(uuids.map(u => [u, { correct, ms: 1000 }])),
+    flags: {}, marks: Object.fromEntries(uuids.map(u => [u, 1])), endedAt: when
+  });
+  const real1 = mkMock([q1.uuid, q2.uuid], true, '2024-01-01T00:00:00.000Z');
+  // Both questions this mock was actually sat on have since been deleted —
+  // byId has nothing for either uuid, so markSession() can price neither and
+  // its total stays 0.
+  const phantom = mkMock(['gone-1', 'gone-2'], false, '2024-01-15T00:00:00.000Z');
+  const real2 = mkMock([q1.uuid, q2.uuid], false, '2024-02-01T00:00:00.000Z');
+  const card = mockTrendCard([real1, phantom, real2], byId);
+  assert(card, 'the two real mocks are still enough to draw a trend, the phantom one aside');
+  assert(card.textContent.indexOf('1 of 2 above the line') >= 0,
+    'must count 2 real mocks, not 3 — the phantom’s would-be 0% must not sneak onto the line: ' + card.textContent);
+  eq(card.querySelectorAll('svg circle').length, 2, 'and the chart itself must plot exactly the two real points');
+});
+
+test('adoptCourses() repaints the rail when the course LIST changes, even if the selection does not', async () => {
+  const was = { course: State.course, courses: State.courses, activeCourseId: Settings.get('activeCourseId') };
+  const course = makeCourse('AC1', 'Adopt-courses base course', [], { id: 'test-course' });
+  const merged = makeCourse('AC2', 'Adopt-courses merged-in course', [], { id: 'test-course-2' });
+  try {
+    await DB.put('courses', course);
+    State.course = course; State.courses = [course];
+    await Settings.set('activeCourseId', course.id);
+    // A second course lands the way a background merge from another device
+    // would: written straight to the store, this device's selection untouched.
+    await DB.put('courses', merged);
+    await adoptCourses();
+    eq(State.course.id, course.id, 'the selection itself is unaffected by the new arrival');
+    const opts = Array.from($('#courseSel').options).map(o => o.value);
+    assert(opts.indexOf(merged.id) >= 0, 'the merged-in course must be in the rail’s switcher right away, not only after a reload');
+  } finally {
+    await DB.del('courses', course.id);
+    await DB.del('courses', merged.id);
+    State.course = was.course; State.courses = was.courses;
+    await Settings.set('activeCourseId', was.activeCourseId);
+    State.invalidate();
+    renderShell();
+  }
 });
 
 test('A question’s own marks beat the course rate, and a case question takes the case rate', () => {
