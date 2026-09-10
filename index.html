@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.17', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.18', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -20849,7 +20849,14 @@ async function lossRecoveryChoice(reason, newCount) {
   });
   if (choice === 'reload') {
     FileStore.connected = true; FileStore.needsReconnect = false; FileStore.problem = null;
-    try { await FileStore.loadFromDisk(); toast('Reloaded from your file. Nothing was lost.', 'ok'); }
+    try {
+      await FileStore.loadFromDisk();
+      // The same wholesale-rebuild hazard every other reload path here
+      // guards against now.
+      await Settings.load();
+      await adoptCourses();
+      toast('Reloaded from your file. Nothing was lost.', 'ok');
+    }
     catch (e) { toast('Could not reload: ' + e.message, 'bad', 9000); }
   } else if (choice === 'force') {
     FileStore.connected = true; FileStore.needsReconnect = false; FileStore.problem = null;
@@ -20901,7 +20908,13 @@ async function recoveryFlow(kind) {
       let theirs = null, theirsPayload = null;
       try {
         const fh = await FileStore.fileHandleFor(false);
-        const payload = JSON.parse(await (await fh.getFile()).text());
+        // The same gzip-or-JSON sniff every other reader of this file uses
+        // (_loadFromDisk, DriveSync.pull) — a plain JSON.parse() here read
+        // every gzip-compressed data file (a legitimate shape elsewhere in
+        // this same app, e.g. one fetched from Drive and dropped in this
+        // folder) as unreadable, degrading this dialog to its two-button
+        // "cannot merge" form for a file the rest of the app opens fine.
+        const payload = await readBankBytes(await (await fh.getFile()).arrayBuffer());
         theirsPayload = payload;
         theirs = { savedAt: payload.savedAt, questions: (payload.stores && payload.stores.questions || []).length };
       } catch (e) { /* unreadable — treated as unknown below */ }
@@ -20968,6 +20981,12 @@ async function recoveryFlow(kind) {
         FileStore.connected = true; FileStore.needsReconnect = false; FileStore.problem = null;
         try {
           await FileStore.loadFromDisk();
+          // Same Settings-then-adoptCourses pair every other wholesale
+          // IndexedDB rebuild needs, so State.course/State.courses and the
+          // settings cache do not keep pointing at whatever they held
+          // before a reload that may have renamed or dropped a course.
+          await Settings.load();
+          await adoptCourses();
           toast('Reloaded your bank from the file on disk.', 'ok');
         } catch (e) {
           toast('Could not read that file: ' + e.message, 'bad', 9000);
@@ -21034,7 +21053,17 @@ async function reconnectFlow() {
     // (no stamp yet) or a file that really did change has anything to load.
     const unchanged = !!FileStore._stamp && (await FileStore.verifyFile()) === 'ok';
     const res = unchanged ? 'unchanged' : await FileStore.loadFromDisk();
-    if (res === 'loaded') toast('Reconnected. Your bank was reloaded from your file.', 'ok');
+    if (res === 'loaded') {
+      // IndexedDB was just rebuilt from the file wholesale — State.course,
+      // State.courses and the settings cache are still whatever they were
+      // before, possibly naming a course id the reload no longer has.
+      // Settings first, adoptCourses (which reads activeCourseId from it
+      // and calls State.invalidate()) after, same order applyMergedBank()
+      // and undoLastAutoMerge() already use for the identical hazard.
+      await Settings.load();
+      await adoptCourses();
+      toast('Reconnected. Your bank was reloaded from your file.', 'ok');
+    }
     else { FileStore.problem = null; await FileStore.flushNow(); toast('Reconnected.', 'ok'); }
     updateStorageBar();
     await go(State.view || 'dashboard');
@@ -21858,6 +21887,13 @@ async function connectFlow() {
         await FileStore.forget(); updateStorageBar(); return;
       }
       await FileStore.loadFromDisk();
+      // Same hazard the 'merge' branch below is already safe from, via
+      // applyMergedBank()'s own Settings.load()+adoptCourses() — this
+      // branch rebuilds IndexedDB the same wholesale way and needs the
+      // same pair, in the same order (Settings first: adoptCourses reads
+      // activeCourseId from its cache).
+      await Settings.load();
+      await adoptCourses();
       toast('Loaded your bank from the file.', 'ok');
       break;
     } else if (choice === 'browser') {
@@ -32121,6 +32157,39 @@ test('Undoing a merge reloads the settings it just put back', () => {
   assert(reload > 0, 'the undo path must reload Settings after restoring the settings store');
   assert(reload < src.indexOf('adoptCourses()'), 'and before adoptCourses, which reads activeCourseId from that cache');
   assert(reload > src.indexOf('putManyRaw'), 'and after the stores have been rewritten');
+});
+test('A reconnect that reloads the bank also refreshes Settings and adopted courses', () => {
+  const src = reconnectFlow.toString();
+  const reload = src.indexOf('Settings.load()');
+  assert(reload > 0, 'reloading IndexedDB from the file leaves State.course/State.courses and the settings cache stale otherwise');
+  assert(reload < src.indexOf('adoptCourses()'), 'and before adoptCourses, which reads activeCourseId from that cache');
+  assert(reload > src.indexOf('loadFromDisk'), 'and only after the stores have actually been rebuilt');
+});
+test('Adopting an existing file over this browser’s bank also refreshes Settings and adopted courses', () => {
+  const src = connectFlow.toString();
+  const reload = src.indexOf('Settings.load()');
+  assert(reload > 0);
+  assert(reload < src.indexOf('adoptCourses()'));
+  assert(reload > src.indexOf('loadFromDisk'));
+});
+test('Discarding this browser’s bank for the file on disk also refreshes Settings and adopted courses', () => {
+  const src = recoveryFlow.toString();
+  const reload = src.indexOf('Settings.load()');
+  assert(reload > 0);
+  assert(reload < src.indexOf('adoptCourses()'));
+  assert(reload > src.indexOf('loadFromDisk'));
+});
+test('Reloading from disk after a blocked write also refreshes Settings and adopted courses', () => {
+  const src = lossRecoveryChoice.toString();
+  const reload = src.indexOf('Settings.load()');
+  assert(reload > 0);
+  assert(reload < src.indexOf('adoptCourses()'));
+  assert(reload > src.indexOf('loadFromDisk'));
+});
+test('The "changed outside the app" recovery reads the file the same gzip-or-JSON way every other reader does', () => {
+  const src = recoveryFlow.toString();
+  assert(/readBankBytes/.test(src), 'a plain JSON.parse(...text()) here reads a legitimate gzip data file (one fetched from Drive and dropped in this folder, say) as unreadable, degrading the dialog to its two-button "cannot merge" form');
+  assert(!/JSON\.parse\(await \(await fh\.getFile\(\)\)\.text\(\)\)/.test(src), 'the old plain-text parse must actually be gone, not just present alongside the new one');
 });
 
 test('Deleting a course never destroys a note file the backup cannot hold', () => {
