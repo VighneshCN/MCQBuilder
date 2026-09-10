@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.7', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.8', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -13796,6 +13796,72 @@ async function resolveOcrEngine() {
   };
 }
 
+/* ---------- OCR worker reuse ----------
+   Tesseract.recognize(image, langs, options) — the call below — is a
+   one-shot convenience wrapper: every call spins up a fresh worker, loads
+   the wasm core and the language data (the slow part, worth well over a
+   second), recognises, then tears it all down again. tesseract.js v4/v5
+   also expose createWorker(langs, oem, options) returning an
+   already-initialized worker whose own .recognize(image) can be called
+   again and again, paying that load cost once per session instead of once
+   per click.
+
+   Older v2/v3 builds shape worker creation differently (synchronous
+   createWorker(options) plus separate load/loadLanguage/initialize calls),
+   and that shape is not attempted here: this repository carries no
+   vendor/ folder to test it against, and a guessed-wrong call sequence
+   could produce a worker that looks created but cannot actually recognise
+   — a silent break with nothing in the self-test suite able to catch it,
+   since the suite never loads Tesseract at all.
+
+   So this only ever tries the modern shape, behind a feature check, and
+   every step is caught: getOcrWorker() returns null on anything it is not
+   sure of, and runOCR() below falls straight through to the exact one-shot
+   call it always used, unchanged, whenever that happens. An engine that
+   cannot do this just does not get the speed-up — it is never left with a
+   worker it cannot use. */
+let _ocrWorker = null, _ocrWorkerKey = null, _ocrWorkerIdleTimer = null;
+
+/** Keeps a ready worker alive for two minutes of inactivity — long enough to
+    cover retries, a crop-and-retry, or stepping through a multi-photo
+    import, without holding an idle engine in memory indefinitely. A real
+    page close/reload tears the worker down on its own; nothing extra is
+    needed for that. */
+function scheduleOcrWorkerCleanup() {
+  clearTimeout(_ocrWorkerIdleTimer);
+  _ocrWorkerIdleTimer = setTimeout(() => {
+    const stale = _ocrWorker;
+    _ocrWorker = null; _ocrWorkerKey = null;
+    if (stale) stale.terminate().catch(() => {});
+  }, 120000);
+}
+
+/** Returns a cached, ready-to-reuse worker built from `opts` (the same
+    engine.options this file already resolves from the vendor folder), or
+    null if reuse is not available or not safe to trust. `opts` is used as
+    a cache key (its logger function is dropped by JSON.stringify, which is
+    what should happen — a new statusEl per call must not force a rebuild)
+    so a changed vendor path or a flipped gzip guess builds a fresh worker
+    instead of reusing a stale one. */
+async function getOcrWorker(opts) {
+  if (!self.Tesseract || typeof self.Tesseract.createWorker !== 'function') return null;
+  const key = JSON.stringify(opts);
+  if (_ocrWorker && _ocrWorkerKey === key) { scheduleOcrWorkerCleanup(); return _ocrWorker; }
+  if (_ocrWorker) { const stale = _ocrWorker; _ocrWorker = null; _ocrWorkerKey = null; stale.terminate().catch(() => {}); }
+  try {
+    // oem deliberately left undefined so this matches whatever default the
+    // one-shot call below implicitly uses — a mismatch here would change
+    // recognition behaviour, not just its speed.
+    const worker = await self.Tesseract.createWorker('eng', undefined, opts);
+    if (!worker || typeof worker.recognize !== 'function') return null;
+    _ocrWorker = worker; _ocrWorkerKey = key;
+    scheduleOcrWorkerCleanup();
+    return worker;
+  } catch (e) {
+    return null;
+  }
+}
+
 /**
  * OCR hook. No engine is bundled, because no OCR library small enough to embed
  * offline exists — so this loads a local vendor script if you have placed one
@@ -13840,15 +13906,29 @@ async function runOCR(canvas, textArea, statusEl) {
       logger: m => { if (m && m.status) statusEl.textContent = m.status + (typeof m.progress === 'number' ? ' · ' + Math.round(m.progress * 100) + '%' : ''); }
     });
     let out;
-    try {
-      out = await self.Tesseract.recognize(canvas, 'eng', opts);
-    } catch (first) {
-      // The one guess in here worth a second attempt: whether the language
-      // file is the gzipped one. Only retried when nothing could be probed —
-      // otherwise the answer was known and the failure is something else.
-      if (engine.certain) throw first;
-      opts.gzip = !opts.gzip;
-      out = await self.Tesseract.recognize(canvas, 'eng', opts);
+    // Try a held-open worker first — same options, so identical output —
+    // and fall through to the untouched one-shot path below on anything
+    // that does not check out.
+    const worker = await getOcrWorker(opts).catch(() => null);
+    if (worker) {
+      try {
+        out = await worker.recognize(canvas);
+      } catch (reuseErr) {
+        if (_ocrWorker === worker) { _ocrWorker = null; _ocrWorkerKey = null; }
+        worker.terminate().catch(() => {});
+      }
+    }
+    if (!out) {
+      try {
+        out = await self.Tesseract.recognize(canvas, 'eng', opts);
+      } catch (first) {
+        // The one guess in here worth a second attempt: whether the language
+        // file is the gzipped one. Only retried when nothing could be probed —
+        // otherwise the answer was known and the failure is something else.
+        if (engine.certain) throw first;
+        opts.gzip = !opts.gzip;
+        out = await self.Tesseract.recognize(canvas, 'eng', opts);
+      }
     }
     const words = (out.data && out.data.words) || [];
     const low = words.filter(w => w.confidence < 70).length;
@@ -14780,14 +14860,40 @@ ROUTES.analytics = async (root) => {
     } else {
       const grid = h('div', { class: 'grid g2' });
       TIME_CELLS.forEach(cell => {
-        const n = split.cells[cell.k].length;
-        grid.appendChild(h('div', { class: 'notice ' + cell.tone + ' small' + (n ? '' : ' dim'), style: 'margin:0' }, [
+        const list = split.cells[cell.k];
+        const box = h('div', { class: 'notice ' + cell.tone + ' small' + (list.length ? '' : ' dim'), style: 'margin:0' }, [
           h('div', { class: 'row', style: 'gap:8px;align-items:baseline' }, [
-            h('b', { text: cell.label }), h('span', { class: 'docnum', text: String(n) }),
-            h('span', { class: 'tiny dim', text: pct(n, split.timed) })
+            h('b', { text: cell.label }), h('span', { class: 'docnum', text: String(list.length) }),
+            h('span', { class: 'tiny dim', text: pct(list.length, split.timed) })
           ]),
           h('div', { class: 'tiny', style: 'margin-top:3px', text: cell.reading })
-        ]));
+        ]);
+        // Same expandable list the results screen offers under its own four
+        // boxes (timeCard, above) — here it points at every question behind
+        // this cell across the whole period, not just one paper.
+        if (list.length) {
+          const detail = h('div', { class: 'stack', style: 'margin-top:6px;display:none' });
+          list.slice().sort((a, c) => c.ms - a.ms).forEach(x => {
+            const q = byUuid.get(x.uuid);
+            if (!q) return;
+            detail.appendChild(h('div', { class: 'row', style: 'gap:8px' }, [
+              h('span', { class: 'docnum dim', text: q.qid || '—' }),
+              h('span', { class: 'tiny num', text: fmtDur(x.ms) }),
+              h('span', { class: 'tiny', style: 'flex:1;min-width:0', text: (q.stem || '').slice(0, 80) }),
+              h('button', { class: 'btn sm ghost', onclick: () => openQuestion(q.uuid), text: 'Open' })
+            ]));
+          });
+          box.appendChild(h('button', {
+            class: 'btn sm ghost', style: 'margin-top:6px',
+            onclick: (e) => {
+              const on = detail.style.display === 'none';
+              detail.style.display = on ? 'block' : 'none';
+              e.currentTarget.textContent = on ? 'Hide these' : 'Show these';
+            }, text: 'Show these'
+          }));
+          box.appendChild(detail);
+        }
+        grid.appendChild(box);
       });
       b.appendChild(grid);
 
@@ -31392,6 +31498,48 @@ test('The OCR engine is resolved from the folder the script sits in, and a wrong
   } finally {
     Settings.cache.ocrScriptPath = wasPath;
     ocrVendorFilePresent = wasProbe;
+  }
+});
+test('OCR worker reuse: caches by options, rebuilds on a changed key, and stays out of the way when unavailable', async () => {
+  const wasTesseract = self.Tesseract;
+  try {
+    // No engine loaded at all — must fail safe, not throw reading .createWorker
+    // off of nothing.
+    self.Tesseract = undefined;
+    eq(await getOcrWorker({ a: 1 }), null, 'no Tesseract on the page means no worker, quietly');
+
+    // An engine with no createWorker (nothing this feature-check can use):
+    // the same quiet null.
+    self.Tesseract = {};
+    eq(await getOcrWorker({ a: 1 }), null, 'an engine with no createWorker is left alone');
+
+    // A working engine: the same option VALUES (not the same object) must
+    // return the exact same worker, and build only once.
+    let builds = 0, terminated = [];
+    const makeWorker = () => { const w = { id: ++builds, recognize: async () => ({}), terminate: async () => { terminated.push(w.id); } }; return w; };
+    self.Tesseract = { createWorker: async () => makeWorker() };
+    const optsA = { workerPath: 'vendor/worker.min.js', gzip: false };
+    const w1 = await getOcrWorker(optsA);
+    const w2 = await getOcrWorker(Object.assign({}, optsA));
+    assert(w1 && w2 === w1, 'identical option values reuse the same worker, not a fresh build');
+    eq(builds, 1, 'only one worker was ever built for the same key');
+
+    // Different options — a changed vendor path, or a flipped gzip guess —
+    // must terminate the stale worker rather than leak it, and build fresh.
+    const w3 = await getOcrWorker({ workerPath: 'vendor/worker.min.js', gzip: true });
+    assert(w3 && w3 !== w1, 'a changed option set must not reuse the old worker');
+    eq(terminated.join(','), String(w1.id), 'the worker that no longer matches is terminated, not leaked');
+    eq(builds, 2);
+
+    // A createWorker that rejects must come back as unavailable, not throw —
+    // the caller always has the one-shot recognize() path to fall back on.
+    self.Tesseract = { createWorker: async () => { throw new Error('boom'); } };
+    eq(await getOcrWorker({ workerPath: 'x' }), null, 'a failed build is reported as unavailable, not thrown');
+  } finally {
+    clearTimeout(_ocrWorkerIdleTimer);
+    if (_ocrWorker && typeof _ocrWorker.terminate === 'function') _ocrWorker.terminate().catch(() => {});
+    _ocrWorker = null; _ocrWorkerKey = null; _ocrWorkerIdleTimer = null;
+    self.Tesseract = wasTesseract;
   }
 });
 test('The suite leaves nothing of its own in the bank', async () => {
