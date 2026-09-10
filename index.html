@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.28', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.29', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -4777,11 +4777,16 @@ function looksLikeOption(line, prevWasOption, idxExpected) {
   const m = RX.option.exec(line);
   if (!m) return null;
   const letter = m[1].toUpperCase(), body = m[2].trim();
-  if (body.length < 2) return null;
+  // A blank body (RX.option's \s*(.+)$ can capture pure whitespace) is not an
+  // option — that path exists for optOnly's own "letter alone on one line"
+  // layout to claim instead. A single DIGIT or SYMBOL body is a real answer
+  // ("A) 5") and must not be rejected; only a lone letter is ambiguous enough
+  // with the stray-capital-in-a-stem case to still be refused.
+  if (!body || /^[A-Za-z]$/.test(body)) return null;
   // "I. Introduction" style roman/heading or a sentence continuing mid-thought
   if (/^[A-Z]\.\s+[A-Z][a-z]+\s+\d{4}/.test(line)) return null;
   const expected = LETTERS[idxExpected];
-  if (!prevWasOption && letter !== 'A' && letter !== 'a' && letter !== expected) {
+  if (!prevWasOption && letter !== 'A' && letter !== expected) {
     // an isolated "B) something" with no preceding A) is suspicious
     return { letter, body, weak: true };
   }
@@ -4884,7 +4889,7 @@ function parseText(text, opts) {
       continue;
     }
 
-    if (!t) { if (mode === 'stem' && stemBuf.length) mode = 'stem'; continue; }
+    if (!t) continue;
     // A separate answer key is harvested below, never parsed as questions.
     if (isKeyLine(t, keyMode)) { flush(); if (KEY_HEADER_RX.test(t)) keyMode = true; continue; }
     keyMode = false;
@@ -6329,8 +6334,6 @@ function weightedPick(pool, blueprint, count, rng) {
    request. Filling from elsewhere stays available, but only as a deliberate
    choice. */
 
-const DIFFICULTY_KEYS = ['easy', 'medium', 'hard'];
-
 /** Largest-remainder apportionment: hands out exactly `total` whole units
     across `shares`, giving the surplus to whoever was rounded down hardest.
     The same method weightedPick uses, lifted out so every dimension rounds
@@ -7511,9 +7514,14 @@ function renderShell() {
   app.appendChild(h('div', { class: 'scrim hidden', id: 'scrim', onclick: closeMobileNav }));
   // renderShell() always rebuilds #storagebar from scratch, empty — every
   // caller needs it populated immediately, not just the boot path, so this
-  // isn't left for each call site to remember on its own.
+  // isn't left for each call site to remember on its own. #themeBtn is
+  // rebuilt the same way, always reading "Light" until applyTheme() corrects
+  // it — boot did that once, but every later renderShell() (switching
+  // courses, deleting one, coming back from Settings…) put the stale label
+  // straight back regardless of the theme actually in effect.
   updateStorageBar();
   updateRiskBar();
+  applyTheme();
 }
 function closeMobileNav() {
   const railEl = $('#rail'); if (railEl) railEl.classList.remove('open');
@@ -7905,9 +7913,15 @@ ROUTES.dashboard = async (root) => {
   // three times over on the app's first screen. Each derivation below filters
   // before it sorts, so they work on their own copies and cannot disturb this.
   const courseSessions = await DB.byIndex('sessions', 'courseId', State.course.id);
-  const mockPcts = courseSessions
+  // markSession() re-derives a mark from every question in a paper, so
+  // marking every mock the course has ever sat — for three numbers
+  // readinessVerdict keeps in the end (its own .slice(-3), after marking) —
+  // cost more with every mock added, for good. Capped to the same window
+  // the trend chart below already draws, before marking rather than after.
+  const sortedMocks = courseSessions
     .filter(x => x.status === 'complete' && x.mode === 'mock' && (x.questionUuids || []).length)
-    .sort((a, b) => new Date(a.endedAt || a.startedAt) - new Date(b.endedAt || b.startedAt))
+    .sort((a, b) => new Date(a.endedAt || a.startedAt) - new Date(b.endedAt || b.startedAt));
+  const mockPcts = sortedMocks.slice(-8)
     .map(m => markSession(m, mockById))
     .filter(mk => mk.total > 0)
     .map(mk => mk.pct);
@@ -7991,14 +8005,17 @@ ROUTES.dashboard = async (root) => {
   const sessions = courseSessions
     .filter(s => s.status === 'complete').sort((a, b) => new Date(b.endedAt) - new Date(a.endedAt)).slice(0, 6);
   if (sessions.length) {
-    const byId = new Map(all.map(q => [q.uuid, q]));
+    // Scored once each, not once for anyMarked and again per row — sessionScore
+    // marks the whole paper, same cost as markSession above. mockById is the
+    // same lookup this whole route already built; a second identical Map for
+    // the same six-or-fewer sessions bought nothing.
+    const scored = sessions.map(s => ({ s, sc: sessionScore(s, mockById) }));
     // A Marks column earns its space only on a course where marks and the
     // question count are not the same number.
-    const anyMarked = sessions.some(x => !sessionScore(x, byId).marks.plain);
+    const anyMarked = scored.some(({ sc }) => !sc.marks.plain);
     const card = h('div', { class: 'card', style: 'margin-top:16px' }, [h('div', { class: 'card-h' }, h('h3', { text: 'Recent sessions' }))]);
     const tb = h('tbody');
-    sessions.forEach(s => {
-      const sc = sessionScore(s, byId);
+    scored.forEach(({ s, sc }) => {
       tb.appendChild(h('tr', {}, [
         h('td', { class: 'nowrap small', text: fmtDate(s.endedAt, true) }),
         h('td', {}, h('span', { class: 'badge b-info', text: MODES[s.mode].label })),
@@ -8021,7 +8038,7 @@ ROUTES.dashboard = async (root) => {
     const mocks = courseSessions
       .filter(x => x.status === 'complete' && x.mode === 'mock')
       .sort((a, b) => new Date(a.endedAt) - new Date(b.endedAt)).slice(-8);
-    const trend = mockTrendCard(mocks, byId);
+    const trend = mockTrendCard(mocks, mockById);
     if (trend) root.appendChild(trend);
   }
 };
@@ -8305,7 +8322,9 @@ function mockTrendCard(mocks, byId) {
   const pts = real.map(({ s: m, mk }) => ({ s: m, pct: mk.pct, when: m.endedAt || m.startedAt }));
   const passPct = clamp(Number(Settings.get('passPct')) || 60, 1, 99);
   const W = 620, H = 150, PADL = 34, PADB = 22, PADT = 12;
-  const x = (i) => PADL + (pts.length === 1 ? (W - PADL - 8) / 2 : i * (W - PADL - 8) / (pts.length - 1));
+  // pts is a 1:1 map of real, which the guard above already requires to hold
+  // at least 2 — the single-point midpoint case can never actually run.
+  const x = (i) => PADL + i * (W - PADL - 8) / (pts.length - 1);
   const y = (p) => PADT + (100 - clamp(p, 0, 100)) * (H - PADT - PADB) / 100;
   const line = pts.map((p, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(p.pct).toFixed(1)).join(' ');
   const svg =
@@ -8518,7 +8537,7 @@ function compositionEditor(cfg, pool, filters, mode, casePool) {
     if (diffLock) { spec.difficultyMix = null; body.appendChild(lockedToggle('Set the difficulty mix myself', diffLock)); }
     else body.appendChild(toggle('Set the difficulty mix myself',
       !!spec.difficultyMix,
-      () => { spec.difficultyMix = DIFFICULTY_KEYS.map(k => ({ key: k, pct: k === 'medium' ? 50 : 25 })); },
+      () => { spec.difficultyMix = DIFFICULTY.map(k => ({ key: k, pct: k === 'medium' ? 50 : 25 })); },
       () => { spec.difficultyMix = null; }));
     if (spec.difficultyMix) {
       const rows = h('div', { class: 'stack', style: 'gap:4px;margin:2px 0 6px 26px' });
@@ -9002,7 +9021,6 @@ async function configureMode(mode, preset) {
       const base = applyFilters(pool, f);
       const keep = base.filter(isRedoEligible);
       if (!keep.length) { toast('Nothing to redo yet — no incorrect, guessed or flagged questions.', 'warn', 4200); return; }
-      cfg.filters = Object.assign({}, f, { explicitUuids: keep.map(q => q.uuid) });
       const s = await Session.create(mode, Object.assign({}, cfg, { filters: { ...f } }));
       s.questionUuids = shuffle(keep.map(q => q.uuid), mulberry32(s.seed)).slice(0, cfg.count);
       s.optionOrders = {};
@@ -9740,7 +9758,7 @@ async function runSession(s) {
       }
       pal.appendChild(h('button', {
         class: 'pal' + (s.responses[u] ? ' answered' : '') + (s.flags[u] ? ' flagged' : '') + (i === idx ? ' cur' : ''),
-        onclick: () => { saveTime(); idx = i; s.cursor = i; Session.save(s); render(); },
+        onclick: () => { idx = i; s.cursor = i; Session.save(s); render(); },
         'aria-label': 'Question ' + (i + 1), text: String(i + 1)
       }));
     });
@@ -9748,8 +9766,6 @@ async function runSession(s) {
     wrap.appendChild(b);
     return wrap;
   }
-
-  function saveTime() { /* time is captured per response */ }
 
   async function choose(q, optId) {
     const ms = Date.now() - qStart;
@@ -9803,6 +9819,12 @@ async function runSession(s) {
 
   function onKey(e) {
     if (e.target.matches('input,textarea,select') || $('.modal-bg')) return;
+    // An option is a real <button>, and Enter's default action on a focused
+    // button is to click it — which this handler's own preventDefault()
+    // below, on the very same key, was swallowing before it could happen.
+    // Tabbing to an option and pressing Enter therefore advanced to the next
+    // question instead of selecting it, and could never submit either.
+    if (e.key === 'Enter' && e.target.matches('button')) return;
     const q = byId.get(s.questionUuids[idx]);
     if (!q) return;
     const order = s.optionOrders[q.uuid] || q.options.map(o => o.id);
@@ -18978,10 +19000,19 @@ const FileStore = {
 
   /** Stop writing, say so plainly, and offer a way out. */
   async onProblem(kind) {
-    if (this._recovering) return;
+    // Recorded before the _recovering bail-out, not after: a write that
+    // fails WHILE a recovery dialog is already open (flush()'s own
+    // verifyFile() check, mid-recoveryFlow) used to return here having
+    // changed nothing, leaving connected true and the storage bar still
+    // reading "Saving to <folder>" for a save that never landed. The toast
+    // and the recoveryFlow re-entry stay suppressed — recoveryFlow and
+    // lossRecoveryChoice already re-assert this same state on every one of
+    // their own success and failure paths, so a reorder here cannot strand
+    // a successful recovery read-only.
     this.connected = false;
     this.needsReconnect = true;
     this.problem = kind;
+    if (this._recovering) return;
     if (kind === 'missing') toast('Your data file is no longer in that folder. The app is now read-only.', 'bad', 10000);
     else if (kind === 'changed') toast('Your data file was changed outside the app. The app is now read-only so it cannot overwrite it.', 'bad', 10000);
     else toast('Lost access to your data file. The app is now read-only.', 'bad', 10000);
@@ -20604,7 +20635,13 @@ const DriveSync = {
 
   async _findExisting() {
     const q = encodeURIComponent("name='" + DRIVE_FILE_NAME + "' and trashed=false");
-    const res = await fetch('https://www.googleapis.com/drive/v3/files?q=' + q + '&spaces=drive&fields=files(id)', {
+    // More than one is possible — this app's own _createFile() never checks
+    // for one first, so an interrupted or doubled first connect can leave
+    // two. Drive's default ordering for files.list is unspecified, so
+    // without this the choice between them was arbitrary and could change
+    // between calls; the newest is the one anything since would have written to.
+    const order = encodeURIComponent('modifiedTime desc');
+    const res = await fetch('https://www.googleapis.com/drive/v3/files?q=' + q + '&spaces=drive&orderBy=' + order + '&pageSize=1&fields=files(id)', {
       headers: { 'Authorization': 'Bearer ' + this.accessToken }, signal: AbortSignal.timeout(DRIVE_FETCH_TIMEOUT_MS)
     });
     // "Not found" and "not allowed to look" are opposite answers, and this
@@ -31575,6 +31612,60 @@ test('The dashboard reads the session store once per render', async () => {
   eq(sessionReads, 1, 'one getAll of the session store, not three');
 });
 
+test('Dashboard\'s past-mock re-marking does not grow with how many mocks a course has sat', async () => {
+  // markSession() walks every question in a paper to mark it — the same real
+  // cost as re-reading the whole session store, just paid per mock instead of
+  // once. Three separate things on this one screen each mark their own,
+  // already-bounded window of past mocks (the readiness figure, the recent-
+  // sessions table, the trend chart) — this proves the total is flat once a
+  // course has passed all three windows, not that any one of them is
+  // exactly N, which would tie this test to windows the other two features
+  // own and could legitimately change for reasons having nothing to do with
+  // this fix.
+  const prevCourse = State.course, prevCourses = State.courses;
+  const cid = 'test-dashboard-cap-' + Date.now();
+  State.course = { id: cid, code: 'TDBC', name: 'Dashboard cap test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  State.invalidate();
+  const q = mkActive('Cap test question', ['a', 'b'], 0, { courseId: cid, domainId: 'D1' });
+  await DB.put('questions', q);
+  const sessionIds = [];
+  const putMocks = async (from, upto) => {
+    for (let i = from; i < upto; i++) {
+      const id = 'test-mock-cap-' + cid + '-' + i;
+      sessionIds.push(id);
+      await DB.put('sessions', {
+        id, courseId: cid, mode: 'mock', status: 'complete', optionOrders: {},
+        questionUuids: [q.uuid], responses: { [q.uuid]: { correct: true, ms: 1000, at: nowISO() } },
+        flags: {}, marks: { [q.uuid]: 1 }, startedAt: nowISO(), endedAt: nowISO()
+      });
+    }
+  };
+  const origMark = markSession;
+  let markCalls = 0;
+  markSession = function (...args) { markCalls++; return origMark.apply(this, args); };
+  try {
+    // Already past every window this route caps at (the widest is 8).
+    await putMocks(0, 12);
+    markCalls = 0;
+    await ROUTES.dashboard(h('div'));
+    const withTwelve = markCalls;
+
+    // Ten more mocks on top — a real course keeps growing.
+    await putMocks(12, 22);
+    markCalls = 0;
+    await ROUTES.dashboard(h('div'));
+    const withTwentyTwo = markCalls;
+
+    eq(withTwentyTwo, withTwelve, 'ten more mocks in the course\'s history must not re-mark a single additional paper');
+  } finally {
+    markSession = origMark;
+    State.course = prevCourse; State.courses = prevCourses; State.invalidate();
+    for (const id of sessionIds) await DB.del('sessions', id).catch(() => {});
+    await DB.del('questions', q.uuid).catch(() => {});
+  }
+});
+
 test('String comparison orders nowISO() timestamps exactly like Date subtraction', () => {
   // Dashboard and Analytics both sort attempts by .ts with a plain string
   // comparator instead of building two Date objects per comparison — sound
@@ -33899,8 +33990,9 @@ async function boot() {
   }
   if (!HAS_CS) setTimeout(() => toast('This browser has no Compression Streams, so .docx, .xlsx and ZIP backups will not work. Use a current Chrome, Edge, Safari or Firefox.', 'warn', 9000), 900);
 
+  // renderShell() itself corrects the theme label now, so this used to be a
+  // second call for nothing.
   renderShell();
-  applyTheme();
   // Never blocks boot on Google's servers — a silent reconnect attempt that
   // updates the storage bar whenever (if ever) it resolves.
   DriveSync.init();
