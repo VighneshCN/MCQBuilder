@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.12', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.13', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -4575,8 +4575,12 @@ const RX = {
   // A leading letter with a word-boundary right after it, so "Available…"
   // (A + boundary-less "vailable") never misreads as option A. Whatever
   // follows — nothing, ") text", ". text", or "text" with no punctuation
-  // at all — is accepted, which real answer lines do inconsistently.
-  answerLetter: /^\s*[\(\[]?\s*([a-hA-H])\b[\)\].:]?\s*[-–:]?\s*(.*)$/,
+  // at all — is accepted, which real answer lines do inconsistently. An
+  // optional "Option"/"Choice" before the letter is accepted too — "Answer:
+  // Option B" is exactly as real as "Answer: B" once RX.answer has already
+  // stripped the "Answer:" part, and a bare "\b" after the word keeps
+  // "Optional…" from being misread as "Option" + letter "a".
+  answerLetter: /^\s*(?:(?:option|choice)\b\s*[:\-–]?\s*)?[\(\[]?\s*([a-hA-H])\b[\)\].:]?\s*[-–:]?\s*(.*)$/i,
   keyPair: /(?:^|[\s,;|])(?:q\.?\s*)?(\d{1,4})\s*[.):\-=]?\s*[\(\[]?\s*([a-hA-H])[\)\]]?(?=$|[\s,;|.])/g,
   header: /^\s*(page\s+\d+|chapter\s+\d+|module\s+\d+|\d+\s*\|\s*page|copyright|all rights reserved)\b/i,
   /* The sheet layout. A .pdf, .docx or .txt arrives here as free text, so a
@@ -4903,9 +4907,15 @@ function parseText(text, opts) {
           if (cur) applyMeta(cur, field, mm[2]);
           // Between a CASE: line and its first question, metadata describes
           // the scenario; the same words in the sheet header describe the
-          // whole sheet.
+          // whole sheet — but only once the document has actually signalled
+          // it IS a sheet (curCase can only be set when sheetMode already
+          // is, so it needs no check of its own). Outside sheetMode this is
+          // an ordinary document's preamble — "Marks: 100", "Time: 3 hours"
+          // above question 1 — and must not become a default silently
+          // applied to every question that follows; it is simply consumed
+          // instead, the same as it always was up to this point.
           else if (curCase && !curCase.seq) { applyMeta(curCase, field, mm[2]); applyMeta(curCase.meta, field, mm[2]); }
-          else applyMeta(sheetMeta, field, mm[2]);
+          else if (sheetMode) applyMeta(sheetMeta, field, mm[2]);
           continue;
         }
       }
@@ -5085,14 +5095,25 @@ function tableRowToCandidate(cells, lineNo) {
   if (nonEmpty.length < 4) return null;
   if (/^(question|stem|q\b)/i.test(cells[0]) && /^(a|option\s*a)$/i.test((cells[1] || '').trim())) return null; // header row
   let stem = cells[0], rest = cells.slice(1);
-  let ans = '', expl = '';
+  let ans = '', expl = '', ansIsTrailing = false;
   // Trailing answer/explanation columns
   for (let i = rest.length - 1; i >= 0; i--) {
     const v = (rest[i] || '').trim();
     if (!v) continue;
-    if (!ans && /^[a-hA-H]$/.test(v)) { ans = v.toUpperCase(); rest = rest.slice(0, i).concat(rest.slice(i + 1)); break; }
+    if (!ans && /^[a-hA-H]$/.test(v)) {
+      ans = v.toUpperCase();
+      // Nothing real left after the cell the answer letter came from means
+      // it really was the trailing column — so whatever is still in `rest`
+      // once it comes out is options, however many of them, not overflow to
+      // sweep into the explanation below. Only when something real *did*
+      // follow it (an explanation column after the answer) does more than
+      // four remaining cells mean "the extra one is explanation, not E".
+      ansIsTrailing = rest.slice(i + 1).every(c => !String(c || '').trim());
+      rest = rest.slice(0, i).concat(rest.slice(i + 1));
+      break;
+    }
   }
-  if (rest.length > 4) { expl = rest.slice(4).filter(Boolean).join(' '); rest = rest.slice(0, 4); }
+  if (rest.length > 4 && !ansIsTrailing) { expl = rest.slice(4).filter(Boolean).join(' '); rest = rest.slice(0, 4); }
   const options = rest.map((t, i) => ({ letter: letterOf(i), text: String(t || '').replace(/^\s*[\(\[]?[a-hA-H][\)\].:]\s*/, '').trim() })).filter(o => o.text);
   if (options.length < 2 || !stem) return null;
   return {
@@ -5263,7 +5284,10 @@ function rowsToCandidates(rows, opts) {
     });
     const ansRaw = get('answer');
     let letter = '';
-    const lm = /^[\(\[]?\s*([a-hA-H])\s*[\)\].:]?\s*$/.exec(ansRaw);
+    // Same "Option B"/"Choice: C" allowance as RX.answerLetter, and for the
+    // same reason: a spreadsheet answer column is exactly as likely to spell
+    // the letter out as a free-text answer line is.
+    const lm = /^(?:(?:option|choice)\b\s*[:\-–]?\s*)?[\(\[]?\s*([a-hA-H])\s*[\)\].:]?\s*$/i.exec(ansRaw);
     if (lm) letter = lm[1].toUpperCase();
     else if (ansRaw) {
       const hit = opts.findIndex(o => normText(o.text) === normText(ansRaw));
@@ -5430,7 +5454,14 @@ function candidateToQuestion(c, ctx) {
   q.learningPoint = (c.learningPoint || '').trim();
   q.originalNumber = c.originalNumber || '';
   q.externalId = c.externalId || '';
-  q.difficulty = DIFFICULTY.indexOf(c.difficulty) >= 0 ? c.difficulty : 'medium';
+  // Lowercased here, centrally, so every route — spreadsheet, JSON, and the
+  // free-text sheet layout's applyMeta(), which unlike the other two keeps
+  // whatever case the source document used — is judged against DIFFICULTY
+  // the same way. Without this, "Difficulty: Hard" from a plain-text import
+  // silently fell back to 'medium' while the identical word in a spreadsheet
+  // column (already lowercased before it got here) was read correctly.
+  const diffRaw = String(c.difficulty || '').toLowerCase();
+  q.difficulty = DIFFICULTY.indexOf(diffRaw) >= 0 ? diffRaw : 'medium';
   q.topic = c.topic || ctx.topic || '';
   q.subtopic = c.subtopic || '';
   q.srcModule = c.srcModule || ctx.srcModule || '';
@@ -7135,6 +7166,10 @@ function carryAnswerChanges(prev, rec) {
     log.push({ from: prev.selectedOptionId, to: rec.selectedOptionId, at: rec.at });
   }
   if (log.length) rec.changes = log;
+  // Time spent on a question is time spent across every visit to it in this
+  // session — revisiting to change an answer is more time added, not a
+  // replacement of what the earlier visit already cost.
+  rec.ms = (prev.ms || 0) + (rec.ms || 0);
   return rec;
 }
 
@@ -25814,6 +25849,47 @@ test('CSV rows map to candidates and resolve the answer letter', () => {
   eq(out.candidates[0].answerLetter, 'B');
   eq(out.candidates[0].domainRaw, 'D1');
 });
+test('RX.answerLetter accepts an "Option"/"Choice" word before the letter', () => {
+  let m = RX.answerLetter.exec('Option B');
+  assert(m, '"Option B" must match');
+  eq(m[1], 'B');
+  m = RX.answerLetter.exec('Choice: C');
+  assert(m, '"Choice: C" must match');
+  eq(m[1], 'C');
+  // A real word that merely starts the same way must not be misread as the
+  // word "Option" followed by a stray answer letter "a".
+  assert(!RX.answerLetter.exec('Optional extras'), '"Optional" must not be read as Option + letter a');
+});
+test('A spreadsheet answer cell spelling out "Option B" still resolves to the letter', () => {
+  const rows = rowsToCandidates([
+    ['Question', 'A', 'B', 'C', 'D', 'Answer'],
+    ['Which is preventive?', 'Log review', 'Authorisation', 'Recon', 'Trail', 'Option B']
+  ]);
+  eq(rows.candidates.length, 1);
+  eq(rows.candidates[0].answerLetter, 'B');
+});
+test('A free-text "Difficulty: Hard" is read the same as a lowercase one, not silently downgraded to medium', () => {
+  const ctx = { courseId: 'test-course', course: { blueprint: [] } };
+  const q = candidateToQuestion({ stem: 'x', options: [{ letter: 'A', text: 'a' }, { letter: 'B', text: 'b' }], difficulty: 'Hard' }, ctx);
+  eq(q.difficulty, 'hard', 'the mixed case a free-text applyMeta() line carries must still be recognised');
+});
+test('A preamble metadata line does not leak onto every question outside sheet mode', () => {
+  const txt = 'Marks: 100\n' +
+    '1. Which control is preventive?\nA) Log review\nB) Authorisation\nAnswer: B\n' +
+    '2. Which is detective?\nA) Firewall\nB) Log review\nAnswer: B\n';
+  const out = parseText(txt, { template: 'auto' });
+  eq(out.candidates.length, 2);
+  out.candidates.forEach(c => assert(c.marks == null, 'a document preamble ("Marks: 100" above question 1) is not a sheet header and must not become every question\'s marks'));
+});
+test('A table row with an explicit trailing answer letter keeps a 5th real option instead of losing it to "explanation"', () => {
+  const cells = ['Which is preventive?', 'Log review', 'Authorisation', 'Reconciliation', 'Audit trail', 'Physical guard', 'C'];
+  const c = tableRowToCandidate(cells, 1);
+  assert(c, 'must produce a candidate');
+  eq(c.options.length, 5, 'all five real options must survive, not just four');
+  eq(c.options[4].text, 'Physical guard');
+  eq(c.explanation, '', 'nothing here was actually an explanation column');
+  eq(c.answerLetter, 'C');
+});
 test('Text files decode UTF-16 by BOM and Windows-1252 when the bytes are not UTF-8', () => {
   const cp1252 = new Uint8Array([0x95, 0x20, 0x41, 0x75, 0x64, 0x69, 0x74, 0x6F, 0x72, 0x92, 0x73, 0x20, 0x96, 0x20, 0x63, 0x61, 0x66, 0xE9]);
   eq(decodeTextBytes(cp1252), '• Auditor’s – café', 'cp1252 bytes must not become U+FFFD');
@@ -29385,6 +29461,15 @@ test('A change keeps the first answer, however many times you go round', () => {
   const same = carryAnswerChanges(third, { selectedOptionId: 'c', at: '4' });
   eq(same.changes.length, 2, 'choosing what is already chosen changes nothing');
   eq(same.firstOptionId, 'a');
+});
+
+test('Revisiting a question adds its time rather than replacing it', () => {
+  const first = carryAnswerChanges(undefined, { selectedOptionId: 'a', at: '1', ms: 5000 });
+  eq(first.ms, 5000);
+  const second = carryAnswerChanges(first, { selectedOptionId: 'b', at: '2', ms: 3000 });
+  eq(second.ms, 8000, 'time from both visits must accumulate, not just keep the latest visit');
+  const third = carryAnswerChanges(second, { selectedOptionId: 'b', at: '3', ms: 1000 });
+  eq(third.ms, 9000, 'even a revisit that does not change the answer still cost time');
 });
 
 test('Changes are priced on the first answer against the last', () => {
