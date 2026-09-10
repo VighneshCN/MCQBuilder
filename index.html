@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.27', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.28', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -11667,7 +11667,7 @@ ROUTES.notes = async (root) => {
         h('span', { class: 'method-ico', text: isHtmlNote(rec) ? '▥' : rec.mimeType.indexOf('pdf') >= 0 ? '▤' : rec.mimeType.indexOf('image') >= 0 ? '▣' : '¶' }),
         h('div', { style: 'flex:1;min-width:180px' }, [
           h('div', { style: 'font-weight:600', text: rec.title }),
-          h('div', { class: 'tiny dim', text: (rec.topic ? rec.topic + ' · ' : '') + bytes(rec.sizeKB * 1024) + ' · added ' + fmtDate(rec.createdAt) + ' · ' + (rec.storage === 'folder' ? 'in your folder' : rec.storage === 'drive' ? 'in Google Drive' : 'in this browser') })
+          h('div', { class: 'tiny dim', text: (rec.topic ? rec.topic + ' · ' : '') + bytes(rec.sizeBytes != null ? rec.sizeBytes : rec.sizeKB * 1024) + ' · added ' + fmtDate(rec.createdAt) + ' · ' + (rec.storage === 'folder' ? 'in your folder' : rec.storage === 'drive' ? 'in Google Drive' : 'in this browser') })
         ]),
         h('button', { class: 'btn sm', onclick: () => openNote(rec), text: 'View' }),
         h('button', {
@@ -20194,6 +20194,12 @@ const DriveSync = {
     const outcome = await this._mergeInRemote(remote);
     if (!outcome.applied) return false;
     if (outcome.contributed) await this.push();
+    // Level with Drive without having pushed — the merge produced exactly what
+    // was downloaded. _catchUpWithDrive does the same thing for the same
+    // reason (see its own comment); without it here too, the very next
+    // catch-up reads this browser as "behind" and uploads the whole bank
+    // again for nothing.
+    else await FileStore.setMeta('driveSyncedSignature', await this._localSignature());
     await showMergeReport(outcome.report, 'Connected to Google Drive',
       'Both copies were combined — this browser and Drive now hold the same bank. Nothing was discarded.');
     return true;
@@ -20238,6 +20244,12 @@ const DriveSync = {
     await FileStore.delMeta('driveDirtySince');
     await FileStore.delMeta('driveQuestionCount');
     await FileStore.delMeta('driveAccountHint');
+    // The other two teardown paths (a folder winning at boot, a permanently
+    // gone Drive file) already forget this; a plain disconnect left it behind,
+    // so a later reconnect's merge — finding nothing new to push — compared
+    // the fresh local state against a signature sent before the gap and read
+    // "behind", uploading the whole bank for nothing it had not already sent.
+    await FileStore.delMeta('driveSyncedSignature');
     updateStorageBar();
     toast('Google Drive disconnected — the file stays in your Drive, this only forgets it here.', 'ok');
     return true;
@@ -20450,10 +20462,6 @@ const DriveSync = {
       if (await this._handleAuthFailure(res)) return false;
       if (!res.ok) throw new Error('Drive returned ' + res.status);
       const meta = await res.json().catch(() => null);
-      // What this upload actually contained. A sync that reports only "done"
-      // cannot be checked against the screen; one that reports what it sent
-      // can be, in a glance, on the spot.
-      this.lastPushedSummary = { questions: newCount, due: dueTodayIn(payload.stores.questions || []) };
       // What went up, as this browser will recognise it later — taken from the
       // payload, so a write made during the upload stays marked as unsynced.
       await FileStore.setMeta('driveSyncedSignature', this._signatureOf(payload.stores));
@@ -20673,8 +20681,14 @@ const DriveSync = {
    */
   async pullNow() {
     if (!this.connected) { toast('Sign in to Google Drive first.', 'bad'); return; }
+    // _catchUpWithDrive bails out at once, before touching anything, when one
+    // is already running (the 45-second watch timer or a resume can easily
+    // overlap a manual press) — without this guard that silent no-op still
+    // reported "Up to date", which is only true of whichever catch-up got
+    // there first.
+    if (this._catchingUp) { toast('Already catching up with Google Drive — please wait for it to finish.', 'info'); return; }
     await this._catchUpWithDrive(true);
-    if (!this._holdPush) toast('Up to date with Google Drive.', 'ok');
+    if (!this._holdPush && !this.problem) toast('Up to date with Google Drive.', 'ok');
   },
 
   /** A one-off "sync with Drive" while a local folder stays the persistent
@@ -20861,17 +20875,24 @@ const NotesStore = {
     const target = this.target();
     const rec = {
       id: uuid(), courseId: meta.courseId, domainId: meta.domainId || null, topic: (meta.topic || '').trim(),
-      title: (meta.title || file.name).trim(), filename: file.name, mimeType: file.type || 'application/octet-stream',
-      sizeKB: Math.round(file.size / 1024), storage: target, folderFilename: null, driveFileId: null, content: null,
+      // meta.title is always a string, so a whitespace-only typed title is
+      // truthy and never reaches the file.name fallback — trim first, THEN
+      // fall back, or a title of a few spaces silently became "".
+      title: ((meta.title || '').trim() || file.name), filename: file.name, mimeType: file.type || 'application/octet-stream',
+      // sizeKB stays for whatever still reads it; sizeBytes is the real size
+      // display and the cap check now use, so a file under 512 bytes shows
+      // its real size instead of the rounded-to-zero "0 B", and the cap
+      // cannot be squeezed past by up to 1023 bytes of rounding.
+      sizeKB: Math.round(file.size / 1024), sizeBytes: file.size, storage: target, folderFilename: null, driveFileId: null, content: null,
       createdAt: nowISO(), updatedAt: nowISO()
     };
     if (target === 'folder') {
       rec.folderFilename = await this._writeFolderFile(rec.id, file);
     } else if (target === 'drive') {
-      rec.driveFileId = await DriveSync.uploadNoteFile(file, rec.title);
+      rec.driveFileId = await DriveSync.uploadNoteFile(file, this._driveNoteName(rec.title, file.name));
     } else {
       const cap = Settings.get('notesMaxKB');
-      if (rec.sizeKB > cap) throw new Error('That file is ' + rec.sizeKB + ' KB, above the ' + cap + ' KB limit for notes kept in the browser. Connect a folder or Google Drive (Settings) to store larger files.');
+      if (file.size > cap * 1024) throw new Error('That file is ' + bytes(file.size) + ', above the ' + cap + ' KB limit for notes kept in the browser. Connect a folder or Google Drive (Settings) to store larger files.');
       rec.content = await blobToDataUrl(file);
     }
     await DB.put('notes', rec);
@@ -20887,6 +20908,16 @@ const NotesStore = {
     await w.write(await file.arrayBuffer());
     await w.close();
     return safe;
+  },
+
+  /** Also shared with migrateLocal(). uploadNoteFile() is given only the
+      human title, so a note titled "Chapter 4" landed in Drive as a bare,
+      extension-less file — the shape Drive's own viewers are worst at.
+      Keeps the title; adds the real extension back only when it is not
+      already there. */
+  _driveNoteName(title, filename) {
+    const ext = (filename.match(/\.[A-Za-z0-9]{1,8}$/) || [''])[0];
+    return ext && !title.toLowerCase().endsWith(ext.toLowerCase()) ? title + ext : title;
   },
 
   /** A note saved before any folder/Drive was connected keeps its full
@@ -20925,9 +20956,18 @@ const NotesStore = {
     if (rec.storage === 'indexeddb') { const res = await fetch(rec.content); return await res.blob(); }
     if (rec.storage === 'folder') {
       if (!FileStore.dirHandle) throw new Error('Connect the same folder this note was saved in to open it.');
-      const dir = await FileStore.dirHandle.getDirectoryHandle(NOTES_SUBFOLDER, { create: false });
-      const fh = await dir.getFileHandle(rec.folderFilename, { create: false });
-      return await fh.getFile();
+      // A folder IS connected, just not the one this note's bytes live in —
+      // no notes/ subfolder there at all, or one that simply doesn't hold
+      // this file. Either throws a bare DOMException ("A requested entry was
+      // not found"), which reached the open-note toast and the delete-backup
+      // dialog verbatim.
+      try {
+        const dir = await FileStore.dirHandle.getDirectoryHandle(NOTES_SUBFOLDER, { create: false });
+        const fh = await dir.getFileHandle(rec.folderFilename, { create: false });
+        return await fh.getFile();
+      } catch (e) {
+        throw new Error('“' + (rec.folderFilename || rec.title) + '” is not in the folder connected now — connect the folder this note was saved in to open it.');
+      }
     }
     if (rec.storage === 'drive') {
       if (!(await DriveSync._ensureToken())) throw new Error('Reconnect Google Drive to open this note.');
@@ -20992,7 +21032,7 @@ async function requireNoteBackup(rec) {
     const proceed = await modal({
       title: 'Backup saved',
       body: h('div', { class: 'stack' }, [
-        h('div', { class: 'notice ok small' }, 'A copy of “' + rec.title + '” was downloaded (' + bytes(rec.sizeKB * 1024) + '). Check your downloads folder before continuing.'),
+        h('div', { class: 'notice ok small' }, 'A copy of “' + rec.title + '” was downloaded (' + bytes(rec.sizeBytes != null ? rec.sizeBytes : rec.sizeKB * 1024) + '). Check your downloads folder before continuing.'),
         h('p', { class: 'small muted' }, 'Removing it here is permanent — the copy just downloaded is the way back.')
       ]),
       actions: [{ label: 'Stop here', value: false }, { label: 'Continue', value: true, kind: 'primary' }]
@@ -32947,6 +32987,57 @@ test('NotesStore save/readBlob/remove round-trips through IndexedDB storage', as
   }
 });
 
+test('NotesStore.save trims a whitespace-only title down to the real filename, and records the real byte size', async () => {
+  const savedDir = FileStore.dirHandle, savedConn = DriveSync.connected, savedConf = DriveSync.configured;
+  try {
+    FileStore.dirHandle = null; DriveSync.connected = false; DriveSync.configured = false;
+    const file = new File(['x'], 'blank-title.txt', { type: 'text/plain' });
+    // meta.title is truthy ("   "), so without trimming first the old code
+    // never reached the file.name fallback and the title silently became "".
+    const rec = await NotesStore.save(file, { courseId: 'test-course-notes', title: '   ' });
+    eq(rec.title, 'blank-title.txt', 'a whitespace-only title falls back to the real filename');
+    eq(rec.sizeBytes, 1, 'the real byte size is recorded, not only the KB rounding');
+    await DB.del('notes', rec.id);
+  } finally {
+    FileStore.dirHandle = savedDir; DriveSync.connected = savedConn; DriveSync.configured = savedConf;
+  }
+});
+test('NotesStore.save gives Drive a real extension even when the title has none', async () => {
+  const savedDir = FileStore.dirHandle, savedConn = DriveSync.connected, savedConf = DriveSync.configured;
+  const realUpload = DriveSync.uploadNoteFile;
+  let uploadedAs = null;
+  try {
+    FileStore.dirHandle = null; DriveSync.connected = true; DriveSync.configured = true;
+    DriveSync.uploadNoteFile = async (file, name) => { uploadedAs = name; return 'fake-drive-id'; };
+    const file = new File(['x'], 'chapter-4-scan.pdf', { type: 'application/pdf' });
+    const rec = await NotesStore.save(file, { courseId: 'test-course-notes', title: 'Chapter 4' });
+    eq(uploadedAs, 'Chapter 4.pdf', 'the human title is kept, with the file\'s own extension appended');
+    // A title that already ends with the extension is not doubled.
+    uploadedAs = null;
+    const already = new File(['x'], 'notes.pdf', { type: 'application/pdf' });
+    await NotesStore.save(already, { courseId: 'test-course-notes', title: 'notes.pdf' });
+    eq(uploadedAs, 'notes.pdf', 'an extension already present in the title is not appended twice');
+    await DB.del('notes', rec.id);
+  } finally {
+    FileStore.dirHandle = savedDir; DriveSync.connected = savedConn; DriveSync.configured = savedConf;
+    DriveSync.uploadNoteFile = realUpload;
+  }
+});
+test('Opening a folder note under a different connected folder names the file, not a raw DOMException', async () => {
+  const savedDir = FileStore.dirHandle;
+  try {
+    // A folder IS connected — just not the one holding this note's bytes.
+    FileStore.dirHandle = { getDirectoryHandle: async () => { const e = new Error('not found'); e.name = 'NotFoundError'; throw e; } };
+    const rec = { storage: 'folder', folderFilename: 'abc-revision.pdf', title: 'Revision notes' };
+    let err = null;
+    try { await NotesStore.readBlob(rec); } catch (e) { err = e; }
+    assert(err, 'a mismatched folder must still throw');
+    assert(err.message.indexOf('abc-revision.pdf') >= 0, 'naming the file, not a bare "not found"');
+    assert(!/NotFoundError|DOMException/.test(err.message), 'the raw browser exception text must not leak through');
+  } finally {
+    FileStore.dirHandle = savedDir;
+  }
+});
 test('NotesStore.remove() reports what Drive actually did, not an unconditional success (B70)', async () => {
   const real = DriveSync.deleteDriveFile;
   const rec = { id: 'scratch-note-b70', storage: 'drive', driveFileId: 'whatever', courseId: 'c' };
@@ -33344,6 +33435,22 @@ test('No mode promises a preset the app cannot load back', () => {
   Object.keys(MODES).forEach(m => {
     assert(!/preset/i.test(MODES[m].desc), m + ' offers presets, but nothing in the app lists or applies a saved preset');
   });
+});
+
+test('Disconnecting Drive forgets its last-sent signature too, not just the file id', async () => {
+  // Without this, a reconnect's merge that contributes nothing back compares
+  // the fresh local state against a signature sent before the disconnect gap
+  // and reads "behind" — uploading the whole bank for nothing new.
+  const D = DriveSync;
+  const saved = { c: D.connected, g: D.configured, p: D._pendingChange };
+  try {
+    await FileStore.setMeta('driveSyncedSignature', 'stale-signature');
+    D.connected = false; D.configured = true; D._pendingChange = false;
+    await D.disconnect();
+    eq(await FileStore.meta('driveSyncedSignature'), undefined, 'the stale signature must not survive a disconnect');
+  } finally {
+    D.connected = saved.c; D.configured = saved.g; D._pendingChange = saved.p;
+  }
 });
 
 test('Every disconnected state offers a way out, on every browser', () => {
