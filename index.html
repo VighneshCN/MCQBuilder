@@ -1163,7 +1163,7 @@ body:has(.game-root) .view{padding-bottom:16px}
 .btn.sm{padding:4px 9px;font-size:12.5px}
 .btn.lg{padding:11px 20px;font-size:15px}
 .btn.block{width:100%}
-.btn-group{display:inline-flex;border:1px solid var(--rule);border-radius:var(--r);overflow:hidden;background:var(--surface)}
+.btn-group{display:inline-flex;flex-wrap:wrap;border:1px solid var(--rule);border-radius:var(--r);overflow:hidden;background:var(--surface)}
 .btn-group button{border:0;background:none;padding:6px 12px;cursor:pointer;font-size:13px;color:var(--txt-2);border-right:1px solid var(--rule-soft)}
 .btn-group button:last-child{border-right:0}
 .btn-group button[aria-pressed="true"]{background:var(--blue);color:#fff}
@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.23', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.24', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -4549,7 +4549,21 @@ function parseCSV(text) {
 }
 function toCSV(rows) {
   return rows.map(r => r.map(v => {
-    const s = v == null ? '' : String(v);
+    let s = v == null ? '' : String(v);
+    // A cell beginning with = + - or @ is read as a formula by Excel,
+    // Sheets and Numbers, not as the text it holds — an imported question
+    // whose stem or option happened to start with one of these could carry
+    // a spreadsheet formula into whatever opens the export. A leading
+    // space defeats the sniffing without changing what the cell reads as;
+    // this app's own importer trims every cell on the way back in, so a
+    // file exported here and re-imported here is unaffected either way.
+    // '-' alone is not enough to flag, though: this app's own CSVs carry
+    // real negative numbers (Awarded marks under negative marking, for
+    // one) that must round-trip byte-for-byte — only a '-' NOT shaped like
+    // a plain number (the case an injection payload like
+    // -2+3+cmd|'/C calc'!A0 actually needs) gets the space.
+    const plainNumber = /^-?\d+(\.\d+)?%?$/.test(s);
+    if (!plainNumber && (/^[=+@]/.test(s) || s[0] === '-')) s = ' ' + s;
     return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   }).join(',')).join('\r\n');
 }
@@ -16729,12 +16743,40 @@ async function repairBrokenImageLinks() {
   return n;
 }
 
+// orphanSource and orphanCase used to be the only two checks below that
+// prescribed a fix the app had no control for: "re-link it to a source"
+// and a case-study question's own detail view pointed right back here
+// ("see the integrity check in Settings") for a link neither screen could
+// actually edit. Same shape as repairBrokenImageLinks — a dangling
+// reference is dropped, unstamped (arithmetic over an already-missing
+// fact, not an edit — stamping it would hand this device every future
+// merge for every question it touched).
+async function repairOrphanRefs() {
+  const srcIds = new Set((await DB.all('sources')).map(s => s.id));
+  const caseIds = new Set((await DB.all('caseStudies')).map(c => c.id));
+  let n = 0;
+  for (const q of await DB.all('questions')) {
+    let changed = false;
+    if (q.sourceId && !srcIds.has(q.sourceId)) { q.sourceId = null; changed = true; }
+    if (q.caseStudyId && !caseIds.has(q.caseStudyId)) { q.caseStudyId = null; changed = true; }
+    if (changed) {
+      const stamp = q.updatedAt;
+      q.updatedAt = stamp;
+      await DB.put('questions', q);
+      n++;
+    }
+  }
+  if (n) State.invalidate();
+  return n;
+}
+
 async function runIntegrity() {
   toast('Running integrity check…');
   // Derived counters are recomputed rather than merely reported: they are
   // arithmetic over the answer log, so "wrong" and "fixed" are the same step.
   const recounted = await repairDerivedStats();
   const unlinked = await repairBrokenImageLinks();
+  const unrefed = await repairOrphanRefs();
   const issues = await integrityChecks();
   const body = h('div', { class: 'stack' });
   if (recounted) {
@@ -16745,6 +16787,10 @@ async function runIntegrity() {
   if (unlinked) {
     body.appendChild(h('div', { class: 'notice ok' },
       'Cleared the link to a missing photo on ' + unlinked + ' question(s). The question text and answer are untouched.'));
+  }
+  if (unrefed) {
+    body.appendChild(h('div', { class: 'notice ok' },
+      'Cleared a link to a missing source or case study on ' + unrefed + ' question(s) — the question text and answer are untouched, and each now stands as a standalone question.'));
   }
   if (!issues.length) body.appendChild(h('div', { class: 'notice ok' }, 'All checks passed. No duplicate IDs, missing answers, orphaned references or invalid classifications.'));
   issues.forEach(i => {
@@ -28251,6 +28297,24 @@ test('CSV round trip survives quotes, commas and newlines', () => {
   const back = parseCSV(toCSV(rows));
   eq(back[0][1], 'b,c'); eq(back[0][2], 'd"e'); eq(back[0][3], 'f\ng');
 });
+test('CSV export defeats formula injection without breaking real numbers (B89)', () => {
+  // Excel/Sheets/Numbers all read a cell beginning with = + - or @ as a
+  // formula rather than as text. A question stem or option starting with
+  // one of these — or a deliberately crafted one, e.g. Google's own
+  // canonical injection example — must not reach the opened file that way.
+  const out = toCSV([['=SUM(A1:A9)', '+cmd', '@import', '-2+3+cmd|\'/C calc\'!A0', 'plain text']]);
+  const cells = parseCSV(out)[0];
+  ['=SUM(A1:A9)', '+cmd', '@import', '-2+3+cmd|\'/C calc\'!A0'].forEach((raw, i) => {
+    assert(cells[i][0] === ' ', 'a dangerous leading character must be defused: ' + JSON.stringify(cells[i]));
+    eq(cells[i].slice(1), raw, 'and the original text is otherwise untouched: ' + JSON.stringify(cells[i]));
+  });
+  eq(cells[4], 'plain text', 'ordinary text is never touched');
+  // This app's own exports carry real negative numbers (Awarded marks
+  // under negative marking) that must round-trip byte-for-byte, not
+  // gain a leading space just for starting with '-'.
+  const nums = parseCSV(toCSV([['-0.5', '-12', '-3.25%']]))[0];
+  eq(nums[0], '-0.5'); eq(nums[1], '-12'); eq(nums[2], '-3.25%');
+});
 test('Attempts CSV carries the marks and the deduction each attempt was scored under', () => {
   const a = { ts: '2026-01-01T00:00:00.000Z', qid: 'Q1', sessionId: 's1', mode: 'mock', correct: false, ms: 1200, questionVersion: 1, marks: 2, awarded: -0.5 };
   const rows = [['Attempt timestamp', 'Question ID', 'Session', 'Mode', 'Correct', 'Confidence', 'Mistake category', 'Time (ms)', 'Question version', 'Marks', 'Awarded']];
@@ -29555,6 +29619,31 @@ test('A link to a photo that is gone is reported, then cleared unstamped by the 
     eq(back.updatedAt, '2026-01-01T00:00:00.000Z', 'without stamping the record');
     issues = await integrityChecks();
     assert(!issues.find(i => i.key === 'brokenImage'), 'and the report no longer lists it');
+  } finally { await DB.del('questions', q.uuid); }
+});
+
+test('Links to a source or case study that are gone are reported, then cleared unstamped by the integrity repair (B93)', async () => {
+  // orphanSource and orphanCase used to be the only two checks that told
+  // someone to go fix a link neither the Provenance tab nor the question
+  // detail view actually let them edit — repairOrphanRefs gives them the
+  // same auto-repair repairBrokenImageLinks already has.
+  const q = mkActive('Which control does this scenario call for?', ['a', 'b', 'c', 'd'], 0, {
+    sourceId: 'source-that-does-not-exist', caseStudyId: 'case-that-does-not-exist', updatedAt: '2026-01-01T00:00:00.000Z'
+  });
+  q.qid = 'ZZR-Q-000001';
+  await DB.put('questions', q);
+  try {
+    let issues = await integrityChecks();
+    assert(issues.find(i => i.key === 'orphanSource' && i.items.indexOf('ZZR-Q-000001') >= 0), 'the dangling source link must be reported first: ' + JSON.stringify(issues.map(i => i.key)));
+    assert(issues.find(i => i.key === 'orphanCase' && i.items.indexOf('ZZR-Q-000001') >= 0), 'and the dangling case-study link too');
+    eq(await repairOrphanRefs(), 1, 'exactly this record is repaired');
+    const back = await Questions.get(q.uuid);
+    eq(back.sourceId, null, 'the dangling source link is cleared');
+    eq(back.caseStudyId, null, 'and the dangling case-study link');
+    eq(back.updatedAt, '2026-01-01T00:00:00.000Z', 'without stamping the record');
+    issues = await integrityChecks();
+    assert(!issues.find(i => i.key === 'orphanSource'), 'and the report no longer lists the source issue');
+    assert(!issues.find(i => i.key === 'orphanCase'), 'nor the case-study one');
   } finally { await DB.del('questions', q.uuid); }
 });
 
