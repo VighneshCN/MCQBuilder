@@ -219,9 +219,10 @@ excluded, so a request for a case-study section always produces one. The number
 actually reached is reported rather than assumed (`describeCaseBlock()`).
 
 The block is appended after the standalone selection, contiguous and in
-`caseSeq` order, and `session.caseSection` records where it starts. When
-`caseCount` is 0 — every mode but an opted-in mock — the selection path is
-byte-identical to what it was before any of this existed.
+`caseSeq` order, and `session.sections`' `case` entry (`from`/`to`) records
+where it starts. When `caseCount` is 0 — every mode but an opted-in mock —
+the selection path is byte-identical to what it was before any of this
+existed.
 
 **Only case-level filters reach the case pool.** A per-question filter (a
 domain, a difficulty, "never attempted") would remove *some* of a scenario's

@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.29', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.30', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -4690,9 +4690,8 @@ function metaFieldOf(label) {
 }
 const PARSE_TEMPLATES = [
   { id: 'auto',      name: 'Auto-detect (recommended)', desc: 'Tries numbered stems with lettered options, then bullets, then tables.' },
-  { id: 'lettered',  name: 'Numbered stem + A/B/C/D options', desc: 'Q1. … then A) … B) … C) … D)' },
+  { id: 'lettered',  name: 'Numbered stem + A/B/C/D options', desc: 'Q1. … then A) … B) … C) … D) — a trailing Answer: C line, if there is one, is read too.' },
   { id: 'bullets',   name: 'Stem + bulleted options', desc: 'Stem line followed by bullet or dash options.' },
-  { id: 'inline',    name: 'One question per line block, answer inline', desc: 'Stem, options, then Answer: C on its own line.' },
   { id: 'table',     name: 'Tabular (tab-separated)', desc: 'Stem, A, B, C, D, Answer, Explanation across a row.' },
   { id: 'sheet',     name: 'MCQ Mastery sheet (from the .docx template)', desc: 'The layout the downloadable question and case study sheets use — including CASE: and SCENARIO: for scenarios. Auto-detect reads it too; pick this to insist on it.' }
 ];
@@ -5275,10 +5274,10 @@ const IMPORT_FIELDS = [
     note: 'Rows sharing this value become one case study. Leave the column out entirely for ordinary standalone questions.',
     cols: ['case ref', 'case id', 'case', 'case study', 'case study ref', 'scenario ref', 'scenario id'], json: ['ref', 'caseRef'] },
   { f: 'caseTitle', label: 'Case study title', caseField: true,
-    cols: ['case title', 'case study title', 'scenario title', 'scenario'], json: ['title'] },
+    cols: ['case title', 'case study title', 'scenario title'], json: ['title'] },
   { f: 'caseText', label: 'The scenario itself', caseField: true,
     note: 'The full passage. No length limit — a page or two is normal.',
-    cols: ['case text', 'case study text', 'scenario text', 'passage', 'case description'], json: ['text', 'scenario', 'passage'] }
+    cols: ['case text', 'case study text', 'scenario text', 'passage', 'case description', 'scenario'], json: ['text', 'scenario', 'passage'] }
 ];
 /** Fields whose value in a JSON file is read by name. Options and the answer
     are handled structurally in jsonToCandidates (an array, an object, a bare
@@ -5627,7 +5626,12 @@ function masteryOf(q, attempts) {
   add('streak', 'Consecutive correct', Math.min(streak, 3) / 3 * 14, 14, streak + ' in a row');
 
   const cw = recent.reduce((s, x) => s + (x.correct ? confWeight(x.confidence) : 0), 0) / recent.length;
-  add('confidence', 'Answer quality', cw * 20, 20, cw >= 0.8 ? 'Answered from knowledge' : cw >= 0.45 ? 'Reasoned or unsure' : 'Mostly guessing');
+  // A timed mock never asks for confidence, so a correct mock answer scores
+  // the same neutral weight as "reasoned or unsure" without having been
+  // either — say so plainly rather than guessing at a feeling nobody reported.
+  const recentCorrect = recent.filter(x => x.correct);
+  const noneRecorded = recentCorrect.length > 0 && recentCorrect.every(x => x.confidence == null);
+  add('confidence', 'Answer quality', cw * 20, 20, noneRecorded ? 'No confidence recorded (timed mock)' : cw >= 0.8 ? 'Answered from knowledge' : cw >= 0.45 ? 'Reasoned or unsure' : 'Mostly guessing');
 
   // Scored over the same recent window as every other component. Over the whole
   // log it was the one permanent dock, and stacked on the permanent first-attempt
@@ -6103,7 +6107,7 @@ function modeLock(mode, ctx) {
   if (mode === 'redo' && !ctx.redo)
     return hard('Nothing missed, guessed or flagged yet. This is where those collect.');
   if (mode === 'lastmile' && !ctx.lastmile)
-    return hard('Nothing to repair yet. Questions arrive here once you get one wrong, flag it, or leave it below your mastery target.');
+    return hard('Nothing to repair yet. A question you have attempted arrives here once you get it wrong, flag it, or leave it below your mastery target.');
   // These two still draw a perfectly good paper. They just cannot yet do the
   // clever part, so they are dimmed rather than closed.
   if (mode === 'domain' && ctx.domainsLocked)
@@ -6132,8 +6136,7 @@ function applyFilters(pool, f) {
     if (f.topics && f.topics.length && f.topics.indexOf(q.topic || '—') < 0) return false;
     if (f.sources && f.sources.length && f.sources.indexOf(q.sourceId) < 0) return false;
     if (f.modules && f.modules.length && f.modules.indexOf(q.srcModule || '—') < 0) return false;
-    if (f.batches && f.batches.length && f.batches.indexOf(q.batchId) < 0) return false;
-    if (f.difficulty && f.difficulty.length && f.difficulty.indexOf(q.difficulty) < 0) return false;
+    if (f.difficulty && f.difficulty.length && !(q.difficultyVerified === 'verified' && f.difficulty.indexOf(q.difficulty) >= 0)) return false;
     // Whole-phrase match against the stem, and optionally the options too —
     // for drilling a question FORM rather than a topic ("BEST describes",
     // "MOST likely", "FIRST"), which is how these exams actually vary.
@@ -6147,18 +6150,13 @@ function applyFilters(pool, f) {
         if (!inStem && !inOpts) return false;
       }
     }
-    if (f.difficultyUngraded && q.difficultyVerified === 'verified') return false;
     if (f.neverAttempted && q.stats.attempts > 0) return false;
-    if (f.attemptedOnly && q.stats.attempts === 0) return false;
     if (f.incorrect && !(q.stats.incorrect > 0 || q.stats.lastResult === 'incorrect')) return false;
     if (f.guessed && !(q.stats.guessedCorrect > 0)) return false;
     if (f.lowConfidence && !(q.stats.attempts > 0 && (q.stats.confidence || 1) < 0.5)) return false;
     if (f.flagged && !q.flagged) return false;
     if (f.due && !(q.nextReviewAt && new Date(q.nextReviewAt) <= now)) return false;
     if (f.notMastered && (q.stats.mastery || 0) >= (f.masteryTarget || 75)) return false;
-    if (f.minAttempts != null && q.stats.attempts < f.minAttempts) return false;
-    if (f.maxAttempts != null && q.stats.attempts > f.maxAttempts) return false;
-    if (f.sinceDays) { const cut = new Date(Date.now() - f.sinceDays * 86400000); if (!q.stats.lastAttemptAt || new Date(q.stats.lastAttemptAt) < cut) return false; }
     return true;
   });
 }
@@ -6787,12 +6785,6 @@ const Session = {
       id: uuid(), courseId: State.course.id, mode, seed,
       config: JSON.parse(JSON.stringify(config)),
       questionUuids: ordered.map(q => q.uuid),
-      // Where the scenarios start, and which questions belong to which — read
-      // by the runner to show the passage and by the palette to mark the break.
-      caseSection: caseBlock ? {
-        startIndex: chosen.length, asked: caseBlock.asked, taken: caseBlock.taken,
-        cases: caseBlock.cases.map(c => ({ caseStudyId: c.caseStudyId, from: chosen.length + c.from, to: chosen.length + c.to, count: c.count }))
-      } : null,
       // A sectioned paper: the standalone run and the case-study block, each
       // with its own share of the clock. Absent on every paper that is one
       // undifferentiated run, which is all of them but this.
@@ -8693,7 +8685,13 @@ async function configureMode(mode, preset) {
   // do with.
   const eligibleCaseQs = caseEligiblePool(all);
   const body = h('div', { class: 'stack' });
-  const mockOpening = mockOpeningFor(pool.length + casePool.length,
+  // The paper draws standalone questions from pool, plus up to mockCaseCount
+  // scenario questions from casePool — but only in mock mode; in case-study
+  // mode pool already IS casePool, so adding casePool.length again here
+  // counted every scenario question twice and opened the dialog already
+  // showing the "won't fit" warning on a bank that actually had room.
+  const openingCaseCount = mode === 'mock' ? clamp(Settings.get('mockCaseCount') || 0, 0, casePool.length) : 0;
+  const mockOpening = mockOpeningFor(pool.length + openingCaseCount,
     Settings.get('mockCount'), Settings.get('mockMinutes'));
   // `preset.cfg` is the configuration that just failed to start, handed back
   // by the shortfall dialog: five domain percentages and a difficulty split
@@ -8701,7 +8699,7 @@ async function configureMode(mode, preset) {
   // below therefore reads its opening state from cfg rather than assuming a
   // blank form.
   const cfg = (preset && preset.cfg) || {
-    filters: { domains: [], topics: [], sources: [], modules: [], difficulty: [], batches: [], caseStudies: [] },
+    filters: { domains: [], topics: [], sources: [], modules: [], difficulty: [], caseStudies: [] },
     // A last-mile session defaults to forty rather than twenty: it is the one
     // people sit as a single long sweep of everything still broken, and it is
     // capped by what actually qualifies so the field never opens on a number
@@ -8712,7 +8710,7 @@ async function configureMode(mode, preset) {
           : 20,
     weighted: mode === 'mixed' || mode === 'mock',
     minutes: mode === 'mock' ? mockOpening.minutes : Settings.get('mockMinutes'),
-    caseCount: mode === 'mock' ? clamp(Settings.get('mockCaseCount') || 0, 0, casePool.length) : 0,
+    caseCount: openingCaseCount,
     caseFilters: { caseStudies: [] }
   };
   const f = cfg.filters;
@@ -26792,6 +26790,23 @@ test('A guessed-correct answer is not treated as mastery', () => {
   assert(guessed.score < knew.score, 'a guess must score below knowing');
   assert(guessed.score < 75, 'a guessed-correct answer must not reach the mastery target, got ' + guessed.score);
 });
+test('Mock-only correct answers are labelled as unrecorded, not guessed at', () => {
+  const q = mkQ('x', ['a', 'b'], 0);
+  const mockOnly = [{ ts: nowISO(), correct: true, confidence: null }, { ts: nowISO(), correct: true, confidence: null }];
+  const part = masteryOf(q, mockOnly).parts.find(p => p.key === 'confidence');
+  eq(part.note, 'No confidence recorded (timed mock)', 'a mock never asks, so the note must not claim reasoning that never happened');
+  eq(part.value, 10, 'the score itself is untouched by the fix: an unrecorded confidence still scores the same neutral default weight (0.5 of 20) it always has');
+
+  // A genuinely reasoned/unsure streak keeps its own label — this is not a
+  // blanket rename of the bucket, only the case a mock cannot fill in.
+  const reasoned = [{ ts: nowISO(), correct: true, confidence: 'unsure' }, { ts: nowISO(), correct: true, confidence: 'unsure' }];
+  eq(masteryOf(q, reasoned).parts.find(p => p.key === 'confidence').note, 'Reasoned or unsure');
+
+  // A mix of one real low-confidence answer and one mock answer is not
+  // "every recent correct answer" unrecorded, so ordinary bucketing applies.
+  const mixed = [{ ts: nowISO(), correct: true, confidence: 'guessed' }, { ts: nowISO(), correct: true, confidence: null }];
+  eq(masteryOf(q, mixed).parts.find(p => p.key === 'confidence').note, 'Mostly guessing', 'one real low-confidence answer in the window is enough to bucket normally');
+});
 test('A question missed on first sight recovers once the guessing stops', () => {
   const q = mkQ('x', ['a', 'b'], 0);
   const at = (d, correct, confidence) => ({ ts: new Date(Date.UTC(2026, 0, 1) + d * 86400000).toISOString(), correct, confidence });
@@ -26887,6 +26902,22 @@ test('Filters isolate incorrect, guessed and due questions', () => {
   eq(applyFilters(pool, { due: true }).length, 1);
   eq(applyFilters(pool, { neverAttempted: true }).length, 1);
 });
+test('A difficulty filter only matches a question a person actually graded', () => {
+  // difficulty carries a usable default ('medium') from the moment a
+  // question exists, same as blankQuestion's own comment explains for
+  // difficultyVerified — an ungraded question must not pass a "medium"
+  // filter just because that untouched default happens to say so.
+  const mk = (o) => { const q = mkQ('q', ['a', 'b'], 0); q.status = 'active'; q.answerVerified = 'verified'; return Object.assign(q, o); };
+  const pool = [
+    mk({ difficulty: 'medium', difficultyVerified: 'verified' }),
+    mk({ difficulty: 'medium', difficultyVerified: 'unverified' }),
+    mk({ difficulty: 'hard', difficultyVerified: 'verified' })
+  ];
+  const got = applyFilters(pool, { difficulty: ['medium'] });
+  eq(got.length, 1, 'the ungraded question must not count as medium');
+  eq(got[0].difficultyVerified, 'verified');
+  eq(applyFilters(pool, { difficulty: ['medium', 'hard'] }).length, 2, 'an ungraded question is excluded from every difficulty tier, not just its default one');
+});
 
 /* ---- file-backed store ---- */
 test('File sync covers every store except the handle store', () => {
@@ -26940,6 +26971,34 @@ test('First-attempt accuracy under a period window counts genuine first attempts
   } finally {
     await DB.del('attempts', 99131); await DB.del('attempts', 99132); await DB.del('questions', q.uuid);
     AnaState.days = was.days; State.course = was.course; State.courses = was.courses;
+  }
+});
+test('The dashboard\'s first-attempt reducer sorts by ts, not by which attempt was written first', async () => {
+  // DB.byIndex('attempts', 'courseId', …) returns rows in primary-key
+  // (auto-increment id) order — the order this browser happened to write
+  // them, not the order they were answered. A merge can append an older
+  // attempt after a newer one already synced, so the reducer must sort by
+  // ts before picking "the first" rather than trust array position.
+  const was = { course: State.course, courses: State.courses };
+  const q = mkQ('dashboard first attempt ordering', ['a', 'b'], 0);
+  try {
+    State.course = makeCourse('OD', 'Dashboard ordering test course', CISA_BLUEPRINT, { id: 'test-course' });
+    State.courses = [State.course];
+    State.invalidate();
+    await DB.put('questions', q);
+    const early = new Date(Date.now() - 20 * 86400000).toISOString();
+    // Written second (the higher id) despite being the earlier, true first attempt.
+    await DB.put('attempts', { id: 99142, questionUuid: q.uuid, courseId: State.course.id, correct: false, ts: early });
+    // Written first (the lower id) despite being the later, second attempt.
+    await DB.put('attempts', { id: 99141, questionUuid: q.uuid, courseId: State.course.id, correct: true, ts: nowISO() });
+    const root = h('div');
+    await ROUTES.dashboard(root);
+    const tile = Array.prototype.slice.call(root.querySelectorAll('.tile')).find(t => t.textContent.indexOf('First-attempt accuracy') >= 0);
+    assert(tile, 'the first-attempt tile must render');
+    eq(tile.querySelector('b').textContent, '0%', 'the chronologically earlier, incorrect attempt must win regardless of write order');
+  } finally {
+    await DB.del('attempts', 99141); await DB.del('attempts', 99142); await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses; State.invalidate();
   }
 });
 
@@ -28520,6 +28579,7 @@ test('a new paper carries no dead pool counters', async () => {
     State.invalidate();
     s = await Session.create('learning', { count: 1, filters: {} });
     assert(!('poolSize' in s) && !('eligibleTotal' in s), 'poolSize/eligibleTotal are never read, so they must not be stored');
+    assert(!('caseSection' in s), 'caseSection is never read either — sectioning a mixed paper is sections\' job');
     eq(Array.isArray(s.selectionNotes), true, 'the human-readable selection summary is still there');
   } finally {
     if (s) await DB.del('sessions', s.id);
@@ -28720,7 +28780,7 @@ test('No ordinary filter can reach a case-study question', () => {
   // Every filter the practice modes actually use, including the ones the case
   // questions above were deliberately made to match.
   const FILTERS = [{}, { domains: ['D1'] }, { flagged: true }, { due: true }, { incorrect: true },
-    { guessed: true }, { lowConfidence: true }, { attemptedOnly: true }, { neverAttempted: true },
+    { guessed: true }, { lowConfidence: true }, { neverAttempted: true },
     { notMastered: true, masteryTarget: 75 }, { difficulty: ['medium'] }];
   FILTERS.forEach((f, i) => {
     const got = applyFilters(pool, f).filter(isCaseQuestion);
@@ -28829,6 +28889,19 @@ test('A hand-supplied column mapping is used instead of the header row', () => {
   // And "no header row at all" reaches the positional reading deliberately.
   const headerless = rowsToCandidates(rows, { headerless: true });
   eq(headerless.candidates.length, 2, 'both rows are data when there is no header');
+});
+
+test('A "Scenario" column heading means the passage, same as JSON\'s scenario key', () => {
+  // caseText.json already carries 'scenario' as a JSON key alias; a bare
+  // "Scenario" spreadsheet heading must resolve the same way, not to the
+  // case study's title.
+  const map = mapHeader(['Case Ref', 'Scenario', 'Question', 'A', 'B', 'Answer']);
+  eq(map.caseText, 1, 'a bare "Scenario" heading is the passage');
+  eq(map.caseTitle, undefined, 'and is not read as the title');
+  // A heading that actually says "title" is unaffected.
+  const titled = mapHeader(['Case Ref', 'Scenario Title', 'Scenario Text', 'Question', 'A', 'B', 'Answer']);
+  eq(titled.caseTitle, 1);
+  eq(titled.caseText, 2);
 });
 
 test('A recognised header still parses exactly as it always did', () => {
