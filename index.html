@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.9', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.10', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -2042,7 +2042,24 @@ function modal(opts) {
     // selector if dialogs are ever nested.
     box._close = close;
     (opts.actions || [{ label: 'Close', value: null }]).forEach(a => {
-      foot.appendChild(h('button', { class: 'btn ' + (a.kind || ''), onclick: async () => { if (a.before && (await a.before(body)) === false) return; close(a.value); }, text: a.label }));
+      foot.appendChild(h('button', {
+        class: 'btn ' + (a.kind || ''), text: a.label,
+        onclick: async () => {
+          if (!a.before) { close(a.value); return; }
+          // A second click while `before` is still running used to be able to
+          // fire it twice — the question composer's Save created two questions
+          // and burned two permanent IDs. The whole footer is disabled for the
+          // duration, the same "can't run twice" guard already used ad hoc on
+          // individual buttons elsewhere in this file (quick-add, note upload),
+          // not a new control.
+          const buttons = $$('button', foot);
+          buttons.forEach(b => b.disabled = true);
+          let ok;
+          try { ok = await a.before(body); } finally { buttons.forEach(b => b.disabled = false); }
+          if (ok === false) return;
+          close(a.value);
+        }
+      }));
     });
     box.appendChild(h('div', { class: 'modal-h' }, [h('h3', { text: opts.title || '' }), h('div', { class: 'spacer' }), h('button', { class: 'btn ghost sm', 'aria-label': 'Close', onclick: () => close(null), text: '✕' })]));
     box.appendChild(body); box.appendChild(foot); bg.appendChild(box); root.appendChild(bg);
@@ -2674,17 +2691,26 @@ function rareKeys(q, df, maxDf) {
   return pick.slice(0, DUP_MAX_KEYS);
 }
 
-function buildIndex(list) {
+/** `alsoForDf` (used by detectDuplicates) only ever matters when `list` is
+    empty — a first import, with nothing in the bank yet. With no bank, df
+    would otherwise be built from nothing, every word would tie at frequency
+    0, and rareKeys' fallback sort degenerates to "longest word wins": two
+    rewordings of the same question can end up indexed under none of the
+    same keys and never bucket together within the batch. Seeding df from
+    the batch itself in that one case fixes it, without disturbing the
+    already-tuned, already-tested df an established bank produces on its
+    own — `alsoForDf` is ignored the moment `list` is non-empty. Only `list`
+    is ever actually added to the index either way. */
+function buildIndex(list, alsoForDf) {
   const byFp = new Map(), byTok = new Map(), df = new Map();
-  const all = [];
-  list.forEach(q => {
+  const dfSource = (!list.length && alsoForDf && alsoForDf.length) ? alsoForDf : list;
+  dfSource.forEach(q => {
     const t = Array.from(new Set(qTokens(q)));
-    all.push(t);
     t.forEach(w => df.set(w, (df.get(w) || 0) + 1));
   });
   // Anything in more than 2% of the bank is treated as noise, with a floor so
   // small banks still index normally.
-  const maxDf = Math.max(20, Math.ceil(list.length * 0.02));
+  const maxDf = Math.max(20, Math.ceil(dfSource.length * 0.02));
   const index = { byFp, byTok, df, maxDf };
   list.forEach(q => addToIndex(index, q));
   return index;
@@ -2745,7 +2771,7 @@ function candidatesFor(q, index, excludeUuid) {
 function comparablePair(a, b) { return isCaseQuestion(a) === isCaseQuestion(b); }
 
 function detectDuplicates(candidates, bank) {
-  const index = buildIndex(bank);
+  const index = buildIndex(bank, candidates);
   const results = new Map();
   candidates.forEach(q => {
     // Earlier candidates are already in the index, so within-batch duplicates
@@ -26877,6 +26903,25 @@ test('A stem full of words the bank has never seen still finds its near-duplicat
   assert(candidatesFor(n2, index, n2.uuid).some(o => o.uuid === n1.uuid), 'a batch member indexed on new words must still be reachable');
 });
 
+test('buildIndex counts word frequency over alsoForDf, not just list', () => {
+  // A first import starts from an empty bank. Without alsoForDf, df is built
+  // from nothing, so every word in the batch ties at frequency 0 and
+  // rareKeys' tie-break — pure word length — is all that decides which 8
+  // words index each candidate. Two rewordings of the same question can
+  // then end up sharing none of their (length-picked) keys, even though
+  // they share most of their actual vocabulary, and never bucket together.
+  const mk = (stem) => ({ uuid: uuid(), stem, options: [], tags: [] });
+  const q1 = mk('segregation of duties prevents fraud');
+  const q2 = mk('segregation of duties prevents unauthorised access');
+  const blind = buildIndex([]);
+  eq(blind.df.size, 0, 'an empty bank alone carries no frequency information');
+  const aware = buildIndex([], [q1, q2]);
+  eq(aware.df.get('segregation'), 2, 'a word both candidates use is counted twice');
+  eq(aware.df.get('duties'), 2);
+  eq(aware.df.get('fraud'), 1, 'a word only one candidate uses is counted once, not folded into the other');
+  assert(aware.maxDf >= 20, 'the floor still applies to a batch this small');
+});
+
 test('Comparison caches never reach the data file', () => {
   const q = mkQ('cached question', ['a', 'b'], 0);
   simParts(q);
@@ -30370,6 +30415,32 @@ test('B21: Escape/close with unsaved course-editor content asks before discardin
     await p;
     eq(document.querySelectorAll('.modal-bg').length, 0, 'the dialog is fully closed');
     eq(State.courses.length, beforeCount, 'declining to keep it must not have created a course');
+  } finally {
+    document.querySelectorAll('.modal-bg').forEach(el => el.remove());
+  }
+});
+
+test('modal() disables its footer while an async "before" runs, so a rapid double-click cannot fire it twice', async () => {
+  let calls = 0;
+  let p;
+  try {
+    p = modal({
+      title: 'Double-click guard', body: h('p', { text: 'x' }),
+      actions: [{ label: 'Save', value: 'saved', kind: 'primary', before: async () => { calls++; await new Promise(r => setTimeout(r, 80)); return true; } }]
+    });
+    await new Promise(r => setTimeout(r, 50)); // let it mount
+    const btn = document.querySelector('.modal-bg .modal-f button');
+    assert(btn, 'the action button must be on screen');
+    btn.click();
+    // A disabled button does not dispatch a click at all — this second call,
+    // fired before the first click's `before` has resolved, is exactly the
+    // window that used to let a rapid double-click (the question composer's
+    // Save, for one) run the same async action twice and burn two IDs.
+    btn.click();
+    assert(btn.disabled, 'the button must already be disabled by the time the second click could land');
+    const v = await p;
+    eq(calls, 1, 'the async action must run exactly once no matter how many clicks landed while it was pending');
+    eq(v, 'saved');
   } finally {
     document.querySelectorAll('.modal-bg').forEach(el => el.remove());
   }
