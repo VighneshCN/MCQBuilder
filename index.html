@@ -1530,7 +1530,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.11', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.12', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1747,10 +1747,22 @@ const DB = {
       req.onerror = () => rej(req.error || new Error('Could not open the local database.'));
       req.onblocked = () => rej(new Error('Another tab is holding the database open. Close it and reload.'));
     });
-    this.db.onversionchange = () => { this.db.close(); this.db = null; };
+    // Fires when another tab (or a newer build loaded in this one) opens the
+    // database at a higher schema version — closing this handle is what lets
+    // that upgrade proceed. Left null and unannounced, every DAL call after
+    // this point threw a bare "Cannot read properties of null" with no way
+    // to know why; tx() below now names the real cause instead.
+    this.db.onversionchange = () => {
+      this.db.close();
+      this.db = null;
+      toast('The app was updated in another tab — reload this one to continue.', 'bad', 10000);
+    };
     return this.db;
   },
-  tx(names, mode) { return this.db.transaction(names, mode || 'readonly'); },
+  tx(names, mode) {
+    if (!this.db) throw new Error('This tab is out of date — reload to continue.');
+    return this.db.transaction(names, mode || 'readonly');
+  },
   _p(req) { return new Promise((res, rej) => { req.onsuccess = () => res(req.result); req.onerror = () => rej(req.error); }); },
   get(store, key) { return this._p(this.tx(store).objectStore(store).get(key)); },
   all(store) { return this._p(this.tx(store).objectStore(store).getAll()); },
@@ -2066,7 +2078,13 @@ function modal(opts) {
     const onKey = (e) => { if (e.key === 'Escape') close(null); };
     document.addEventListener('keydown', onKey);
     bg.addEventListener('mousedown', e => { if (e.target === bg && !opts.sticky) close(null); });
-    setTimeout(() => { const f = box.querySelector('input,textarea,select,button.primary'); if (f) f.focus(); }, 30);
+    // A danger confirm has neither a form field nor a .primary button (its
+    // only two actions are Cancel and a .danger button), so this used to
+    // focus nothing at all — the opener kept real keyboard focus behind the
+    // dialog, and a stray Enter could re-trigger whatever had opened it,
+    // stacking the same confirm on top of itself. Falling back to the first
+    // footer button lands on Cancel, the safe default for a dialog like this.
+    setTimeout(() => { const f = box.querySelector('input,textarea,select,button.primary') || foot.querySelector('button'); if (f) f.focus(); }, 30);
   });
 }
 /** confirmLabel names what the confirm button actually does — "Delete" is
@@ -2255,7 +2273,7 @@ function blankQuestion(courseId) {
     uuid: uuid(), qid: null, version: 1, status: 'draft', courseId,
     createdAt: nowISO(), updatedAt: nowISO(),
     stem: '', options: [], correctOptionId: null, explanation: '', learningPoint: '',
-    imageId: null, lockOptionOrder: false, lang: 'en',
+    imageId: null, lockOptionOrder: false,
     domainId: null, topic: '', subtopic: '',
     // Which bank this record belongs to. null/absent means the ordinary
     // standalone bank, so every record written before case studies existed
@@ -2264,7 +2282,7 @@ function blankQuestion(courseId) {
     // eligiblePool() / caseEligiblePool() in module 06.
     caseStudyId: null, caseSeq: 0,
     srcModule: '', srcChapter: '', srcSection: '',
-    difficulty: 'medium', qtype: 'single', tags: [],
+    difficulty: 'medium', tags: [],
     // What this question is worth. null means "whatever the course says",
     // which is what every record written before marking existed means too.
     marks: null,
@@ -2276,7 +2294,7 @@ function blankQuestion(courseId) {
     // "medium because nobody has looked" — and records written before this
     // existed have no flag at all, which reads as unverified, so the whole
     // existing bank becomes gradeable rather than only what is imported next.
-    answerVerified: 'unverified', contentVerified: 'unverified', classVerified: 'unverified',
+    answerVerified: 'unverified', classVerified: 'unverified',
     difficultyVerified: 'unverified',
     verifiedAt: null, verifyNote: '', conflict: false,
     dupOf: null, canonicalUuid: null, aliasQids: [], mergedFrom: [],
@@ -2285,8 +2303,7 @@ function blankQuestion(courseId) {
     stats: {
       attempts: 0, correct: 0, incorrect: 0, guessedCorrect: 0,
       firstResult: null, lastResult: null, lastAttemptAt: null,
-      avgMs: 0, mastery: 0, confidence: 0, streak: 0, wrongStreak: 0,
-      lastMistake: null
+      avgMs: 0, mastery: 0, confidence: 0, streak: 0, wrongStreak: 0
     },
     nextReviewAt: null, srStage: 0, flagged: false
   };
@@ -2385,10 +2402,6 @@ const Questions = {
     if (courseId == null) return [];
     return DB.byIndex('questions', 'courseId', courseId);
   },
-  async byQid(qid) {
-    const rows = await DB.byIndex('questions', 'qid', qid);
-    return rows[0] || null;
-  },
   async save(q, reason, noVersion) {
     const prev = await DB.get('questions', q.uuid);
     if (prev && !noVersion && materiallyDifferent(prev, q)) {
@@ -2482,7 +2495,6 @@ const CaseStudies = {
       { title: cs.title, words: passageWords(cs.text) }, reason || '');
     return cs;
   },
-  async putRaw(cs) { await DB.put('caseStudies', cs); return cs; },
   /** Every question filed under this case study, in the order it was printed. */
   async questionsOf(caseStudyId) {
     const rows = await DB.byIndex('questions', 'caseStudyId', caseStudyId);
@@ -5580,7 +5592,7 @@ function applyAttempt(q, att) {
   const s = q.stats;
   s.attempts++;
   if (att.correct) { s.correct++; s.streak++; s.wrongStreak = 0; if (att.confidence === 'guessed') s.guessedCorrect++; }
-  else { s.incorrect++; s.wrongStreak++; s.streak = 0; s.lastMistake = att.mistake || null; }
+  else { s.incorrect++; s.wrongStreak++; s.streak = 0; }
   if (s.firstResult == null) s.firstResult = att.correct ? 'correct' : 'incorrect';
   s.lastResult = att.correct ? 'correct' : 'incorrect';
   s.lastAttemptAt = att.ts;
@@ -6758,9 +6770,18 @@ const Session = {
       // for a wrong answer is applied — so an attempt log read years later
       // still adds up to the score that was reported at the time.
       marks: rec.marks != null ? rec.marks : marksOf(q, s.courseId),
+      // The deduction fraction comes from the paper's own frozen scheme when
+      // it has one, the same rule markSession() already reports the paper's
+      // score under — reading the live course setting instead meant a
+      // negative-marking change made mid-course silently re-scored every
+      // attempt log row for a sitting the scheme change was never meant to
+      // touch, so this log stopped agreeing with the score actually reported
+      // at the time.
       awarded: rec.correct
         ? (rec.marks != null ? rec.marks : marksOf(q, s.courseId))
-        : -round2((rec.marks != null ? rec.marks : marksOf(q, s.courseId)) * (Number(Settings.get('negativeFraction', s.courseId)) || 0))
+        : -round2((rec.marks != null ? rec.marks : marksOf(q, s.courseId)) * ((s.marking && s.marking.negativeFraction != null)
+          ? Math.max(0, Number(s.marking.negativeFraction) || 0)
+          : Math.max(0, Number(Settings.get('negativeFraction', s.courseId)) || 0)))
     };
     // One answer, one attempt — whatever route got here. Finishing a session
     // that another device already finished, or a re-run of a commit loop, used
@@ -7476,7 +7497,26 @@ function kbdRow(keys, what) {
 
 /* ---------- router ---------- */
 const ROUTES = {};
-async function go(view, arg) {
+// Routes render directly into the shared #view node — appendChild calls
+// from inside whichever ROUTES[view] function is running, not an isolated
+// fragment swapped in atomically — so two overlapping calls (a double
+// nav-click, or an automatic repaint from a Drive catch-up landing mid-click)
+// used to interleave their output in the same container: the second call's
+// target.textContent = '' wiped the first's partial render, and the first,
+// unaware anything happened, kept appending into a screen the second was
+// now also drawing into. Chaining every call through this queue makes them
+// run one at a time in the order they were made, which is what "navigate"
+// always meant anyway.
+let _goQueue = Promise.resolve();
+function go(view, arg) {
+  const run = _goQueue.then(() => _goRun(view, arg));
+  // A rejection must not wedge every later navigation waiting behind it —
+  // _goRun already catches a route's own errors, so this only guards against
+  // something unexpected in the housekeeping around it.
+  _goQueue = run.catch(() => {});
+  return run;
+}
+async function _goRun(view, arg) {
   // Every route below assumes a selected course. On a brand-new install (or
   // right after the only course is removed) there isn't one yet, so every
   // destination is redirected to the same "add your first course" screen
@@ -7488,6 +7528,11 @@ async function go(view, arg) {
   // the next real navigation shows the merged counts.
   if (view === 'runner' && State.session && State.session.status === 'active') return;
   if (!State.course) view = 'onboarding';
+  // Nothing ever routed the other way: a course adopted while State.view was
+  // still 'onboarding' (mid-way through a Drive/folder connect dialog, which
+  // calls go(State.view) itself when it's done) left the student looking at
+  // "Add your first course" even though one now exists.
+  else if (view === 'onboarding') view = 'dashboard';
   if (State.session && State.session.status === 'active' && view !== 'runner') {
     // Route through the exact same confirm-and-clean-up the runner's own
     // Exit/Pause button uses (State.runnerStop is runSession()'s
@@ -8334,7 +8379,10 @@ function compositionEditor(cfg, pool, filters, mode, casePool) {
     /* ---- seen / unseen mix ---- */
     body.appendChild(toggle('Control how much I have seen before',
       !!spec.seenMix,
-      () => { spec.seenMix = { seenPct: Settings.get('repeatSeenPct') != null ? Settings.get('repeatSeenPct') : 30 }; },
+      // Settings.get already falls back to the registered default (30) for a
+      // key nothing has ever written — the != null check here was checking
+      // for a case that can't happen.
+      () => { spec.seenMix = { seenPct: Settings.get('repeatSeenPct') }; },
       () => { spec.seenMix = null; }));
     if (spec.seenMix) {
       const seenCount = pool.filter(q => q.stats.attempts > 0).length;
@@ -12790,6 +12838,7 @@ function renderStaging(root) {
       // pass) must never look like the confirm dialog was simply ignored.
       // State.staging is untouched on failure, so the review is not lost —
       // the student can try again once the underlying problem is fixed.
+      if (State.staging) State.staging._admitting = false;
       await modal({
         title: 'Import could not be saved',
         body: h('div', { class: 'stack' }, [
@@ -12802,6 +12851,14 @@ function renderStaging(root) {
 }
 
 async function admitBatch() {
+  // A rapid double-click on "Confirm import" (or a retry after the failure
+  // dialog's own "try Admit again") could otherwise run this twice
+  // concurrently over the same not-yet-cleared State.staging, duplicating
+  // admitted questions, sources and audit rows. commitBatch()'s catch clears
+  // this again on failure, so a genuine retry after fixing the underlying
+  // problem still works.
+  if (!State.staging || State.staging._admitting) return;
+  State.staging._admitting = true;
   const st = State.staging;
   for (const row of (st.pendingImages || [])) await DB.put('images', row);
   st.pendingImages = null;
@@ -15667,6 +15724,15 @@ async function applyRestore(payload, mode) {
   const curUuid = new Map(freshCurrent.map(q => [q.uuid, q]));
   const curQid = new Map(freshCurrent.filter(q => q.qid).map(q => [q.qid, q]));
   const maxSeqByCourse = new Map();
+  // Case studies get the identical watermark protection questions do, just
+  // without the uuid/qid collision handling above them — nothing re-issues a
+  // colliding csid today, only the watermark that stops one being handed out
+  // twice going forward.
+  const maxCaseSeqByCourse = new Map();
+  (payload.caseStudies || []).forEach(cs => {
+    const seq = IdRegister.caseSeqOf(cs.csid);
+    if (seq > (maxCaseSeqByCourse.get(cs.courseId) || 0)) maxCaseSeqByCourse.set(cs.courseId, seq);
+  });
   const out = [];
   for (const q of incomingQ) {
     const clashUuid = curUuid.get(q.uuid);
@@ -15696,6 +15762,7 @@ async function applyRestore(payload, mode) {
   out.forEach(q => { q.updatedAt = restoredAt; q.restoredAt = restoredAt; });
   await DB.putMany('questions', out);
   for (const [cid, seq] of maxSeqByCourse) await IdRegister.reserveUpTo(cid, seq);
+  for (const [cid, seq] of maxCaseSeqByCourse) await IdRegister.reserveCaseUpTo(cid, seq);
   report.stores.questions = out.length;
   await audit('restore', 'system', '', null, report, mode);
   return report;
@@ -16814,7 +16881,11 @@ ROUTES.settings = async (root) => {
     const reg = await DB.get('idRegister', c.id);
     return h('div', { class: 'notice' }, [
       h('div', { class: 'row wrap' }, [
-        h('span', { class: 'docnum', text: c.qidPrefix + '-Q-' + pad((reg && reg.lastSeq) || 0, 6) }),
+        // Not a real, issued ID — c.qidPrefix is editable and the register's
+        // watermark can outlive whatever prefix was in force when it moved,
+        // so composing the two together used to show an ID no question of
+        // this course's actually carries, and never the case-study watermark.
+        h('span', { class: 'docnum', text: 'Question IDs issued: ' + ((reg && reg.lastSeq) || 0) + ' · Case study IDs: ' + ((reg && reg.lastCaseSeq) || 0) }),
         h('b', { style: 'flex:1', text: c.code + ' — ' + c.name }),
         // An archived course can't be the active one (it's not even in the
         // sidebar picker), so a "Select" button here would just create a
@@ -18400,11 +18471,19 @@ const FileStore = {
     // the one failure it was written to catch.
     this._diskQuestionCount = (payload.stores.questions || []).length;
 
+    // Settings that describe THIS machine (DEVICE_LOCAL_SETTINGS — theme,
+    // OCR path, the offline flag…) stay with it. Restore's replace mode
+    // already filters these; this rebuild needed the same filter and did
+    // not have it, so a folder or file shared between two devices handed
+    // each one the other's local settings on every single boot, not just an
+    // explicit restore.
+    const keepLocalSettings = (await DB.all('settings')).filter(r => isDeviceLocalSetting(r.k));
     const names = syncStores();
     for (const s of names) {
       const rows = Array.isArray(payload.stores[s]) ? payload.stores[s] : [];
       await DB.clearRaw(s);
-      if (rows.length) await DB.putManyRaw(s, rows);
+      const toWrite = s === 'settings' ? rows.filter(r => !isDeviceLocalSetting(r.k)).concat(keepLocalSettings) : rows;
+      if (toWrite.length) await DB.putManyRaw(s, toWrite);
     }
     this.lastSavedAt = payload.savedAt || null;
     this.lastSnapshotAt = payload.savedAt || null;
@@ -18631,7 +18710,18 @@ const FileStore = {
   async flush(force) {
     if (!this.connected) return false;
     if (!this.dirty && !force) return false;
-    if (this._writing) { this._again = true; return false; }
+    if (this._writing) {
+      // A bare boolean here used to forget WHAT was being asked for — a
+      // flushNow('snapshot') that collided with an in-flight write was
+      // deferred as a plain `true`, and the replay below ran an ordinary
+      // journal append instead of the snapshot that was actually requested,
+      // silently downgrading it to whatever the current write already
+      // happened to be doing. Remembering 'snapshot' specifically, and only
+      // ever upgrading toward it, means the strongest of however many
+      // requests collided here is the one that actually runs.
+      this._again = (this._again === 'snapshot' || force === 'snapshot') ? 'snapshot' : true;
+      return false;
+    }
     this._writing = true;
     try {
       // Never write blind. If the file has gone or been changed underneath
@@ -18647,7 +18737,11 @@ const FileStore = {
       return false;
     } finally {
       this._writing = false;
-      if (this._again) { this._again = false; this.flush(); }
+      if (this._again) {
+        const again = this._again === 'snapshot' ? 'snapshot' : undefined;
+        this._again = false;
+        this.flush(again);
+      }
     }
   },
 
@@ -25794,6 +25888,26 @@ test('A restore collision issues a new ID and keeps the old one as an alias', as
     eq((await DB.get('idRegister', cid)).lastSeq, 7, 'the watermark must rise past the highest restored ID');
   } finally {
     for (const u of [here.uuid, sameQid.uuid, fresh.uuid]) await DB.del('questions', u);
+    await DB.del('courses', cid);
+    await DB.del('idRegister', cid);
+  }
+});
+test('A restore also raises the case-study watermark, not just the question one', async () => {
+  const cid = 'test-course-restore-case-' + Date.now();
+  await DB.put('courses', makeCourse('ZZC', 'Restore case scratch', [{ id: 'D1', name: 'One', weight: 100 }], { id: cid, qidPrefix: 'ZZC' }));
+  await IdRegister.reserveUpTo(cid, 1);
+  const cs = Object.assign(blankCaseStudy(cid), { csid: 'ZZC-CS-0007', title: 'Restored scenario', text: 'A passage.' });
+  const payload = {}; BACKUP_STORES.forEach(s => { payload[s] = []; });
+  payload.caseStudies = [cs];
+  try {
+    const report = await applyRestore(payload, 'merge');
+    eq(report.stores.caseStudies, 1);
+    const reg = await DB.get('idRegister', cid);
+    eq(reg.lastCaseSeq, 7, 'the case-study watermark must rise past the highest restored csid, the same way lastSeq does for questions');
+    const nextIds = await IdRegister.nextCase(cid, 1, { note: 'test' });
+    eq(nextIds[0], 'ZZC-CS-0008', 'so the next case study issued after a restore cannot collide with one the restore just brought back');
+  } finally {
+    await DB.del('caseStudies', cs.id);
     await DB.del('courses', cid);
     await DB.del('idRegister', cid);
   }

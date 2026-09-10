@@ -855,9 +855,10 @@ and there is no account to make.
 ### Opening it without a network
 
 The app keeps a copy of itself so it opens on a train. Everything else was
-already offline — the font and the app manifest are embedded in the page, and
-your bank is in the browser database and in your own data folder — so the only
-thing that ever needed a connection was fetching the page itself.
+already offline — the font is embedded in the page, the manifest is a small
+sibling file the service worker keeps a copy of alongside `index.html`, and
+your bank is in the browser database and in your own data folder — so the
+only thing that ever needed a connection was fetching the page itself.
 
 It is on by default, and it never gets in the way of an update: **when you are
 online you always get the current version**, and the stored copy is only ever

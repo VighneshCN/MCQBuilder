@@ -352,7 +352,7 @@ something **wrong**.
 
 This was not cosmetic. `deriveEntryStatus()` files a question as `needs_class`
 whenever it has no `domainId`, and `suggestDomain()` can only guess from
-`course.hints`, which only the CISA and DISA templates ship. So a course
+`course.hints`, which only the CISA template ships. So a course
 somebody sets up themselves classified nothing, and every question fell out of
 practice. Measured in a browser on a self-made course with a plain question
 file: 30 imported, 30 practisable now, 0 before.
@@ -548,7 +548,7 @@ cannot read and a set of dangling references, which is exactly what the first
 version did: twelve questions arrived, none of them practisable.
 
 Emitting `mcq-mastery-import/1` fixes both halves at once. The answer travels
-as a **letter**, which is what `parseStructured()` reads. And the privacy
+as a **letter**, which is what `jsonToCandidates()` reads. And the privacy
 question becomes trivial, because the mapping is an **allowlist**: a field is
 shared only if it is named in `shareableQuestion()`, so a personal field added
 to the record later cannot leak by being forgotten in a denylist. The tests
@@ -903,8 +903,11 @@ there is nothing solid to say.
 
 Human-readable IDs (`CISA-Q-000042`) are allocated from a per-course register at
 the moment a question is *admitted*, not when parsed or staged. Sequence numbers
-are never reused; deleting a question writes a tombstone keyed by its QID so a
-retired ID can never be handed to a different question.
+are never reused — the register's watermark (`lastSeq`, `lastCaseSeq`) only ever
+moves forward, which is what makes that guarantee hold, not the deletion record.
+Deleting a question separately writes a tombstone keyed by its QID, so the
+deletion itself propagates: a sync or merge from another device applies it too,
+instead of the record quietly reappearing there.
 
 The internal key is a `uuid`; the QID is a label. Nothing joins on QID.
 
@@ -1427,6 +1430,12 @@ that would normally mark stores dirty for the next `buildPayload()` call —
 only fires when `FileStore` itself is the connected backend, which is not
 true for a Drive-only merge; without that reset, a push right after the
 merge could silently upload the pre-merge snapshot.
+
+Four maintenance actions — an integrity check, the built-in self-test suite,
+a recompute of derived stats, and "Undo the last automatic merge" — are not
+on the ordinary Settings screen. They are gated behind the URL hash `#tools`
+(`location.hash === '#tools'`), reachable when there is a specific reason to
+run one but otherwise out of the way, since two of them write to the bank.
 
 ## Course notes (optional)
 

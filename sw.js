@@ -12,10 +12,12 @@
   runtime. This is the single exception to the single-file rule, and it buys
   exactly one thing — the app opening when there is no network.
 
-  Everything else was already offline: the font is a base64 data: URI, the web
-  app manifest is a data: URI, and the bank lives in IndexedDB and in a file
-  in a folder you chose. The only remaining network call was the request for
-  index.html itself. This answers that one.
+  Everything else was already offline: the font is a base64 data: URI, and
+  the bank lives in IndexedDB and in a file in a folder you chose. The web
+  app manifest is its own small file too — a browser will not accept one
+  supplied as a data: URI either — precached below alongside this script.
+  The only remaining network call was the request for index.html itself.
+  This answers that one.
 
   NETWORK-FIRST, cache as the fallback.
 
