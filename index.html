@@ -1510,7 +1510,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.36', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.37', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -10797,20 +10797,25 @@ async function openQuestion(uuidStr) {
     .sort((a, b) => new Date(b.ts) - new Date(a.ts));
   const source = q.sourceId ? await DB.get('sources', q.sourceId) : null;
   const m = masteryOf(q, attempts);
-  // This screen computes mastery from the answer log; every count on the
-  // Practice screen reads the copy stored on the question. Those are the same
-  // number unless the stored one is stale — which is exactly what a merge used
-  // to leave behind — and then one screen contradicts another with no way for
-  // anybody to tell which is right. The log is the source of truth, so put the
-  // stored copy back in line with it. Unstamped: it is arithmetic over facts
-  // already held, not an edit, and stamping would hand this device every
-  // future merge.
-  if (q.stats && q.stats.mastery !== m.score) {
+  // This screen used to repair only q.stats.mastery when it disagreed with
+  // the log — but attempts, incorrect, guessedCorrect, wrongStreak,
+  // lastResult and nextReviewAt are all just as derived, and just as able
+  // to go stale from the same old-merge history repairDerivedStats() exists
+  // to fix. Repairing the whole set here, the moment a question is opened,
+  // means nobody has to wait for that bank-wide repair to reach this one
+  // record. Same guard, same unstamped write: arithmetic over facts already
+  // held, not an edit, and stamping it would hand this device every future
+  // merge. m itself does not need recomputing after — masteryOf() above
+  // already reads straight from the log, not from q.stats.
+  if (attempts.length || (q.stats && q.stats.attempts)) {
+    const before = JSON.stringify([q.stats, q.srStage || 0, q.nextReviewAt || null]);
     const stamp = q.updatedAt;
-    q.stats.mastery = m.score;
-    q.updatedAt = stamp;
-    await DB.put('questions', q);
-    State.invalidate();
+    rebuildQuestionStats(q, attempts);
+    if (JSON.stringify([q.stats, q.srStage || 0, q.nextReviewAt || null]) !== before) {
+      q.updatedAt = stamp;
+      await DB.put('questions', q);
+      State.invalidate();
+    }
   }
 
   const caseRec = q.caseStudyId ? await CaseStudies.get(q.caseStudyId) : null;
@@ -11725,6 +11730,19 @@ ROUTES.notes = async (root) => {
           body: h('div', { class: 'stack' }, [
             frame
           ]),
+          actions: [{ label: 'Close', value: null }]
+        });
+        return;
+      }
+      // Markdown and CSV are both inert (noteOpensInertly agrees) but a
+      // plain window.open() of either just triggers a silent download in
+      // most browsers, no different in effect from the blocked-type branch
+      // below except that nothing explains why. Shown as plain text instead.
+      if (isTextDisplayNote(blob.type, rec.filename)) {
+        const text = await blob.text();
+        modal({
+          title: rec.title, wide: true, sticky: true,
+          body: h('div', { class: 'stack' }, [h('div', { class: 'diffbox scroll-y', text })]),
           actions: [{ label: 'Close', value: null }]
         });
         return;
@@ -12659,6 +12677,20 @@ async function columnMapDialog(rows, autoMap, filename) {
   return headerless ? { headerless: true } : { map: assigned() };
 }
 
+/** What a duplicate verdict from detectDuplicates() should be staged as.
+    A "definite" match can still have a null other.qid — the other side is
+    itself a staging candidate, not yet admitted, so neither has a real
+    Question ID yet (two identical questions imported in the same batch).
+    That match can never actually be merged: admitBatch()'s own merge
+    branch requires dup.other.qid. Routed to review instead of a decision
+    that would silently never fire, so the person sees the duplicate
+    rather than it slipping through unflagged. */
+function stagingDecisionFor(v) {
+  if (v.conflict) return 'conflict';
+  if (v.cls === 'definite') return v.other.qid ? 'merge' : 'review';
+  return 'review';
+}
+
 async function runParse(files, meta) {
   const batchId = uuid();
   const batch = { id: batchId, courseId: State.course.id, startedAt: nowISO(), label: meta.title, sourceIds: [], report: null };
@@ -12755,9 +12787,9 @@ async function runParse(files, meta) {
     const v = verdicts.get(it.q.uuid);
     it.dup = v || null;
     if (v) {
-      if (v.conflict) { it.decision = 'conflict'; it.q.status = 'answer_conflict'; it.q.conflict = true; }
-      else if (v.cls === 'definite') it.decision = 'merge';
-      else { it.decision = 'review'; it.q.status = 'possible_dup'; }
+      it.decision = stagingDecisionFor(v);
+      if (it.decision === 'conflict') { it.q.status = 'answer_conflict'; it.q.conflict = true; }
+      else if (it.decision === 'review') { it.q.status = 'possible_dup'; }
     }
   });
   State.staging = staging;
@@ -13043,7 +13075,7 @@ function renderStaging(root) {
       h('span', { class: 'tiny dim', text: 'answer' }), conf(q.parseConf && q.parseConf.answer)
     ]);
     const body = h('div', { class: 'card-b' });
-    const stem = h('textarea', { style: 'min-height:56px', value: q.stem, oninput: e => { q.stem = e.target.value; } });
+    const stem = h('textarea', { style: 'min-height:56px', value: q.stem, oninput: e => { q.stem = e.target.value; it.edited = true; } });
     body.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Stem' }), stem]));
     const optBox = h('div', { class: 'stack' });
     const drawOpts = () => {
@@ -13054,7 +13086,7 @@ function renderStaging(root) {
             h('input', { type: 'radio', name: 'c' + q.uuid, checked: q.correctOptionId === o.id, onchange: () => { q.correctOptionId = o.id; if (q.status === 'needs_answer') q.status = q.domainId ? 'draft' : 'needs_class'; drawAll(); } }),
             h('span', { class: 'docnum', text: letterOf(oi) })
           ]),
-          h('input', { type: 'text', value: o.text, oninput: e => o.text = e.target.value }),
+          h('input', { type: 'text', value: o.text, oninput: e => { o.text = e.target.value; it.edited = true; } }),
           h('button', {
             class: 'btn sm ghost', style: 'margin-top:3px',
             // The same two rules the hand-entry composer follows: deleting an
@@ -13067,6 +13099,7 @@ function renderStaging(root) {
             onclick: () => {
               const wasAnswer = q.options[oi].id === q.correctOptionId;
               q.options.splice(oi, 1);
+              it.edited = true;
               // drawAll, not drawOpts, when the answer went: the row's "No
               // answer was found in the source" notice has to come back.
               if (wasAnswer) { q.correctOptionId = null; drawAll(); } else drawOpts();
@@ -13075,7 +13108,7 @@ function renderStaging(root) {
           })
         ]));
       });
-      optBox.appendChild(h('button', { class: 'btn sm', onclick: () => { q.options.push(makeOption('')); drawOpts(); }, text: '+ Add option' }));
+      optBox.appendChild(h('button', { class: 'btn sm', onclick: () => { q.options.push(makeOption('')); it.edited = true; drawOpts(); }, text: '+ Add option' }));
     };
     drawOpts();
     body.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Options — pick the correct one' }), optBox]));
@@ -13086,7 +13119,7 @@ function renderStaging(root) {
     g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Difficulty' }), h('select', { onchange: e => q.difficulty = e.target.value }, DIFFICULTY.map(d => h('option', { value: d, selected: q.difficulty === d }, d)))]));
     g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Decision' }), h('select', {
       onchange: e => { setStagingDecision(it, e.target.value); drawAll(); }
-    }, [['import', 'Import'], ['reject', 'Reject'], it.dup ? ['merge', 'Merge into existing'] : null, it.dup ? ['review', 'Send to review queue'] : null, it.dup && it.dup.conflict ? ['conflict', 'Record answer conflict'] : null].filter(Boolean).map(([v, l]) => h('option', { value: v, selected: it.decision === v }, l)))]));
+    }, [['import', 'Import'], ['reject', 'Reject'], it.dup && it.dup.other && it.dup.other.qid ? ['merge', 'Merge into existing'] : null, it.dup ? ['review', 'Send to review queue'] : null, it.dup && it.dup.conflict ? ['conflict', 'Record answer conflict'] : null].filter(Boolean).map(([v, l]) => h('option', { value: v, selected: it.decision === v }, l)))]));
     body.appendChild(g);
     if (q.explanation) body.appendChild(h('div', { class: 'field', style: 'margin-top:10px' }, [h('label', { text: 'Explanation' }), h('textarea', { style: 'min-height:46px', value: q.explanation, oninput: e => q.explanation = e.target.value })]));
     if (q.lockOptionOrder) body.appendChild(h('div', { class: 'notice small', style: 'margin-top:10px' }, 'Option order will stay fixed for this question — it refers to a specific position or contains an “all/none of the above” style choice.'));
@@ -13246,7 +13279,15 @@ async function admitBatch() {
     // touching answerVerified.
     else if (it.q.status === 'needs_class' && it.q.answerVerified !== 'verified') it.q.status = 'needs_answer';
     toAdmit.push(it.q);
-    if (it.dup) needsRecheck.push(it.q);
+    // it.edited: the stem, an option's text, or the option list itself was
+    // hand-changed after the parse-time duplicate check ran (stagingRow's
+    // stem/option handlers) — none of which the Decision dropdown, Topic,
+    // Difficulty or Domain participate in, so those still don't need a
+    // recheck on their own. An edit here can turn a clean candidate into a
+    // duplicate the original check never saw, so it gets the same admit-
+    // side recheck a flagged one already gets, whether or not it.dup itself
+    // was ever set.
+    if (it.dup || it.edited) needsRecheck.push(it.q);
   });
   let merged = 0;
   for (const it of toMerge) {
@@ -20984,6 +21025,18 @@ function noteOpensInertly(type) {
   return /^(application\/pdf|image\/(png|jpeg|gif|webp|bmp)|text\/(plain|markdown|csv))$/i.test((type || '').split(';')[0].trim());
 }
 
+/** A markdown/csv note passes noteOpensInertly() — it is safe to open — but
+    neither format is actually rendered by a plain window.open(): most
+    browsers just download it, silently, with none of the explanation the
+    blocked-type branch gives elsewhere. Recognised by the blob's own type
+    first (the value that decides what the browser would otherwise have
+    done) and by filename second, because a note blob read back from
+    IndexedDB can have an empty .type even when its filename says exactly
+    what it is. */
+function isTextDisplayNote(blobType, filename) {
+  return /^text\/(markdown|csv)\b/i.test((blobType || '').split(';')[0].trim()) || /\.(md|markdown|csv)$/i.test(filename || '');
+}
+
 function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -25686,6 +25739,63 @@ test('Conflicting correct answers are detected, not merged', async () => {
   const v = verdicts.get(b.uuid);
   assert(v && v.conflict, 'duplicate detection must surface the conflict');
 });
+test('An in-file duplicate — neither side admitted, so neither has a real Question ID — is routed to review, not a merge decision that could never fire', async () => {
+  const qA = mkQ('The exact same question, twice in one file?', ['a', 'b', 'c', 'd'], 0);
+  const qB = mkQ('The exact same question, twice in one file?', ['a', 'b', 'c', 'd'], 0);
+  await recomputeFingerprint(qA); await recomputeFingerprint(qB);
+  const v = detectDuplicates([qA, qB], []).get(qB.uuid);
+  assert(v, 'the second copy must match the first');
+  eq(v.cls, 'definite', 'two word-for-word identical questions are a definite match');
+  eq(v.other.qid, null, 'neither side of an in-file duplicate has a real Question ID yet');
+  eq(stagingDecisionFor(v), 'review', 'so the decision must not be "merge" — admitBatch() would never act on it');
+});
+test('stagingDecisionFor() picks merge, conflict or review by what admitBatch() can actually act on', () => {
+  eq(stagingDecisionFor({ conflict: true, cls: 'definite', other: { qid: 'Q1' } }), 'conflict', 'a conflicting answer always wins, regardless of class');
+  eq(stagingDecisionFor({ conflict: false, cls: 'definite', other: { qid: 'Q1' } }), 'merge', 'a definite match against an admitted record can be merged');
+  eq(stagingDecisionFor({ conflict: false, cls: 'definite', other: { qid: null } }), 'review', 'a definite match against an unadmitted record cannot');
+  eq(stagingDecisionFor({ conflict: false, cls: 'likely', other: { qid: 'Q1' } }), 'review', 'anything short of definite goes to review, whatever the other side has');
+});
+test('An edited staging candidate is rechecked against the bank on admission, even though the parse-time check found nothing', async () => {
+  const cid = 'test-admit-edited-' + Date.now();
+  const course = makeCourse('AER', 'Admit edited-recheck course', [{ id: 'D1', name: 'One', weight: 100 }], { id: cid });
+  const was = { course: State.course, courses: State.courses, staging: State.staging };
+  const realShowRec = globalThis.showReconciliation, realGo = globalThis.go;
+  globalThis.showReconciliation = () => { };
+  globalThis.go = () => { };
+  const existing = mkActive('Which control BEST detects unauthorised changes to production code?',
+    ['Log review of change records', 'Segregation of duties', 'Annual access recertification', 'Change advisory board sign-off'], 0,
+    { courseId: cid, qid: 'AER-Q-000001', domainId: 'D1' });
+  const batchId = uuid();
+  const batch = { id: batchId, courseId: cid, startedAt: nowISO(), label: 'Test batch', sourceIds: [], report: null };
+  // Word-for-word the same question as `existing` — a definite match by the
+  // app's own similarity rules — but staged with dup:null and edited:true,
+  // as if the parse-time check ran before the wording was hand-changed to
+  // match it. Before this fix, needsRecheck only ever looked at it.dup.
+  const edited = mkQ('Which control BEST detects unauthorised changes to production code?',
+    ['Log review of change records', 'Segregation of duties', 'Annual access recertification', 'Change advisory board sign-off'], 0,
+    { courseId: cid, domainId: 'D1', status: 'draft', answerVerified: 'verified', batchId });
+  const it = { q: edited, dup: null, decision: 'import', edited: true };
+  State.staging = { batch, meta: { title: 'Test batch' }, items: [it], unresolved: [], sources: [], rejected: [], caseStudies: [] };
+  try {
+    await DB.put('courses', course);
+    await recomputeFingerprint(existing); await DB.put('questions', existing);
+    await recomputeFingerprint(edited);
+    State.course = course; State.courses = [course];
+    await admitBatch();
+    const fresh = await DB.get('questions', edited.uuid);
+    assert(fresh, 'the edited candidate must have been admitted');
+    assert((fresh.dupWith || []).length || (fresh.conflictWith || []).length,
+      'admission must have rechecked it against the bank and found the match, purely because it was edited');
+  } finally {
+    globalThis.showReconciliation = realShowRec; globalThis.go = realGo;
+    State.course = was.course; State.courses = was.courses; State.staging = was.staging;
+    await DB.del('questions', existing.uuid);
+    for (const q of await DB.byIndex('questions', 'batchId', batchId)) await DB.del('questions', q.uuid);
+    await DB.del('batches', batchId);
+    await DB.del('courses', cid);
+    await DB.del('idRegister', cid);
+  }
+});
 test('Answer disagreement never lowers a reworded pair below the duplicate threshold', async () => {
   const opts = ['Segregation of duties', 'Log review', 'Annual recertification', 'Change control minutes'];
   const a = mkQ('Which of the following controls BEST prevents unauthorised changes from reaching production?', opts, 0, { domainId: 'd1' });
@@ -26404,6 +26514,31 @@ test('The Content tab shows the source photo, without colliding with the practic
   } finally {
     await DB.del('questions', q.uuid);
     await DB.del('images', q.imageId);
+  }
+});
+test('Opening a question repairs every stale derived counter, not just mastery', async () => {
+  const cid = 'test-openq-repair-' + Date.now();
+  const q = mkActive('A question with a stale history?', ['a', 'b'], 0, { courseId: cid });
+  // Zero real attempt rows exist for this question — these counters are
+  // pure leftovers, the exact shape an old pre-v1.6.0 merge could leave
+  // (repairDerivedStats' own doc comment). A repair driven only by mastery
+  // used to leave attempts/correct standing at their stale, contradictory
+  // values while mastery alone dropped to what the (empty) log says.
+  q.stats.attempts = 3; q.stats.correct = 3; q.stats.mastery = 74;
+  await DB.put('questions', q);
+  try {
+    const opened = openQuestion(q.uuid);
+    let dlg = null;
+    for (let i = 0; i < 50 && !dlg; i++) { await new Promise(r => setTimeout(r, 10)); dlg = $$('.modal').pop(); }
+    assert(dlg, 'the detail dialog must open');
+    if (dlg._close) dlg._close(null);
+    await opened;
+    const fresh = await DB.get('questions', q.uuid);
+    eq(fresh.stats.attempts, 0, 'not just mastery — attempts must be repaired too');
+    eq(fresh.stats.correct, 0);
+    eq(fresh.stats.mastery, 0);
+  } finally {
+    await DB.del('questions', q.uuid);
   }
 });
 test('Repairing is a no-op when every conflict already names a live partner', async () => {
@@ -28193,6 +28328,15 @@ test('A note is only opened as a document when the browser renders it inertly', 
   assert(!noteOpensInertly('application/xhtml+xml'), 'nor XHTML');
   assert(!noteOpensInertly('text/html'), 'nor HTML');
   assert(!noteOpensInertly(''), 'nor an unknown type');
+});
+test('Markdown and CSV notes are recognised for in-app display, by type or by filename', () => {
+  assert(isTextDisplayNote('text/markdown', 'notes.md'), 'a proper markdown type');
+  assert(isTextDisplayNote('text/csv; charset=utf-8', 'export.csv'), 'a csv type with a charset');
+  assert(isTextDisplayNote('', 'revision-notes.md'), 'an IndexedDB blob with no type at all, recognised by filename');
+  assert(isTextDisplayNote('application/octet-stream', 'table.csv'), 'a generic type overridden by a clear filename');
+  assert(!isTextDisplayNote('text/plain', 'notes.txt'), 'plain text already opens fine on its own and is not rerouted');
+  assert(!isTextDisplayNote('application/pdf', 'report.pdf'), 'a PDF is untouched');
+  assert(!isTextDisplayNote('', ''), 'nothing to go on means no, not a guess');
 });
 
 test('A merge-restore must not leave the backup\'s counters standing over a unioned answer log', () => {

@@ -971,8 +971,11 @@ bumped on any question write invalidates it.
 **This runs at every point a question's content can change, not only at
 import.** `recheckQuestion()` is called after every save, merge and unmerge,
 and on admission for every candidate that matched something during staging
-(a candidate that matched nothing at staging is admitted as judged —
-staging detection runs once, at parse time), and re-evaluates that question
+or whose stem, option text or option list were hand-edited on the staging
+screen after that check ran (an edit is tracked, not re-checked live, so a
+candidate that matched nothing at staging AND was never edited afterward
+is the only one admitted as judged from the one-time parse-time check
+alone), and re-evaluates that question
 against the whole live bank — a
 conflict or duplicate found this way is recorded on *both* sides
 (`conflictWith` / `dupWith`, arrays of uuids), and both are pulled out of
