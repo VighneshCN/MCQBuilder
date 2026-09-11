@@ -1510,7 +1510,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.37', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.38', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -12705,6 +12705,19 @@ async function runParse(files, meta) {
       author: meta.author, type: meta.type, filename: f.filename, fileHash: f.fileHash,
       importedAt: nowISO(), detected: 0, admitted: 0, rejected: 0, notes: meta.notes
     };
+    if (existing) {
+      // Re-importing the same file (by content hash) is the ordinary way of
+      // picking up a corrected dialog entry too — title, author, type,
+      // notes — not just a corrected copy of the questions. Each refreshed
+      // only when this dialog actually offered a value, so leaving a field
+      // blank this time cannot wipe one recorded on an earlier import.
+      // Identity fields (id, fileHash, courseId, filename) and importedAt
+      // (the FIRST import) are never touched.
+      if (meta.title) src.title = meta.title + (files.length > 1 ? ' — ' + f.filename : '');
+      if (meta.author) src.author = meta.author;
+      if (meta.type) src.type = meta.type;
+      if (meta.notes) src.notes = meta.notes;
+    }
     let out;
     try {
       if (f.kind === 'rows') {
@@ -13121,7 +13134,14 @@ function renderStaging(root) {
       onchange: e => { setStagingDecision(it, e.target.value); drawAll(); }
     }, [['import', 'Import'], ['reject', 'Reject'], it.dup && it.dup.other && it.dup.other.qid ? ['merge', 'Merge into existing'] : null, it.dup ? ['review', 'Send to review queue'] : null, it.dup && it.dup.conflict ? ['conflict', 'Record answer conflict'] : null].filter(Boolean).map(([v, l]) => h('option', { value: v, selected: it.decision === v }, l)))]));
     body.appendChild(g);
-    if (q.explanation) body.appendChild(h('div', { class: 'field', style: 'margin-top:10px' }, [h('label', { text: 'Explanation' }), h('textarea', { style: 'min-height:46px', value: q.explanation, oninput: e => q.explanation = e.target.value })]));
+    // Always rendered, not just when the source already had one — a person
+    // reviewing a staged batch could otherwise never add the one thing the
+    // hand-entry composer explicitly prompts for (same placeholder as there).
+    // Does not set it.edited: like Topic/Difficulty/Domain, the explanation
+    // plays no part in similarity scoring, so editing it cannot turn a
+    // clean candidate into a duplicate the parse-time check missed.
+    body.appendChild(h('div', { class: 'field', style: 'margin-top:10px' }, [h('label', { text: 'Explanation' }),
+      h('textarea', { style: 'min-height:46px', value: q.explanation || '', placeholder: 'Why the correct answer is correct — shown after you answer', oninput: e => q.explanation = e.target.value })]));
     if (q.lockOptionOrder) body.appendChild(h('div', { class: 'notice small', style: 'margin-top:10px' }, 'Option order will stay fixed for this question — it refers to a specific position or contains an “all/none of the above” style choice.'));
     if (it.dup) body.appendChild(h('button', { class: 'btn sm', style: 'margin-top:10px', onclick: () => compareDialog(q, it.dup, it, drawAll), text: 'Compare side by side' }));
     body.appendChild(h('div', { class: 'srcline', style: 'margin-top:8px', text: (q.sourceRefs[0] || {}).filename + ' · ' + (q.locator || '') + (q.originalNumber ? ' · original no. ' + q.originalNumber : '') }));
@@ -25794,6 +25814,47 @@ test('An edited staging candidate is rechecked against the bank on admission, ev
     await DB.del('batches', batchId);
     await DB.del('courses', cid);
     await DB.del('idRegister', cid);
+  }
+});
+test('Re-importing the same file refreshes its source’s title/author/type/notes, not just its questions', async () => {
+  const cid = 'test-src-refresh-' + Date.now();
+  const was = { course: State.course, courses: State.courses };
+  const course = { id: cid, code: 'SRF', name: 'Source refresh test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  const hash = 'hash-' + Date.now();
+  const seeded = {
+    id: 'src-' + Date.now(), courseId: cid, title: 'Old title', author: 'Old author',
+    type: 'book', filename: 'orig.txt', fileHash: hash, importedAt: '2020-01-01T00:00:00.000Z',
+    detected: 3, admitted: 2, rejected: 0, notes: 'Old notes'
+  };
+  await DB.put('sources', seeded);
+  const was2 = { staging: State.staging, go: globalThis.go };
+  globalThis.go = () => { };
+  try {
+    State.course = course; State.courses = [course];
+    State.invalidate();
+    // runParse does not return staging — it sets it on State.staging and
+    // navigates, exactly as the real "Confirm import" click does.
+    await runParse(
+      [{ filename: 'orig.txt', fileHash: hash, text: '1. Which is preventive?\nA) Log review\nB) Authorisation' }],
+      { title: 'New title', author: 'New author', type: 'article', notes: 'New notes', template: 'auto' }
+    );
+    const staging = State.staging;
+    assert(staging, 'runParse must have set State.staging');
+    eq(staging.sources.length, 1, 'the file must match the seeded source by hash, not create a second one');
+    const src = staging.sources[0];
+    eq(src.id, seeded.id, 'the same row must be reused');
+    eq(src.title, 'New title', 'title refreshed from this run’s dialog');
+    eq(src.author, 'New author');
+    eq(src.type, 'article');
+    eq(src.notes, 'New notes');
+    eq(src.importedAt, seeded.importedAt, 'importedAt is the FIRST import and must never move');
+    assert(staging.items.length, 'the text must have parsed into at least one candidate');
+    eq(staging.items[0].q.sourceRefs[0].sourceTitle, 'New title', 'the refreshed title must reach the question’s own provenance, not the stale one');
+  } finally {
+    globalThis.go = was2.go; State.staging = was2.staging;
+    await DB.del('sources', seeded.id);
+    State.course = was.course; State.courses = was.courses;
+    State.invalidate();
   }
 });
 test('Answer disagreement never lowers a reworded pair below the duplicate threshold', async () => {
