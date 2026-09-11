@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.43', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.44', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -2078,6 +2078,15 @@ function toast(msg, kind, ms) {
   const dur = ms || Math.min(12000, Math.max(3200, String(msg || '').length * 55));
   setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 260); }, dur);
 }
+/** Every open dialog that tracks its own unsaved changes registers its check
+    here for the duration it is open, so a refresh or tab close can warn
+    exactly when Escape/✕ would already have asked to discard — a gap that
+    used to exist for every dialog but the image-transcription workflow,
+    which is a boolean rather than a function precisely because "open" and
+    "dirty" mean the same thing there and nowhere else. */
+const _dirtyGuards = new Set();
+function guardUnsaved(fn) { _dirtyGuards.add(fn); return () => _dirtyGuards.delete(fn); }
+function anyUnsavedEdit() { return Array.from(_dirtyGuards).some(f => { try { return f(); } catch (e) { return false; } }); }
 function modal(opts) {
   return new Promise(resolve => {
     const root = $('#modalRoot');
@@ -9549,7 +9558,34 @@ async function runSession(s) {
   };
   if (isMock) { tickTimer = setInterval(tick, 1000); }
 
-  const stop = () => { if (tickTimer) clearInterval(tickTimer); document.removeEventListener('keydown', onKey); State.runnerStop = null; };
+  // Only a mock has a clock for a sleeping screen to eat: resumeGapMs()
+  // charges the WHOLE gap against the paper's time limit whenever
+  // mockAllowPause is off (the default — the real exam does not pause), so a
+  // phone that locks mid-paper comes back shorter by however long it slept.
+  // The browser drops a screen lock the instant the document hides and does
+  // not give it back on its own, so this has to re-acquire on every return
+  // to the tab or it works exactly once, until the first app switch.
+  let wl = null;
+  const holdAwake = () => {
+    if (!isMock || !navigator.wakeLock || document.visibilityState !== 'visible' || wl) return;
+    navigator.wakeLock.request('screen')
+      .then(l => { wl = l; l.addEventListener('release', () => { wl = null; }); })
+      .catch(() => { }); // denied, unsupported, low battery — never fatal to the paper
+  };
+  const onVis = () => { if (document.visibilityState === 'visible') holdAwake(); };
+  if (isMock) { document.addEventListener('visibilitychange', onVis); holdAwake(); }
+
+  const stop = () => {
+    if (tickTimer) clearInterval(tickTimer);
+    document.removeEventListener('keydown', onKey);
+    document.removeEventListener('visibilitychange', onVis);
+    // Fire-and-forget: stop() is depended on being synchronous by both
+    // leaveGuarded (which awaits Session.save right after it) and
+    // submitMock/finish (which await Session.finish right after) — an
+    // async stop() would let either race ahead of the release.
+    if (wl) { const l = wl; wl = null; l.release().catch(() => { }); }
+    State.runnerStop = null;
+  };
   // Confirm-and-clean-up, shared by the runner's own Exit/Pause button and
   // by go()'s nav-rail guard below — so leaving via either path behaves
   // identically: same confirm wording, same real-time gap stamped for a
@@ -11185,6 +11221,13 @@ async function openQuestion(uuidStr) {
   }
   drawPane();
 
+  // Registered for exactly as long as this dialog can have something
+  // unsaved in it — released in the finally below, which also covers the
+  // save/flag/archive processing after the loop so a refresh mid-save
+  // cannot slip through unguarded, and covers the case where Questions.save
+  // itself throws.
+  const release = guardUnsaved(hasUnsavedChanges);
+  try {
   let res;
   for (; ;) {
     res = await modal({
@@ -11267,6 +11310,7 @@ async function openQuestion(uuidStr) {
     const ok = await confirmBox('Archive this question?', 'It leaves the practice pool but keeps its Question ID, sources and attempt history. Archiving is reversible.');
     if (ok) { const fresh = await Questions.get(uuidStr); const prev = fresh.status; fresh.status = 'archived'; fresh.updatedAt = nowISO(); await DB.put('questions', fresh); await audit('archive', 'question', fresh.qid, { status: prev }, { status: 'archived' }, ''); State.invalidate(); toast('Archived'); if (State.view === 'bank') go('bank'); }
   }
+  } finally { release(); }
 }
 
 /* ---------- writing a question by hand ----------
@@ -12129,6 +12173,8 @@ async function openCaseStudy(csOrId, isNew) {
       (edit.domainId || null) !== (cs.domainId || null) ||
       edit.topic !== (cs.topic || '');
   }
+  const release = guardUnsaved(hasUnsavedChanges);
+  try {
   let res;
   for (; ;) {
     res = await modal({
@@ -12155,6 +12201,7 @@ async function openCaseStudy(csOrId, isNew) {
   toast(isNew ? cs.csid + ' created — now add its questions' : 'Saved', 'ok');
   go('cases');
   if (isNew) setTimeout(() => openCaseStudy(cs.id), 60);
+  } finally { release(); }
 }
 
 /* ============================================================================
@@ -12559,6 +12606,8 @@ async function sourceDialog(files) {
       tmpl.value !== initial.tmpl || trust.checked !== initial.trust || notes.value !== initial.notes ||
       Object.keys(columnMaps).length > 0;
   }
+  const release = guardUnsaved(hasUnsavedChanges);
+  try {
   let res;
   for (; ;) {
     res = await modal({
@@ -12608,6 +12657,7 @@ async function sourceDialog(files) {
     template: tmpl.value, trustSourceAnswers: trust.checked, notes: notes.value.trim(),
     columnMaps
   });
+  } finally { release(); }
 }
 
 /* ---------- telling the app what your columns mean ----------
@@ -12725,6 +12775,8 @@ async function columnMapDialog(rows, autoMap, filename) {
   function hasUnsavedChanges() {
     return headerless || Object.keys(chosen).some(k => chosen[k] !== initialChosen[k]);
   }
+  const release = guardUnsaved(hasUnsavedChanges);
+  try {
   let res;
   for (; ;) {
     res = await modal({
@@ -12743,6 +12795,7 @@ async function columnMapDialog(rows, autoMap, filename) {
   }
   if (!res) return null;
   return headerless ? { headerless: true } : { map: assigned() };
+  } finally { release(); }
 }
 
 /** What a duplicate verdict from detectDuplicates() should be staged as.
@@ -17914,6 +17967,8 @@ async function courseDialog(course) {
     h('div', { class: 'tiny dim', text: 'Adds that course right away, with its exam blueprint and weights already set. Building a course for something else? Just fill in the form below.' })
   ]) : null;
 
+  const release = guardUnsaved(hasUnsavedChanges);
+  try {
   let res;
   for (; ;) {
     res = await modal({
@@ -18045,6 +18100,7 @@ async function courseDialog(course) {
     if (ruleChanged) await applyOptionCountRule(course);
   }
   renderShell(); go(isNew ? 'dashboard' : 'settings');
+  } finally { release(); }
 }
 
 /** Re-check every live question in a course against its option-count rule,
@@ -32525,6 +32581,21 @@ test('An automatic repaint never draws the dashboard over a live paper', async (
   }
 });
 
+test('A timed mock holds the screen awake, and gives it back on every exit', () => {
+  const src = runSession.toString();
+  assert(/wakeLock/.test(src), 'a phone that sleeps mid-paper is charged the whole gap by resumeGapMs');
+  assert(/visibilitychange/.test(src), 'the browser drops a screen lock whenever the document hides — without a re-acquire it works exactly once');
+  const stopBody = /const stop = \(\) => \{[\s\S]*?\};/.exec(src);
+  assert(stopBody && /release\(\)/.test(stopBody[0]), 'stop() is the one teardown both leaveGuarded and submitMock/finish run through, so the release belongs there');
+  assert(/\.catch\(/.test(src), 'a denied lock must never break the runner');
+});
+test('Only a mock has a clock for a sleeping phone to eat', () => {
+  Object.keys(MODES).forEach(m => {
+    if (m !== 'mock') eq(MODES[m].reveal, true, m + ' is untimed, so it needs no wake lock');
+  });
+  eq(resumeGapMs({ lastTickAt: 1000 }, true, false, 601000), 600000, 'a ten-minute sleep on a non-pausable mock costs ten real minutes');
+  eq(resumeGapMs({ lastTickAt: 1000 }, true, true, 601000), 0, 'and nothing when pausing is allowed');
+});
 test('The mock clock checkpoint writes locally without waking the sync layer', async () => {
   const prev = _writeHook; let hooked = 0; _writeHook = () => { hooked++; };
   const s = { id: 'selftest-ckpt-' + Date.now(), courseId: 'selftest-course', status: 'active', elapsedMs: 15000 };
@@ -33255,6 +33326,29 @@ test('modal() disables its footer while an async "before" runs, so a rapid doubl
   } finally {
     document.querySelectorAll('.modal-bg').forEach(el => el.remove());
   }
+});
+
+test('A dialog with unsaved edits arms the refresh warning, and a clean one does not', () => {
+  eq(anyUnsavedEdit(), false, 'nothing open, nothing to warn about');
+  let dirty = false;
+  const release = guardUnsaved(() => dirty);
+  try {
+    eq(anyUnsavedEdit(), false, 'an open but untouched dialog must not warn');
+    dirty = true;
+    eq(anyUnsavedEdit(), true, 'an edited one must');
+    const boomRelease = guardUnsaved(() => { throw new Error('x'); });
+    try {
+      eq(anyUnsavedEdit(), true, 'one guard throwing must not take the whole check down, nor hide a real "yes" from another');
+    } finally { boomRelease(); }
+  } finally { release(); }
+  eq(anyUnsavedEdit(), false, 'the guard is released when the dialog closes');
+});
+test('Every dirty-tracked editor registers its unload guard', () => {
+  // The image-transcription workflow is the one deliberate exception — see
+  // the comment above _dirtyGuards — so it is not in this list.
+  [openQuestion, openCaseStudy, sourceDialog, columnMapDialog, courseDialog].forEach(f =>
+    assert(/guardUnsaved\(hasUnsavedChanges\)/.test(f.toString()),
+      f.name + ' tracks unsaved changes for Escape/✕ but must arm the same check for a refresh or closed tab'));
 });
 
 test('A first run is never a wall for somebody who already has a bank', async () => {
@@ -35640,7 +35734,7 @@ async function boot() {
     // clearly, or a long review session (domains assigned, duplicates
     // resolved question by question) can vanish with zero notice.
     if (State.staging) { e.preventDefault(); e.returnValue = ''; return; }
-    if (window._imageWorkflowOpen) { e.preventDefault(); e.returnValue = ''; }
+    if (window._imageWorkflowOpen || anyUnsavedEdit()) { e.preventDefault(); e.returnValue = ''; }
   });
   // Last, and never awaited: whether the app can be opened offline next time
   // has no bearing on whether it works now, and a slow or failed registration
