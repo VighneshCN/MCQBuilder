@@ -1510,7 +1510,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.34', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.35', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -9585,7 +9585,7 @@ async function runSession(s) {
          h('div', { class: 'srcline', style: 'margin-top:12px', text: (rec.csid || '') + (rec.text ? ' · ' + passageWords(rec.text) + ' words' : '') })]
       : [h('div', { class: 'notice bad small' }, rec
           ? 'This case study has no scenario text. Add it from Case Studies — the question cannot be answered fairly without it.'
-          : 'The scenario this question belongs to is missing from the bank. Answer it if you can; the integrity check in Settings will list it.')]));
+          : 'The scenario this question belongs to is missing from the bank. Answer it if you can; running the integrity check in Settings clears the link and returns it to the standalone bank.')]));
     return pane;
   }
 
@@ -10797,7 +10797,7 @@ async function openQuestion(uuidStr) {
         ? h('span', {}, ['Question ', h('b', { text: String(q.caseSeq || '?') }), ' of the scenario ',
             h('b', { text: caseRec.title || caseRec.csid || 'untitled' }),
             ' (' + passageWords(caseRec.text) + ' words). It is only ever asked with that scenario in front of the candidate.'])
-        : h('span', { class: 'small' }, 'This is filed under a case study that is no longer in the bank. Until that is fixed it cannot be answered fairly — see the integrity check in Settings.'),
+        : h('span', { class: 'small' }, 'This is filed under a case study that is no longer in the bank. Until that is fixed it cannot be answered fairly — running the integrity check in Settings clears the link, and it becomes an ordinary standalone question.'),
       // Opened from inside the case-study editor there are two dialogs
       // stacked, and querySelector('.modal') returns the outer one — so this
       // used to close the editor and leave the question detail sitting over
@@ -11757,16 +11757,25 @@ ROUTES.cases = async (root) => {
   const cases = await CaseStudies.byCourse(State.course.id);
   const all = await State.questions();
   const caseQs = all.filter(isCaseQuestion);
+  // "Ready" here has to mean askable, which needs the scenario itself to be
+  // un-archived and have text — the same rule drawableCasePool() already
+  // applies for the Practice screen and the mock configurator. Without this,
+  // an eligible question under an archived or textless scenario counted as
+  // ready here while nothing could ever actually draw it.
+  const drawable = drawableCaseIds(cases);
   const readyByCase = new Map(), totalByCase = new Map();
   caseQs.forEach(q => {
     totalByCase.set(q.caseStudyId, (totalByCase.get(q.caseStudyId) || 0) + 1);
-    if (isPracticeEligible(q)) readyByCase.set(q.caseStudyId, (readyByCase.get(q.caseStudyId) || 0) + 1);
+    if (isPracticeEligible(q) && drawable.has(q.caseStudyId)) readyByCase.set(q.caseStudyId, (readyByCase.get(q.caseStudyId) || 0) + 1);
   });
 
   await band('Case Studies', 'Scenario-based questions, kept apart', [
     { k: 'Case studies', v: String(cases.filter(c => !c.archived).length) },
+    // Every case question in the register, whether or not its scenario is
+    // currently drawable — a deliberate raw count, not the same thing as
+    // "Practice-ready" below.
     { k: 'Questions', v: String(caseQs.length) },
-    { k: 'Practice-ready', v: String(caseQs.filter(isPracticeEligible).length), color: 'var(--green)' }
+    { k: 'Practice-ready', v: String(drawableCasePool(all, cases).length), color: 'var(--green)' }
   ], [
     h('button', { class: 'btn primary', onclick: () => newCaseStudy(), text: 'New case study' })
   ], {
@@ -11797,6 +11806,9 @@ ROUTES.cases = async (root) => {
 
   const card = (c) => {
     const total = totalByCase.get(c.id) || 0;
+    // readyByCase already excludes an archived or textless scenario (see
+    // drawable above), so this badge and the "none of them will be drawn"
+    // warning below no longer disagree about the same card.
     const ready = readyByCase.get(c.id) || 0;
     const words = passageWords(c.text);
     const box = h('div', { class: 'card', style: 'margin-bottom:14px' + (c.archived ? ';opacity:.62' : '') });
@@ -11818,7 +11830,9 @@ ROUTES.cases = async (root) => {
     else b.appendChild(h('p', { class: 'small muted', style: 'margin:0', text: c.text.slice(0, 260) + (c.text.length > 260 ? '…' : '') }));
     b.appendChild(h('div', { class: 'row wrap', style: 'gap:8px;margin-top:4px' }, [
       h('button', { class: 'btn sm primary', onclick: () => openCaseStudy(c.id), text: 'Open' }),
-      !c.archived && ready ? h('button', { class: 'btn sm', onclick: () => configureMode('casestudy'), text: 'Practise' }) : null,
+      // ready is already 0 for an archived or textless scenario — see
+      // drawable above — so this no longer needs its own !c.archived check.
+      ready ? h('button', { class: 'btn sm', onclick: () => configureMode('casestudy'), text: 'Practise' }) : null,
       !c.archived ? h('button', { class: 'btn sm ghost', onclick: () => archiveCaseStudy(c, true), text: 'Archive' }) : null,
       c.archived ? h('button', { class: 'btn sm', onclick: () => archiveCaseStudy(c, false), text: 'Restore' }) : null,
       c.archived && !total ? h('button', { class: 'btn sm danger', onclick: () => deleteEmptyCaseStudy(c), text: 'Delete' }) : null
@@ -16786,7 +16800,7 @@ async function integrityChecks() {
   push('badAnswer', 'The marked correct answer no longer matches any option', all.filter(q => q.correctOptionId && !q.options.some(o => o.id === q.correctOptionId)).map(q => q.qid), 'Reopen the question and pick the correct option again.');
   push('fewOptions', 'Fewer than two options', all.filter(q => (q.options || []).length < 2 && q.status !== 'rejected').map(q => q.qid || q.uuid.slice(0, 8)), 'Complete the options or reject the record.');
   push('activeUnverified', 'Marked Active but the answer isn’t verified', all.filter(q => q.status === 'active' && q.answerVerified !== 'verified').map(q => q.qid), 'These are already blocked from practice; verify the answer or move them to review.');
-  push('orphanSource', 'Linked to a source that no longer exists', all.filter(q => q.sourceId && !srcIds.has(q.sourceId)).map(q => q.qid), 'Re-link it to a source, or clear the link.');
+  push('orphanSource', 'Linked to a source that no longer exists', all.filter(q => q.sourceId && !srcIds.has(q.sourceId)).map(q => q.qid), 'Already cleared by this check — running it again confirms the link stays gone.');
   push('orphanAttempt', 'Practice history for a question that no longer exists', attempts.filter(a => !qUuids.has(a.questionUuid)).map(a => a.qid || a.questionUuid.slice(0, 8)), 'Harmless but untidy — usually left by a partial restore.');
   push('brokenImage', 'Linked to a photo that’s gone', all.filter(q => q.imageId && !imgIds.has(q.imageId)).map(q => q.qid), 'The photo is gone. Running the integrity check (Settings) clears the link.');
   const uuidSeen = new Set(), dupUuid = [];
@@ -16799,7 +16813,7 @@ async function integrityChecks() {
   // A case-study question whose scenario has gone cannot be answered honestly:
   // the context it was written against no longer exists.
   const caseIds = new Set(cases.map(c => c.id));
-  push('orphanCase', 'A case-study question whose case study is gone', all.filter(q => q.caseStudyId && !caseIds.has(q.caseStudyId)).map(q => q.qid || q.uuid.slice(0, 8)), 'Open it from the Question Bank and either re-link it to a case study or clear the link, which returns it to the standalone bank.');
+  push('orphanCase', 'A case-study question whose case study is gone', all.filter(q => q.caseStudyId && !caseIds.has(q.caseStudyId)).map(q => q.qid || q.uuid.slice(0, 8)), 'Already cleared by this check — running it again confirms the link stays gone.');
   const casesWithQs = new Set(all.filter(q => q.caseStudyId && q.status !== 'rejected' && q.status !== 'merged').map(q => q.caseStudyId));
   push('emptyCase', 'A case study with no questions', cases.filter(c => !casesWithQs.has(c.id)).map(c => (c.csid || c.id.slice(0, 8)) + ' — ' + (c.title || 'untitled')), 'Harmless, but it can never be practised. Add questions to it from Case Studies, or delete it.');
   return issues;
@@ -30289,6 +30303,39 @@ test('A scenario nobody can read is not one anybody can be asked about', () => {
   eq(drawable.length, 1, 'but only one can actually be put in front of someone');
   eq(drawable[0].caseStudyId, 'good');
   eq(drawableCasePool(qs, []).length, 0, 'and with no scenarios at all, none of them');
+});
+
+test('Case Studies screen counts a scenario as ready only when it can actually be drawn', async () => {
+  const was = { course: State.course, courses: State.courses };
+  const cid = 'test-cases-ready-' + Date.now();
+  const course = { id: cid, code: 'TCR', name: 'Case readiness test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  const good = { id: 'good-' + cid, courseId: cid, title: 'Good scenario', text: 'A real scenario, several paragraphs long.', archived: false };
+  const blank = { id: 'blank-' + cid, courseId: cid, title: 'Blank scenario', text: '   ', archived: false };
+  const gone = { id: 'gone-' + cid, courseId: cid, title: 'Archived scenario', text: 'Perfectly good text.', archived: true };
+  const qGood = mkCaseQ('Q against a real scenario?', ['a', 'b'], 0, good.id, 1);
+  const qBlank = mkCaseQ('Q against a blank scenario?', ['a', 'b'], 0, blank.id, 1);
+  const qGone = mkCaseQ('Q against an archived scenario?', ['a', 'b'], 0, gone.id, 1);
+  qGood.courseId = qBlank.courseId = qGone.courseId = cid;
+  try {
+    State.course = course; State.courses = [course];
+    State.invalidate();
+    await DB.put('caseStudies', good); await DB.put('caseStudies', blank); await DB.put('caseStudies', gone);
+    await DB.put('questions', qGood); await DB.put('questions', qBlank); await DB.put('questions', qGone);
+    State.invalidate();
+    const root = h('div');
+    await ROUTES.cases(root);
+    const stats = Array.prototype.slice.call($('#band').querySelectorAll('.band-stat'));
+    const readyStat = stats.find(s => s.textContent.indexOf('Practice-ready') >= 0);
+    const questionsStat = stats.find(s => s.textContent.indexOf('Questions') >= 0);
+    assert(readyStat, 'the Practice-ready stat must render');
+    eq(readyStat.querySelector('b').textContent, '1', 'only the question under the real, un-archived scenario is ready');
+    eq(questionsStat.querySelector('b').textContent, '3', 'the raw count still includes all three, unlike Practice-ready');
+  } finally {
+    await DB.del('caseStudies', good.id); await DB.del('caseStudies', blank.id); await DB.del('caseStudies', gone.id);
+    await DB.del('questions', qGood.uuid); await DB.del('questions', qBlank.uuid); await DB.del('questions', qGone.uuid);
+    State.course = was.course; State.courses = was.courses;
+    State.invalidate();
+  }
 });
 
 test('A draft case question is never counted as held back by its scenario', () => {
