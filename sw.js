@@ -68,8 +68,13 @@ self.addEventListener('install', (e) => {
 
 self.addEventListener('activate', (e) => {
   e.waitUntil((async () => {
-    // Anything under an older cache name is a previous shell and is dead
-    // weight; the current one is refilled by the first successful fetch.
+    // CACHE's version suffix has never actually changed, so this deletes
+    // nothing today — but it is what turns bumping it, the day this shell
+    // ever needs a genuine hard reset, into one that actually clears the
+    // previous version's cache instead of leaving it orphaned in Cache
+    // Storage forever alongside the new one. (turnOffOffline() in
+    // index.html deletes the same mcq-mastery-* caches for the other case:
+    // a person switching offline off, not a version change.)
     const names = await caches.keys();
     await Promise.all(names.filter(n => n !== CACHE && n.indexOf('mcq-mastery-') === 0).map(n => caches.delete(n)));
     await self.clients.claim();

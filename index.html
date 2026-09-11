@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.45', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.46', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -28913,17 +28913,26 @@ test('Duplicate detection stays fast as the bank grows', () => {
   const cands = [];
   for (let i = 0; i < 100; i++) cands.push(mk('Which control best addresses ' + words[i % 10] + ' exposure in scenario number ' + i + ' of the review?'));
 
-  const started = Date.now();
   const verdicts = detectDuplicates(cands, bank);
-  const ms = Date.now() - started;
 
   // Every candidate is a word-for-word copy of a bank entry.
   let found = 0;
   cands.forEach(q => { if (verdicts.get(q.uuid)) found++; });
   eq(found, 100, 'every exact duplicate must still be caught');
 
-  // Generous, but a return to the quadratic scan blows straight past it.
-  assert(ms < 8000, 'duplicate detection took ' + ms + 'ms for 100 candidates against 3000 — far slower than expected');
+  // Not a stopwatch. A clock threshold is wrong in both directions: a
+  // quadratic scan can still pass it on a fast machine, and correct code can
+  // fail it on a slow phone or a throttled tab. What actually makes this
+  // fast is the index, so measure that directly — the pool candidatesFor()
+  // hands back for each candidate IS the comparison count.
+  const idx = buildIndex(bank, cands);
+  const pools = cands.map(q => candidatesFor(q, idx, q.uuid).length);
+  const worst = pools.reduce((a, b) => Math.max(a, b), 0);
+  const total = pools.reduce((a, b) => a + b, 0);
+  assert(worst <= DUP_MAX_POOL,
+    'no candidate may be compared against more than DUP_MAX_POOL — worst was ' + worst);
+  assert(total * 20 < cands.length * bank.length,
+    total + ' comparisons where a full quadratic scan would do ' + (cands.length * bank.length));
 });
 
 test('A stem full of words the bank has never seen still finds its near-duplicate', async () => {
@@ -32105,24 +32114,35 @@ test('The printed page is built in one place', () => {
   eq(withExtra.length - plain.length, '.x{color:red}'.length, 'and nothing else changes');
 });
 
-test('The offline switch is honest about where it cannot work', () => {
-  // The guard is the whole safety story: a page served from disk, or a
-  // browser with no worker support, must be left completely alone.
+test('The offline switch is honest about where it cannot work', async () => {
+  // What the guard is FOR, not a second copy of how it is written — that
+  // form can only ever fail by transcription, never by testing the wrong
+  // thing, since it is the same expression as OFFLINE_OK's own definition.
   eq(typeof OFFLINE_OK, 'boolean');
-  eq(OFFLINE_OK, 'serviceWorker' in navigator && /^https?:$/.test(location.protocol),
-    'available exactly when the browser supports it and the page came over http');
+  assert(location.protocol !== 'file:' || !OFFLINE_OK,
+    'a page opened straight off the disk must never register a worker');
+  assert('serviceWorker' in navigator || !OFFLINE_OK,
+    'nor must a browser that has no worker to register');
+  // Both entry points have to consult the guard — this is what would rot
+  // silently if a third one were ever added and forgot to.
+  assert(registerOffline.toString().indexOf('OFFLINE_OK') > 0, 'registration is gated on the guard');
+  assert(offlineState.toString().indexOf('OFFLINE_OK') > 0, 'and so is what Settings is told to show');
+  // And the report the Settings row renders agrees with it, with a reason
+  // to put on screen whenever the answer is no.
+  const st = await offlineState();
+  eq(st.can, OFFLINE_OK, 'Settings reports exactly what the guard decided');
+  assert(st.can || (st.why && st.why.length > 0), 'a "no" always carries the reason to show');
+  assert(!st.can || st.why === undefined, 'and a "yes" carries no excuse');
   // Registration is a no-op when switched off, whatever the browser can do.
   // Restored in a finally: this test flips a setting somebody is actually
   // using, and a failure here must not quietly leave their offline copy off.
   const was = Settings.get('offlineEnabled');
-  return (async () => {
-    try {
-      await Settings.set('offlineEnabled', false);
-      eq(await registerOffline(), null, 'switched off means nothing is registered');
-    } finally {
-      await Settings.set('offlineEnabled', was);
-    }
-  })();
+  try {
+    await Settings.set('offlineEnabled', false);
+    eq(await registerOffline(), null, 'switched off means nothing is registered');
+  } finally {
+    await Settings.set('offlineEnabled', was);
+  }
 });
 test('Turning offline off touches only this app\'s own worker', () => {
   const src = turnOffOffline.toString();
