@@ -1510,7 +1510,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.35', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.36', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -5213,6 +5213,12 @@ const IMPORT_FIELDS = [
     cols: ['d', 'option d', 'optiond', 'opt d', 'choice d'], json: [] },
   { f: 'e',               label: 'Option E',
     cols: ['e', 'option e', 'optione', 'choice e'], json: [] },
+  { f: 'f',               label: 'Option F',
+    cols: ['f', 'option f', 'optionf', 'choice f'], json: [] },
+  { f: 'g',               label: 'Option G',
+    cols: ['g', 'option g', 'optiong', 'choice g'], json: [] },
+  { f: 'h',               label: 'Option H',
+    cols: ['h', 'option h', 'optionh', 'choice h'], json: [] },
   { f: 'answer',          label: 'Correct answer',          need: 'strongly advised',
     note: 'A letter (B), or the full text of the right option. Without it the question is admitted needing answer verification and cannot be practised until you set it.',
     cols: ['answer', 'correct', 'correct answer', 'correctanswer', 'key', 'ans', 'correct option'],
@@ -5244,6 +5250,12 @@ const IMPORT_FIELDS = [
     cols: ['why d', 'rationale d', 'reason d', 'explanation d', 'd rationale', 'd reason'], json: [] },
   { f: 'whyE',           label: 'Why E is right or wrong', optionRationale: 'e',
     cols: ['why e', 'rationale e', 'reason e', 'explanation e', 'e rationale', 'e reason'], json: [] },
+  { f: 'whyF',           label: 'Why F is right or wrong', optionRationale: 'f',
+    cols: ['why f', 'rationale f', 'reason f', 'explanation f', 'f rationale', 'f reason'], json: [] },
+  { f: 'whyG',           label: 'Why G is right or wrong', optionRationale: 'g',
+    cols: ['why g', 'rationale g', 'reason g', 'explanation g', 'g rationale', 'g reason'], json: [] },
+  { f: 'whyH',           label: 'Why H is right or wrong', optionRationale: 'h',
+    cols: ['why h', 'rationale h', 'reason h', 'explanation h', 'h rationale', 'h reason'], json: [] },
   { f: 'marks',           label: 'Marks',
     note: 'What this one question is worth. Leave the column out entirely and every question takes the course\u2019s own rate.',
     cols: ['marks', 'mark', 'weight', 'points', 'score'], json: ['marks', 'mark', 'points'] },
@@ -5343,7 +5355,7 @@ function rowsToCandidates(rows, opts) {
     const stem = get('stem');
     if (!stem) { if (r.some(v => String(v).trim())) unresolved.push({ line: i + 1, text: r.join(' | ').slice(0, 160) }); continue; }
     const opts = [];
-    ['a', 'b', 'c', 'd', 'e'].forEach((k, ix) => {
+    LETTERS.toLowerCase().split('').forEach((k, ix) => {
       const v = get(k);
       if (v) opts.push({ letter: letterOf(ix), text: v, rationale: get('why' + k.toUpperCase()) });
     });
@@ -9891,6 +9903,16 @@ function learningPointBox(q) {
     to it still carrying the default every question is born with. */
 function difficultyUngraded(q) { return !q || q.difficultyVerified !== 'verified'; }
 
+/** Applies a difficulty choice made in the composer or the detail editor to
+    the record being written. Choosing a real difficulty is a person judging
+    it, so it is stamped verified; choosing "ungraded" hands it back to the
+    in-practice prompt without disturbing whatever value the record already
+    carries — the default it was born with, on a brand-new question. */
+function applyDifficultyChoice(target, choice) {
+  if (choice === 'ungraded') { target.difficultyVerified = 'unverified'; }
+  else { target.difficulty = choice; target.difficultyVerified = 'verified'; }
+}
+
 /** Asks how the answer was arrived at, and — only while nobody has graded
     this question's difficulty — how hard it was, in the same dialog.
     Confidence is a fact about this attempt, so it is asked every time;
@@ -10405,6 +10427,22 @@ async function showResults(s) {
 // it has always shown; the case-study side is a deliberate switch away.
 const BankState = { q: '', status: '', domain: '', source: '', batch: '', verif: '', learn: '', diff: '', bank: 'standalone', caseStudy: '', sort: 'qid', dir: 1, page: 0, size: 50, view: 'table', sel: new Set() };
 
+/** Everything the Question Bank's free-text search matches against for one
+    question — a separate, named function (not inlined into filtered())
+    so the fields it covers can be asserted directly. Used to only be the
+    stem, options, topic, qid and aliases: a search for a distinctive word
+    in an explanation, a learning point, a subtopic, a tag or an option's
+    rationale found nothing, even though that word is exactly what someone
+    half-remembering a question would type. */
+function bankHaystack(q, caseTitle) {
+  return [
+    q.qid || '', q.stem, q.explanation || '', q.learningPoint || '',
+    q.topic || '', q.subtopic || '', (q.tags || []).join(' '),
+    q.options.map(o => o.text + ' ' + (o.rationale || '')).join(' '),
+    (q.aliasQids || []).join(' '), caseTitle.get(q.caseStudyId) || ''
+  ].join(' ');
+}
+
 ROUTES.bank = async (root) => {
   const everything = await State.questions();
   const caseRecords = await CaseStudies.byCourse(State.course.id);
@@ -10459,7 +10497,7 @@ ROUTES.bank = async (root) => {
   // which records are affected. Clearing on every filter change (like the
   // clear that already happens once a bulk action completes) keeps "what's
   // ticked" always matching "what's currently visible".
-  const search = h('input', { type: 'search', placeholder: 'Question ID or text…', value: BankState.q, oninput: debounce(e => { BankState.q = e.target.value; BankState.page = 0; BankState.sel.clear(); draw(); }, 260) });
+  const search = h('input', { type: 'search', placeholder: 'ID, question, answer, your notes…', value: BankState.q, oninput: debounce(e => { BankState.q = e.target.value; BankState.page = 0; BankState.sel.clear(); draw(); }, 260) });
   const searchField = h('div', { class: 'field' }, [h('label', { text: 'Search' }), search]);
   const mkSel = (label, key, opts) => {
     const s = h('select', { onchange: e => { BankState[key] = e.target.value; BankState.page = 0; BankState.sel.clear(); draw(); } },
@@ -10528,8 +10566,7 @@ ROUTES.bank = async (root) => {
       if (L === 'due' && !(q.nextReviewAt && new Date(q.nextReviewAt) <= now)) return false;
       if (L === 'flagged' && !q.flagged) return false;
       if (term) {
-        const hay = (q.qid || '') + ' ' + q.stem + ' ' + q.options.map(o => o.text).join(' ') + ' ' + (q.topic || '') + ' ' + (q.aliasQids || []).join(' ') + ' ' + (caseTitle.get(q.caseStudyId) || '');
-        if (hay.toLowerCase().indexOf(term) < 0) return false;
+        if (bankHaystack(q, caseTitle).toLowerCase().indexOf(term) < 0) return false;
       }
       return true;
     });
@@ -10851,6 +10888,15 @@ async function openQuestion(uuidStr) {
   function drawPane() {
     pane.textContent = '';
     if (tab === 'content') {
+      // The photo this question was transcribed from, so it can be checked
+      // against the transcription right here while editing it — previously
+      // shown only on Provenance (as #qimg-detail; a distinct id, since the
+      // practice screen already owns #qimg and loadImageInto() does a
+      // document-wide lookup).
+      if (q.imageId) {
+        pane.appendChild(h('div', { id: 'qimg-content', class: 'imgstage' }));
+        loadImageInto('#qimg-content', q.imageId);
+      }
       const stem = h('textarea', { style: 'min-height:100px', value: edit.stem, oninput: e => edit.stem = e.target.value });
       pane.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Question stem' }), stem]));
       const optWrap = h('div', { class: 'stack' });
@@ -11102,10 +11148,7 @@ async function openQuestion(uuidStr) {
     fresh.explanation = edit.explanation; fresh.learningPoint = edit.learningPoint;
     fresh.domainId = edit.domainId; fresh.topic = edit.topic.trim(); fresh.subtopic = edit.subtopic.trim();
     fresh.srcModule = edit.srcModule.trim(); fresh.srcChapter = edit.srcChapter.trim(); fresh.srcSection = edit.srcSection.trim();
-    // Choosing a real difficulty here grades it; choosing "ungraded" hands it
-    // back to the in-practice prompt without disturbing the stored value.
-    if (edit.difficulty === 'ungraded') fresh.difficultyVerified = 'unverified';
-    else { fresh.difficulty = edit.difficulty; fresh.difficultyVerified = 'verified'; }
+    applyDifficultyChoice(fresh, edit.difficulty);
     fresh.tags = edit.tags.split(',').map(s => s.trim()).filter(Boolean);
     const mkVal = parseFloat(edit.marks);
     fresh.marks = isFinite(mkVal) && mkVal > 0 ? mkVal : null;
@@ -11212,7 +11255,7 @@ function entryBlockers(q, course) {
 function entryUnlocks(q) {
   const out = [];
   if (!q.domainId) out.push('a domain — for domain drills, weighted mocks and accuracy by domain');
-  if (!q.difficulty) out.push('a difficulty — for papers built to a difficulty mix');
+  if (difficultyUngraded(q)) out.push('a difficulty — for papers built to a difficulty mix');
   if (!String(q.explanation || '').trim()) out.push('an explanation — shown to you when the answer is revealed');
   return out;
 }
@@ -11245,7 +11288,7 @@ async function questionComposer(opts) {
   const draft = Object.assign({
     stem: '', explanation: '', learningPoint: '',
     domainId: null, topic: '', subtopic: '', srcModule: '',
-    difficulty: 'medium', tags: '', marks: '', answerChecked: true, lockOptionOrder: false
+    difficulty: 'ungraded', tags: '', marks: '', answerChecked: true, lockOptionOrder: false
   }, opts.defaults || {});
   draft.options = Array.from({ length: wantOptions }, () => makeOption(''));
   draft.correctOptionId = null;
@@ -11341,7 +11384,8 @@ async function questionComposer(opts) {
     h('input', { type: 'text', value: draft.topic, oninput: e => draft.topic = e.target.value })]));
   grid.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Difficulty' }),
     h('select', { onchange: e => draft.difficulty = e.target.value },
-      DIFFICULTY.map(d => h('option', { value: d, selected: draft.difficulty === d }, d)))]));
+      [h('option', { value: 'ungraded', selected: draft.difficulty === 'ungraded' }, 'Ungraded — ask me during practice')]
+        .concat(DIFFICULTY.map(d => h('option', { value: d, selected: draft.difficulty === d }, d))))]));
   grid.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Source module' }),
     h('input', { type: 'text', placeholder: 'Optional', value: draft.srcModule, oninput: e => draft.srcModule = e.target.value })]));
   grid.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Tags (comma separated)' }),
@@ -11380,11 +11424,11 @@ async function questionComposer(opts) {
     q.domainId = draft.domainId || null;
     q.topic = String(draft.topic || '').trim();
     q.srcModule = String(draft.srcModule || '').trim();
-    q.difficulty = draft.difficulty;
-    // Choosing a difficulty here is a person judging it, exactly as choosing
-    // one in the detail editor is — so it counts as graded and the
-    // in-practice prompt never asks again.
-    q.difficultyVerified = 'verified';
+    // Choosing a real difficulty here is a person judging it, exactly as
+    // choosing one in the detail editor is — so it counts as graded.
+    // "Ungraded" (the default the field starts on) leaves the question
+    // exactly as blankQuestion() made it, so the in-practice prompt still asks.
+    applyDifficultyChoice(q, draft.difficulty);
     q.tags = String(draft.tags || '').split(',').map(x => x.trim()).filter(Boolean);
     const mk = parseFloat(draft.marks);
     q.marks = isFinite(mk) && mk > 0 ? mk : null;
@@ -11523,8 +11567,13 @@ async function newQuestion(opts) {
 
 async function exportBank(list) {
   // The case study columns go on the END so an existing importer, script or
-  // spreadsheet reading this file by position is not shifted by one.
-  const rows = [['Question ID', 'Status', 'Stem', 'A', 'B', 'C', 'D', 'E', 'Correct answer', 'Explanation', 'Domain', 'Topic', 'Subtopic', 'Source module', 'Source', 'Source locator', 'Answer verification', 'Attempts', 'Accuracy', 'Mastery', 'Marks', 'Why A', 'Why B', 'Why C', 'Why D', 'Why E', 'Case ref', 'Case title', 'Case question no.']];
+  // spreadsheet reading this file by position is not shifted by one. The
+  // option/rationale columns run to LETTERS.length (H) rather than a
+  // hardcoded five — the hand-entry composer allows up to 8 options
+  // (draft.options.length >= 8 guard), and a course using F/G/H was
+  // silently having those options dropped from the export entirely.
+  const optLetters = Array.from({ length: LETTERS.length }, (_, i) => letterOf(i));
+  const rows = [['Question ID', 'Status', 'Stem', ...optLetters, 'Correct answer', 'Explanation', 'Domain', 'Topic', 'Subtopic', 'Source module', 'Source', 'Source locator', 'Answer verification', 'Attempts', 'Accuracy', 'Mastery', 'Marks', ...optLetters.map(l => 'Why ' + l), 'Case ref', 'Case title', 'Case question no.']];
   const sources = await DB.byIndex('sources', 'courseId', State.course.id);
   const srcName = (id) => { const s = sources.find(x => x.id === id); return s ? s.title : ''; };
   const caseRecs = new Map((await CaseStudies.byCourse(State.course.id)).map(c => [c.id, c]));
@@ -11532,13 +11581,13 @@ async function exportBank(list) {
     const o = q.options.map(x => x.text);
     const cs = q.caseStudyId ? caseRecs.get(q.caseStudyId) : null;
     const ci = q.options.findIndex(x => x.id === q.correctOptionId);
-    rows.push([q.qid, (STATUS[q.status] || {}).label, q.stem, o[0] || '', o[1] || '', o[2] || '', o[3] || '', o[4] || '',
+    rows.push([q.qid, (STATUS[q.status] || {}).label, q.stem,
+      ...Array.from({ length: LETTERS.length }, (_, i) => o[i] || ''),
       ci >= 0 ? letterOf(ci) : '', q.explanation, q.domainId ? State.domainName(q.domainId) : 'Unmapped', q.topic, q.subtopic,
       q.srcModule, srcName(q.sourceId), q.locator, q.answerVerified, q.stats.attempts,
       q.stats.attempts ? Math.round(q.stats.correct / q.stats.attempts * 100) + '%' : '', q.stats.mastery || 0,
       fmtMarks(marksOf(q)),
-      (q.options[0] || {}).rationale || '', (q.options[1] || {}).rationale || '', (q.options[2] || {}).rationale || '',
-      (q.options[3] || {}).rationale || '', (q.options[4] || {}).rationale || '',
+      ...Array.from({ length: LETTERS.length }, (_, i) => (q.options[i] || {}).rationale || ''),
       cs ? (cs.csid || '') : '', cs ? (cs.title || '') : '', cs ? (q.caseSeq || '') : '']);
   });
   download(State.course.code + '-question-bank-' + todayKey() + '.csv', new Blob(['\uFEFF' + toCSV(rows)], { type: 'text/csv;charset=utf-8' }));
@@ -11579,13 +11628,25 @@ async function loadImageInto(sel, imageId) {
    Notes — course revision material, browsable before a practice session
    ========================================================================== */
 
+/** What the Notes screen tells you about where a new note's bytes will
+    land. Pure, so the wording can be asserted without rendering the route.
+    The IndexedDB case used to say notes "stay in this browser only" — true
+    of the file itself, but misleading about the data: a note's bytes are
+    kept right on its `notes` row (readBlob() reads them back from a data
+    URL), and `notes` is one of BACKUP_STORES, so they are already backed
+    up, exported and synced along with the rest of the bank. What a folder
+    or Drive connection actually buys is a higher size cap and a real file
+    on disk, not reachability that browser-only notes otherwise lack. */
+function noteStorageNotice() {
+  const target = NotesStore.target();
+  if (target === 'folder') return 'They go into a "notes" folder next to your connected file.';
+  if (target === 'drive') return 'They upload to your connected Google Drive.';
+  return 'Their bytes are kept inside your question bank itself, up to ' + Settings.get('notesMaxKB') + ' KB each — so they travel with every backup, export and Drive/folder sync, the same as your questions. Connect a folder or Google Drive in Settings to raise that size limit and give each note its own file you can open outside the app.';
+}
+
 ROUTES.notes = async (root) => {
   const notes = await NotesStore.list(State.course.id);
-  const whereNotesGo = NotesStore.target() === 'folder'
-    ? 'They go into a "notes" folder next to your connected file.'
-    : NotesStore.target() === 'drive'
-      ? 'They upload to your connected Google Drive.'
-      : 'They stay in this browser only, up to ' + Settings.get('notesMaxKB') + ' KB each. Connect a folder or Google Drive in Settings for larger files, and to reach them from another device.';
+  const whereNotesGo = noteStorageNotice();
   await band('Notes', 'Your own revision material', [
     { k: 'Notes', v: String(notes.length) }
   ], null, {
@@ -12545,7 +12606,7 @@ async function columnMapDialog(rows, autoMap, filename) {
     const m = assigned();
     const out = [];
     if (m.stem === undefined) out.push('Say which column holds the question itself.');
-    const opts = ['a', 'b', 'c', 'd', 'e'].filter(k => m[k] !== undefined).length;
+    const opts = LETTERS.toLowerCase().split('').filter(k => m[k] !== undefined).length;
     if (opts < 2) out.push('Say which columns hold at least two answer options.');
     return out;
   }
@@ -25903,6 +25964,24 @@ test('Every question starts ungraded, however sensible its default difficulty', 
   delete legacy.difficultyVerified;
   assert(difficultyUngraded(legacy), 'an older record with no flag must read as ungraded, not as graded');
 });
+test('Choosing "ungraded" in the composer or the detail editor leaves the record ungraded', () => {
+  // The composer's difficulty field defaults to 'ungraded' — a hand-typed
+  // question nobody actually judged must not come out of build() claiming
+  // a verified difficulty just because the field was left on its default.
+  const fresh = mkQ('x', ['a', 'b'], 0);
+  eq(fresh.difficulty, 'medium', 'the default the question was born with');
+  applyDifficultyChoice(fresh, 'ungraded');
+  eq(fresh.difficulty, 'medium', 'left exactly as it was — "ungraded" never invents a value');
+  eq(fresh.difficultyVerified, 'unverified');
+  assert(difficultyUngraded(fresh), 'so it still asks during practice');
+  // Picking a real value is a judgement and is stamped verified, whatever
+  // the record used to say — same rule in the composer and the editor.
+  const graded = mkQ('y', ['a', 'b'], 0, { difficulty: 'easy', difficultyVerified: 'verified' });
+  applyDifficultyChoice(graded, 'hard');
+  eq(graded.difficulty, 'hard');
+  eq(graded.difficultyVerified, 'verified');
+  assert(!difficultyUngraded(graded));
+});
 test('An option round-tripped without its rationale loses it, so every edit buffer must carry one', () => {
   const src = makeOption('B is a corrective control', 'o1', 'the classic trap');
   const dropped = { id: src.id, text: src.text };
@@ -26306,6 +26385,26 @@ test('A doubtful answer tells the reviewer why when the record is opened', async
     if (dlg && dlg._close) dlg._close(null);
     await opened;
   } finally { await DB.del('questions', q.uuid); }
+});
+test('The Content tab shows the source photo, without colliding with the practice screen’s own image slot', async () => {
+  const cid = 'test-qimg-content-' + Date.now();
+  const q = mkQ('A question with a source photo?', ['a', 'b'], 0, { courseId: cid, imageId: 'img-' + cid });
+  await DB.put('images', { id: q.imageId, dataUrl: 'data:image/png;base64,x' });
+  await DB.put('questions', q);
+  try {
+    const opened = openQuestion(q.uuid);
+    let dlg = null;
+    for (let i = 0; i < 50 && !dlg; i++) { await new Promise(r => setTimeout(r, 10)); dlg = $$('.modal').pop(); }
+    assert(dlg, 'the detail dialog must open');
+    assert(dlg.querySelector('#qimg-content'), 'the Content tab (the default tab) must show the photo');
+    eq(document.querySelectorAll('#qimg-content').length, 1, 'exactly one image slot, not duplicated');
+    eq(document.querySelectorAll('#qimg').length, 0, 'and it must not collide with #qimg, which the practice screen owns');
+    if (dlg && dlg._close) dlg._close(null);
+    await opened;
+  } finally {
+    await DB.del('questions', q.uuid);
+    await DB.del('images', q.imageId);
+  }
 });
 test('Repairing is a no-op when every conflict already names a live partner', async () => {
   const cid = 'test-orphan-' + Date.now();
@@ -28895,6 +28994,45 @@ test('CSV export defeats formula injection without breaking real numbers (B89)',
   const nums = parseCSV(toCSV([['-0.5', '-12', '-3.25%']]))[0];
   eq(nums[0], '-0.5'); eq(nums[1], '-12'); eq(nums[2], '-3.25%');
 });
+test('Question Bank CSV export carries all eight option/rationale columns, not just five', async () => {
+  // The hand-entry composer allows up to 8 options (LETTERS.length). exportBank
+  // used to hardcode 5 lettered columns, silently dropping F/G/H from any
+  // export of a question that actually used them.
+  const was = { course: State.course, courses: State.courses };
+  const course = { id: 'test-csv8-' + Date.now(), code: 'CSV8', name: 'CSV export test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  const q = mkActive('A question with all eight options?',
+    ['Opt A', 'Opt B', 'Opt C', 'Opt D', 'Opt E', 'Opt F', 'Opt G', 'Opt H'], 7, { courseId: course.id });
+  q.options.forEach((o, i) => { o.rationale = 'Why ' + String.fromCharCode(65 + i); });
+  const realDownload = globalThis.download;
+  let captured = null;
+  globalThis.download = (name, blob) => { captured = blob; };
+  try {
+    State.course = course; State.courses = [course];
+    await exportBank([q]);
+    assert(captured, 'exportBank must hand a CSV blob to download()');
+    const rows = parseCSV((await captured.text()).replace(/^﻿/, ''));
+    // Header: Question ID, Status, Stem, A..H, Correct answer, ... , Why A..H, ...
+    eq(rows[0].slice(3, 11).join(','), 'A,B,C,D,E,F,G,H', 'the header must carry all eight option-letter columns');
+    eq(rows[0].slice(24, 32).join(','), 'Why A,Why B,Why C,Why D,Why E,Why F,Why G,Why H', 'and all eight rationale columns');
+    eq(rows[1].slice(3, 11).join('|'), 'Opt A|Opt B|Opt C|Opt D|Opt E|Opt F|Opt G|Opt H', 'every option text must reach the row, not just the first five');
+    eq(rows[1][11], 'H', 'the correct-answer letter must be reported even when it is past E');
+    eq(rows[1].slice(24, 32).join('|'), 'Why A|Why B|Why C|Why D|Why E|Why F|Why G|Why H', 'every rationale must reach the row too');
+  } finally {
+    globalThis.download = realDownload;
+    State.course = was.course; State.courses = was.courses;
+  }
+});
+test('Question Bank search reaches explanations, notes, tags and option rationales, not just the stem', () => {
+  const q = mkActive('What controls detective risk?', ['Segregation of duties', 'Reconciliation'], 1, {
+    explanation: 'Reconciliation catches errors after the fact.',
+    learningPoint: 'Detective controls find problems; preventive ones stop them.',
+    subtopic: 'Control types', tags: ['zigzagword']
+  });
+  q.options[0].rationale = 'Preventive, not detective — a common trap.';
+  const hay = bankHaystack(q, new Map()).toLowerCase();
+  ['reconciliation catches errors', 'detective controls find problems', 'control types', 'zigzagword', 'a common trap']
+    .forEach(needle => assert(hay.indexOf(needle) >= 0, 'haystack must carry: ' + needle + ' — got: ' + hay));
+});
 test('Attempts CSV carries the marks and the deduction each attempt was scored under', () => {
   const a = { ts: '2026-01-01T00:00:00.000Z', qid: 'Q1', sessionId: 's1', mode: 'mock', correct: false, ms: 1200, questionVersion: 1, marks: 2, awarded: -0.5 };
   const rows = [['Attempt timestamp', 'Question ID', 'Session', 'Mode', 'Correct', 'Confidence', 'Mistake category', 'Time (ms)', 'Question version', 'Marks', 'Awarded']];
@@ -30132,7 +30270,7 @@ test('Blockers name what is left to do, and go quiet when nothing is', () => {
   q.correctOptionId = q.options[0].id;
   q.answerVerified = 'verified';
   eq(entryBlockers(q, null).length, 0, 'a complete one has none, domain or no domain');
-  eq(entryUnlocks(q).length, 2, 'though it would still like a domain and a difficulty');
+  eq(entryUnlocks(q).length, 3, 'though it would still like a domain, a difficulty and an explanation');
   q.domainId = 'D1';
   eq(entryBlockers(q, null).length, 0);
   const strict = { code: 'TST', optionCount: 4, enforceOptionCount: true };
@@ -33561,6 +33699,23 @@ test('NotesStore.target() treats a configured Drive backend as Drive through a l
     eq(NotesStore.target(), 'drive');
     DriveSync.connected = false; DriveSync.configured = false;
     eq(NotesStore.target(), 'indexeddb', 'genuinely never connected is the only case that falls back');
+  } finally {
+    FileStore.dirHandle = savedDir; DriveSync.connected = savedConn; DriveSync.configured = savedConf;
+  }
+});
+test('The Notes screen never tells you browser-stored notes stay only in the browser', () => {
+  const savedDir = FileStore.dirHandle, savedConn = DriveSync.connected, savedConf = DriveSync.configured;
+  try {
+    FileStore.dirHandle = { name: 'x' };
+    DriveSync.connected = false; DriveSync.configured = false;
+    assert(/notes.*folder/i.test(noteStorageNotice()), 'a connected folder is named');
+    FileStore.dirHandle = null;
+    DriveSync.connected = true; DriveSync.configured = true;
+    assert(/Google Drive/.test(noteStorageNotice()), 'connected Drive is named');
+    DriveSync.connected = false; DriveSync.configured = false;
+    const notice = noteStorageNotice();
+    assert(!/only in this browser|browser only|stay in this browser/i.test(notice), 'must not claim the notes are trapped here: ' + notice);
+    assert(/bank|backup|sync/i.test(notice), 'must say the bytes travel with the bank instead: ' + notice);
   } finally {
     FileStore.dirHandle = savedDir; DriveSync.connected = savedConn; DriveSync.configured = savedConf;
   }
