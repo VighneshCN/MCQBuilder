@@ -1516,7 +1516,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.39', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.40', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -7799,14 +7799,21 @@ ROUTES.dashboard = async (root) => {
   // but synced second sorts last here and the "first" attempt picked is the
   // wrong one. Analytics (firstMap) and rebuildQuestionStats both order by ts
   // before folding; so does this, or the same bank reads differently on two
-  // devices and the readiness verdict flips with it. Sorted on a copy: the
-  // `attempts` array below is also read for guessRate and the time average.
-  // ts is always nowISO() — a fixed-width, Z-suffixed UTC string — so plain
-  // string comparison orders it identically to parsing both sides into a
-  // Date, without building two Date objects per comparison in a sort that
-  // runs over every attempt in the course on every dashboard recompute.
-  attempts.slice().sort((a, b) => a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0)
-    .forEach(a => { if (!firstAttempts.has(a.questionUuid)) firstAttempts.set(a.questionUuid, a); });
+  // devices and the readiness verdict flips with it. A single linear pass,
+  // not a sort: only the earliest attempt per question is ever kept, so
+  // sorting the whole array first (then throwing the order away) did
+  // O(n log n) work — 5,000 comparisons a merge could easily bring the
+  // count to — for an O(n) answer. `<` (strict) reproduces exactly what the
+  // stable sort + first-wins used to: among two attempts with the identical
+  // ts for the same question, the one that came first in `attempts` itself
+  // wins, because the later one's ts is never STRICTLY less than the one
+  // already kept. ts is always nowISO() — a fixed-width, Z-suffixed UTC
+  // string — so plain string comparison orders it identically to parsing
+  // both sides into a Date.
+  for (const a of attempts) {
+    const prev = firstAttempts.get(a.questionUuid);
+    if (!prev || a.ts < prev.ts) firstAttempts.set(a.questionUuid, a);
+  }
   const firstArr = Array.from(firstAttempts.values());
   const firstAcc = firstArr.length ? firstArr.filter(a => a.correct).length / firstArr.length : null;
   const recent = attempts.slice().sort((a, b) => a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0).slice(0, 100);
@@ -12248,7 +12255,12 @@ ROUTES.import = async (root) => {
     if (State.view !== 'import' || State.staging) return;
     const items = Array.from((e.clipboardData || {}).items || []);
     const img = items.find(i => i.type.indexOf('image') === 0);
-    if (img) { e.preventDefault(); const f = img.getAsFile(); imageWorkflow(f); }
+    // getAsFile() can return null even when .type says "image" — a real
+    // possibility for some clipboard content, not just a defensive guard —
+    // and imageWorkflow(null) opens a file picker instead of doing nothing,
+    // since that is also how it is called with no image at all.
+    const f = img && img.getAsFile();
+    if (f) { e.preventDefault(); imageWorkflow(f).catch(err => toast(err.message || 'That image could not be opened.', 'bad', 6000)); }
   };
   document.removeEventListener('paste', ROUTES.import._paste || (() => { }));
   ROUTES.import._paste = paste;
@@ -15201,10 +15213,19 @@ ROUTES.analytics = async (root) => {
   // under "Last 7 days" the tile counts only questions genuinely met for the
   // first time in those days, so it agrees with the table's all-time column.
   const firstMap = new Map();
-  // ts is always nowISO() — a fixed-width, Z-suffixed UTC string — so plain
-  // string comparison orders it identically to a Date subtraction, without
-  // building two Date objects per comparison for every attempt in the course.
-  allAttempts.slice().sort((a, b) => a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0).forEach(a => { if (!firstMap.has(a.questionUuid)) firstMap.set(a.questionUuid, a); });
+  // A single linear pass, not a sort: only the earliest attempt per question
+  // is ever kept, so sorting the whole array first — then throwing the order
+  // away — did O(n log n) work for an O(n) answer. `<` (strict) reproduces
+  // exactly what the stable sort + first-wins used to: among two attempts
+  // with the identical ts for the same question, the one that came first in
+  // allAttempts itself wins, because the later one's ts is never STRICTLY
+  // less than the one already kept. ts is always nowISO() — a fixed-width,
+  // Z-suffixed UTC string — so plain string comparison orders it identically
+  // to a Date subtraction.
+  for (const a of allAttempts) {
+    const prev = firstMap.get(a.questionUuid);
+    if (!prev || a.ts < prev.ts) firstMap.set(a.questionUuid, a);
+  }
   const inView = new Set(attempts.map(a => a.id));
   const firstArr = Array.from(firstMap.values()).filter(a => inView.has(a.id));
   const newestFirst = attempts.slice().sort((a, b) => a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0);
@@ -18277,20 +18298,34 @@ async function undoLastAutoMerge() {
 
 async function recomputeAll() {
   const all = await State.questions();
-  let n = 0;
+  // One streamed read of the whole attempts store, not one attemptsOf()
+  // lookup per question, and one DB.putMany at the end, not one DB.put per
+  // question — attemptsOf() alone does one indexed read per uuid in a
+  // question's own history, so for 5,000 questions this used to mean
+  // roughly 10,000 separate transactions (a read then a write, per
+  // question) — and a storage-bar rebuild on every one of those writes —
+  // before a single record was actually touched. repairDerivedStats()
+  // already uses this exact streamed-map pattern for the same reason.
+  const byQ = new Map();
+  await DB.each('attempts', a => {
+    if (!a || !a.questionUuid) return;
+    if (!byQ.has(a.questionUuid)) byQ.set(a.questionUuid, []);
+    byQ.get(a.questionUuid).push(a);
+  });
+  const changed = [];
   for (const q of all) {
-    // attemptsOf, not a plain index lookup by this row's own uuid alone —
-    // repairDerivedStats already fixed exactly this for its own mastery
-    // rebuild; a raw lookup here regresses the same bug this button's own
-    // job is to correct, for a merge survivor's absorbed history.
-    const hist = await attemptsOf(q);
+    // historyUuids, not a plain lookup by this row's own uuid alone — the
+    // same absorbed-merge-history correctness attemptsOf() gave this
+    // rebuild before, now folded from the streamed map instead of the DB.
+    const hist = historyUuids(q).reduce((acc, u) => acc.concat(byQ.get(u) || []), []);
     q.stats.mastery = masteryOf(q, hist).score;
+    // Irreducible CPU cost (a real hash), not I/O — stays in the loop.
     await recomputeFingerprint(q);
-    await DB.put('questions', q);
-    n++;
+    changed.push(q);
   }
+  if (changed.length) await DB.putMany('questions', changed);
   State.invalidate();
-  toast('Recomputed ' + n + ' record(s)', 'ok');
+  toast('Recomputed ' + changed.length + ' record(s)', 'ok');
 }
 
 async function showAudit() {
@@ -18964,8 +18999,11 @@ const FileStore = {
     if ((payload.schema || 1) > APP.schema) throw new Error('That file was written by a newer version of the app. Update the app before opening it.');
     // Kept as JSON text: the rollback copy at flush time is written back
     // verbatim, and the snapshot cadence wants the bank's real size, not a
-    // compressed one.
-    this._lastSize = JSON.stringify(payload).length;
+    // compressed one. Byte length, not JS string length — the same fix
+    // the journal's own byte count and verifyWritten() already needed,
+    // for the same reason: a stem with an em dash or any other multi-byte
+    // character makes those two numbers disagree.
+    this._lastSize = new TextEncoder().encode(JSON.stringify(payload)).length;
 
     // Arm the loss guard from the FILE, before a single store is touched. The
     // rebuild below clears each store before refilling it, so anything that
@@ -19448,7 +19486,9 @@ const FileStore = {
       }
     }
 
-    this._lastSize = text.length;
+    // Byte length, not JS string length — see verifyWritten()'s own comment
+    // on the same file a few lines below.
+    this._lastSize = new TextEncoder().encode(text).length;
     this._diskQuestionCount = qCount;
 
     this._journal = [];
@@ -26338,6 +26378,7 @@ test('One answer changes exactly one question, so the runner refreshes one recor
     assert(!!fresh.srReason, 'and the schedule reason the reveal panel prints');
     eq(JSON.stringify(await DB.get('questions', other.uuid)), otherBefore, 'nothing else moved, so reloading the whole bank buys nothing');
   } finally {
+    for (const a of await DB.byIndex('attempts', 'sessionId', s.id)) if (a.id != null) await DB.del('attempts', a.id);
     await DB.del('questions', q.uuid); await DB.del('questions', other.uuid); await DB.del('sessions', s.id);
   }
 });
@@ -26843,11 +26884,43 @@ test('Merging carries the absorbed record\'s practice history to the survivor, a
 test('The question-detail view and the mastery recompute button both read absorbed merge history, not just their own uuid (B87)', () => {
   // Both used to fetch attempts by DB.byIndex('attempts', 'questionUuid', uuid)
   // directly — correct for a question that was never on the losing end of a
-  // merge, silently wrong for one that was. attemptsOf() is the one helper
-  // that already gets this right (historyUuids), and repairDerivedStats
-  // already proved it matters for exactly this class of bug.
+  // merge, silently wrong for one that was. historyUuids() is the one
+  // helper that already gets this right, and repairDerivedStats already
+  // proved it matters for exactly this class of bug. openQuestion() reads
+  // it through attemptsOf() (one question, a few indexed DB reads);
+  // recomputeAll() reads it directly against a streamed in-memory map
+  // instead (every question in the course, one DB.each() total) — same
+  // rule, applied through two different mechanisms for two different
+  // access patterns.
   assert(/attemptsOf\(q\)/.test(openQuestion.toString()), 'openQuestion’s Attempts/Mastery tabs must include absorbed duplicate history');
-  assert(/attemptsOf\(q\)/.test(recomputeAll.toString()), 'recomputeAll must not regress the exact bug repairDerivedStats already fixed once');
+  assert(/historyUuids\(q\)/.test(recomputeAll.toString()), 'recomputeAll must not regress the exact bug repairDerivedStats already fixed once');
+});
+test('recomputeAll() streams the attempt log once and writes once, not one transaction pair per question', async () => {
+  const cid = 'test-recompute-txn-' + Date.now();
+  const was = { course: State.course, courses: State.courses };
+  const course = { id: cid, code: 'RAT', name: 'recomputeAll transaction test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  const a = mkActive('Q1 for recomputeAll transaction counting?', ['a', 'b'], 0, { courseId: cid });
+  const b = mkActive('Q2 for recomputeAll transaction counting?', ['a', 'b'], 0, { courseId: cid });
+  const c = mkActive('Q3 for recomputeAll transaction counting?', ['a', 'b'], 0, { courseId: cid });
+  await DB.put('questions', a); await DB.put('questions', b); await DB.put('questions', c);
+  const origPut = DB.put, origPutMany = DB.putMany, origEach = DB.each;
+  let puts = 0, putManys = 0, eachCalls = 0;
+  DB.put = function (...args) { if (args[0] === 'questions') puts++; return origPut.apply(this, args); };
+  DB.putMany = function (...args) { if (args[0] === 'questions') putManys++; return origPutMany.apply(this, args); };
+  DB.each = function (...args) { if (args[0] === 'attempts') eachCalls++; return origEach.apply(this, args); };
+  try {
+    State.course = course; State.courses = [course];
+    State.invalidate();
+    await recomputeAll();
+    eq(puts, 0, 'no per-question DB.put(\'questions\', …) — that was the O(n) write pattern this fix removed');
+    eq(putManys, 1, 'exactly one batched write for the whole course, not one per question');
+    eq(eachCalls, 1, 'exactly one streamed pass over attempts, not one attemptsOf() lookup per question');
+  } finally {
+    DB.put = origPut; DB.putMany = origPutMany; DB.each = origEach;
+    State.course = was.course; State.courses = was.courses;
+    State.invalidate();
+    await DB.del('questions', a.uuid); await DB.del('questions', b.uuid); await DB.del('questions', c.uuid);
+  }
 });
 
 /* ---- per-course option count ---- */
@@ -28648,6 +28721,22 @@ test('Given the text it wrote, verifyWritten checks size and a tail slice instea
   assert(r.ok, 'the no-expectedText fallback must still pass a genuinely correct file');
 });
 
+test('_lastSize is measured in real bytes, not JS string length', () => {
+  // The same confusion verifyWritten's own byte-count check exists to
+  // avoid (see the test above) and the journal's byte count was fixed for
+  // once already: a stem with an em dash or any other multi-byte character
+  // makes .length and a real byte count disagree. _lastSize feeds the
+  // "Your data file is …" size notice and the snapshot cadence threshold
+  // directly as a byte count, so it has to actually be one.
+  const withMultiByte = 'Auditor’s café — a stem with an em dash';
+  assert(withMultiByte.length !== new TextEncoder().encode(withMultiByte).length,
+    'the fixture itself must exercise the byte/length gap, or this test proves nothing');
+  const loadSrc = FileStore._loadFromDisk.toString();
+  const writeSrc = FileStore._writeSnapshot.toString();
+  assert(/_lastSize = new TextEncoder\(\)\.encode\(/.test(loadSrc), '_loadFromDisk must measure real bytes, not JSON.stringify(...).length');
+  assert(/_lastSize = new TextEncoder\(\)\.encode\(/.test(writeSrc), '_writeSnapshot must measure real bytes, not text.length');
+});
+
 /* ---- scaling ---- */
 test('Duplicate detection stays fast as the bank grows', () => {
   const mk = (stem) => {
@@ -29644,6 +29733,39 @@ test('An undecodable image ends the image workflow with a toast, not an unhandle
   await imageWorkflow(new Blob(['not an image'], { type: 'image/png' })).catch(() => { rejected = true; });
   assert(!rejected, 'imageWorkflow must handle the decode failure itself');
   eq($$('.modal-bg').length, modalsBefore, 'no image editor modal should open for an image that could not be decoded');
+});
+test('Pasting a clipboard item whose file cannot be extracted does not open a file picker', () => {
+  // getAsFile() can return null even when .type says "image" — a real
+  // possibility for some clipboard content, not a defensive-only guard —
+  // and imageWorkflow(null) is also how the global paste handler is meant
+  // to ask for a picker with no image at all, so the two must be told apart.
+  const wasView = State.view;
+  const realWorkflow = globalThis.imageWorkflow;
+  const calls = [];
+  globalThis.imageWorkflow = (f) => { calls.push(f); return Promise.resolve(); };
+  try {
+    State.view = 'dashboard';
+    // The global handler also bails while a modal is open — an earlier
+    // test's own leftover (not this test's doing; several tests in this
+    // suite leave one behind on purpose to check it gets reused) would
+    // otherwise block both dispatches below and this test would pass for
+    // the wrong reason on the null case while failing the real-file one.
+    document.querySelectorAll('.modal-bg').forEach(el => el.remove());
+    assert(!$('.modal-bg'), 'the paste-anywhere guard this test exercises needs a clear stage');
+    const nullEvt = new Event('paste', { bubbles: true, cancelable: true });
+    nullEvt.clipboardData = { items: [{ type: 'image/png', getAsFile: () => null }] };
+    document.dispatchEvent(nullEvt);
+    eq(calls.length, 0, 'a clipboard item that says "image" but hands back no file must not reach imageWorkflow at all');
+    const fakeFile = { name: 'x.png', type: 'image/png' };
+    const realEvt = new Event('paste', { bubbles: true, cancelable: true });
+    realEvt.clipboardData = { items: [{ type: 'image/png', getAsFile: () => fakeFile }] };
+    document.dispatchEvent(realEvt);
+    eq(calls.length, 1, 'a real file must still reach it, exactly as before');
+    eq(calls[0], fakeFile);
+  } finally {
+    globalThis.imageWorkflow = realWorkflow;
+    State.view = wasView;
+  }
 });
 test('A photo whose only question was tombstoned does not survive the merge', async () => {
   const empty = { courses: [], sources: [], batches: [], attempts: [], sessions: [], settings: [], audit: [], idRegister: [], presets: [], notes: [], caseStudies: [], questionVersions: [] };
@@ -32613,10 +32735,23 @@ test('Dashboard and Analytics compare .ts as a string, not by constructing two D
   // specifically, not every use of new Date() on a .ts field.
   const dash = ROUTES.dashboard.toString();
   assert(!/new Date\([a-z]\.ts\) [-] new Date\([a-z]\.ts\)/.test(dash), 'dashboard must not construct two Dates to compare .ts');
-  assert((dash.match(/\.ts [<>] [a-z]\.ts/g) || []).length >= 4, 'both dashboard sort sites must compare .ts directly');
+  // 2, not 4: the "earliest attempt per question" site no longer sorts at
+  // all (see the next test) — only the "most recent 100" site, a genuine
+  // top-k selection a linear pass cannot replace, still does.
+  assert((dash.match(/\.ts [<>] [a-z]\.ts/g) || []).length >= 2, 'the remaining dashboard sort site must still compare .ts directly');
   const ana = ROUTES.analytics.toString();
   assert(!/new Date\([a-z]\.ts\) [-] new Date\([a-z]\.ts\)/.test(ana), 'analytics must not construct two Dates to compare .ts');
-  assert((ana.match(/\.ts [<>] [a-z]\.ts/g) || []).length >= 4, 'both analytics sort sites must compare .ts directly');
+  assert((ana.match(/\.ts [<>] [a-z]\.ts/g) || []).length >= 2, 'the remaining analytics sort site must still compare .ts directly');
+});
+test('Dashboard and Analytics find the earliest attempt per question with one linear pass, not a sort', () => {
+  // Pinned by source: only the minimum per question is ever kept, so
+  // sorting every attempt in the course first — then discarding the order —
+  // did O(n log n) work for an O(n) answer. A regression back to
+  // `.slice().sort(...)` for this site specifically should fail here.
+  const dash = ROUTES.dashboard.toString();
+  assert(/a\.ts < prev\.ts/.test(dash), 'dashboard must fold the earliest attempt with a linear pass');
+  const ana = ROUTES.analytics.toString();
+  assert(/a\.ts < prev\.ts/.test(ana), 'analytics must fold the earliest attempt with a linear pass');
 });
 
 test('A non-pausable mock is charged for real time on resume even without a Leave stamp', () => {
@@ -35225,7 +35360,11 @@ async function boot() {
     if (State.view === 'import' || $('.modal-bg')) return;
     const items = Array.from((e.clipboardData || {}).items || []);
     const img = items.find(i => i.type.indexOf('image') === 0);
-    if (img) { e.preventDefault(); imageWorkflow(img.getAsFile()); }
+    // Same guard as the import screen's own paste handler: getAsFile() can
+    // return null even when .type says "image", and imageWorkflow(null)
+    // opens a file picker instead of doing nothing.
+    const f = img && img.getAsFile();
+    if (f) { e.preventDefault(); imageWorkflow(f).catch(err => toast(err.message || 'That image could not be opened.', 'bad', 6000)); }
   });
   window.addEventListener('beforeunload', (e) => {
     if (State.session && State.session.status === 'active' && State.session.mode === 'mock') { e.preventDefault(); e.returnValue = ''; return; }
