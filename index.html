@@ -138,6 +138,12 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   background:linear-gradient(180deg,var(--ink-700) 0%,var(--ink-900) 100%);
   color:#D6E0E8; display:flex; flex-direction:column;
   position:sticky; top:0; height:100dvh; border-right:1px solid var(--ink-900);
+  /* viewport-fit=cover draws the rail under the home indicator/notch on a
+     phone. Whatever is actually last in this flex column — .rail-foot on
+     desktop, .storagebar once the media query below hides rail-foot —
+     clears it either way; env() is 0px anywhere without one, so this is a
+     no-op elsewhere. */
+  padding-bottom:env(safe-area-inset-bottom); padding-left:env(safe-area-inset-left);
 }
 [data-theme="dark"] .rail{background:linear-gradient(180deg,#0F1922 0%,#080D13 100%)}
 .brand{padding:11px 16px 10px; border-bottom:1px solid rgba(255,255,255,.09)}
@@ -210,6 +216,12 @@ hr{border:0;border-top:1px solid var(--rule-soft);margin:16px 0}
   color:var(--accent-1);background:var(--grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
 }
 .view{padding:22px 26px 80px;max-width:1220px;width:100%}
+/* A separate declaration, after the shorthand above rather than folded into
+   it: on a phone in landscape the rail already owns the left column (the
+   880px breakpoint below is narrower than that), so it is the RIGHT edge of
+   .view that can sit under a notch, and putting env() inside a shorthand
+   risks the whole shorthand where it is unsupported, not just this side. */
+.view{padding-right:calc(26px + env(safe-area-inset-right))}
 /* Sits under the sticky band, in every view, on every screen size — the rail's
    storage bar is behind a hamburger on a phone, so on the device most likely
    to be browser-only it was the one place a person never looked. */
@@ -1379,6 +1391,11 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
    the 880px block never applied, being overridden by the very rule it targets. */
 @media(max-width:880px){
   .toasts{top:auto;bottom:12px;right:12px;left:12px;width:auto;max-width:none;align-items:stretch}
+  /* A second, later declaration rather than folded into the one above: a
+     browser with no env(safe-area-inset-*) support treats the whole value as
+     invalid and drops it, not as 0 — so the plain "bottom:12px" a line up has
+     to stand alone as the value that lands there in that case. */
+  .toasts{bottom:calc(12px + env(safe-area-inset-bottom))}
 }
 .toast{background:var(--ink-800);color:#EAF1F6;padding:10px 15px;border-radius:var(--r);box-shadow:var(--shadow-lg);font-size:13.5px;border-left:3px solid var(--blue-2);width:100%}
 .toast.ok{border-left-color:#6DC5A4} .toast.bad{border-left-color:#E98D76} .toast.warn{border-left-color:#DFAE5C}
@@ -1437,6 +1454,10 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
 
 /* --- exam centre simulation (timed mock only) -------------------------- */
 .sim{position:fixed;inset:0;z-index:80;background:var(--paper);display:flex;flex-direction:column;overflow:auto}
+/* The one full-bleed screen in the app (inset:0 above) — its own controls,
+   the exam-day ceremony's Skip button included, are otherwise the one thing
+   here that could land right under a notch or the home indicator. */
+.sim{padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
 .sim-bar{
   display:flex;align-items:center;gap:12px;padding:10px 18px;
   border-bottom:1px solid var(--rule);background:var(--surface);flex:none
@@ -1516,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.42', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.43', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -10612,8 +10633,13 @@ ROUTES.bank = async (root) => {
     list.sort((a, b) => {
       let x, y;
       if (key === 'qid') { x = seq.get(a); y = seq.get(b); }
-      else if (key === 'imported') { x = a.importedAt || a.createdAt; y = b.importedAt || b.createdAt; }
-      else if (key === 'last') { x = a.stats.lastAttemptAt || ''; y = b.stats.lastAttemptAt || ''; }
+      // Ties break on when it was last attempted, most-recent-last — the
+      // column this sorts shows the attempt count, so the primary key has to
+      // be that same number or the arrow would lie about its own column.
+      else if (key === 'att') {
+        const an = a.stats.attempts || 0, bn = b.stats.attempts || 0;
+        if (an !== bn) { x = an; y = bn; } else { x = a.stats.lastAttemptAt || ''; y = b.stats.lastAttemptAt || ''; }
+      }
       else if (key === 'acc') { x = a.stats.attempts ? a.stats.correct / a.stats.attempts : -1; y = b.stats.attempts ? b.stats.correct / b.stats.attempts : -1; }
       else if (key === 'mastery') { x = a.stats.mastery || 0; y = b.stats.mastery || 0; }
       else if (key === 'due') { x = a.nextReviewAt || '9999'; y = b.nextReviewAt || '9999'; }
@@ -10699,7 +10725,7 @@ ROUTES.bank = async (root) => {
       h('thead', {}, h('tr', {}, [
         h('th', { class: 'gut' }, h('input', { type: 'checkbox', onchange: e => { slice.forEach(q => e.target.checked ? BankState.sel.add(q.uuid) : BankState.sel.delete(q.uuid)); draw(); } })),
         h('th', { text: '' }), th('Question ID', 'qid'), h('th', { text: 'Question' }), h('th', { text: 'Dom' }),
-        h('th', { text: 'Status' }), h('th', { text: 'Att' }), th('Acc', 'acc'), th('Mastery', 'mastery'), th('Due', 'due')
+        h('th', { text: 'Status' }), th('Att', 'att'), th('Acc', 'acc'), th('Mastery', 'mastery'), th('Due', 'due')
       ])), tb
     ])));
     return card;
@@ -11023,7 +11049,10 @@ async function openQuestion(uuidStr) {
           h('div', { class: 'srcline', text: [r.filename, r.locator, r.originalNumber ? 'original no. ' + r.originalNumber : '', r.importedAt ? 'imported ' + fmtDate(r.importedAt) : ''].filter(Boolean).join('  ·  ') })
         ]));
       });
-      if (source) rows.appendChild(h('div', { class: 'small muted' }, 'File hash: ' + h('span', { class: 'srcline' }).textContent + (source.fileHash || '').slice(0, 24) + '…'));
+      if (source) rows.appendChild(h('div', { class: 'small muted' }, [
+        'File hash: ',
+        h('span', { class: 'srcline', text: (source.fileHash || '').slice(0, 24) + '…' })
+      ]));
       // The photo the question was transcribed from is kept for exactly this
       // screen; until now it was only ever shown mid-practice.
       if (q.imageId) rows.appendChild(h('div', { id: 'qimg-detail', class: 'imgstage' }));
@@ -12028,7 +12057,7 @@ async function openCaseStudy(csOrId, isNew) {
   if (!cs) { toast('That case study no longer exists', 'bad'); return; }
   let questions = isNew ? [] : await CaseStudies.questionsOf(cs.id);
 
-  const edit = { title: cs.title, text: cs.text, domainId: cs.domainId, topic: cs.topic, tags: (cs.tags || []).join(', ') };
+  const edit = { title: cs.title, text: cs.text, domainId: cs.domainId, topic: cs.topic };
   const body = h('div', { class: 'stack' });
   const wordCount = h('span', { class: 'tiny dim' });
   const qList = h('div', { class: 'stack' });
@@ -12098,7 +12127,7 @@ async function openCaseStudy(csOrId, isNew) {
   function hasUnsavedChanges() {
     return edit.title !== (cs.title || '') || edit.text !== (cs.text || '') ||
       (edit.domainId || null) !== (cs.domainId || null) ||
-      edit.topic !== (cs.topic || '') || edit.tags !== (cs.tags || []).join(', ');
+      edit.topic !== (cs.topic || '');
   }
   let res;
   for (; ;) {
@@ -12116,7 +12145,11 @@ async function openCaseStudy(csOrId, isNew) {
   cs.text = edit.text;
   cs.domainId = edit.domainId || null;
   cs.topic = edit.topic.trim();
-  cs.tags = edit.tags.split(',').map(x => x.trim()).filter(Boolean);
+  // cs.tags is deliberately left untouched: this dialog has no tags field
+  // (see `edit`, above), and nothing reads a scenario's tags — so there is
+  // nothing to write back, and no reason to round-trip a value that arrived
+  // from a restore or another build through a join/split that would re-split
+  // any tag containing a comma.
   await CaseStudies.save(cs, isNew ? 'created by hand' : 'edited');
   State.invalidate();
   toast(isNew ? cs.csid + ' created — now add its questions' : 'Saved', 'ok');
@@ -29638,6 +29671,17 @@ test('caseKeptCount reads the current decisions, not a snapshot from admission',
   eq(caseKeptCount(items, 'nope').total, 0);
 });
 
+test('The case study editor leaves tags exactly as it found them', () => {
+  // There is no tags field in this dialog (see the `edit` object at its top)
+  // and nothing anywhere reads a scenario's tags — so writing one back could
+  // only round-trip whatever arrived from a restore or another build through
+  // a join(', ')/split(',') that silently re-splits any tag with a comma
+  // in it, on every open-and-save. Guards against that being re-added.
+  const src = openCaseStudy.toString();
+  assert(!/cs\.tags\s*=/.test(src), 'nothing must ever write cs.tags back from this dialog');
+  assert(!/edit\.tags/.test(src), 'nor read a tags field that does not exist here');
+});
+
 test('The staging screen’s case-study card refreshes on every redraw, not just its own textarea', () => {
   const src = renderStaging.toString();
   assert(/caseRefreshers/.test(src), 'a decision made elsewhere on the screen must reach the "kept" count here too');
@@ -33097,6 +33141,24 @@ test('The Question Bank mastery bar follows the course mastery target, not a har
   assert(!/>=\s*75\s*\?\s*'g'/.test(src),
     'the green threshold must not be hardcoded — a course that raised its mastery target would show green under a row the "Mastered" filter on this same screen already excludes');
   assert(/masteryTarget/.test(src), 'the bar must read the same masteryTarget setting the "Mastered" filter already uses');
+});
+test('Every sort key the Question Bank implements is reachable from a column header', () => {
+  const src = ROUTES.bank.toString();
+  const implemented = (src.match(/key === '(\w+)'/g) || []).map(s => s.slice(9, -1));
+  const wired = (src.match(/th\('[^']+', '(\w+)'\)/g) || []).map(s => s.replace(/.*, '/, '').slice(0, -2));
+  assert(implemented.length >= 4, 'sanity check that the comparator itself was actually found in the source');
+  implemented.forEach(k => assert(wired.indexOf(k) >= 0,
+    'sort key "' + k + '" is implemented but no column header ever sets BankState.sort to it'));
+});
+test('The Att column sorts by the number it shows, not by something else entirely', () => {
+  // Pin the shape rather than drive the whole route (which needs a live
+  // #band and a selected course): the primary key must be the attempt count,
+  // never lastAttemptAt alone — that would sort against what the column
+  // itself displays, which is exactly the bug a stray 'last' key here once
+  // introduced by accident.
+  const src = ROUTES.bank.toString();
+  assert(/key === 'att'[\s\S]{0,20}\{[\s\S]{0,220}a\.stats\.attempts \|\| 0, bn = b\.stats\.attempts \|\| 0/.test(src),
+    'the "att" key must key on stats.attempts first, with lastAttemptAt only as a tiebreak');
 });
 test('A long toast message gets more time on screen than a short one, within limits', () => {
   const realSetTimeout = window.setTimeout;

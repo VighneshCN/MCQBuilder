@@ -517,12 +517,19 @@ Automated tests cannot verify rendering or real browser storage.
 
 ### The first run
 
-- [ ] Install to the Home Screen with a bank already on Drive. The first screen
+- [ ] On iOS, Add to Home Screen with a bank already on Drive: the copy starts
+      empty (its own storage, separate from Safari), and the first screen
       offers Connect Google Drive and Restore from a backup, NOT only "add a
-      course", and the sidebar shows where the data lives
-- [ ] Connect Drive from that screen: courses and questions appear and the nav
-      fills in, with no reload and no throwaway course
+      course" — the sidebar shows where the data lives
+- [ ] On Chrome, Edge or Android, Install with a bank already in the browser:
+      the installed copy already has it — installing changes nothing, unlike
+      the iOS case above
+- [ ] Connect Drive from the iOS first-run screen: courses and questions
+      appear and the nav fills in, with no reload and no throwaway course
 - [ ] Same again via Restore from a backup
+- [ ] On a phone with a notch or home indicator, turned sideways: the sidebar
+      and its storage bar/buttons are not hidden under either, and toasts in
+      portrait sit above the home indicator, not behind it
 
 ### Drive when the token goes
 
