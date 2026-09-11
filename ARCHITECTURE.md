@@ -837,7 +837,12 @@ anywhere else: `LOCAL_BUNDLE` is the single declaration of what a copy is, and
 each entry carries a `required` flag. Only `index.html` is required — every
 other file is a graceful degradation, so a deployment missing `serve.ps1`
 produces a working copy rather than an error, and the names that could not be
-fetched are recorded in the note instead of silently vanishing.
+fetched are recorded in the note instead of silently vanishing. That includes
+`data/starter-index.json` — a deployment that never filled it in still zips a
+working copy — and `startHereText()` splits what it names into two buckets, so
+a missing launcher (the only case the "use the Mac/Linux commands" advice
+actually answers) is never conflated with a missing `sw.js`, manifest, or
+starter catalogue, none of which stop the copy from running.
 
 It re-uses `zipFiles()`, the writer the backups already use, rather than a
 second archive path. That is why the test asserts a round trip through

@@ -978,8 +978,9 @@ you simply need the network to open it, and it cannot be installed.
 
 Backup & Restore → **Keep your own copy of the app** → *Download a copy* gives
 you a zip of the whole thing: `index.html`, `sw.js`, `manifest.webmanifest`, the
-Windows launcher, and a `START-HERE.txt` explaining what each file is. Unzip it
-anywhere and run it exactly as in section 1.
+Windows launcher, the starter-bank catalogue if this deployment has one, and a
+`START-HERE.txt` explaining what each file is. Unzip it anywhere and run it
+exactly as in section 1.
 
 The point is independence. Once you have that zip you are not relying on
 whoever published the app, or on that address still being there, or on nothing

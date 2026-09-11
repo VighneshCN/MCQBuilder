@@ -16791,7 +16791,11 @@ const LOCAL_BUNDLE = [
   // it in the world; a deployment that does not carry it simply produces a
   // bundle without it, and START-HERE says so.
   { url: 'serve.ps1', name: 'serve.ps1' },
-  { url: 'Start MCQ Mastery.bat', name: 'Start MCQ Mastery.bat' }
+  { url: 'Start MCQ Mastery.bat', name: 'Start MCQ Mastery.bat' },
+  // The starter-bank catalogue. Without it Add Questions offers nothing
+  // pre-built, same as any deployment that never filled the file in — not an
+  // error, so this carries no `required`.
+  { url: STARTER_INDEX, name: STARTER_INDEX }
 ];
 
 /** Null when the bank would survive the move; otherwise why it would not. */
@@ -16810,6 +16814,12 @@ async function localCopyRisk() {
 function startHereText(o) {
   const i = o || {};
   const missing = (i.missing || []);
+  // Only serve.ps1 and the .bat are what the Mac/Linux commands above are an
+  // alternative to — advising them for a missing sw.js, manifest or starter
+  // catalogue would send someone hunting for a workaround to a problem the
+  // app does not have.
+  const missingLauncher = missing.filter(m => m === 'serve.ps1' || m === 'Start MCQ Mastery.bat');
+  const missingOther = missing.filter(m => missingLauncher.indexOf(m) < 0);
   return [
     'MCQ MASTERY — your own copy',
     '===========================',
@@ -16864,8 +16874,11 @@ function startHereText(o) {
     'This copy never updates itself; that is the point of having it. To move to',
     'a newer version, open the app you took it from and download a copy again.',
     '',
-    missing.length
-      ? 'NOTE: this bundle does not include ' + missing.join(', ') + '. Use one of the\nMac/Linux commands above, which need nothing extra.'
+    missingLauncher.length
+      ? 'NOTE: this bundle does not include ' + missingLauncher.join(', ') + '. Use one of the\nMac/Linux commands above, which need nothing extra.'
+      : '',
+    missingOther.length
+      ? 'NOTE: this bundle is also missing ' + missingOther.join(', ') + '. The app still runs;\nyou only lose what that file is for — working offline (sw.js), the install icon\n(manifest.webmanifest), or the built-in starter question sets (the index file).'
       : '',
     ''
   ].filter(l => l !== null).join('\n');
@@ -32860,6 +32873,17 @@ test('The note in the box says the things that would otherwise be a support mess
   // A bundle missing the launcher says so rather than leaving a dead reference.
   const partial = startHereText({ version: '1', when: 'now', missing: ['serve.ps1'] });
   assert(partial.indexOf('does not include serve.ps1') > 0, partial.slice(-200));
+  // A missing sw.js, manifest or starter catalogue is not a launcher problem,
+  // and must not send somebody to the Mac/Linux commands to solve one.
+  const other = startHereText({ version: '1', when: 'now', missing: ['data/starter-index.json'] });
+  assert(other.indexOf('is also missing data/starter-index.json') > 0, other.slice(-260));
+  assert(!/Use one of the\nMac\/Linux commands/.test(other), 'that advice only answers a missing launcher');
+});
+
+test('The local-copy bundle carries the starter catalogue, but does not require it', () => {
+  const entry = LOCAL_BUNDLE.find(f => f.url === STARTER_INDEX);
+  assert(entry, 'a self-contained copy should offer whatever starter banks this deployment has');
+  assert(!entry.required, 'a deployment that never filled the catalogue in must still produce a working copy');
 });
 
 test('A shared bank carries the questions and none of the practising', () => {
