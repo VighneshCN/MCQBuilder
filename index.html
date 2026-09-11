@@ -1516,7 +1516,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.41', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.42', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1885,11 +1885,11 @@ const DB = {
   /** Count the records under one index key without reading a single one. */
   countBy(store, index, value) { return this._p(this.tx(store).objectStore(store).index(index).count(value)); },
   /** Stream a store/index without materialising everything at once. */
-  each(store, fn, index, range) {
+  each(store, fn, index, range, dir) {
     return new Promise((res, rej) => {
       const os = this.tx(store).objectStore(store);
       const src = index ? os.index(index) : os;
-      const req = src.openCursor(range || null);
+      const req = src.openCursor(range || null, dir || 'next');
       req.onsuccess = () => { const c = req.result; if (!c) return res(); const r = fn(c.value); if (r === false) return res(); c.continue(); };
       req.onerror = () => rej(req.error);
     });
@@ -6852,7 +6852,13 @@ const Session = {
   },
   async resumeLatest(courseId) {
     const rows = await DB.byIndex('sessions', 'courseId', courseId);
-    return rows.filter(s => s.status === 'active').sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt))[0] || null;
+    // String comparison, not a Date subtraction: startedAt is always an ISO
+    // string where it exists, so it sorts correctly without parsing it back
+    // into a Date first — and a row with no startedAt at all (new Date(undefined)
+    // is Invalid Date, whose subtraction is NaN) falls to the end instead of
+    // landing at an unpredictable position, since Array#sort's behaviour on a
+    // NaN-returning comparator is not guaranteed by the spec.
+    return rows.filter(s => s.status === 'active').sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || ''))[0] || null;
   },
   /** Record one response. Scoring always compares stable option IDs. */
   async answer(s, q, selectedOptionId, meta) {
@@ -18359,7 +18365,12 @@ async function recomputeAll() {
 }
 
 async function showAudit() {
-  const rows = (await DB.all('audit')).sort((a, b) => new Date(b.ts) - new Date(a.ts)).slice(0, 400);
+  // The audit trail only ever grows, and only the most recent 400 rows are
+  // shown — reading the whole store to sort and slice it gets slower every
+  // day the app is used. A reverse cursor on the 'ts' index arrives in the
+  // order this screen wants and stops the moment it has enough.
+  const rows = [];
+  await DB.each('audit', r => { rows.push(r); if (rows.length >= 400) return false; }, 'ts', null, 'prev');
   const tb = h('tbody');
   rows.forEach(a => tb.appendChild(h('tr', {}, [
     h('td', { class: 'tiny nowrap', text: fmtDate(a.ts, true) }),
@@ -28491,6 +28502,16 @@ test('mergeAppendOnlyRows dedupes by content, not by the meaningless auto-increm
   eq(r.added, 1);
   assert(r.rows.some(x => x.questionUuid === 'q3'), 'the remote-only attempt must survive despite sharing an id with a local row');
 });
+test('mergeKeyedRowsUnionOnly keeps whichever side it saw a key on first, with no time comparison at all', () => {
+  const local = [{ qid: 'Q-1', reason: 'local wipe' }, { qid: 'Q-2', reason: 'local wipe' }];
+  const remote = [{ qid: 'Q-2', reason: 'remote wipe' }, { qid: 'Q-3', reason: 'remote wipe' }];
+  const r = mergeKeyedRowsUnionOnly(local, remote, 'qid');
+  eq(r.rows.length, 3, 'the union of both sides, by key — never a comparison of which is "newer"');
+  eq(r.added, 1, 'only the genuinely new key (Q-3) counts as added');
+  eq(r.rows.find(x => x.qid === 'Q-2').reason, 'local wipe', 'a key both sides share keeps the LOCAL row — a retirement is never un-retired by a later-seen copy');
+  eq(mergeKeyedRowsUnionOnly(null, null, 'qid').rows.length, 0, 'missing rows on either side means an empty union, not a crash');
+  eq(mergeKeyedRowsUnionOnly([], [{ qid: 'Q-9' }], 'qid').added, 1, 'a first-ever merge from an empty local store adds everything remote holds');
+});
 test('mergeIdRegisterRows never lets the Question ID watermark move backwards', () => {
   const local = [{ courseId: 'c1', lastSeq: 50, allocations: [{ ts: '2026-01-01T00:00:00Z', from: 'Q-Q-000041', to: 'Q-Q-000050', count: 10 }] }];
   const remote = [{ courseId: 'c1', lastSeq: 30, allocations: [{ ts: '2025-06-01T00:00:00Z', from: 'Q-Q-000021', to: 'Q-Q-000030', count: 10 }] }];
@@ -29518,6 +29539,13 @@ async function runSelfTests() {
   summary.className = 'notice ' + (fail ? 'bad' : 'ok');
   summary.textContent = pass + ' passed · ' + fail + ' failed · ' + skip + ' skipped, out of ' + TESTS.length + ' checks.';
   await audit('test', 'system', '', null, { pass, fail, skip }, '');
+  // Several tests render a route straight into the shared #band/#view without
+  // restoring it afterwards — the last one to run is whatever this screen is
+  // left showing underneath the dialog. A plain repaint of whatever State.view
+  // currently is (never a saved-and-restored one — that is each test's own
+  // job, not this button's) is the same idiom used everywhere else in this
+  // file to refresh the shell after something changed it from outside.
+  await go(State.view || 'dashboard');
   return dlg;
 }
 
@@ -32610,6 +32638,32 @@ test('Questions.byCourse stays index-backed, never a cursor scan of the whole st
     await DB.del('questions', q.uuid);
   }
 });
+test('showAudit() streams the newest rows off the ts index, and never re-sorts the whole store', async () => {
+  const stamp = 'test-audit-' + Date.now();
+  const ids = [];
+  const realModal = globalThis.modal, realAll = DB.all;
+  let sawFullRead = false;
+  try {
+    const base = Date.now();
+    // Written oldest-first — out of the order the screen must show them in —
+    // so a pass would prove the read relies on the index, not insertion order.
+    for (let i = 0; i < 5; i++) {
+      ids.push(await DB.put('audit', { ts: new Date(base + i * 1000).toISOString(), action: 'test', entityType: 'question', entityId: stamp + '-' + i, prev: null, next: null, note: '' }));
+    }
+    DB.all = function (store) { if (store === 'audit') sawFullRead = true; return realAll.apply(this, arguments); };
+    let body = null;
+    globalThis.modal = async (o) => { body = o.body; return null; };
+    await showAudit();
+    assert(!sawFullRead, 'the audit screen must not read the whole store to sort it — that gets slower every day the app is used');
+    const mine = [...body.querySelectorAll('tbody tr')].map(tr => tr.children[3].textContent).filter(id => id.indexOf(stamp) === 0);
+    eq(mine.length, 5, 'every scratch row must be on screen');
+    eq(mine.join(','), [stamp + '-4', stamp + '-3', stamp + '-2', stamp + '-1', stamp + '-0'].join(','), 'newest first, straight off the ts index');
+    assert(showAudit.toString().indexOf("DB.all(") < 0, 'and the function itself must never fall back to reading the whole store');
+  } finally {
+    globalThis.modal = realModal; DB.all = realAll;
+    for (const id of ids) await DB.del('audit', id);
+  }
+});
 test('The dashboard reads the session store once per render', async () => {
   // ROUTES.dashboard reads State.course throughout; the suite can run before
   // any course has been selected, unlike the app proper.
@@ -33591,6 +33645,49 @@ test('A merge that shrinks only because this browser held the tombstones can sti
     State.courses = was.list; State.course = was.c;
     if (savedActive) await Settings.set('activeCourseId', savedActive);
     await DB.delRaw('tombstones', 'ZZZ-Q-424242');
+  }
+});
+
+test('applyMergedBank keeps this device’s own newer session, and takes the incoming one only when it really is newer', async () => {
+  // Mirrors the test above: applyMergedBank() ends by calling adoptCourses(),
+  // which can move the selected course under whoever is running the
+  // built-in tests.
+  const was = { c: State.course, list: State.courses.slice() };
+  const savedActive = Settings.get('activeCourseId');
+  const idOld = 'test-mergeguard-stale-' + Date.now();
+  const idNew = 'test-mergeguard-fresh-' + Date.now();
+  try {
+    // 'active', not 'complete': commitMergedSessionAnswers() only reconciles
+    // completed mock sessions, and a scratch row with no MODES entry would
+    // otherwise be walked into machinery this test has no business driving.
+    const base = { courseId: 'test-mergeguard-course', mode: 'mixed', status: 'active', startedAt: '2026-01-01T00:00:00.000Z', endedAt: null, questionUuids: [], responses: {}, flags: {}, cursor: 0 };
+    // DB.put would re-stamp updatedAt to right now (sessions is in
+    // _stampedStores) — putRaw is what lets this "already live" row carry
+    // the exact past stamp the guard is compared against.
+    await DB.putRaw('sessions', Object.assign({ id: idOld }, base, { updatedAt: '2026-06-01T00:00:00.000Z', elapsedMs: 111 }));
+    await DB.putRaw('sessions', Object.assign({ id: idNew }, base, { updatedAt: '2026-06-01T00:00:00.000Z', elapsedMs: 111 }));
+
+    const merged = { stores: { sessions: [
+      // Older than what is already live: a merge built before this device's
+      // own later save landed. Must lose.
+      Object.assign({ id: idOld }, base, { updatedAt: '2026-01-15T00:00:00.000Z', elapsedMs: 999 }),
+      // Genuinely newer: the other device saved after this one did. Must win.
+      Object.assign({ id: idNew }, base, { updatedAt: '2026-12-01T00:00:00.000Z', elapsedMs: 999 })
+    ] } };
+    await applyMergedBank(merged, {});
+
+    const stale = await DB.get('sessions', idOld);
+    eq(stale.elapsedMs, 111, 'a stale incoming row must not overwrite what this device already holds');
+    eq(stale.updatedAt, '2026-06-01T00:00:00.000Z');
+
+    const fresh = await DB.get('sessions', idNew);
+    eq(fresh.elapsedMs, 999, 'a genuinely newer incoming row must win');
+    eq(fresh.updatedAt, '2026-12-01T00:00:00.000Z');
+  } finally {
+    State.courses = was.list; State.course = was.c;
+    if (savedActive) await Settings.set('activeCourseId', savedActive);
+    await DB.delRaw('sessions', idOld);
+    await DB.delRaw('sessions', idNew);
   }
 });
 
@@ -34658,6 +34755,12 @@ test('Adopting an existing file over this browser’s bank also refreshes Settin
   assert(reload < src.indexOf('adoptCourses()'));
   assert(reload > src.indexOf('loadFromDisk'));
 });
+test('A background merge reloads Settings before adopting courses, same as the other three whole-store rebuilds', () => {
+  const src = applyMergedBank.toString();
+  const reload = src.indexOf('Settings.load()');
+  assert(reload > 0, 'a merge changes the settings store directly, bypassing the in-memory cache everything else reads');
+  assert(reload < src.indexOf('adoptCourses()'), 'adoptCourses reads activeCourseId from that cache, so it must run after the reload, not before');
+});
 test('connectFlow() hands off from a signed-out-but-configured Drive bank, not just a signed-in one', async () => {
   const was = {
     tier: FileStore.tier, session: State.session,
@@ -34798,6 +34901,24 @@ test('resumeLatest sees an unfinished session, so configureMode is gated', async
     // course that does not exist. Run twice and it survives itself; the whole
     // point of this batch (C4) is that the suite must not leave damage behind.
     await DB.del('sessions', 'sess-gate');
+  }
+});
+test('resumeLatest ignores finished sessions, and a missing startedAt cannot crash or out-rank a real one', async () => {
+  const cid = 'test-resumelatest-' + Date.now();
+  const mkS = (id, over) => Object.assign({ id, courseId: cid, mode: 'mock', responses: {}, flags: {}, optionOrders: {}, questionUuids: ['u1'], status: 'active' }, over);
+  const rows = [
+    mkS(cid + '-done', { status: 'complete', startedAt: '2026-06-01T00:00:00.000Z' }),
+    mkS(cid + '-old', { startedAt: '2026-01-01T00:00:00.000Z' }),
+    mkS(cid + '-new', { startedAt: '2026-03-01T00:00:00.000Z' }),
+    mkS(cid + '-none', { startedAt: undefined })
+  ];
+  try {
+    for (const s of rows) await DB.putRaw('sessions', s);
+    const got = await Session.resumeLatest(cid);
+    assert(got, 'an active session must be found despite a finished one being newest and another carrying no startedAt at all');
+    eq(got.id, cid + '-new', 'the newest ACTIVE session wins — finished is excluded outright, and a missing startedAt must not out-rank a real one');
+  } finally {
+    for (const s of rows) await DB.delRaw('sessions', s.id);
   }
 });
 test('A mode shortcut refuses to open while a session is unfinished', async () => {
