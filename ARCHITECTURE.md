@@ -382,9 +382,14 @@ removal, and nothing here removes a mode somebody could already run.
 ## Installing, and where the bank lives
 
 `manifest.webmanifest` carries the icon as an inline SVG `data:` URI, so no PNG
-files are needed; the icon itself is the rail's tick mark. Its mark sits inside
-the central 80% of the canvas, so the same file serves as `maskable`. iOS is
-the exception: Safari does not accept an SVG as a Home Screen icon through
+files are needed; the icon itself is the rail's tick mark. Its mark — including
+its stroke — sits inside the central 80% of the canvas, so it survives being
+cropped to any mask a platform applies. The `any` and `maskable` entries are
+therefore the same SVG, except the background rect: `any`'s has rounded
+corners (`rx="112"`) as its own shape, while `maskable`'s is a plain full-bleed
+square — a maskable icon promises no transparent corners of its own, since the
+platform supplies the actual shape. iOS is the exception: Safari does not
+accept an SVG as a Home Screen icon through
 either mechanism it supports (the manifest's own `icons`, or the older
 `apple-touch-icon` link, which has never taken anything but a raster image),
 so the same mark also exists as a 180×180 PNG, rasterised from this exact SVG

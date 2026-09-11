@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.44', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.45', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -6628,19 +6628,25 @@ function lastMilePick(pool, cap, masteryTarget) {
     rows.push({ q, cls });
     counts[cls]++;
   });
+  const limit = Math.max(0, cap == null ? rows.length : cap);
   /* Worst first inside each class: the longest run of wrong answers, then the
      lowest mastery, then the one left longest — a question you last saw in
      June has had more time to go than one you saw on Tuesday. The qid is the
      final key purely so the list is stable rather than at the mercy of however
-     the bank came back from the index. */
-  rows.sort((a, b) =>
+     the bank came back from the index.
+     Skipped entirely when limit is 0 — the count-only callers below, which
+     only ever read `available`/`availableCounts`, both computed above the
+     sort — since this is the one comparator in the file expensive enough
+     (two localeCompare calls) to be worth not running at all on a full pass
+     over the bank just to throw the order away. */
+  if (limit) rows.sort((a, b) =>
     order.indexOf(a.cls) - order.indexOf(b.cls) ||
     (b.q.stats.wrongStreak || 0) - (a.q.stats.wrongStreak || 0) ||
     (a.q.stats.mastery || 0) - (b.q.stats.mastery || 0) ||
     String(a.q.stats.lastAttemptAt || '').localeCompare(String(b.q.stats.lastAttemptAt || '')) ||
     String(a.q.qid || a.q.uuid).localeCompare(String(b.q.qid || b.q.uuid)));
 
-  const taken = rows.slice(0, Math.max(0, cap == null ? rows.length : cap));
+  const taken = rows.slice(0, limit);
   const reasons = {};
   const takenCounts = {};
   order.forEach(k => takenCounts[k] = 0);
@@ -8515,7 +8521,9 @@ ROUTES.practice = async (root, preselect) => {
     let count = null;
     if (m === 'spaced') count = due.length;
     if (m === 'redo') count = pool.filter(isRedoEligible).length;
-    if (m === 'lastmile') count = lastMilePick(pool, 0, Settings.get('masteryTarget')).available;
+    // Same pool, same target, same cap as lockCtx.lastmile above — a second
+    // pass here used to recompute the identical number.
+    if (m === 'lastmile') count = lockCtx.lastmile;
     if (info.caseBank) count = casePool.length;
     const lock = modeLock(m, lockCtx);
     const asleep = !!lock;
@@ -12471,7 +12479,7 @@ async function starterManifest() {
     if (!res.ok) { _catalogue = empty; return _catalogue; }
     const j = await res.json();
     _catalogue = {
-      files: Array.isArray(j && j.files) ? j.files : [],
+      files: (Array.isArray(j && j.files) ? j.files : []).filter(e => e && sameOriginPath(e.file)),
       notices: Array.isArray(j && j.notices) ? j.notices : [],
       // studyGroup was the name for about ten minutes; both are read so a
       // manifest drafted against the earlier one does not silently show
@@ -12491,6 +12499,16 @@ function safeLinkOrNull(o) {
   if (!o || typeof o.url !== 'string') return null;
   if (!/^https?:\/\//i.test(o.url.trim())) return null;
   return { label: String(o.label || 'Support group'), url: o.url.trim(), note: o.note ? String(o.note) : '' };
+}
+
+/** A supplied question file is only ever a path inside this deployment — the
+    opposite rule from safeLinkOrNull above, and just as deliberate: a scheme
+    of any kind (https:, data:, blob:, javascript:) or a protocol-relative
+    path would take a fetch off this origin, which is the one thing the app
+    promises never to do. The manifest is third-party-authored (see the
+    comment on starterManifest above), so this is checked, not assumed. */
+function sameOriginPath(p) {
+  return typeof p === 'string' && p !== '' && !/^[a-z][a-z0-9+.-]*:/i.test(p) && p.slice(0, 2) !== '//';
 }
 
 /** What a dated list is offering today. Dates are plain YYYY-MM-DD keys and
@@ -29021,6 +29039,29 @@ test('The app never advertises question files it has not confirmed', async () =>
     const good = await probeStarterFile({ file: 'data/real.json' });
     assert(good.ok, 'a present file must pass');
     eq(good.size, 2048, 'the size should come from the response, not from a constant');
+
+    // The manifest is third-party-authored — see the comment on
+    // starterManifest — so a file entry pointing off this origin (a scheme,
+    // or a protocol-relative path) must never even be offered, let alone probed.
+    globalThis.fetch = async (url) => {
+      if (String(url).indexOf('starter-index') >= 0) {
+        return {
+          ok: true, json: async () => ({
+            files: [
+              { file: 'https://elsewhere.example/bank.json', course: 'CISA' },
+              { file: '//elsewhere.example/bank.json', course: 'CISA' },
+              { file: 'data:application/json,{}', course: 'CISA' },
+              { file: 'data/ok.json', course: 'CISA' }
+            ]
+          })
+        };
+      }
+      return { ok: false, status: 404 };
+    };
+    _catalogue = null;
+    const filtered = await starterCatalogue();
+    eq(filtered.length, 1, 'only the same-origin entry survives: ' + filtered.map(f => f.file).join(', '));
+    eq(filtered[0].file, 'data/ok.json');
   } finally {
     globalThis.fetch = realFetch;
     _catalogue = null;
@@ -32028,6 +32069,12 @@ test('The last mile never puts an unseen question in front of you', () => {
   eq(none.questions.length, 0);
   eq(describeLastMile(none), '', 'and an empty list says nothing rather than saying nothing well');
   eq(lastMilePick([], 40, 75).available, 0, 'an empty bank is not an error');
+  // cap 0 is the count-only path the dashboard and the practice grid badge
+  // use — the sort is skipped for it, so this is what actually proves that
+  // skip did not also break the two numbers those callers do read.
+  const counted = lastMilePick(lmPool(), 0, 75);
+  eq(counted.available, 5, 'a count-only call still counts everything');
+  eq(counted.questions.length, 0, 'and still hands back no paper');
 });
 
 test('The notebook and the last mile agree on what is still broken', () => {
