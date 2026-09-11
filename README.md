@@ -158,16 +158,20 @@ backups from **Backup & Restore** are your safety net.
 
 ### Opening it for the first time when you already have a bank
 
-An installed app — Home Screen on iOS, Install on Chrome — gets **its own
-storage, separate from the browser you installed it from**. That is the
-platform's doing, not a setting. So the installed copy always starts empty,
-even when the same app in the browser is full of your work.
+On iOS, Share → **Add to Home Screen** gives the app its own storage, separate
+from Safari. That is the platform's doing, not a setting, so a fresh Home
+Screen copy always starts empty, even when the same app in Safari is full of
+your work. Chrome, Edge and Android do not work this way — **Install** there
+is the same origin and the same database, so installing changes nothing and
+your bank is already there.
 
 The first screen therefore offers two things beside *Add a course*: **Connect
 Google Drive** and **Restore from a backup** (plus *Open my data folder* where
-the browser supports it). Use one of those and your courses come back with your
-questions. **You never need to create a course first** — an earlier version made
-you invent a throwaway one just to reach Settings, which was wrong.
+the browser supports it) — how an empty iOS install gets your data back, and
+equally how you'd start on any platform on a genuinely new machine. Use one of
+those and your courses come back with your questions. **You never need to
+create a course first** — an earlier version made you invent a throwaway one
+just to reach Settings, which was wrong.
 
 ### Google Drive on an iPhone or iPad
 

@@ -1516,7 +1516,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.40', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.41', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -2505,6 +2505,16 @@ function blankCaseStudy(courseId) {
 function passageWords(text) {
   const t = String(text || '').trim();
   return t ? t.split(/\s+/).length : 0;
+}
+
+/** How many of a staged scenario's questions are still headed for the bank,
+    out of how many the parser found under it — the "N of M kept" line on the
+    staging screen's case-study card. A merge or reject decision on any of
+    them changes this, which is why it is a pure function of the current
+    staging items rather than something computed once and cached. */
+function caseKeptCount(items, caseKey) {
+  const mine = items.filter(it => it.q.caseRef === caseKey);
+  return { kept: mine.filter(it => it.decision !== 'reject' && it.decision !== 'merge').length, total: mine.length };
 }
 
 const CaseStudies = {
@@ -7774,7 +7784,7 @@ ROUTES.onboarding = async (root) => {
           : null
       ].filter(Boolean)),
       h('p', { class: 'tiny dim', style: 'margin:0' },
-        'Installing the app to your Home Screen gives it its own storage, separate from the browser — so a fresh install always starts empty even when the same app in the browser is full. Connecting the same Drive, folder or backup joins them up again.')
+        'On iOS, adding the app to your Home Screen gives it its own storage, separate from Safari — so a fresh Home Screen copy starts empty even when the same app in Safari is full. Chrome, Edge and Android do not work this way: installing there changes nothing. Connecting the same Drive, folder or backup joins an empty copy back up again.')
     ])
   ]));
 };
@@ -12217,7 +12227,7 @@ ROUTES.import = async (root) => {
   const drop = h('div', { class: 'drop', tabindex: '0', role: 'button' }, [
     h('div', { style: 'font-size:26px;line-height:1;margin-bottom:8px', text: '↧' }),
     h('h3', { text: 'Drop files here, or click to choose' }),
-    h('p', { class: 'muted small', style: 'margin:6px 0 0', text: 'Accepted: .docx · .csv · .xlsx · .json · .txt · text-based .pdf · .png / .jpg' }),
+    h('p', { class: 'muted small', style: 'margin:6px 0 0', text: 'Accepted: ' + ACCEPTED.filter(e => e !== '.pdf').join(' · ') + ' · text-based .pdf' }),
     h('p', { class: 'tiny dim', style: 'margin:4px 0 0', text: 'You can also paste a screenshot with Ctrl+V / ⌘V anywhere on this screen.' })
   ]);
   const input = h('input', { type: 'file', multiple: true, class: 'hidden', accept: ACCEPTED.join(','), onchange: e => intake(Array.from(e.target.files)) });
@@ -12343,6 +12353,7 @@ async function renderRegisters(root, sources, batches) {
       ]));
     });
     card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, ['Batch', 'Started', 'Label', 'Detected', 'Imported', 'Drafts', 'Reconciled', ''].map(t => h('th', { text: t })))), tb])));
+    if (batches.length > 25) card.appendChild(h('div', { class: 'small dim', style: 'margin-top:8px', text: 'Showing the 25 most recent of ' + batches.length + '.' }));
     root.appendChild(card);
   }
 }
@@ -12879,11 +12890,8 @@ function renderStaging(root) {
   root.appendChild(steps);
 
   const counts = () => {
-    const c = { import: 0, merge: 0, review: 0, conflict: 0, reject: 0, draft: 0 };
-    st.items.forEach(it => {
-      c[it.decision] = (c[it.decision] || 0) + 1;
-      if (it.decision === 'import' && it.q.status !== 'draft' && it.q.status !== 'active') c.draft++;
-    });
+    const c = { import: 0, merge: 0, review: 0, conflict: 0, reject: 0 };
+    st.items.forEach(it => { c[it.decision] = (c[it.decision] || 0) + 1; });
     return c;
   };
   const summary = h('div', { class: 'grid g5', style: 'margin-bottom:14px' });
@@ -12900,6 +12908,11 @@ function renderStaging(root) {
   drawSummary();
   root.appendChild(summary);
 
+  // Populated per scenario below, and re-run from drawAll(): a decision made
+  // from the ordinary item list (Merge, Reject, ...) changes what kept()
+  // counts here, and this card would otherwise go stale the moment anything
+  // outside it changed.
+  const caseRefreshers = [];
   if (st.caseStudies && st.caseStudies.length) {
     const card = h('div', { class: 'card', style: 'margin-bottom:14px' }, [
       h('div', { class: 'card-h' }, [
@@ -12912,9 +12925,10 @@ function renderStaging(root) {
     cb.appendChild(h('p', { class: 'small muted', style: 'margin:0' },
       'These go into the case study bank, not the ordinary one — their questions are only ever asked with the scenario in front of the candidate. Check each scenario reads properly before admitting; this is the last point at which nothing has been written.'));
     st.caseStudies.forEach(cs => {
-      const mine = () => st.items.filter(it => it.q.caseRef === cs.key);
-      const kept = () => mine().filter(it => it.decision !== 'reject' && it.decision !== 'merge').length;
       const wordLabel = h('span', { class: 'tiny dim' });
+      // A stable node, toggled — not a ternary baked into the tree at build
+      // time — so typing text in below can make this go away again.
+      const noText = h('div', { class: 'notice warn small' }, 'This scenario has no text, so none of its questions will be drawn until you add it.');
       const ta = autoGrow(h('textarea', {
         style: 'min-height:120px', value: cs.text,
         placeholder: 'No scenario text was found in the file. Paste it here — without it these questions cannot be answered fairly.',
@@ -12922,9 +12936,12 @@ function renderStaging(root) {
       }), 120);
       const drawWords = () => {
         const w = passageWords(cs.text);
-        wordLabel.textContent = (w ? w.toLocaleString() + ' words' : 'no scenario text') + ' · ' + kept() + ' of ' + mine().length + ' question(s) kept';
+        const c = caseKeptCount(st.items, cs.key);
+        wordLabel.textContent = (w ? w.toLocaleString() + ' words' : 'no scenario text') + ' · ' + c.kept + ' of ' + c.total + ' question(s) kept';
+        noText.classList.toggle('hidden', !!w);
       };
       drawWords();
+      caseRefreshers.push(drawWords);
       cb.appendChild(h('div', { class: 'stack', style: 'gap:6px;padding-top:10px;border-top:1px solid var(--rule)' }, [
         h('div', { class: 'row wrap', style: 'gap:8px' }, [
           h('span', { class: 'docnum', text: cs.ref }),
@@ -12932,8 +12949,8 @@ function renderStaging(root) {
           wordLabel
         ]),
         ta,
-        passageWords(cs.text) ? null : h('div', { class: 'notice warn small' }, 'This scenario has no text, so none of its questions will be drawn until you add it.')
-      ].filter(Boolean)));
+        noText
+      ]));
     });
     card.appendChild(cb);
     root.appendChild(card);
@@ -12956,7 +12973,7 @@ function renderStaging(root) {
   const pager = h('div', { class: 'row', style: 'margin-top:14px;justify-content:center;gap:10px' });
   root.appendChild(pager);
 
-  function drawAll() { drawBulk(); drawList(); drawSummary(); }
+  function drawAll() { drawBulk(); drawList(); drawSummary(); caseRefreshers.forEach(fn => fn()); }
 
   function drawBulk() {
     bulk.textContent = '';
@@ -27263,15 +27280,18 @@ test('Unreliable domains are left unmapped rather than guessed', () => {
 test('Question IDs are sequential, prefixed and never reused', async () => {
   const cid = 'test-course-ids-' + Date.now();
   await DB.put('courses', makeCourse('ZZT', 'Scratch course', [{ id: 'D1', name: 'One', weight: 100 }], { id: cid, qidPrefix: 'ZZT' }));
-  const first = await IdRegister.next(cid, 3, { note: 'test' });
-  eq(first[0], 'ZZT-Q-000001'); eq(first[2], 'ZZT-Q-000003');
-  const second = await IdRegister.next(cid, 1, { note: 'test' });
-  eq(second[0], 'ZZT-Q-000004', 'the next allocation must continue, never restart');
-  await IdRegister.reserveUpTo(cid, 900);
-  const third = await IdRegister.next(cid, 1, { note: 'test' });
-  eq(third[0], 'ZZT-Q-000901', 'a restore watermark must push the counter past restored IDs');
-  await DB.del('courses', cid);
-  await DB.del('idRegister', cid);
+  try {
+    const first = await IdRegister.next(cid, 3, { note: 'test' });
+    eq(first[0], 'ZZT-Q-000001'); eq(first[2], 'ZZT-Q-000003');
+    const second = await IdRegister.next(cid, 1, { note: 'test' });
+    eq(second[0], 'ZZT-Q-000004', 'the next allocation must continue, never restart');
+    await IdRegister.reserveUpTo(cid, 900);
+    const third = await IdRegister.next(cid, 1, { note: 'test' });
+    eq(third[0], 'ZZT-Q-000901', 'a restore watermark must push the counter past restored IDs');
+  } finally {
+    await DB.del('courses', cid);
+    await DB.del('idRegister', cid);
+  }
 });
 test('A restore collision issues a new ID and keeps the old one as an alias', async () => {
   // Drives the real write phase (applyRestore, merge mode) against the live
@@ -29562,6 +29582,28 @@ const mkCases = (spec) => {
   });
   return out;
 };
+
+test('caseKeptCount reads the current decisions, not a snapshot from admission', () => {
+  const items = [
+    { q: { caseRef: 'c1' }, decision: 'import' },
+    { q: { caseRef: 'c1' }, decision: 'reject' },
+    { q: { caseRef: 'c1' }, decision: 'merge' },
+    { q: { caseRef: 'c2' }, decision: 'import' }
+  ];
+  eq(caseKeptCount(items, 'c1').kept, 1, 'rejected and merged items are not kept');
+  eq(caseKeptCount(items, 'c1').total, 3, 'but they still count toward the scenario’s total');
+  eq(caseKeptCount(items, 'c2').kept, 1);
+  eq(caseKeptCount(items, 'nope').kept, 0, 'a scenario with nothing staged under it counts as empty, not an error');
+  eq(caseKeptCount(items, 'nope').total, 0);
+});
+
+test('The staging screen’s case-study card refreshes on every redraw, not just its own textarea', () => {
+  const src = renderStaging.toString();
+  assert(/caseRefreshers/.test(src), 'a decision made elsewhere on the screen must reach the "kept" count here too');
+  const drawAllBody = /function drawAll\(\) \{[^}]*\}/.exec(src);
+  assert(drawAllBody && /caseRefreshers/.test(drawAllBody[0]), 'drawAll() specifically must run the case-study refreshers, or this rots the moment either is edited alone');
+  assert(/noText\.classList\.toggle\('hidden'/.test(src), 'the "no text" notice must be toggled on a stable node, not rebuilt from a ternary that only ever runs once');
+});
 
 test('A case study is never split, whatever number is asked for', () => {
   const pool = mkCases([5, 5, 5, 5]);
@@ -33090,7 +33132,23 @@ test('A first run is never a wall for somebody who already has a bank', async ()
     assert(labels.some(t => /drive/i.test(t)), 'and so is the bank they already have: ' + labels.join('/'));
     assert(labels.some(t => /backup/i.test(t)), 'and a backup: ' + labels.join('/'));
     assert(/do not need to add a course first/i.test(root.textContent), 'said in words, not just implied by a button');
+    // Only iOS gives an installed copy its own storage. Chrome, Edge and
+    // Android installs share the browser's database — claiming otherwise
+    // there would send someone hunting for a Drive/backup reconnect their
+    // bank was never separated from in the first place.
+    assert(/On iOS.*its own storage/.test(root.textContent), 'the separate-storage note must be scoped to the platform it actually holds for');
+    assert(/Chrome, Edge and Android do not work this way/i.test(root.textContent), 'and must say so for the platforms where installing changes nothing');
   } finally { State.view = savedView; }
+});
+
+test('The drop zone accepted-types note is derived from ACCEPTED, not hand-copied', () => {
+  const src = ROUTES.import.toString();
+  assert(/ACCEPTED\.filter\(e => e !== '\.pdf'\)\.join/.test(src),
+    'the accepted-file-types text must be built from ACCEPTED so a new format can never drift out of sync with what it says');
+  // The derivation only proves the two can never diverge; confirm what it
+  // actually produces still names everything ACCEPTED does.
+  const text = ACCEPTED.filter(e => e !== '.pdf').join(' · ') + ' · text-based .pdf';
+  ACCEPTED.forEach(ext => assert(text.indexOf(ext) >= 0, ext + ' is accepted but not mentioned in "' + text + '"'));
 });
 
 test('Data arriving from elsewhere brings its courses with it', async () => {

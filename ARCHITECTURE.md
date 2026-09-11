@@ -1043,8 +1043,12 @@ the questions, and only those that actually keep a question, so a case-study
 question is never in the bank pointing at a case study that does not exist.
 
 The reconciliation report is the point: every question that entered the parser
-is accounted for. Low confidence does not block import; it routes the question
-to a review status where it is excluded from practice until confirmed.
+is accounted for. Low confidence does not block import, and — since
+`needs_content` (see "What blocks practice, and what merely locks a feature"
+above) carries `practice: true` — it does not block practice either. It routes
+the question to `needs_content` for review, still practisable, and only a
+genuine defect (no verified answer, too few options) files it under a status
+that actually blocks practice.
 
 ## Versioning
 
