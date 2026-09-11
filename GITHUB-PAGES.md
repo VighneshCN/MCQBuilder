@@ -25,8 +25,12 @@ them at a public URL is another. Keep them on your disk and import them into the
 app locally.
 
 The included `.gitignore` blocks the obvious cases — your live database,
-journal, backups, and any `data/` folder. Check it is present before your first
-commit.
+journal and backups. Under `data/`, everything stays local by default too,
+with two deliberate exceptions: `data/starter-index.json` (the catalogue the
+app reads, empty until you fill it in) and any `data/shared-*.json` you
+export to hand someone a bank — rename an export to start with `shared-`
+before committing it, or it stays local like everything else there. Check
+`.gitignore` is present before your first commit.
 
 ## Publishing, step by step
 
@@ -104,8 +108,11 @@ Load these in a private browsing window, where you are not signed in to GitHub:
 
 - `https://<your-username>.github.io/<repo>/` — should load the app
 - `https://<your-username>.github.io/<repo>/data/starter-index.json` — should
-  return **404**
-- Any question file you were worried about — should return **404**
+  load: this one is meant to be published. Open it and check every path
+  listed under `"files"` is something you have the right to publish — that,
+  not the catalogue's own presence, is where a real leak would actually be.
+- Any question file you did not deliberately list there or export as
+  `data/shared-*.json` — should return **404**
 
 A 404 in a signed-out window is the confirmation. Checking while signed in
 proves nothing.
@@ -128,10 +135,15 @@ browser storage, both independent of the app file. Hard-refresh (Ctrl+Shift+R)
 if you still see the old version — Pages caches.
 
 The offline copy does not hold an old version in place: `sw.js` fetches the
-page from the network first every time and only falls back to its copy when
-there is no connection. If you have hard-refreshed and still see the old app,
-that is Pages' own cache, not this — but Settings → Offline → **Check for an
-update** will rule it out.
+page from the network first every time. For a navigation where a cached copy
+already exists to fall back on, that fetch races a short timeout — a captive
+portal, or a connection that looks connected but is not, would otherwise
+leave the page blank rather than falling back at all. The network request is
+never cancelled, so a merely slow connection still gets the fresh page and
+refreshes the cache once it answers; the race only ever protects against a
+connection that is not really there. If you have hard-refreshed and still
+see the old app, that is Pages' own cache, not this — there is no in-app
+update check, so a hard refresh (Ctrl+Shift+R) is the way to confirm.
 
 ### People who took their own copy will not get the update
 

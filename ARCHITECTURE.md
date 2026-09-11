@@ -383,7 +383,14 @@ removal, and nothing here removes a mode somebody could already run.
 
 `manifest.webmanifest` carries the icon as an inline SVG `data:` URI, so no PNG
 files are needed; the icon itself is the rail's tick mark. Its mark sits inside
-the central 80% of the canvas, so the same file serves as `maskable`.
+the central 80% of the canvas, so the same file serves as `maskable`. iOS is
+the exception: Safari does not accept an SVG as a Home Screen icon through
+either mechanism it supports (the manifest's own `icons`, or the older
+`apple-touch-icon` link, which has never taken anything but a raster image),
+so the same mark also exists as a 180×180 PNG, rasterised from this exact SVG
+and inlined as its own `data:` URI on an `apple-touch-icon` link in
+`index.html`'s head — still no PNG *file*, so the single-file property above
+holds.
 
 `DriveSync` keeps two separate ideas apart. `connected` means a live OAuth token
 exists right now; `configured` means this browser's bank lives on Drive. The

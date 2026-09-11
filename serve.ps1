@@ -104,8 +104,20 @@ while ($true) {
         $stream = $client.GetStream()
 
         # Browsers pre-open connections and then sometimes send nothing at all.
-        # Without a timeout, one of those would block the loop forever.
-        $stream.ReadTimeout = 5000
+        # Without a timeout, one of those would block the loop forever — and
+        # because this loop handles one connection at a time, a real request
+        # queued up behind a parked one waits out the FULL timeout before it
+        # is even looked at. 750ms, not the 5s this used to be: the listener
+        # binds loopback only, so there is no network between browser and
+        # server, and a genuine request's line is already sitting in the
+        # socket's receive buffer by the time AcceptTcpClient() returns —
+        # the timeout is sized entirely for the socket that will never send
+        # anything. This guards both blocking reads under it: the request
+        # line below, and the header-drain loop the Host-header check runs
+        # a few lines down. WriteTimeout is untouched and stays infinite —
+        # index.html (2MB) and the OCR engine's largest vendor file (~15MB)
+        # are writes, and need to be.
+        $stream.ReadTimeout = 750
 
         $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::ASCII)
         $requestLine = $reader.ReadLine()

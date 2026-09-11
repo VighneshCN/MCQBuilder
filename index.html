@@ -34,6 +34,12 @@
 <meta name="theme-color" content="#16202B">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="MCQ Mastery">
+<!-- iOS ignores the manifest's SVG icons for Home Screen web apps, and
+     apple-touch-icon has never accepted anything but a raster image, so
+     without this line Add to Home Screen falls back to a screenshot of
+     the page. Rendered from the same SVG the manifest uses (the rail's
+     tick mark), at 180x180 — see ARCHITECTURE.md's icon note. -->
+<link rel="apple-touch-icon" href="data:image/png;base64,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">
 <style>
 @font-face{
   font-family:'Sora Var';font-style:normal;font-weight:400 800;font-display:swap;
@@ -1510,7 +1516,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.38', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.39', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -15822,11 +15828,15 @@ ROUTES.backup = async (root) => {
 
   const tb = h('tbody');
   BACKUP_STORES.forEach(s => tb.appendChild(h('tr', {}, [h('td', { class: 'small', text: s }), h('td', { class: 'num right', text: String(counts[s]) })])));
+  const sAdv = storageAdvice({ usage: usage && usage.usage, quota: usage && usage.quota, images: counts.images });
   root.appendChild(h('div', { class: 'card', style: 'margin-top:16px' }, [
     h('div', { class: 'card-h' }, [h('h3', { text: 'Local storage' }), h('div', { class: 'spacer' }),
       h('span', { class: 'small dim', text: usage ? bytes(usage.usage || 0) + ' used of about ' + bytes(usage.quota || 0) + ' available' : 'Usage not reported by this browser' })]),
     h('div', { class: 'card-b' }, [
-      usage && usage.quota && (usage.usage / usage.quota) > 0.7 ? h('div', { class: 'notice warn', style: 'margin-bottom:10px' }, 'Storage is over 70% full, largely because of stored images. Lower the image size limit in Settings, or take a backup and clear old image records.') : null,
+      sAdv ? h('div', { class: 'notice warn', style: 'margin-bottom:10px' }, [
+        h('div', {}, [h('b', { text: sAdv.headline })]),
+        h('ul', { class: 'small', style: 'margin:8px 0 0 18px;padding:0' }, sAdv.fixes.map(f => h('li', { text: f })))
+      ]) : null,
       h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, [h('th', { text: 'Store' }), h('th', { class: 'right', text: 'Records' })])), tb]))
     ])
   ]));
@@ -18742,6 +18752,37 @@ function durabilityAdvice(o) {
     note: i.supported
       ? 'Browsers are allowed to clear storage they have made no promise about — to free space, or on some phones simply after a few weeks without opening the app.'
       : 'Browsers are allowed to clear storage they have made no promise about, and this one offers no way to ask.'
+  };
+}
+
+// The threshold Backup & Restore's storage notice speaks at.
+const STORAGE_WARN_RATIO = 0.7;
+
+/** What Backup & Restore says about local storage filling up, or null when
+    there is nothing worth saying. Pure, so the wording can be asserted.
+    navigator.storage.estimate() reports two whole-origin numbers; nothing
+    anywhere actually measures which store within that origin is
+    responsible. The offline shell cache (index.html itself, and once
+    fetched, the OCR engine's largest vendor files) shares this same quota
+    and is invisible to the per-store counts table above it — so the
+    wording reports what is actually known (usage is high) and offers
+    remedies without naming a cause it has not measured. `images` is the
+    store's own record count, already computed for that table; when it is
+    zero, the image-specific fixes below are skipped rather than shown
+    over a table that visibly contradicts them. */
+function storageAdvice(o) {
+  const i = o || {};
+  if (!i.usage || !i.quota || (i.usage / i.quota) <= STORAGE_WARN_RATIO) return null;
+  const fixes = [];
+  if (i.images) {
+    fixes.push('Turn off "Keep a copy of the source image" in Settings → Images and OCR — useful provenance, but it is what fills up local storage fastest.');
+    fixes.push('Or lower the image size limit there.');
+  }
+  fixes.push('The offline copy of the app (Settings → Offline) shares this same storage, and can be switched off if you do not need the app to open without a connection.');
+  return {
+    tone: 'warn',
+    headline: 'Storage is over ' + Math.round(STORAGE_WARN_RATIO * 100) + '% full.',
+    fixes
   };
 }
 
@@ -25857,6 +25898,62 @@ test('Re-importing the same file refreshes its source’s title/author/type/note
     State.invalidate();
   }
 });
+test('admitBatch() writes exactly what deriveEntryStatus says: verified+classified is active, verified-but-unfiled still practises, an unconfirmed answer is demoted', async () => {
+  const cid = 'test-admit-status-' + Date.now();
+  const course = makeCourse('ASR', 'Admit status rules course', [{ id: 'D1', name: 'One', weight: 100 }], { id: cid });
+  const was = { course: State.course, courses: State.courses, staging: State.staging };
+  const realShowRec = globalThis.showReconciliation, realGo = globalThis.go;
+  globalThis.showReconciliation = () => { };
+  globalThis.go = () => { };
+  const batchId = uuid();
+  const batch = { id: batchId, courseId: cid, startedAt: nowISO(), label: 'Status rules batch', sourceIds: [], report: null };
+
+  // 1. Verified answer, filed under a domain — a clean admit.
+  const clean = mkQ('A verified, classified question?', ['a', 'b'], 0, { courseId: cid, domainId: 'D1', status: 'draft', answerVerified: 'verified', batchId });
+  // 2. Verified answer, no domain — the regression the hand-rolled ladder
+  //    that used to live in admitBatch had no branch for: this must land
+  //    needs_class (practice:true), not draft (practice:false).
+  const noDomain = mkQ('A verified but unclassified question?', ['a', 'b'], 0, { courseId: cid, domainId: null, status: 'draft', answerVerified: 'verified', batchId });
+  // 3. A correctOptionId is set (the staging row's answer radio does this,
+  //    moving needs_answer to needs_class when there is no domain) but the
+  //    answer itself was never actually verified — the one boundary every
+  //    import crosses must still demote this to needs_answer.
+  const unverified = mkQ('A picked-but-unverified answer?', ['a', 'b'], 0, { courseId: cid, domainId: 'D1', status: 'needs_class', answerVerified: 'unverified', batchId });
+
+  const items = [clean, noDomain, unverified].map(q => ({ q, dup: null, decision: 'import' }));
+  State.staging = { batch, meta: { title: 'Status rules batch' }, items, unresolved: [], sources: [], rejected: [], caseStudies: [] };
+  try {
+    await DB.put('courses', course);
+    State.course = course; State.courses = [course];
+    await admitBatch();
+
+    const freshClean = await DB.get('questions', clean.uuid);
+    eq(freshClean.status, 'active', 'verified + classified is a clean admit');
+    assert(isPracticeEligible(freshClean), 'and reaches practice');
+
+    const freshNoDomain = await DB.get('questions', noDomain.uuid);
+    eq(freshNoDomain.status, 'needs_class', 'verified but unfiled must not be silently promoted to active');
+    assert(isPracticeEligible(freshNoDomain), 'but an unfiled question still practises perfectly well');
+
+    const freshUnverified = await DB.get('questions', unverified.uuid);
+    eq(freshUnverified.status, 'needs_answer', 'an unconfirmed answer must be demoted, not left as merely unfiled');
+    assert(!isPracticeEligible(freshUnverified), 'and held out of practice until the answer is confirmed');
+
+    const batchRow = await DB.get('batches', batchId);
+    const report = batchRow.report;
+    eq(report.imported, 1, 'only the fully clean admit counts as "imported" in the report');
+    eq(report.drafts, 2, 'the other two both count as drafts in the report, even though one of them still practises');
+    eq(report.accounted, report.detected, 'every candidate must be accounted for');
+    assert(report.balanced, 'and the report must say so');
+  } finally {
+    globalThis.showReconciliation = realShowRec; globalThis.go = realGo;
+    State.course = was.course; State.courses = was.courses; State.staging = was.staging;
+    for (const q of await DB.byIndex('questions', 'batchId', batchId)) await DB.del('questions', q.uuid);
+    await DB.del('batches', batchId);
+    await DB.del('courses', cid);
+    await DB.del('idRegister', cid);
+  }
+});
 test('Answer disagreement never lowers a reworded pair below the duplicate threshold', async () => {
   const opts = ['Segregation of duties', 'Log review', 'Annual recertification', 'Change control minutes'];
   const a = mkQ('Which of the following controls BEST prevents unauthorised changes from reaching production?', opts, 0, { domainId: 'd1' });
@@ -31689,6 +31786,15 @@ test('The offline shell can tell this app from whatever else is on this port', (
   eq(('<title>' + document.title).indexOf(SHELL_MARK), 0, 'the document title still begins the way sw.js expects');
   assert(document.title.length > 11, 'and the marker is a prefix of a real title, not the whole of it');
 });
+test('The Home Screen icon iOS actually reads is still in the head', () => {
+  // Safari takes neither of the manifest's SVG icons for Add to Home
+  // Screen, and apple-touch-icon has never accepted anything but a raster
+  // image — this guards against the line quietly being dropped or
+  // reordered out of the head, not against its pixels being wrong.
+  const link = document.querySelector('link[rel="apple-touch-icon"]');
+  assert(link, 'an apple-touch-icon link must be present');
+  assert(/^data:image\/png;base64,/.test(link.getAttribute('href') || ''), 'and it must be an inlined PNG, not a file reference or an SVG');
+});
 
 test('Offline "Ready" is only ever said when the shell is really cached', () => {
   return (async () => {
@@ -34567,6 +34673,14 @@ test('browserIsOnlyCopy() does not call a folder merely awaiting reconnection "n
     assert(!browserIsOnlyCopy(), 'a folder merely awaiting reconnection is not "nowhere else" — the file still holds it');
     FileStore.connected = true; FileStore.needsReconnect = false;
     assert(!browserIsOnlyCopy(), 'and an actually-connected folder obviously is not either');
+    if (savedDrive) {
+      // A bank on Google Drive is not "nowhere else" either — no FOLDER was
+      // ever connected (everConnected stays false), but the boot toast that
+      // reads !everConnected on its own used to say so anyway.
+      FileStore.connected = false; FileStore.everConnected = false; FileStore.needsReconnect = false;
+      DriveSync.configured = true;
+      assert(!browserIsOnlyCopy(), 'nor is a bank that lives on Google Drive, even with no folder ever connected');
+    }
   } finally {
     FileStore.connected = was.connected; FileStore.everConnected = was.everConnected; FileStore.needsReconnect = was.needsReconnect;
     if (savedDrive) DriveSync.configured = savedDrive.configured;
@@ -34718,6 +34832,21 @@ test('A granted promise is not oversold', () => {
   eq(g.fixes.length, 0, 'nothing left to ask of them');
   // The thing persistence does NOT protect against, said in the same breath.
   assert(/[Cc]learing your browsing data/.test(g.note), g.note);
+});
+test('The storage warning never blames images it has not counted, and never asserts a cause it never measured', () => {
+  eq(storageAdvice(null), null, 'must never throw on nothing');
+  eq(storageAdvice({ usage: 50, quota: 100, images: 5 }), null, 'silent at exactly half');
+  eq(storageAdvice({ usage: 70, quota: 100, images: 5 }), null, 'and still silent at exactly the threshold — a plain > test, not >=');
+  eq(storageAdvice({ usage: null, quota: 100, images: 5 }), null, 'no usage reported means nothing to say');
+  eq(storageAdvice({ usage: 80, quota: 0, images: 5 }), null, 'a zero quota must not divide into a false positive');
+  const withImages = storageAdvice({ usage: 80, quota: 100, images: 5 });
+  assert(withImages, 'past the threshold it must speak');
+  eq(withImages.tone, 'warn');
+  assert(withImages.fixes.some(f => /image/i.test(f)), 'with real image records, an image-specific fix is offered: ' + JSON.stringify(withImages.fixes));
+  const noImages = storageAdvice({ usage: 80, quota: 100, images: 0 });
+  assert(noImages, 'still speaks — the browser really is over 70% full');
+  assert(!noImages.fixes.some(f => /image/i.test(f)), 'but must not blame images when the bank holds none: ' + JSON.stringify(noImages.fixes));
+  assert(noImages.fixes.length, 'and must still offer at least one real, existing remedy');
 });
 
 test('A course-only backup carries nothing filed under another course', async () => {
@@ -35064,8 +35193,26 @@ async function boot() {
     toast('Something didn’t save: ' + (r.message || r.name) + '. If this keeps happening, back up from Settings and reload the app.', 'bad', 9000);
   });
 
-  if (FileStore.tier !== 'manual' && !FileStore.everConnected) {
-    setTimeout(() => toast('Your bank currently lives only in this browser. Connect a folder to keep it in a file you own.', 'warn', 9000), 1500);
+  // !FileStore.everConnected is true for every user who has never connected
+  // a FOLDER — including one whose bank is already safe on Google Drive.
+  // browserIsOnlyCopy() is the shared predicate the risk strip and
+  // ensureDurableStorage() already agree on; used here too so a Drive user
+  // is never told their bank is browser-only and then told the opposite two
+  // clicks later on Backup & Restore. Evaluated inside the timeout, not
+  // above it: DriveSync.init() (called a few lines up, deliberately not
+  // awaited so Google's servers never block boot) sets configured only
+  // after its own IndexedDB reads land, and this 1500ms delay is exactly
+  // what gives them time to. Guarded on a real question existing, matching
+  // browserOnlyRisk()'s own "nothing to lose yet" rule — a brand-new empty
+  // install is the one moment there truly is nothing at stake.
+  if (FileStore.tier !== 'manual') {
+    setTimeout(async () => {
+      if (!browserIsOnlyCopy()) return;
+      let n = 0;
+      try { n = await DB.count('questions'); } catch (e) { return; }
+      if (!n) return;
+      toast('Your bank currently lives only in this browser. Connect a folder to keep it in a file you own.', 'warn', 9000);
+    }, 1500);
   }
 
   // global shortcuts
