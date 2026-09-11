@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.46', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.47', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -7698,14 +7698,45 @@ const ROUTES = {};
 // always meant anyway.
 let _goQueue = Promise.resolve();
 function go(view, arg) {
-  const run = _goQueue.then(() => _goRun(view, arg));
+  const run = _goQueue.then(() => _goRun(view, arg, false));
   // A rejection must not wedge every later navigation waiting behind it —
   // _goRun already catches a route's own errors, so this only guards against
   // something unexpected in the housekeeping around it.
   _goQueue = run.catch(() => {});
   return run;
 }
-async function _goRun(view, arg) {
+// The popstate handler's own entry into the same queue, below — never called
+// directly by anything else. Kept separate from go() rather than a hidden
+// third parameter there, so nothing among go()'s ~120 ordinary call sites can
+// ever pass fromPop by accident.
+function goFromHistory(view) {
+  const run = _goQueue.then(() => _goRun(view, undefined, true));
+  _goQueue = run.catch(() => {});
+  return run;
+}
+/** Whether a navigation should push a new history entry, replace the current
+    one, or touch history at all. Pure, so the whole rule is testable without
+    a real history object:
+     - one arriving from popstate never writes back — the browser already
+       moved the position itself; writing here would push a duplicate of
+       what the user just went back to, or fight a forward navigation.
+     - the very first navigation ever made (almost always boot's own
+       go('dashboard')) replaces the entry the page already has instead of
+       pushing a new one — without a seeded base entry, the first Back a
+       person presses has nowhere of this app's own to land on and exits it.
+     - a same-view call — the "repaint" idiom used throughout this file
+       (go(State.view), an automatic re-render after a Drive/folder sync) —
+       touches neither: it is not a navigation, and a periodic sync timer
+       must never grow the back stack on its own. */
+function navHistoryAction(prevView, nextView, seeded, fromPop) {
+  if (fromPop) return 'none';
+  if (!seeded) return 'replace';
+  if (prevView === nextView) return 'none';
+  return 'push';
+}
+// Set the moment navHistoryAction is first acted on — see its comment.
+let _navSeeded = false;
+async function _goRun(view, arg, fromPop) {
   // Every route below assumes a selected course. On a brand-new install (or
   // right after the only course is removed) there isn't one yet, so every
   // destination is redirected to the same "add your first course" screen
@@ -7732,10 +7763,27 @@ async function _goRun(view, arg) {
     // freeze for free while "away".
     if (State.runnerStop) {
       const left = await State.runnerStop();
-      if (!left) return;
+      if (!left) {
+        // A Back gesture already moved the browser's own position before
+        // this ever ran — runSession() sets State.view straight to 'runner'
+        // with no entry of its own to pop back to, so Back lands here, on
+        // whatever came before it. Declining to leave must put a marker
+        // back, or the NEXT Back silently exits mid-exam instead of asking
+        // again.
+        if (fromPop) { try { history.pushState({ v: State.view }, '', location.pathname + location.search + location.hash); } catch (e) { } }
+        return;
+      }
     }
   }
+  const prevView = State.view;
   State.view = view;
+  const navAction = navHistoryAction(prevView, view, _navSeeded, fromPop);
+  if (navAction !== 'none') {
+    _navSeeded = true;
+    try {
+      history[navAction === 'replace' ? 'replaceState' : 'pushState']({ v: view }, '', location.pathname + location.search + location.hash);
+    } catch (e) { /* pushState can be rate-limited or refused in some contexts; navigation itself must never depend on it working */ }
+  }
   $$('.nav-item').forEach(b => b.setAttribute('aria-current', b.dataset.view === view ? 'page' : 'false'));
   closeMobileNav();
   const target = $('#view');
@@ -32618,6 +32666,32 @@ test('Finishing a session twice at once runs one commit loop, not two', async ()
   }
 });
 
+test('A navigation writes history only for a genuine view change, from a click or a Back gesture alike', () => {
+  eq(navHistoryAction('dashboard', 'bank', true, false), 'push', 'an ordinary navigation pushes once a base entry is seeded');
+  eq(navHistoryAction('bank', 'bank', true, false), 'none', 'go(State.view) — the repaint idiom used throughout this file for an automatic re-render — must never grow the back stack');
+  eq(navHistoryAction('dashboard', 'bank', false, false), 'replace', 'the very first navigation ever made seeds a base entry instead of pushing on top of nothing — without it the first Back exits the app');
+  eq(navHistoryAction('dashboard', 'anything', true, true), 'none', 'one arriving from popstate never writes back — the browser already moved the position itself');
+  eq(navHistoryAction('dashboard', 'anything', false, true), 'none', 'not even to seed — a Back gesture never gets to be the one that establishes the base entry');
+});
+test('The router writes history only after the leave-guard can no longer refuse the navigation', () => {
+  const src = _goRun.toString();
+  const guardIdx = src.indexOf('State.runnerStop()');
+  const writeIdx = src.indexOf('navHistoryAction(prevView');
+  assert(guardIdx > 0 && writeIdx > guardIdx,
+    'a mock in progress can still decline to leave; writing history before that point would desync it from State.view');
+});
+test('Declining to leave after a Back gesture puts a history marker back instead of leaving it consumed', () => {
+  const src = _goRun.toString();
+  assert(/if \(fromPop\)[\s\S]{0,40}history\.pushState\(\{ v: State\.view \}/.test(src),
+    'runSession() sets State.view straight to \'runner\' with no history entry of its own, so a Back gesture already moved the browser position before landing here — declining must push a marker back, or the next Back silently exits mid-exam');
+});
+test('A history-API failure can never take real navigation down with it', () => {
+  const src = _goRun.toString();
+  const writeSite = src.indexOf('navAction !== ');
+  assert(writeSite > 0 && /catch/.test(src.slice(writeSite, writeSite + 300)),
+    'pushState/replaceState can throw (rate limits, sandboxing) and must be caught, not left to reject every later navigation queued behind it');
+});
+
 test('A second runSession() on the session already being run is a no-op', async () => {
   const saved = { s: State.session, v: State.view, r: State.runnerStop };
   const ghost = { id: 'test-run-twice', status: 'active', mode: 'mock', questionUuids: [], responses: {}, flags: {} };
@@ -35708,6 +35782,17 @@ async function boot() {
       e.preventDefault();
       e.returnValue = '';
     }
+  });
+  // A Back gesture — the Android back button above all, but also a trackpad
+  // swipe, Alt+Left, or the browser's own button — used to leave this app
+  // entirely on its very first press, because nothing here ever touched
+  // history. One listener for the whole app: it restores whatever view was
+  // current the moment THIS app itself wrote the entry being returned to.
+  // No state at all — arriving from outside this session's own history, a
+  // bookmark or a shared link — falls back to the dashboard, same as
+  // everywhere else State.view is read with no course selected yet.
+  window.addEventListener('popstate', (e) => {
+    goFromHistory((e.state && e.state.v) || 'dashboard');
   });
   document.addEventListener('visibilitychange', () => {
     // Neither call is forced: flushNow() already respects snapshotDue() and

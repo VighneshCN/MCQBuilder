@@ -397,6 +397,31 @@ and inlined as its own `data:` URI on an `apple-touch-icon` link in
 `index.html`'s head — still no PNG *file*, so the single-file property above
 holds.
 
+The router integrates with the browser's own history, so the Android back
+button, a trackpad swipe, or Alt+Left move backward through screens instead of
+leaving the app outright — installed as a standalone PWA, there is no address
+bar to reach otherwise. `_goRun()` writes one entry per genuine navigation,
+never for the "repaint" idiom used throughout this file (`go(State.view)`
+after a Drive/folder sync, an automatic re-render — same view in, same view
+out), and never for a navigation arriving from `popstate` itself, which the
+browser has already moved the position for. The very first navigation ever
+made — boot's own `go('dashboard')` — replaces the entry the page already has
+rather than pushing on top of nothing, seeding a base a person can land on;
+without it the first Back press would exit the app immediately. The one
+sharp edge: `runSession()` sets `State.view` to `'runner'` directly, with no
+history entry of its own (a live paper cannot be an entry a Back gesture is
+allowed to simply discard), so a Back gesture during a mock lands on
+whatever came before it and re-runs the exact same leave-guard the runner's
+own Exit/Pause button uses; declining pushes a fresh marker back rather than
+leaving the position consumed, so the next Back asks again instead of
+silently exiting mid-exam. The decision of push/replace/neither is the pure
+`navHistoryAction()`, kept separate from the `history.pushState()` calls
+themselves precisely so it can be tested without a real `history` object.
+Deliberately out of scope: closing a modal on Back. That would need pushing
+a sentinel entry per dialog open — a much larger change touching every
+`for(;;)`-looping editor — for a gesture Escape and the backdrop click
+already handle.
+
 `DriveSync` keeps two separate ideas apart. `connected` means a live OAuth token
 exists right now; `configured` means this browser's bank lives on Drive. The
 second survives a reload and is true on a train — the first is false for the

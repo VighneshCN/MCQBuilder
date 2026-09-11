@@ -531,6 +531,23 @@ Automated tests cannot verify rendering or real browser storage.
       and its storage bar/buttons are not hidden under either, and toasts in
       portrait sit above the home indicator, not behind it
 
+### Back navigation
+
+- [ ] Installed as a standalone app on Android: visit a few screens (Bank,
+      Analytics, Settings), then press the system Back button repeatedly —
+      each press steps to the previous screen; only after unwinding back to
+      the first one does Back exit the app
+- [ ] Same on desktop Chrome/Edge with Alt+Left, and with a trackpad swipe on
+      a browser that supports it
+- [ ] Clicking the same nav item twice, or leaving a screen idle while a
+      Drive/folder sync repaints it in the background, does not add extra
+      steps to Back — one press still goes to the actual previous screen
+- [ ] Start a timed mock, then press Back: the same "Pause the exam?"
+      confirm the Exit button gives appears. Choose to stay, then press Back
+      again — the same confirm appears again, never a silent exit
+- [ ] Reload the page mid-session, then press Back: still lands one screen
+      back, not outside the app on the very first press
+
 ### Drive when the token goes
 
 - [ ] On an iPhone: connect Drive, practise, lock the phone for a minute, come
