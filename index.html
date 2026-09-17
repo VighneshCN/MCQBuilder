@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.50', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.51', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -8006,7 +8006,26 @@ ROUTES.dashboard = async (root) => {
         h('p', { class: 'muted small', style: 'margin:0', text: rec.d })
       ]),
       rec.alt ? h('button', { class: 'btn', onclick: rec.alt.run, text: rec.alt.label }) : null,
-      h('button', { class: 'btn primary', onclick: () => go(rec.go, rec.mode), text: rec.a })
+      h('button', {
+        class: 'btn primary',
+        // The recommendation for a due queue IS the queue — skip the configure
+        // dialog and go straight to question 1 rather than making someone
+        // reconfirm a mode the button already named (roadmap #9c). Every other
+        // recommendation still opens its dialog, since those need a choice
+        // (which unseen questions, which mock length) the dashboard cannot
+        // make for them.
+        onclick: rec.mode !== 'spaced' ? () => go(rec.go, rec.mode) : async () => {
+          // configureMode enforces this same gate at its one shared entry point
+          // (D17) — reached here too, since this path skips that entry point.
+          const live = await Session.resumeLatest(State.course.id);
+          if (live) { toast('Resume or discard your unfinished ' + modeOf(live.mode).label.toLowerCase() + ' session first.', 'warn', 4200); go('practice'); return; }
+          try {
+            const s = await Session.create('spaced', { filters: { due: true }, count: Math.min(due.length, 40) });
+            runSession(s);
+          } catch (e) { toast(e.message, 'bad', 5200); go('practice'); }
+        },
+        text: rec.a
+      })
     ])
   ]));
 
@@ -12767,8 +12786,42 @@ async function sourceDialog(files) {
   tmpl.addEventListener('change', () => { tmplDesc.textContent = (PARSE_TEMPLATES.find(t => t.id === tmpl.value) || {}).desc || ''; });
   // Remembered per course, not recreated unchecked on every file — importing
   // a trusted publisher's bank one file at a time otherwise meant re-ticking
-  // this on every single import (D15).
-  const trust = h('input', { type: 'checkbox', checked: !!Settings.get('sourceTrustDefault'), onchange: async (e) => { await Settings.set('sourceTrustDefault', e.target.checked); } });
+  // this on every single import (D15). Until this course has a remembered
+  // choice at all, open it from what this batch actually detected instead of
+  // a blanket off: every candidate needs a confidently printed answer, not
+  // merely an inferred one (roadmap #9b).
+  const savedTrustKey = courseKey('sourceTrustDefault', State.course.id);
+  const hasSavedTrust = Settings.cache[savedTrustKey] !== undefined;
+  let trustTouched = false;
+  const trustHint = h('span', { class: 'dim tiny' });
+  function previewTrustDefault() {
+    let total = 0, highConf = 0;
+    for (const f of files) {
+      try {
+        let out;
+        if (f.kind === 'rows') out = rowsToCandidates(f.rows);
+        else if (f.kind === 'json') out = jsonToCandidates(f.json);
+        else out = parseText(f.text, { template: tmpl.value });
+        (out.candidates || []).forEach(c => { total++; if (c.conf && c.conf.answer >= 0.8) highConf++; });
+      } catch (e) { /* best-effort preview only — a file that fails here still gets a real attempt at "Extract questions" */ }
+    }
+    return { total, highConf };
+  }
+  function refreshTrustDefault() {
+    if (hasSavedTrust || trustTouched) return;
+    const { total, highConf } = previewTrustDefault();
+    trust.checked = total > 0 && highConf === total;
+    trustHint.textContent = total
+      ? (trust.checked ? ' — every detected answer looks confidently printed, so this opens ticked'
+        : ' — ' + (total - highConf) + ' of ' + total + ' detected answers had to be inferred, so this opens off')
+      : '';
+  }
+  const trust = h('input', {
+    type: 'checkbox', checked: hasSavedTrust && !!Settings.get('sourceTrustDefault'),
+    onchange: async (e) => { trustTouched = true; trustHint.textContent = ''; await Settings.set('sourceTrustDefault', e.target.checked); }
+  });
+  refreshTrustDefault();
+  tmpl.addEventListener('change', refreshTrustDefault);
   const notes = h('textarea', { style: 'min-height:50px', placeholder: 'Copyright or usage note, edition, anything worth recording' });
 
   // Escape/✕ close exactly like Cancel despite sticky, same gap as every
@@ -12799,7 +12852,7 @@ async function sourceDialog(files) {
         h('div', { class: 'field' }, [h('label', { text: 'Official domain for this batch' }), dom])
       ]),
       h('div', { class: 'field' }, [h('label', { text: 'Notes' }), notes]),
-      h('label', { class: 'check' }, [trust, h('span', {}, ['Treat an answer printed in the source as verified ', h('span', { class: 'dim tiny', text: '— leave off if you want to check each answer yourself' })])]),
+      h('label', { class: 'check' }, [trust, h('span', {}, ['Treat an answer printed in the source as verified ', h('span', { class: 'dim tiny', text: '— leave off if you want to check each answer yourself' }), trustHint])]),
       h('div', { class: 'card' }, [h('div', { class: 'card-b tight small muted' }, files.map(f => h('div', { class: 'row' }, [
         h('span', { class: 'docnum', text: f.ext }),
         h('span', { style: 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', title: f.filename, text: f.filename }),
@@ -28308,7 +28361,7 @@ test('Appearance resolves Light, Dark and Auto correctly', async () => {
 
 /* ---- the file is watched, not assumed ---- */
 test('A deleted data file is detected instead of silently recreated', async () => {
-  const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, p: FileStore.problem, t: FileStore.tier, e: FileStore.everConnected };
+  const was = { c: FileStore.connected, d: FileStore.dirHandle, s: FileStore._stamp, p: FileStore.problem, t: FileStore.tier, e: FileStore.everConnected, r: FileStore._recovering };
   try {
     FileStore.tier = 'folder';
     FileStore.everConnected = true;
@@ -28321,6 +28374,13 @@ test('A deleted data file is detected instead of silently recreated', async () =
     eq(await FileStore.verifyFile(), 'missing', 'a vanished file must be reported as missing');
 
     // And a write must refuse rather than recreate it behind the scenes.
+    // onProblem() (called inside flush()) sets connected/problem below
+    // regardless of this flag — only its OWN setTimeout(recoveryFlow, 0)
+    // scheduling is gated on it — so this must be set before the call, not
+    // after: recoveryFlow's macrotask can sit queued for many tests before
+    // firing, so restoring the flag afterwards races it instead of stopping
+    // it, and it would pop up a live dialog nothing here will ever close.
+    FileStore._recovering = true;
     FileStore.dirty = true;
     const wrote = await FileStore.flush();
     assert(wrote === false, 'writing must not proceed when the file has gone');
@@ -28331,7 +28391,7 @@ test('A deleted data file is detected instead of silently recreated', async () =
     FileStore.connected = was.c; FileStore.dirHandle = was.d;
     FileStore._stamp = was.s; FileStore.problem = was.p;
     FileStore.tier = was.t; FileStore.everConnected = was.e;
-    FileStore.needsReconnect = false; FileStore.dirty = false;
+    FileStore.needsReconnect = false; FileStore.dirty = false; FileStore._recovering = was.r;
   }
 });
 
@@ -28396,7 +28456,14 @@ test('A file deleted while the app was closed is not resurrected on next launch'
     const res = await FileStore.loadFromDisk();
     eq(res, 'missing', 'the loader should report the file as missing');
 
-    // This is the boot decision that used to recreate it silently.
+    // This is the boot decision that used to recreate it silently. Marked
+    // as already recovering FIRST: onProblem() still sets connected/problem
+    // below regardless, but this stops it from also scheduling its own
+    // setTimeout(recoveryFlow, 0) — that macrotask can sit queued for many
+    // tests before it gets a turn to run, so suppressing it only after the
+    // call races that later firing instead of preventing it, and it would
+    // pop up a live dialog nothing here will ever close.
+    FileStore._recovering = true;
     await FileStore.onProblem('missing');
     assert(!created, 'a vanished file must not be written back into the folder unasked');
     assert(FileStore.isReadOnly(), 'the app must be read-only, not quietly saving again');
@@ -28430,6 +28497,15 @@ test('A zero-byte data file is reported as empty, not as gone (B124)', async () 
     eq(FileStore.problem, 'empty', 'not folded into "missing" — the storage bar and Settings both key off this');
     assert(/is empty \(0 bytes\)/.test(toastMsg || ''), 'the toast must say the file is empty, not that it is gone: ' + toastMsg);
     eq(FileStore.status().key, 'empty');
+    // onProblem() also scheduled its own recoveryFlow via setTimeout(0) — the
+    // toast above needed _recovering false to fire, so unlike the sibling
+    // tests this cannot be pre-empted; instead, wait for that one deferred
+    // call to actually land (it always beats a real timer queued after it)
+    // and close the dialog it opens, rather than leaving it for whatever
+    // later test happens to be running when it finally gets a turn.
+    await new Promise(r => setTimeout(r, 20));
+    $$('.modal').forEach(m => { if (m._close) m._close(null); });
+    FileStore._recovering = false;
   } finally {
     globalThis.toast = realToast;
     FileStore.connected = was.c; FileStore.dirHandle = was.d; FileStore._stamp = was.s;
@@ -29802,6 +29878,66 @@ test('Spaced mode opens with the count field set to how much is actually due, no
   } finally {
     for (const q of qs) await DB.del('questions', q.uuid);
     State.course = prevCourse; State.courses = prevCourses; State.invalidate();
+  }
+});
+
+test('The dashboard\'s "Start due review" button skips the configure dialog and starts practice immediately (roadmap #9c)', async () => {
+  const prevCourse = State.course, prevCourses = State.courses, prevSession = State.session, prevRunnerStop = State.runnerStop, prevView = State.view;
+  const cid = 'test-due-shortcut-' + Date.now();
+  State.course = { id: cid, code: 'TDS', name: 'Due shortcut test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  const qs = Array.from({ length: 3 }, (_, i) => mkQ('due shortcut q' + i, ['a', 'b'], 0,
+    { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified', nextReviewAt: addDays(-1) }));
+  for (const q of qs) await DB.put('questions', q);
+  const findBtn = (root) => Array.prototype.slice.call(root.querySelectorAll('button')).find(b => b.textContent === 'Start due review');
+  const waitFor = async (pred, tries) => { for (let i = 0; i < (tries || 50) && !pred(); i++) await new Promise(r => setTimeout(r, 10)); return pred(); };
+  try {
+    State.invalidate();
+    const root = h('div');
+    await ROUTES.dashboard(root);
+    const btn = findBtn(root);
+    assert(btn, 'the recommended-next button must read "Start due review" when questions are due');
+    btn.click();
+    await waitFor(() => !!(State.session && State.session.status === 'active'));
+    assert(!$$('.modal').length, 'no configure dialog must appear — the recommendation IS the session');
+    assert(State.session && State.session.mode === 'spaced', 'a spaced session must already be running');
+    eq(State.session.questionUuids.length, 3, 'every due question must be in the session, since only 3 are due');
+    const sid = State.session.id;
+    await State.runnerStop();
+    await DB.del('sessions', sid);
+  } finally {
+    for (const q of qs) await DB.del('questions', q.uuid);
+    State.course = prevCourse; State.courses = prevCourses; State.session = prevSession; State.runnerStop = prevRunnerStop; State.view = prevView;
+    State.invalidate();
+  }
+});
+
+test('The dashboard\'s "Start due review" button still refuses a second session over an unfinished one (roadmap #9c)', async () => {
+  const prevCourse = State.course, prevCourses = State.courses;
+  const cid = 'test-due-shortcut-gate-' + Date.now();
+  State.course = { id: cid, code: 'TDG', name: 'Due shortcut gate test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  const qs = Array.from({ length: 3 }, (_, i) => mkQ('due gate q' + i, ['a', 'b'], 0,
+    { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified', nextReviewAt: addDays(-1) }));
+  for (const q of qs) await DB.put('questions', q);
+  const live = { id: 'sess-due-gate-' + Date.now(), courseId: cid, mode: 'mock', responses: {}, flags: {}, optionOrders: {}, questionUuids: [], status: 'active', startedAt: nowISO() };
+  await DB.put('sessions', live);
+  const findBtn = (root) => Array.prototype.slice.call(root.querySelectorAll('button')).find(b => b.textContent === 'Start due review');
+  try {
+    State.invalidate();
+    const root = h('div');
+    await ROUTES.dashboard(root);
+    const btn = findBtn(root);
+    assert(btn, 'the recommended-next button must read "Start due review" when questions are due');
+    btn.click();
+    await new Promise(r => setTimeout(r, 40));
+    assert(!$$('.modal').length, 'no configure dialog opens over an unfinished session either');
+    eq((await DB.byIndex('sessions', 'courseId', cid)).filter(x => x.status === 'active').length, 1, 'still exactly one active session for the course');
+  } finally {
+    await DB.del('sessions', live.id);
+    for (const q of qs) await DB.del('questions', q.uuid);
+    State.course = prevCourse; State.courses = prevCourses;
+    State.invalidate();
   }
 });
 
@@ -32132,6 +32268,55 @@ test('sourceDialog remembers the "trust source answers" choice per course, inste
     assert(dlg, 'the source dialog must open a second time');
     assert(dlg.querySelector('input[type=checkbox]').checked,
       'a trusted source must not have to be re-ticked on every single file');
+    if (dlg && dlg._close) dlg._close(null);
+    await opened;
+  } finally {
+    const key = courseKey('sourceTrustDefault', cid);
+    await DB.del('settings', key).catch(() => {});
+    delete Settings.cache[key];
+    State.course = prevCourse; State.courses = prevCourses;
+  }
+});
+
+test('sourceDialog defaults the trust tick from what the batch actually detected, with no remembered choice yet (roadmap #9b)', async () => {
+  const prevCourse = State.course, prevCourses = State.courses;
+  const cid = 'test-trust-preview-' + Date.now();
+  State.course = { id: cid, code: 'TTP', name: 'Trust preview test', blueprint: [] };
+  State.courses = (State.courses || []).concat([State.course]);
+  const findModal = async () => { let dlg = null; for (let i = 0; i < 50 && !dlg; i++) { await new Promise(r => setTimeout(r, 10)); dlg = $$('.modal').pop(); } return dlg; };
+  try {
+    const confident = { filename: 'confident.txt', ext: 'txt', size: 10, kind: 'text', text: [
+      '1. Which control is preventive?', 'A) Log review', 'B) Segregation of duties', 'Answer: B',
+      '', '2. Which control is detective?', 'A) Log review', 'B) Segregation of duties', 'Answer: A'
+    ].join('\n') };
+    let opened = sourceDialog([confident]);
+    let dlg = await findModal();
+    assert(dlg, 'the source dialog must open');
+    let trustBox = dlg.querySelector('input[type=checkbox]');
+    assert(trustBox.checked, 'every detected answer was confidently printed, so this opens ticked');
+    assert(/confidently printed/.test(dlg.textContent), 'the checkbox says why it defaulted on');
+    if (dlg && dlg._close) dlg._close(null);
+    await opened;
+
+    const mixed = { filename: 'mixed.txt', ext: 'txt', size: 10, kind: 'text', text: [
+      '1. Which control is preventive?', 'A) Log review', 'B) Segregation of duties', 'Answer: B',
+      '', '2. Which control is detective?', 'A) Log review', 'B) Segregation of duties'
+    ].join('\n') };
+    opened = sourceDialog([mixed]);
+    dlg = await findModal();
+    assert(dlg, 'the source dialog must open a second time');
+    trustBox = dlg.querySelector('input[type=checkbox]');
+    assert(!trustBox.checked, 'one detected answer had to be inferred, so this opens off');
+    assert(/had to be inferred/.test(dlg.textContent), 'the checkbox says why it defaulted off');
+    if (dlg && dlg._close) dlg._close(null);
+    await opened;
+
+    // A remembered choice for this course still wins over the preview (D15).
+    await Settings.set('sourceTrustDefault', false);
+    opened = sourceDialog([confident]);
+    dlg = await findModal();
+    assert(dlg, 'the source dialog must open a third time');
+    assert(!dlg.querySelector('input[type=checkbox]').checked, 'a remembered "off" must not be overridden by a confident batch');
     if (dlg && dlg._close) dlg._close(null);
     await opened;
   } finally {
