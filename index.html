@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.53', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.54', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -9669,6 +9669,19 @@ async function runSession(s) {
   let idx = s.cursor || 0;
   let qStart = Date.now();
   let tickTimer = null;
+  // How long the CURRENT question has actually been on screen — across every
+  // visit, not just the one that ends in an answer. Recorded here rather than
+  // only on the response itself, so a question left blank (skipped, or the
+  // clock ran out) still tells its own time-on-screen story instead of
+  // vanishing from it entirely (roadmap #3b). Returns the just-elapsed delta
+  // so callers that also need "time since this view began" don't re-read the
+  // clock a moment later and drift from what was actually banked.
+  function saveTime() {
+    const delta = Math.max(0, Date.now() - qStart);
+    const uuid = s.questionUuids[idx];
+    if (uuid) { s.visitMs = s.visitMs || {}; s.visitMs[uuid] = (s.visitMs[uuid] || 0) + delta; }
+    return delta;
+  }
 
   // The ceremony runs before the clock starts, and only once per session:
   // resuming after a browser restart returns you to the desk, not the gate.
@@ -10013,7 +10026,7 @@ async function runSession(s) {
   }
 
   async function choose(q, optId) {
-    const ms = Date.now() - qStart;
+    const ms = saveTime();
     if (modeOf(s.mode).confidence) {
       const ans = await askConfidence(q, optId);
       if (ans === null) return;
@@ -10071,6 +10084,7 @@ async function runSession(s) {
   }
 
   function move(d) {
+    saveTime();
     idx = clamp(idx + d, 0, s.questionUuids.length - 1);
     s.cursor = idx; Session.save(s); render();
   }
@@ -10085,8 +10099,8 @@ async function runSession(s) {
         : 'All questions are answered' + (flagged ? ', ' + flagged + ' flagged' : '') + '. Submitting is final for this attempt.');
     if (ok) await submitMock();
   }
-  async function submitMock() { stop(); await Session.finish(s); State.session = null; State.invalidate(); showResults(s); }
-  async function finish() { stop(); await Session.finish(s); State.session = null; State.invalidate(); showResults(s); }
+  async function submitMock() { saveTime(); stop(); await Session.finish(s); State.session = null; State.invalidate(); showResults(s); }
+  async function finish() { saveTime(); stop(); await Session.finish(s); State.session = null; State.invalidate(); showResults(s); }
 
   function onKey(e) {
     if (e.target.matches('input,textarea,select') || $('.modal-bg')) return;
@@ -10334,7 +10348,14 @@ function paceSvg(cumMs, limitMs) {
 function timeCard(s, byId) {
   const items = s.questionUuids.map(u => {
     const rec = s.responses[u];
-    return rec ? { uuid: u, ms: rec.ms || 0, correct: !!rec.correct } : null;
+    // visitMs accumulates every visit to a question, so it can only ever be
+    // the more complete number — a question left, then returned to and
+    // answered, spent real time on that first look that rec.ms alone (only
+    // the moment right before the final choice) would leave out entirely
+    // (roadmap #3b).
+    if (!rec) return null;
+    const ms = Math.max(rec.ms || 0, (s.visitMs || {})[u] || 0);
+    return { uuid: u, ms, correct: !!rec.correct };
   }).filter(Boolean);
   const split = timeSplit(items);
   if (!split.timed) return null;
@@ -22250,6 +22271,17 @@ function mergeSessionRows(localRows, remoteRows) {
     if (elapsedMs) out.elapsedMs = elapsedMs;
     const lastTickAt = Math.max(mine.lastTickAt || 0, their.lastTickAt || 0);
     if (lastTickAt) out.lastTickAt = lastTickAt;
+    // Same reasoning as elapsedMs, one question at a time: each device only
+    // ever grows its own dwell-time total for a question it showed, so the
+    // higher of the two is never wrong to keep, and a plain Object.assign
+    // above would otherwise silently drop whichever side lost the
+    // terminal/newest-updatedAt tie-break's own visited-but-unanswered time.
+    const visitKeys = new Set([...Object.keys(mine.visitMs || {}), ...Object.keys(their.visitMs || {})]);
+    if (visitKeys.size) {
+      const visitMs = {};
+      visitKeys.forEach(k => { visitMs[k] = Math.max((mine.visitMs || {})[k] || 0, (their.visitMs || {})[k] || 0); });
+      out.visitMs = visitMs;
+    }
     // A Leave stamped on one device is meaningless once folded into a row
     // neither device is currently looking at — carrying it through a merge
     // would charge the next resume, on whichever device that turns out to
@@ -28880,6 +28912,15 @@ test('mergeSessionRows keeps the larger elapsed time, not just whichever row won
   const r = mergeSessionRows([laptop], [phone]);
   eq(r.rows[0].elapsedMs, 90000, 'the merge must not rewind the clock to whichever side merely answered last');
 });
+test('mergeSessionRows keeps the larger per-question dwell time from each side, not just the tie-break winner’s (roadmap #3b)', () => {
+  // Q1: only the losing side (by updatedAt) ever visited it before answering
+  // elsewhere. Q2: both visited it, laptop's total is the larger one.
+  const laptop = { id: 's8', status: 'active', updatedAt: '2026-09-01T12:00:00Z', visitMs: { q2: 9000 }, responses: {}, flags: {} };
+  const phone = { id: 's8', status: 'active', updatedAt: '2026-09-01T10:00:00Z', visitMs: { q1: 4000, q2: 3000 }, responses: {}, flags: {} };
+  const r = mergeSessionRows([laptop], [phone]);
+  eq(r.rows[0].visitMs.q1, 4000, 'the side that never visited q1 at all must not erase the other side’s time on it');
+  eq(r.rows[0].visitMs.q2, 9000, 'and the larger of the two totals on a question both visited must survive');
+});
 test('mergeSessionRows clears a stale Leave stamp so the next resume is not charged for it twice (D13)', () => {
   const withLeave = { id: 's6', status: 'active', updatedAt: '2026-09-01T12:00:00Z', leftAt: 1000000, responses: {}, flags: {} };
   const other = { id: 's6', status: 'active', updatedAt: '2026-09-01T10:00:00Z', responses: {}, flags: {} };
@@ -28892,6 +28933,7 @@ test('mergeSessionRows does not manufacture a timing key for a session neither d
   const r = mergeSessionRows([mine], [theirs]);
   eq(r.updated, 0, 'a merge of two rows with no timing fields at all must not itself add one');
   assert(!('elapsedMs' in r.rows[0]), 'no elapsedMs key should appear where neither side ever had one');
+  assert(!('visitMs' in r.rows[0]), 'nor a visitMs key, for the same reason');
 });
 test('mergeSessionRows reports no update for a session merged into a byte-identical copy', () => {
   const mine = { id: 's3', courseId: 'c', status: 'active', updatedAt: '2026-09-01T10:00:00Z',
@@ -31994,6 +32036,40 @@ test('Tapping the selected mock option again clears the answer (roadmap #3d)', a
   }
 });
 
+test('Navigating away from a question banks the time spent on it, even unanswered (roadmap #3b)', async () => {
+  const was = { course: State.course, courses: State.courses, session: State.session, view: State.view, runnerStop: State.runnerStop };
+  const cid = 'test-visitms-' + Date.now();
+  State.course = { id: cid, code: 'TVM', name: 'Visit time test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  const q1 = mkQ('visit time q1', ['a', 'b'], 0, { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified' });
+  const q2 = mkQ('visit time q2', ['a', 'b'], 0, { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified' });
+  await DB.put('questions', q1); await DB.put('questions', q2);
+  const s = {
+    id: 'sess-' + cid, courseId: cid, mode: 'learning', status: 'active',
+    questionUuids: [q1.uuid, q2.uuid], cursor: 0, responses: {}, flags: {}, optionOrders: {}, startedAt: nowISO(), elapsedMs: 0
+  };
+  try {
+    State.invalidate();
+    await runSession(s);
+    await new Promise(r => setTimeout(r, 20));
+    // Dwell on q1 without answering it, then leave — the old behaviour left
+    // no trace at all of this, since only s.responses fed the time report.
+    await new Promise(r => setTimeout(r, 40));
+    const nextBtn = Array.prototype.slice.call($('#view').querySelectorAll('button')).find(b => b.textContent === 'Next →');
+    assert(nextBtn, 'the Next button must render on the first of two questions');
+    nextBtn.click();
+    await new Promise(r => setTimeout(r, 20));
+    assert(s.visitMs && s.visitMs[q1.uuid] >= 20, 'leaving an unanswered question must still bank the time spent looking at it: ' + JSON.stringify(s.visitMs));
+    assert(!s.responses[q1.uuid], 'it must still be unanswered — this is about time, not about forcing a response');
+  } finally {
+    if (State.runnerStop) { try { await State.runnerStop(); } catch (e) { } }
+    await DB.del('sessions', s.id).catch(() => {});
+    await DB.del('questions', q1.uuid); await DB.del('questions', q2.uuid);
+    State.course = was.course; State.courses = was.courses; State.session = was.session; State.view = was.view; State.runnerStop = was.runnerStop;
+    State.invalidate();
+  }
+});
+
 test('The results screen shows why a wrong answer was wrong, not just its letter', async () => {
   const was = { course: State.course, courses: State.courses, view: State.view };
   const course = makeCourse('RRB', 'Rationale-on-results test course', CISA_BLUEPRINT, { id: 'test-course' });
@@ -32206,6 +32282,19 @@ test('Answers with no recorded time are excluded, not treated as instant', () =>
   eq(median([]), 0);
   eq(median([5]), 5);
   eq(median([1, 2, 3]), 2);
+});
+
+test('The time-per-question card counts every visit, not just the moment before the final answer (roadmap #3b)', () => {
+  const q = mkQ('Which control is preventive?', ['a', 'b'], 0);
+  const s = {
+    questionUuids: [q.uuid],
+    responses: { [q.uuid]: { selectedOptionId: q.options[0].id, correct: true, ms: 1000 } },
+    visitMs: { [q.uuid]: 5000 }
+  };
+  const card = timeCard(s, new Map([[q.uuid, q]]));
+  assert(card, 'the card must render when there is timed data');
+  assert(card.textContent.indexOf('5s across 1 answered question') >= 0,
+    'the fuller visitMs total must be what gets reported, not the smaller rec.ms alone: ' + card.textContent);
 });
 
 /* ---- calibration ---- */
