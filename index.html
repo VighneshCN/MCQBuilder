@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.57', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.58', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -10020,7 +10020,7 @@ async function runSession(s) {
     if (isMock) outer.appendChild(mockPaletteBar());
     const shell = ctx ? h('div', { class: 'case-main' }) : outer;
     if (ctx) outer.appendChild(h('div', { class: 'case-layout' }, [casePane(ctx), shell]));
-    if (!isMock) shell.appendChild(h('div', { class: 'qmeta' }, [h('span', { class: 'docnum dim', text: q.qid || '(unassigned)' })]));
+    if (!isMock) shell.appendChild(h('div', { class: 'qmeta' }, [h('a', { href: '#', class: 'docnum dim', onclick: (e) => { e.preventDefault(); openQuestion(q.uuid); }, text: q.qid || '(unassigned)' })]));
     shell.appendChild(h('div', { class: 'q-stem', text: q.stem }));
     if (q.imageId) shell.appendChild(h('div', { id: 'qimg', class: 'imgstage', style: 'margin-bottom:14px' }));
 
@@ -10068,13 +10068,11 @@ async function runSession(s) {
         h('span', { class: 'small muted', text: 'Answer: ' + letterOf(order.indexOf(q.correctOptionId)) + ' · ' + fmtDur(rec.ms) }),
         q.srReason ? h('span', { class: 'small dim', text: '· ' + q.srReason }) : null
       ]));
-      rationaleBlock(q, rec, order).forEach(n => rev.appendChild(n));
-      // The "no explanation was captured" notice above is a genuine dead end
-      // here, unlike its twin on the results screen — nothing else in this
-      // reveal offers a way to actually go add one (D17).
-      if (!q.explanation && !q.options.some(o => o.rationale)) {
-        rev.appendChild(h('button', { class: 'btn sm', style: 'margin-top:4px', onclick: () => openQuestion(q.uuid), text: 'Open question' }));
-      }
+      // The results screen (a separate, static rendering of the same data)
+      // still shows a plain warning and an "Open question" escape hatch here
+      // — this live reveal instead writes straight back to the question, so
+      // the field itself replaces both the warning and the button.
+      rationaleBlock(q, rec, order, { interactive: true }).forEach(n => rev.appendChild(n));
       // Every other option's reasoning, on request — useful on a question where
       // two distractors were both tempting, noise on one where they were not.
       const others = q.options.filter(o => o.rationale && o.id !== q.correctOptionId && o.id !== rec.selectedOptionId);
@@ -10260,16 +10258,21 @@ async function runSession(s) {
     reviewed after the fact (the results screen's Incorrect/Flagged cards).
     Returns an array of nodes for the caller to place; never a DOM subtree
     of its own, so a caller can interleave its own content between them. */
-function rationaleBlock(q, rec, order) {
+function rationaleBlock(q, rec, order, opts) {
+  const interactive = !!(opts && opts.interactive);
   const r = rec || {};
   const chosenOpt = q.options.find(o => o.id === r.selectedOptionId);
   const correctOpt = q.options.find(o => o.id === q.correctOptionId);
   const nodes = [];
-  if (chosenOpt && chosenOpt.rationale && !r.correct) {
-    nodes.push(h('div', { class: 'exp why-chosen' }, [
-      h('b', { text: 'Why ' + letterOf(order.indexOf(chosenOpt.id)) + ' is wrong. ' }),
-      chosenOpt.rationale
-    ]));
+  if (chosenOpt && !r.correct) {
+    if (chosenOpt.rationale) {
+      nodes.push(h('div', { class: 'exp why-chosen' }, [
+        h('b', { text: 'Why ' + letterOf(order.indexOf(chosenOpt.id)) + ' is wrong. ' }),
+        chosenOpt.rationale
+      ]));
+    } else if (interactive) {
+      nodes.push(optionRationaleBox(q, chosenOpt, 'Why ' + letterOf(order.indexOf(chosenOpt.id)) + ' is wrong'));
+    }
   }
   if (correctOpt && correctOpt.rationale) {
     nodes.push(h('div', { class: 'exp why-correct' }, [
@@ -10278,8 +10281,44 @@ function rationaleBlock(q, rec, order) {
     ]));
   }
   if (q.explanation) nodes.push(h('div', { class: 'exp', text: q.explanation }));
-  else if (!q.options.some(o => o.rationale)) nodes.push(h('div', { class: 'notice warn' }, 'No explanation was captured for this question. Add one from the Question Bank so future revisions are useful.'));
+  else if (!q.options.some(o => o.rationale)) nodes.push(interactive ? explanationBox(q) : h('div', { class: 'notice warn' }, 'No explanation was captured for this question. Add one from the Question Bank so future revisions are useful.'));
   return nodes;
+}
+
+/** The interactive stand-in for a missing "why is this wrong" — the same
+    slot its static rationale would occupy once someone writes one, one
+    line at a time, saved back through Questions.save like any other edit. */
+function optionRationaleBox(q, opt, label) {
+  const inp = h('input', { type: 'text', placeholder: 'Why is this one wrong? One line is enough.', value: opt.rationale || '' });
+  const save = debounce(async () => {
+    const fresh = await Questions.get(q.uuid);
+    const freshOpt = (fresh.options || []).find(o => o.id === opt.id);
+    if (!freshOpt) return;
+    freshOpt.rationale = inp.value;
+    await Questions.save(fresh, 'option rationale added at the reveal');
+    State.invalidate();
+  }, 700);
+  inp.addEventListener('input', save);
+  return h('div', { class: 'exp why-chosen field' }, [h('label', { text: label + '.' }), inp]);
+}
+
+/** learningPointBox's own debounced-textarea pattern, bound to the shared
+    q.explanation instead of the device-private learningPoint — so this one
+    goes through Questions.save (version bump, fingerprint, duplicate
+    recheck) rather than the bare DB.put a private field can get away with. */
+function explanationBox(q) {
+  const ta = h('textarea', { placeholder: 'Explain the right answer — this replaces the warning for everyone who sees this question next.', value: q.explanation || '' });
+  const save = debounce(async () => {
+    const fresh = await Questions.get(q.uuid);
+    fresh.explanation = ta.value;
+    await Questions.save(fresh, 'explanation added at the reveal');
+    State.invalidate();
+  }, 700);
+  ta.addEventListener('input', save);
+  return h('div', { class: 'field' }, [
+    h('label', { text: 'Explanation' }), ta,
+    h('div', { class: 'tiny dim', style: 'margin-top:4px', text: 'Nothing on record yet — write it here, while the question is fresh, and everyone who reviews this question will see it.' })
+  ]);
 }
 
 function learningPointBox(q) {
@@ -32056,7 +32095,7 @@ test('rationaleBlock explains the option chosen, the option that was right, or n
   assert(/No explanation was captured/.test(nothing[0].textContent), 'a question with no reasoning at all says so, rather than showing nothing');
 });
 
-test('The runner\'s own dead-end "no explanation" warning offers a way out (D17)', async () => {
+test('The runner\'s own dead-end "no explanation" warning is now a field that saves straight to the question (roadmap #10)', async () => {
   const was = { course: State.course, courses: State.courses, session: State.session, view: State.view, runnerStop: State.runnerStop };
   const cid = 'test-reveal-openq-' + Date.now();
   State.course = { id: cid, code: 'TRO2', name: 'Reveal open-question test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
@@ -32077,10 +32116,98 @@ test('The runner\'s own dead-end "no explanation" warning offers a way out (D17)
     await runSession(s);
     await new Promise(r => setTimeout(r, 20));
     const view = $('#view');
-    assert(/No explanation was captured/.test(view.textContent), 'the dead-end warning must still show, unchanged');
-    const openBtn = Array.prototype.slice.call(view.querySelectorAll('button')).find(b => b.textContent === 'Open question');
-    assert(openBtn, 'an escape hatch out of the dead end must exist right here, not only on the results screen');
+    assert(!/No explanation was captured/.test(view.textContent), 'the old dead-end warning must be gone — a field replaces it, not just sit alongside it');
+    assert(!Array.prototype.slice.call(view.querySelectorAll('button')).some(b => b.textContent === 'Open question'), 'the field is the way out now, so the old escape-hatch button must be gone too');
+    const label = Array.from(view.querySelectorAll('.reveal .field label')).find(l => l.textContent === 'Explanation');
+    assert(label, 'an "Explanation" field must stand where the warning used to be');
+    const ta = label.parentElement.querySelector('textarea');
+    assert(ta, 'the field must be a textarea, the same pattern "My learning point" already uses in this same reveal');
+
+    ta.value = 'Because it directly maps to the control objective.';
+    ta.dispatchEvent(new Event('input'));
+    await new Promise(r => setTimeout(r, 900)); // clear the field's 700ms debounce
+
+    const saved = await Questions.get(q.uuid);
+    eq(saved.explanation, 'Because it directly maps to the control objective.', 'typing into the field must save straight to the question, not just sit in the box');
+    eq(saved.version, (q.version || 1) + 1, 'a real content edit still earns a version, the same as editing it from the Question Bank would');
   } finally {
+    if (State.runnerStop) { try { await State.runnerStop(); } catch (e) { } }
+    await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses; State.session = was.session; State.view = was.view; State.runnerStop = was.runnerStop;
+    State.invalidate();
+  }
+});
+
+test('An empty "why is this wrong" slot is a field too, saved to that one option (roadmap #10)', async () => {
+  const was = { course: State.course, courses: State.courses, session: State.session, view: State.view, runnerStop: State.runnerStop };
+  const cid = 'test-reveal-rationale-' + Date.now();
+  State.course = { id: cid, code: 'TRR', name: 'Reveal rationale field test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  const q = mkQ('reveal rationale field test', ['right', 'wrong'], 0, { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified' });
+  // Already carries an explanation, so only the option-rationale slot is
+  // under test here — otherwise the missing-explanation field would also
+  // render and the two would be easy to conflate.
+  q.explanation = 'Already has an explanation on file.';
+  await DB.put('questions', q);
+  const wrongOptId = q.options[1].id;
+  const s = {
+    id: 'sess-' + cid, courseId: cid, mode: 'learning', status: 'active',
+    questionUuids: [q.uuid], cursor: 0,
+    responses: { [q.uuid]: { selectedOptionId: wrongOptId, correct: false, ms: 1000, at: nowISO() } },
+    flags: {}, optionOrders: {}, startedAt: nowISO()
+  };
+  try {
+    State.invalidate();
+    await runSession(s);
+    await new Promise(r => setTimeout(r, 20));
+    const view = $('#view');
+    const label = Array.from(view.querySelectorAll('.reveal .field label')).find(l => /^Why B is wrong/.test(l.textContent));
+    assert(label, 'a field must stand in the "why the chosen option is wrong" slot when that option has no rationale yet');
+    const inp = label.parentElement.querySelector('input');
+    assert(inp, 'the option-rationale field is a one-line input, not a full textarea');
+
+    inp.value = 'It is a detective control, not a preventive one.';
+    inp.dispatchEvent(new Event('input'));
+    await new Promise(r => setTimeout(r, 900));
+
+    const saved = await Questions.get(q.uuid);
+    const savedOpt = saved.options.find(o => o.id === wrongOptId);
+    eq(savedOpt.rationale, 'It is a detective control, not a preventive one.', 'typing into the field must save to that specific option, not the question at large');
+  } finally {
+    if (State.runnerStop) { try { await State.runnerStop(); } catch (e) { } }
+    await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses; State.session = was.session; State.view = was.view; State.runnerStop = was.runnerStop;
+    State.invalidate();
+  }
+});
+
+test('The qid shown at the reveal is a link that opens the question (roadmap #10)', async () => {
+  const was = { course: State.course, courses: State.courses, session: State.session, view: State.view, runnerStop: State.runnerStop };
+  const cid = 'test-reveal-qidlink-' + Date.now();
+  State.course = { id: cid, code: 'TQL', name: 'Reveal qid-link test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  const q = mkQ('reveal qid-link test', ['a', 'b'], 0, { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified', qid: 'TQL-001' });
+  await DB.put('questions', q);
+  const s = {
+    id: 'sess-' + cid, courseId: cid, mode: 'learning', status: 'active',
+    questionUuids: [q.uuid], cursor: 0, responses: {}, flags: {}, optionOrders: {}, startedAt: nowISO()
+  };
+  let dlg = null;
+  try {
+    State.invalidate();
+    await runSession(s);
+    await new Promise(r => setTimeout(r, 20));
+    const view = $('#view');
+    const link = view.querySelector('.qmeta a.docnum');
+    assert(link, 'the qid must render as a link now, not a plain span');
+    eq(link.textContent, 'TQL-001');
+    link.click();
+    for (let i = 0; i < 100 && !dlg; i++) { await new Promise(r => setTimeout(r, 10)); dlg = $$('.modal').pop(); }
+    assert(dlg, 'clicking the qid must open the question editor, the same as the old "Open question" button did');
+  } finally {
+    // openQuestion's editor stays open until dismissed — close it here so it
+    // does not linger for whatever test runs next.
+    if (dlg) { const x = dlg.querySelector('[aria-label="Close"]'); if (x) { x.click(); await new Promise(r => setTimeout(r, 20)); } }
     if (State.runnerStop) { try { await State.runnerStop(); } catch (e) { } }
     await DB.del('questions', q.uuid);
     State.course = was.course; State.courses = was.courses; State.session = was.session; State.view = was.view; State.runnerStop = was.runnerStop;
