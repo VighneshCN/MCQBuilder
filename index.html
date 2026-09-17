@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.51', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.52', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -12737,10 +12737,17 @@ async function loadSuppliedBank(entry) {
   let parsed;
   try { parsed = await readFile(file); }
   catch (e) { await modal({ title: 'Could not read that file', body: h('div', { class: 'notice bad', text: e.message }) }); return; }
+  // Trusted by default, the way every starter bank always has been \u2014 but a
+  // manifest entry can carry trustAnswers: false for a source shakier than
+  // the rest, the same per-entry override defaultDomainId already gets
+  // (roadmap #9e).
+  const trust = entry.trustAnswers !== false;
   await runParse([parsed], {
     title: entry.label || entry.file, author: '', type: 'Question bank', srcModule: '', srcChapter: '',
-    defaultDomainId: entry.defaultDomainId || null, template: 'auto', trustSourceAnswers: true,
-    notes: 'Supplied with the app, from your own source documents. Answers are marked verified because your source stated them, not because they were independently fact-checked \u2014 spot-check anything that looks off.'
+    defaultDomainId: entry.defaultDomainId || null, template: 'auto', trustSourceAnswers: trust,
+    notes: trust
+      ? 'Supplied with the app, from your own source documents. Answers are marked verified because your source stated them, not because they were independently fact-checked \u2014 spot-check anything that looks off.'
+      : 'Supplied with the app, from your own source documents. This source is flagged as less reliable, so answers are filed for verification rather than trusted automatically.'
   });
 }
 
@@ -32324,6 +32331,40 @@ test('sourceDialog defaults the trust tick from what the batch actually detected
     await DB.del('settings', key).catch(() => {});
     delete Settings.cache[key];
     State.course = prevCourse; State.courses = prevCourses;
+  }
+});
+
+test('A starter-index entry can flag its answers as untrusted via trustAnswers: false (roadmap #9e)', async () => {
+  const prevCourse = State.course, prevCourses = State.courses, prevStaging = State.staging;
+  const cid = 'test-starter-trust-' + Date.now();
+  State.course = { id: cid, code: 'TST', name: 'Starter trust test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  const realFetch = globalThis.fetch;
+  const bankJson = JSON.stringify({ questions: [{ stem: 'Which control is preventive?', options: ['Log review', 'Segregation of duties'], answer: 'B' }] });
+  globalThis.fetch = async () => ({ ok: true, blob: async () => new Blob([bankJson], { type: 'application/json' }) });
+  try {
+    State.invalidate();
+    await loadSuppliedBank({ file: 'fake-starter-untrusted.json', label: 'Untrusted starter bank', trustAnswers: false });
+    // runParse() ends with a fire-and-forget go('import') it never awaits —
+    // settle before touching State.course again, or that pending navigation
+    // resumes against whatever this test (or the next one) has left it as.
+    await new Promise(r => setTimeout(r, 30));
+    assert(State.staging && State.staging.items.length === 1, 'the batch must be staged');
+    const untrusted = State.staging.items[0].q;
+    assert(untrusted.answerVerified !== 'verified', 'trustAnswers: false must not mark the answer verified');
+    eq(untrusted.status, 'needs_answer', 'so it is filed for verification, not treated as ready');
+    State.staging = null;
+
+    await loadSuppliedBank({ file: 'fake-starter-trusted.json', label: 'Trusted starter bank' });
+    await new Promise(r => setTimeout(r, 30));
+    assert(State.staging && State.staging.items.length === 1, 'the second batch must be staged too');
+    const trusted = State.staging.items[0].q;
+    eq(trusted.answerVerified, 'verified', 'omitting trustAnswers must keep the existing trusted-by-default behaviour');
+  } finally {
+    globalThis.fetch = realFetch;
+    State.staging = prevStaging;
+    State.course = prevCourse; State.courses = prevCourses;
+    State.invalidate();
   }
 });
 
