@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.56', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.57', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -8602,6 +8602,63 @@ function mockTrendCard(mocks, byId) {
         move === 0 ? 'Flat across these ' + pts.length + ' mocks, at ' + Math.round(last) + '%.'
           : move > 0 ? 'Up ' + move + ' points across these ' + pts.length + ' mocks, now ' + Math.round(last) + '%.'
             : 'Down ' + Math.abs(move) + ' points across these ' + pts.length + ' mocks, now ' + Math.round(last) + '%.')
+    ])
+  ]);
+}
+
+/** First-ever attempts grouped into rolling 7-day windows from the earliest
+    one in view — real weeks of practice, not calendar weeks, so a bank
+    someone opened on a Wednesday still gets an honest first bucket. Weeks
+    with nothing in them are left out rather than plotted as a gap or a zero,
+    the same way mockTrendCard only ever plots sittings that happened. */
+function weeklyFirstAttemptTrend(firstArr) {
+  const withTs = (firstArr || []).filter(a => a && a.ts).slice().sort((a, b) => a.ts < b.ts ? -1 : 1);
+  if (!withTs.length) return [];
+  const startKey = todayKey(withTs[0].ts);
+  const buckets = new Map();
+  withTs.forEach(a => {
+    const idx = Math.floor(Math.max(0, daysBetweenKeys(startKey, todayKey(a.ts))) / 7);
+    const b = buckets.get(idx) || { correct: 0, total: 0 };
+    b.total++; if (a.correct) b.correct++;
+    buckets.set(idx, b);
+  });
+  const maxIdx = Math.max(...buckets.keys());
+  const weeks = [];
+  for (let i = 0; i <= maxIdx; i++) {
+    const b = buckets.get(i);
+    if (b) weeks.push({ pct: (b.correct / b.total) * 100, total: b.total });
+  }
+  return weeks;
+}
+/** Reuses mockTrendCard's own SVG idiom (roadmap #7): same layout, same
+    idea — first-attempt accuracy plotted week by week instead of mock by
+    mock, so honest coverage of what somebody actually knew gets the same
+    trend line their mock scores already do. */
+function firstAttemptTrendCard(firstArr) {
+  const weeks = weeklyFirstAttemptTrend(firstArr);
+  if (weeks.length < 2) return null;
+  const W = 620, H = 150, PADL = 34, PADB = 22, PADT = 12;
+  const x = (i) => PADL + i * (W - PADL - 8) / (weeks.length - 1);
+  const y = (p) => PADT + (100 - clamp(p, 0, 100)) * (H - PADT - PADB) / 100;
+  const line = weeks.map((w, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(w.pct).toFixed(1)).join(' ');
+  const svg =
+    '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="First-attempt accuracy across ' + weeks.length + ' weeks of practice" style="width:100%;height:auto">' +
+    [0, 50, 100].map(g =>
+      '<line x1="' + PADL + '" y1="' + y(g).toFixed(1) + '" x2="' + (W - 8) + '" y2="' + y(g).toFixed(1) + '" stroke="currentColor" stroke-opacity=".12"/>' +
+      '<text x="' + (PADL - 6) + '" y="' + (y(g) + 3.5).toFixed(1) + '" text-anchor="end" font-size="9" fill="currentColor" fill-opacity=".5">' + g + '%</text>').join('') +
+    '<path d="' + line + '" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linejoin="round"/>' +
+    weeks.map((w, i) => '<circle cx="' + x(i).toFixed(1) + '" cy="' + y(w.pct).toFixed(1) + '" r="3.5" fill="var(--pencil)"><title>Week ' + (i + 1) + ' — ' + Math.round(w.pct) + '% of ' + w.total + '</title></circle>').join('') +
+    '</svg>';
+  const last = weeks[weeks.length - 1].pct, first = weeks[0].pct;
+  const move = Math.round(last - first);
+  return h('div', { class: 'card', style: 'margin-top:16px' }, [
+    h('div', { class: 'card-h' }, [h('h3', { text: 'First-attempt accuracy by week' })]),
+    h('div', { class: 'card-b stack' }, [
+      h('div', { html: svg, style: 'color:var(--txt-2)' }),
+      h('div', { class: 'small muted', style: 'margin:0' },
+        move === 0 ? 'Flat across these ' + weeks.length + ' weeks, at ' + Math.round(last) + '%.'
+          : move > 0 ? 'Up ' + move + ' points across these ' + weeks.length + ' weeks, now ' + Math.round(last) + '%.'
+            : 'Down ' + Math.abs(move) + ' points across these ' + weeks.length + ' weeks, now ' + Math.round(last) + '%.')
     ])
   ]);
 }
@@ -15677,10 +15734,18 @@ ROUTES.analytics = async (root) => {
   t('Overall accuracy', pct(attempts.filter(a => a.correct).length, attempts.length), 'Every attempt, including repeats');
   t('Recent accuracy', pct(recent.filter(a => a.correct).length, recent.length), 'Last ' + recent.length + ' attempts' +
     (prior.length >= 30 ? ' · was ' + pct(prior.filter(a => a.correct).length, prior.length) + ' over the ' + prior.length + ' before' : ''));
-  t('Mastered', pct(mastered, active.length), mastered + ' of ' + active.length + ' active questions' + (bothBanks ? ' across both banks' : '') + (AnaState.days ? ' (all time)' : ''));
+  t('Mastered', pct(mastered, active.length),
+    // Zero mastered with real practice behind it is not "nothing to report" —
+    // it is the same retention gate masteryOf() reports per question, just
+    // never said out loud at the tile level until now (roadmap #7).
+    (mastered === 0 && attempts.length)
+      ? 'Needs a second correct answer after a gap — nothing has cleared retention yet'
+      : mastered + ' of ' + active.length + ' active questions' + (bothBanks ? ' across both banks' : '') + (AnaState.days ? ' (all time)' : ''));
   root.appendChild(tiles);
   root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:16px' },
     'Coverage is separate from accuracy: you have seen ' + seen + ' of ' + active.length + ' active questions' + (bothBanks ? ' across both banks' : '') + (AnaState.days ? ' in the last ' + AnaState.days + ' days' : '') + ' (' + pct(seen, active.length) + '). Repeating the same questions raises accuracy but not coverage.'));
+  const trendCard = firstAttemptTrendCard(firstArr);
+  if (trendCard) root.appendChild(trendCard);
 
   const tabs = h('div', { class: 'btn-group', style: 'margin-bottom:14px' });
   [['domain', 'Domain'], ['topic', 'Topic'], ['module', 'Source module'], ['source', 'Source'], ['difficulty', 'Difficulty'], ['mistake', 'Mistake'], ['mode', 'Mode'], ['time', 'Time'], ['confidence', 'Confidence']]
@@ -32384,6 +32449,49 @@ test('The time-per-question card counts every visit, not just the moment before 
   assert(card, 'the card must render when there is timed data');
   assert(card.textContent.indexOf('5s across 1 answered question') >= 0,
     'the fuller visitMs total must be what gets reported, not the smaller rec.ms alone: ' + card.textContent);
+});
+
+test('Weekly first-attempt accuracy buckets by real practice weeks, skipping gaps rather than plotting zeros (roadmap #7)', () => {
+  const firstArr = [
+    { ts: '2026-01-01T00:00:00.000Z', correct: true },
+    { ts: '2026-01-02T00:00:00.000Z', correct: false },
+    { ts: '2026-01-10T00:00:00.000Z', correct: true },
+    { ts: '2026-01-11T00:00:00.000Z', correct: true },
+    { ts: '2026-01-25T00:00:00.000Z', correct: false }
+  ];
+  const weeks = weeklyFirstAttemptTrend(firstArr);
+  eq(weeks.length, 3, 'the empty week between must be skipped, not plotted as a gap or a zero');
+  eq(weeks[0].pct, 50); eq(weeks[0].total, 2);
+  eq(weeks[1].pct, 100); eq(weeks[1].total, 2);
+  eq(weeks[2].pct, 0); eq(weeks[2].total, 1);
+  eq(weeklyFirstAttemptTrend([]).length, 0, 'no history draws nothing');
+
+  const card = firstAttemptTrendCard(firstArr);
+  assert(card, 'three real weeks is enough to plot a trend');
+  assert(/Down 50 points across these 3 weeks, now 0%/.test(card.textContent), 'the trend sentence must compare the first plotted week to the last: ' + card.textContent);
+  assert(!firstAttemptTrendCard([{ ts: '2026-01-01T00:00:00.000Z', correct: true }]), 'a single week of history is not a trend');
+});
+
+test('The Mastered tile explains a zero instead of just reporting one, once there is real practice behind it (roadmap #7)', async () => {
+  const was = { course: State.course, courses: State.courses, days: AnaState.days };
+  const cid = 'test-mastered-sub-' + Date.now();
+  const q = mkQ('mastered sub-line test', ['a', 'b'], 0, { courseId: cid, status: 'active', answerVerified: 'verified' });
+  try {
+    State.course = { id: cid, code: 'TMS', name: 'Mastered sub-line test', blueprint: [] };
+    State.courses = [State.course];
+    await DB.put('questions', q);
+    await DB.put('attempts', { id: 'att-tms-1', questionUuid: q.uuid, courseId: cid, correct: false, ts: nowISO() });
+    AnaState.days = 0;
+    const root = h('div');
+    await ROUTES.analytics(root);
+    const tile = Array.prototype.slice.call(root.querySelectorAll('.tile')).find(t => t.textContent.indexOf('Mastered') >= 0);
+    assert(tile, 'the Mastered tile must render');
+    assert(tile.textContent.indexOf('Needs a second correct answer after a gap') >= 0,
+      'zero mastered with real attempts behind it must explain why, not just repeat the 0: ' + tile.textContent);
+  } finally {
+    await DB.del('attempts', 'att-tms-1'); await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses; AnaState.days = was.days;
+  }
 });
 
 /* ---- calibration ---- */
