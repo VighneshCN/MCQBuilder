@@ -9,8 +9,10 @@ at runtime. Nothing leaves your machine unless you switch on one of two
 off-by-default options yourself: Google Drive sync (your own account, one file)
 or external OCR (an API of your choosing, with your own key).
 
-Ships with two courses configured — **CISA** and **DISA AT** — and no questions.
-You import your own.
+Nothing is preloaded — no courses, no questions. **Add a course** offers
+**CISA** and **DISA AT** as one-click starting points, blueprint and mock
+defaults already filled in, or a blank form for any other exam. You import
+your own questions either way.
 
 ---
 
