@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.55', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.56', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -5749,7 +5749,7 @@ function masteryOf(q, attempts) {
     hold, "n days from now" gives two devices two different review dates for
     an identical history, which is exactly the disagreement the rebuild exists
     to end. Dated from the answer, the replay is a pure function of the log. */
-function scheduleNext(correct, confidence, srStage, cfg, from) {
+function scheduleNext(correct, confidence, srStage, cfg, from, examDate) {
   const I = cfg || Settings.get('srIntervals');
   let days, reason, stage = srStage || 0;
   if (!correct) { days = I.wrong; stage = 0; reason = 'Incorrect → back to ' + days + ' day'; }
@@ -5769,7 +5769,21 @@ function scheduleNext(correct, confidence, srStage, cfg, from) {
     days = stage <= 1 ? I.highConf : (ladder[Math.min(stage - 1, ladder.length - 1)]);
     reason = 'Confident and correct → extended to ' + days + ' days';
   }
-  return { days, stage, at: addDays(days, from), reason };
+  let at = addDays(days, from);
+  // A short interval landing just past the exam is really landing right
+  // before it — clamping those would squeeze an already-tight review into
+  // nothing. Only the intervals long enough to plausibly overshoot a real
+  // exam date get pulled back, and only to the day before it, never onto it.
+  if (examDate && days > 3) {
+    const examLocal = dateKeyToLocal(examDate);
+    if (examLocal && todayKey(at) > examDate) {
+      const clamped = new Date(examLocal);
+      clamped.setDate(clamped.getDate() - 1);
+      at = clamped.toISOString();
+      reason += ' — pulled forward to land before the exam';
+    }
+  }
+  return { days, stage, at, reason };
 }
 
 /** Apply an attempt to the question's rolling statistics. */
@@ -5786,7 +5800,7 @@ function applyAttempt(q, att) {
   // The question's own course decides the ladder, not whichever course
   // happens to be open — a merge replays questions from every course.
   const sch = scheduleNext(att.correct, att.confidence, q.srStage,
-    Settings.get('srIntervals', q.courseId), att.ts);
+    Settings.get('srIntervals', q.courseId), att.ts, Settings.get('examDate', q.courseId));
   q.srStage = sch.stage; q.nextReviewAt = sch.at; q.srReason = sch.reason;
   // Answering changes the record — mastery, streak, the date it next falls
   // due — so it is an edit, and the merge decides which of two devices holds
@@ -27860,6 +27874,40 @@ test('Spaced repetition intervals follow the stated ladder', () => {
   eq(scheduleNext(true, 'knew', 1, cfg).days, 30);
   eq(scheduleNext(true, 'knew', 2, cfg).days, 60);
   eq(scheduleNext(true, 'knew', 3, cfg).days, 90);
+});
+test('A review that would otherwise fall after the exam is pulled back to the day before it (roadmap #12)', () => {
+  const cfg = { wrong: 1, guessed: 1, lowConf: 3, medConf: 7, highConf: 14, ladder: [14, 30, 60, 90] };
+  const from = '2026-01-01T00:00:00.000Z';
+  // A 14-day interval would land on the 15th; the exam is on the 10th.
+  const overshoot = scheduleNext(true, 'knew', 0, cfg, from, '2026-01-10');
+  eq(todayKey(overshoot.at), '2026-01-09', 'pulled back to the day before the exam, never onto it');
+  assert(/pulled forward/.test(overshoot.reason), 'and the reason says so');
+
+  // A 3-day interval also lands past an exam this close, but 3 is not a long
+  // enough interval to be worth squeezing — the roadmap's own days > 3 guard.
+  const shortOne = scheduleNext(true, 'unsure', 0, cfg, from, '2026-01-01');
+  eq(todayKey(shortOne.at), '2026-01-04', 'a short interval is left alone even when it overshoots');
+  assert(!/pulled forward/.test(shortOne.reason));
+
+  // An exam far enough away that the interval never gets close: untouched.
+  const roomy = scheduleNext(true, 'knew', 0, cfg, from, '2026-06-01');
+  eq(todayKey(roomy.at), '2026-01-15', 'no exam pressure, no clamp');
+  assert(!/pulled forward/.test(roomy.reason));
+});
+test('applyAttempt actually reads the course’s own exam date for the clamp, not just scheduleNext in isolation (roadmap #12)', async () => {
+  const cid = 'test-examclamp-' + Date.now();
+  const q = mkQ('exam clamp test', ['a', 'b'], 0, { courseId: cid });
+  q.updatedAt = '2020-01-01T00:00:00.000Z';
+  await Settings.set('examDate', '2026-01-10', cid);
+  try {
+    applyAttempt(q, { correct: true, confidence: 'knew', ms: 1000, ts: '2026-01-01T00:00:00.000Z' });
+    eq(todayKey(q.nextReviewAt), '2026-01-09', 'the course-scoped exam date must reach the clamp through applyAttempt');
+    assert(/pulled forward/.test(q.srReason), 'and the reason shown in the UI must say why');
+  } finally {
+    const key = courseKey('examDate', cid);
+    await DB.del('settings', key).catch(() => {});
+    delete Settings.cache[key];
+  }
 });
 test('A reasoned or unsure answer must not inflate the stage a following "knew" builds on', () => {
   const cfg = { wrong: 1, guessed: 1, lowConf: 3, medConf: 7, highConf: 14, ladder: [14, 30, 60, 90] };
