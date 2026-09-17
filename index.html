@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.52', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.53', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -7017,6 +7017,15 @@ const Session = {
     const hist = await attemptsOf(fresh);
     fresh.stats.mastery = masteryOf(fresh, hist).score;
     fresh.flagged = !!s.flags[q.uuid] || fresh.flagged;
+    // "Source answer may be doubtful" was, until now, a chip with nowhere to
+    // land: picking it recorded the mistake but changed nothing else, so a
+    // wrong answer key just kept being drilled as if it were fine. The same
+    // doubtful state a merge disagreement already sets — filterable in the
+    // bank and held out of practice until someone re-verifies it (roadmap #6).
+    if (att.mistake === 'source_doubt') {
+      fresh.answerVerified = 'doubtful';
+      fresh.verifyNote = 'Flagged during practice: the source answer may be wrong';
+    }
     await DB.put('questions', fresh);
     State.invalidate();
     return att;
@@ -17331,6 +17340,19 @@ async function integrityChecks() {
   push('orphanCase', 'A case-study question whose case study is gone', all.filter(q => q.caseStudyId && !caseIds.has(q.caseStudyId)).map(q => q.qid || q.uuid.slice(0, 8)), 'Already cleared by this check — running it again confirms the link stays gone.');
   const casesWithQs = new Set(all.filter(q => q.caseStudyId && q.status !== 'rejected' && q.status !== 'merged').map(q => q.caseStudyId));
   push('emptyCase', 'A case study with no questions', cases.filter(c => !casesWithQs.has(c.id)).map(c => (c.csid || c.id.slice(0, 8)) + ' — ' + (c.title || 'untitled')), 'Harmless, but it can never be practised. Add questions to it from Case Studies, or delete it.');
+  // Nobody has flagged these as doubtful, but the evidence is already there:
+  // three or more tries, every single one wrong, and not scattered across
+  // options either — most of them the same one. That converges on the marked
+  // key being the mistake, not the students (roadmap #6).
+  const attemptsByQ = new Map();
+  attempts.forEach(a => { if (!attemptsByQ.has(a.questionUuid)) attemptsByQ.set(a.questionUuid, []); attemptsByQ.get(a.questionUuid).push(a); });
+  const maybeWrong = all.filter(q => {
+    const qAtt = attemptsByQ.get(q.uuid);
+    if (!qAtt || qAtt.length < 3 || qAtt.some(a => a.correct)) return false;
+    return !!distractorProfile(qAtt, q).dominant;
+  }).map(q => q.qid || q.uuid.slice(0, 8));
+  push('possibleWrongAnswer', 'Answer may be wrong — every attempt missed it, mostly the same way', maybeWrong,
+    'Three or more attempts, none correct, converging on one option rather than spread across all of them — the marked key itself may be the mistake. Tag it "Source answer may be doubtful" next time it comes up in practice to hold it for review, or open it and check the source directly.');
   return issues;
 }
 
@@ -30085,6 +30107,25 @@ test('A mock attempt keeps the version that was answered, not the version at sub
   }
 });
 
+test('Tagging a mistake "Source answer may be doubtful" actually marks the answer doubtful (roadmap #6)', async () => {
+  const cid = 'test-source-doubt-' + Date.now();
+  const q = mkQ('Which is the correct control?', ['a', 'b', 'c', 'd'], 0, { courseId: cid, status: 'active', answerVerified: 'verified' });
+  await DB.put('questions', q);
+  const s = { id: 'sess-' + Date.now(), courseId: cid, mode: 'learning', responses: {}, flags: {}, optionOrders: {}, questionUuids: [q.uuid], status: 'active' };
+  await DB.put('sessions', s);
+  try {
+    const rec = { selectedOptionId: q.options[1].id, correct: false, ms: 500, confidence: null, mistake: 'source_doubt', at: nowISO(), qVersion: q.version, marks: 1 };
+    await Session.commit(s, q, rec);
+    const fresh = await Questions.get(q.uuid);
+    eq(fresh.answerVerified, 'doubtful', 'the chip must do more than log the mistake category');
+    assert(fresh.verifyNote, 'and say why, the same way every other doubtful record does');
+    assert(!isPracticeEligible(fresh), 'so it stops being drilled as a settled answer until someone checks it');
+  } finally {
+    for (const a of await DB.byIndex('attempts', 'sessionId', s.id)) await DB.del('attempts', a.id);
+    await DB.del('questions', q.uuid); await DB.del('sessions', s.id);
+  }
+});
+
 async function runSelfTests() {
   const body = h('div', { class: 'stack' });
   const summary = h('div', { class: 'notice' }, 'Running…');
@@ -31465,6 +31506,41 @@ test('Links to a source or case study that are gone are reported, then cleared u
     assert(!issues.find(i => i.key === 'orphanSource'), 'and the report no longer lists the source issue');
     assert(!issues.find(i => i.key === 'orphanCase'), 'nor the case-study one');
   } finally { await DB.del('questions', q.uuid); }
+});
+
+test('Three or more consistently wrong attempts flag a question as possibly wrong (roadmap #6)', async () => {
+  const mk = (qid) => {
+    const q = mkActive('Which control is preventive, ' + qid + '?', ['Log review', 'Segregation of duties', 'Reconciliation', 'Audit trail'], 1);
+    q.qid = qid;
+    return q;
+  };
+  const flagged = mk('ZZW-Q-000001'), tooFew = mk('ZZW-Q-000002'), hasCorrect = mk('ZZW-Q-000003'), scattered = mk('ZZW-Q-000004');
+  const qs = [flagged, tooFew, hasCorrect, scattered];
+  const attRows = [];
+  let nextId = Date.now();
+  const addAtt = (q, optIdx, correct) => attRows.push({ id: nextId++, questionUuid: q.uuid, qid: q.qid, selectedOptionId: q.options[optIdx].id, correct, ts: nowISO() });
+  // 3 wrong, 2 of them on the same option ("Log review") — a dominant pattern.
+  addAtt(flagged, 0, false); addAtt(flagged, 0, false); addAtt(flagged, 2, false);
+  // Same pattern, but only 2 attempts — not enough evidence yet.
+  addAtt(tooFew, 0, false); addAtt(tooFew, 0, false);
+  // 3 attempts, but one of them got it right.
+  addAtt(hasCorrect, 0, false); addAtt(hasCorrect, 0, false); addAtt(hasCorrect, 1, true);
+  // 3 wrong, spread one each across three different options — no dominant one.
+  addAtt(scattered, 0, false); addAtt(scattered, 2, false); addAtt(scattered, 3, false);
+  for (const q of qs) await DB.put('questions', q);
+  for (const a of attRows) await DB.put('attempts', a);
+  try {
+    const issues = await integrityChecks();
+    const found = issues.find(i => i.key === 'possibleWrongAnswer');
+    assert(found, 'the check must exist at all');
+    assert(found.items.indexOf('ZZW-Q-000001') >= 0, '3 wrong attempts converging on one option must be flagged: ' + JSON.stringify(found.items));
+    assert(found.items.indexOf('ZZW-Q-000002') < 0, 'fewer than 3 attempts must not be enough evidence');
+    assert(found.items.indexOf('ZZW-Q-000003') < 0, 'a question answered correctly even once must not be flagged');
+    assert(found.items.indexOf('ZZW-Q-000004') < 0, 'misses spread evenly across options is not a pattern');
+  } finally {
+    for (const q of qs) await DB.del('questions', q.uuid);
+    for (const a of attRows) await DB.del('attempts', a.id);
+  }
 });
 
 test('A question whose scenario has gone still reaches the printed bank', async () => {
