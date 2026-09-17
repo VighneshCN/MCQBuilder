@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.59', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.60', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -10057,52 +10057,16 @@ async function runSession(s) {
         const line = repeatMissLine(prior, q, !!rec.correct);
         if (line) recall.appendChild(h('div', { class: 'notice ' + line.tone + ' small', style: 'margin:0 0 4px' }, line.text));
       })();
-      rev.appendChild(h('div', { class: 'row' }, [
-        h('span', { class: 'badge ' + (rec.correct ? 'b-active' : 'b-conflict'), text: rec.correct ? '✓ Correct' : '✕ Incorrect' }),
+      // Everything below is shared with the post-mock walkthrough
+      // (revealPanel, showResults) — this is the one place it is built
+      // interactively, live, with the mistake chips a finished mock has no
+      // record to react against (roadmap #2).
+      revealPanel(q, rec, order, {
+        interactive: true,
+        onMistake: classifyMistake,
         // Why this one is on the shortlist, in a last-mile session only.
-        (s.lastMile && s.lastMile.reasons && s.lastMile.reasons[q.uuid])
-          ? h('span', {
-            class: 'badge b-review', title: 'Why this question is in your last-mile list',
-            text: (LASTMILE_REASONS.find(r => r[0] === s.lastMile.reasons[q.uuid]) || [, 'On your list'])[1]
-          }) : null,
-        h('span', { class: 'small muted', text: 'Answer: ' + letterOf(order.indexOf(q.correctOptionId)) + ' · ' + fmtDur(rec.ms) }),
-        q.srReason ? h('span', { class: 'small dim', text: '· ' + q.srReason }) : null
-      ]));
-      // What went wrong, picked right here instead of in a second dialog —
-      // chips, like learningPointBox below, not a modal with its own Save
-      // step (roadmap #4). Only a wrong answer has anything to diagnose.
-      if (!rec.correct) {
-        rev.appendChild(h('div', { class: 'field', style: 'margin-top:2px' }, [
-          h('label', { text: 'What went wrong?' }),
-          h('div', { class: 'seg' }, MISTAKES.map(([k, label]) => h('button', {
-            class: 'chip', 'aria-pressed': String(rec.mistake === k),
-            onclick: () => classifyMistake(q, k), text: label
-          })))
-        ]));
-      }
-      // The results screen (a separate, static rendering of the same data)
-      // still shows a plain warning and an "Open question" escape hatch here
-      // — this live reveal instead writes straight back to the question, so
-      // the field itself replaces both the warning and the button.
-      rationaleBlock(q, rec, order, { interactive: true }).forEach(n => rev.appendChild(n));
-      // Every other option's reasoning, on request — useful on a question where
-      // two distractors were both tempting, noise on one where they were not.
-      const others = q.options.filter(o => o.rationale && o.id !== q.correctOptionId && o.id !== rec.selectedOptionId);
-      if (others.length) {
-        const box = h('div', { class: 'stack', style: 'display:none' }, others.map(o =>
-          h('div', { class: 'exp small' }, [
-            h('b', { text: letterOf(order.indexOf(o.id)) + '. ' }), o.rationale
-          ])));
-        rev.appendChild(h('button', {
-          class: 'btn sm ghost', onclick: (e) => {
-            const on = box.style.display === 'none';
-            box.style.display = on ? 'flex' : 'none';
-            e.currentTarget.textContent = on ? 'Hide the other options' : 'Why the other options are wrong';
-          }, text: 'Why the other options are wrong'
-        }));
-        rev.appendChild(box);
-      }
-      rev.appendChild(learningPointBox(q));
+        lastMileReason: s.lastMile && s.lastMile.reasons && s.lastMile.reasons[q.uuid]
+      }).forEach(n => rev.appendChild(n));
       shell.appendChild(rev);
     }
 
@@ -10263,6 +10227,71 @@ async function runSession(s) {
   render();
 }
 
+/** Everything shown once a question is answered: the badge row, the
+    mistake chips (interactive only — a finished mock never captured a
+    confidence/mistake to react against), rationaleBlock, the other
+    options' reasoning on request, and the learning-point note. One
+    function instead of two copies that drift, reused unchanged by the
+    runner's own live reveal and the post-mock walkthrough (roadmap #2).
+    rec may be null — a mock question left blank. opts.interactive makes
+    the explanation/rationale slots the runner's own live editing fields
+    (opts.onMistake supplies the mistake-chip handler); without it,
+    everything is exactly what the results screen has always shown,
+    "Open question" included. opts.lastMileReason is the session's own
+    precomputed s.lastMile.reasons[q.uuid] — a mock never has one, and
+    this function has no reason to know Session's shape to find out.
+    Returns an array of nodes for the caller to place. */
+function revealPanel(q, rec, order, opts) {
+  const cfg = opts || {};
+  const nodes = [];
+  nodes.push(h('div', { class: 'row' }, [
+    h('span', {
+      class: 'badge ' + (!rec ? 'b-draft' : rec.correct ? 'b-active' : 'b-conflict'),
+      text: !rec ? '— Not answered' : rec.correct ? '✓ Correct' : '✕ Incorrect'
+    }),
+    cfg.lastMileReason
+      ? h('span', {
+        class: 'badge b-review', title: 'Why this question is in your last-mile list',
+        text: (LASTMILE_REASONS.find(r => r[0] === cfg.lastMileReason) || [, 'On your list'])[1]
+      }) : null,
+    h('span', { class: 'small muted', text: 'Answer: ' + letterOf(order.indexOf(q.correctOptionId)) + (rec ? ' · ' + fmtDur(rec.ms) : '') }),
+    q.srReason ? h('span', { class: 'small dim', text: '· ' + q.srReason }) : null
+  ]));
+  if (cfg.interactive && rec && !rec.correct) {
+    nodes.push(h('div', { class: 'field', style: 'margin-top:2px' }, [
+      h('label', { text: 'What went wrong?' }),
+      h('div', { class: 'seg' }, MISTAKES.map(([k, label]) => h('button', {
+        class: 'chip', 'aria-pressed': String(rec.mistake === k),
+        onclick: () => cfg.onMistake(q, k), text: label
+      })))
+    ]));
+  }
+  rationaleBlock(q, rec, order, { interactive: cfg.interactive }).forEach(n => nodes.push(n));
+  // Every other option's reasoning, on request — useful on a question where
+  // two distractors were both tempting, noise on one where they were not.
+  const chosenId = rec ? rec.selectedOptionId : null;
+  const others = q.options.filter(o => o.rationale && o.id !== q.correctOptionId && o.id !== chosenId);
+  if (others.length) {
+    const box = h('div', { class: 'stack', style: 'display:none' }, others.map(o =>
+      h('div', { class: 'exp small' }, [
+        h('b', { text: letterOf(order.indexOf(o.id)) + '. ' }), o.rationale
+      ])));
+    nodes.push(h('button', {
+      class: 'btn sm ghost', onclick: (e) => {
+        const on = box.style.display === 'none';
+        box.style.display = on ? 'flex' : 'none';
+        e.currentTarget.textContent = on ? 'Hide the other options' : 'Why the other options are wrong';
+      }, text: 'Why the other options are wrong'
+    }));
+    nodes.push(box);
+  }
+  nodes.push(learningPointBox(q));
+  if (!cfg.interactive) {
+    nodes.push(h('button', { class: 'btn sm', style: 'margin-top:6px', onclick: () => openQuestion(q.uuid), text: 'Open question' }));
+  }
+  return nodes;
+}
+
 /** Why a question came out the way it did: the rationale for the option
     actually chosen comes first, because it is the one addressed to the
     person who chose it — getting it wrong for a reason you can name is what
@@ -10271,8 +10300,8 @@ async function runSession(s) {
     the question's own explanation, or a nudge to add one if neither exists.
     rec is optional: a mock question left blank has no chosen option, so
     there is nothing to say was wrong, only what was right.
-    Shared by the runner's own reveal screen and anywhere else a question is
-    reviewed after the fact (the results screen's Incorrect/Flagged cards).
+    Shared by revealPanel — the runner's own reveal screen and the post-mock
+    walkthrough both reach this through it, never directly.
     Returns an array of nodes for the caller to place; never a DOM subtree
     of its own, so a caller can interleave its own content between them. */
 function rationaleBlock(q, rec, order, opts) {
@@ -10852,38 +10881,45 @@ async function showResults(s) {
     ]));
   }
 
-  // review list
-  const wrong = s.questionUuids.filter(u => s.responses[u] && !s.responses[u].correct);
-  const guessed = s.questionUuids.filter(u => s.responses[u] && s.responses[u].correct && s.responses[u].confidence === 'guessed');
-  // A mock lets you leave a question unanswered and move on. It scores the
-  // same as wrong, but "wrong" above requires a response to compare against
-  // the key — a blank one never appears there, or anywhere else on this
-  // screen, so there was nowhere to even see which questions these were.
-  const blank = s.questionUuids.filter(u => !s.responses[u]);
-  const flagged = s.questionUuids.filter(u => s.flags[u]);
-  const groups = [['Incorrect', wrong], ['Left blank', blank], ['Correct but guessed', guessed], ['Flagged', flagged]];
-  groups.forEach(([label, list]) => {
-    if (!list.length) return;
-    const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [h('div', { class: 'card-h' }, [h('h3', { text: label }), h('span', { class: 'badge b-draft', text: String(list.length) })])]);
-    const b = h('div', { class: 'card-b stack' });
-    list.forEach(u => {
+  // review list — everything worth a second look (wrong, blank, a correct
+  // guess, or flagged for any reason), in paper order rather than grouped by
+  // which of those it was: a wrong-and-flagged question used to print
+  // twice, once per card it qualified for, and finding question 12 meant
+  // knowing which of four cards to check first. One <details> per question
+  // instead, its own summary line saying which of those reasons applied
+  // (roadmap #2).
+  const reviewList = s.questionUuids.filter(u => {
+    const rec = s.responses[u];
+    if (!rec) return true;
+    if (!rec.correct) return true;
+    if (rec.confidence === 'guessed') return true;
+    return !!s.flags[u];
+  });
+  if (reviewList.length) {
+    const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [h('div', { class: 'card-h' }, [h('h3', { text: 'Review' }), h('span', { class: 'badge b-draft', text: String(reviewList.length) })])]);
+    const b = h('div', { class: 'card-b' });
+    reviewList.forEach(u => {
       const q = byId.get(u); if (!q) return;
       const rec = s.responses[u];
       const order = s.optionOrders[u] || q.options.map(o => o.id);
-      b.appendChild(h('div', { style: 'border-left:3px solid var(--rule);padding-left:12px' }, [
-        h('div', { class: 'row', style: 'gap:8px' }, [h('span', { class: 'docnum dim', text: q.qid }), h('span', { class: 'tiny dim', text: State.domainShort(q.domainId) })]),
-        h('div', { class: 'small', style: 'margin:4px 0 6px', text: q.stem.slice(0, 220) + (q.stem.length > 220 ? '…' : '') }),
-        rec ? h('div', { class: 'tiny' }, [
-          h('span', { style: 'color:var(--pencil)', text: rec.correct ? '' : 'You chose ' + letterOf(order.indexOf(rec.selectedOptionId)) + '. ' }),
-          h('span', { style: 'color:var(--green)', text: 'Correct: ' + letterOf(order.indexOf(q.correctOptionId)) })
-        ]) : null,
-        ...rationaleBlock(q, rec, order),
-        h('button', { class: 'btn sm', style: 'margin-top:6px', onclick: () => openQuestion(q.uuid), text: 'Open question' })
+      const status = !rec ? 'Left blank'
+        : rec.correct ? (rec.confidence === 'guessed' ? 'Correct — guessed' : 'Correct')
+        : 'You chose ' + letterOf(order.indexOf(rec.selectedOptionId)) + ' · correct is ' + letterOf(order.indexOf(q.correctOptionId));
+      const body = h('div', { class: 'stack', style: 'margin-top:10px' });
+      revealPanel(q, rec, order).forEach(n => body.appendChild(n));
+      b.appendChild(h('details', { open: !rec || !rec.correct, style: 'padding:10px 0;border-bottom:1px solid var(--rule-soft)' }, [
+        h('summary', { style: 'cursor:pointer' }, [
+          h('span', { class: 'docnum', text: 'Q' + (s.questionUuids.indexOf(u) + 1) + '. ' }),
+          q.stem.slice(0, 160) + (q.stem.length > 160 ? '…' : ''),
+          h('span', { class: 'tiny dim', style: 'margin-left:8px', text: status + (rec ? ' · ' + fmtDur(rec.ms) : '') }),
+          s.flags[u] ? h('span', { class: 'badge b-review', style: 'margin-left:6px', text: '⚑ Flagged' }) : null
+        ]),
+        body
       ]));
     });
     card.appendChild(b);
     target.appendChild(card);
-  });
+  }
   target.appendChild(h('div', { class: 'row' }, [
     h('button', { class: 'btn primary', onclick: () => go('practice'), text: 'Practise again' }),
     h('button', { class: 'btn', onclick: () => go('analytics'), text: 'Open analytics' })
@@ -32441,11 +32477,14 @@ test('The results screen shows why a wrong answer was wrong, not just its letter
     State.invalidate();
     await showResults(s);
     const view = $('#view');
-    const heading = Array.from(view.querySelectorAll('.card-h h3')).find(h3 => h3.textContent === 'Incorrect');
-    assert(heading, 'an incorrect answer must still get its own group');
+    const heading = Array.from(view.querySelectorAll('.card-h h3')).find(h3 => h3.textContent === 'Review');
+    assert(heading, 'a wrong answer must still land in the review list');
     const card = heading.closest('.card');
-    assert(card.querySelector('.exp.why-chosen'), 'the results screen must show why the chosen option was wrong, not just its letter');
-    assert(card.querySelector('.exp.why-correct'), 'and why the correct option was right');
+    const details = card.querySelector('details');
+    assert(details, 'each reviewed question is its own <details>, not a plain row');
+    assert(details.open, 'a wrong answer must default open, not need a click to see why');
+    assert(details.querySelector('.exp.why-chosen'), 'the results screen must show why the chosen option was wrong, not just its letter');
+    assert(details.querySelector('.exp.why-correct'), 'and why the correct option was right');
   } finally {
     await DB.del('questions', q.uuid);
     State.course = was.course; State.courses = was.courses; State.view = was.view;
@@ -32453,9 +32492,13 @@ test('The results screen shows why a wrong answer was wrong, not just its letter
   }
 });
 
-test('A mock question left blank gets its own group on the results screen', async () => {
+test('A mock question left blank is counted into the results screen review list, not lost (roadmap #2)', async () => {
   const was = { course: State.course, courses: State.courses, view: State.view };
   const course = makeCourse('LBK', 'Left-blank results test course', CISA_BLUEPRINT, { id: 'test-course' });
+  // right=1, blank=1 of 3: one correct (excluded from review), one wrong,
+  // one blank — the wrong and the blank one both belong in the list, a
+  // single count rather than two separate group badges that used to have
+  // to be added up by hand.
   const { s, byId } = mkPaper(3, 1, 1, 1, { passPct: 60, negativeFraction: 0, scaledScore: null });
   s.startedAt = s.endedAt = nowISO(); s.status = 'complete'; s.optionOrders = {}; s.seed = 1;
   try {
@@ -32464,12 +32507,61 @@ test('A mock question left blank gets its own group on the results screen', asyn
     State.invalidate();
     await showResults(s);
     const view = $('#view');
-    const heading = Array.from(view.querySelectorAll('.card-h h3')).find(h3 => h3.textContent === 'Left blank');
-    assert(heading, 'a "Left blank" group must appear on the results screen');
+    const heading = Array.from(view.querySelectorAll('.card-h h3')).find(h3 => h3.textContent === 'Review');
+    assert(heading, 'a "Review" list must appear on the results screen');
     const badge = heading.parentElement.querySelector('.badge');
-    eq(badge.textContent, '1', 'exactly the one blank question must be counted, not zero');
+    eq(badge.textContent, '2', 'the wrong question and the blank one must both be counted');
+    const summaries = Array.from(heading.closest('.card').querySelectorAll('summary'));
+    assert(summaries.some(sm => /Left blank/.test(sm.textContent)), 'the blank question must say so in its own summary line');
+    // revealPanel itself must not crash on a null rec, and must say so
+    // rather than falsely claiming a verdict that was never reached.
+    const blankDetails = Array.from(heading.closest('.card').querySelectorAll('details')).find(d => /Left blank/.test(d.querySelector('summary').textContent));
+    const blankBadge = blankDetails.querySelector('.badge.b-draft');
+    assert(blankBadge && blankBadge.textContent === '— Not answered', 'the reveal body itself must say "Not answered", not silently claim wrong or right');
   } finally {
     for (const q of byId.values()) await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses; State.view = was.view;
+    State.invalidate();
+  }
+});
+
+test('The results screen review list is one per question in paper order, not one card per reason (roadmap #2)', async () => {
+  const was = { course: State.course, courses: State.courses, view: State.view };
+  const course = makeCourse('PPO', 'Paper-order results test course', CISA_BLUEPRINT, { id: 'test-course' });
+  const q1 = mkQ('First — flagged and correct', ['right', 'wrong'], 0);
+  const q2 = mkQ('Second — wrong and flagged', ['right', 'wrong'], 0);
+  const s = {
+    id: 'test-paper-order-results', courseId: 'test-course', mode: 'mock', status: 'complete',
+    questionUuids: [q1.uuid, q2.uuid], optionOrders: {},
+    flags: { [q1.uuid]: true, [q2.uuid]: true },
+    responses: {
+      [q1.uuid]: { selectedOptionId: q1.correctOptionId, correct: true, confidence: null, ms: 1000, at: nowISO() },
+      [q2.uuid]: { selectedOptionId: q2.options[1].id, correct: false, ms: 1000, at: nowISO() }
+    },
+    marks: { [q1.uuid]: 1, [q2.uuid]: 1 }, startedAt: nowISO(), endedAt: nowISO(), seed: 1,
+    marking: { passPct: 60, negativeFraction: 0, scaledScore: null }
+  };
+  try {
+    State.course = course; State.courses = [course];
+    await DB.put('questions', q1); await DB.put('questions', q2);
+    State.invalidate();
+    await showResults(s);
+    const view = $('#view');
+    const heading = Array.from(view.querySelectorAll('.card-h h3')).find(h3 => h3.textContent === 'Review');
+    assert(heading, 'a "Review" list must appear');
+    const card = heading.closest('.card');
+    const badge = heading.parentElement.querySelector('.badge');
+    // Flagged-and-correct is one question, wrong-and-flagged is another —
+    // the old four group cards would have printed the second one twice
+    // (once under "Incorrect", once under "Flagged"). One combined list
+    // must count each question exactly once.
+    eq(badge.textContent, '2', 'a question that is both wrong and flagged must be counted once, not twice');
+    const items = Array.from(card.querySelectorAll('details'));
+    eq(items.length, 2, 'and rendered once, not twice');
+    assert(/^Q1\.\s*First/.test(items[0].querySelector('summary').textContent.replace(/\s+/g, ' ').trim()), 'the first item must be the first question in the paper, not grouped by which list it used to belong to');
+    assert(/^Q2\.\s*Second/.test(items[1].querySelector('summary').textContent.replace(/\s+/g, ' ').trim()), 'and the second item the second question');
+  } finally {
+    await DB.del('questions', q1.uuid); await DB.del('questions', q2.uuid);
     State.course = was.course; State.courses = was.courses; State.view = was.view;
     State.invalidate();
   }
