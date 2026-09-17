@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.58', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.59', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -10068,6 +10068,18 @@ async function runSession(s) {
         h('span', { class: 'small muted', text: 'Answer: ' + letterOf(order.indexOf(q.correctOptionId)) + ' · ' + fmtDur(rec.ms) }),
         q.srReason ? h('span', { class: 'small dim', text: '· ' + q.srReason }) : null
       ]));
+      // What went wrong, picked right here instead of in a second dialog —
+      // chips, like learningPointBox below, not a modal with its own Save
+      // step (roadmap #4). Only a wrong answer has anything to diagnose.
+      if (!rec.correct) {
+        rev.appendChild(h('div', { class: 'field', style: 'margin-top:2px' }, [
+          h('label', { text: 'What went wrong?' }),
+          h('div', { class: 'seg' }, MISTAKES.map(([k, label]) => h('button', {
+            class: 'chip', 'aria-pressed': String(rec.mistake === k),
+            onclick: () => classifyMistake(q, k), text: label
+          })))
+        ]));
+      }
       // The results screen (a separate, static rendering of the same data)
       // still shows a plain warning and an "Open question" escape hatch here
       // — this live reveal instead writes straight back to the question, so
@@ -10140,8 +10152,7 @@ async function runSession(s) {
     if (modeOf(s.mode).confidence) {
       const ans = await askConfidence(q, optId);
       if (ans === null) return;
-      const correct = optId === q.correctOptionId;
-      const rec = await Session.answer(s, q, optId, { ms, confidence: ans.confidence, mistake: null, difficulty: ans.difficulty });
+      await Session.answer(s, q, optId, { ms, confidence: ans.confidence, mistake: null, difficulty: ans.difficulty });
       State.invalidate();
       // One indexed read, not a walk of the whole store. Answering rewrites
       // exactly this question — its counters, its SR stage and the srReason
@@ -10151,22 +10162,11 @@ async function runSession(s) {
       // overwrite the attempt that was just committed.
       const fresh = await Questions.get(q.uuid);
       if (fresh) byId.set(q.uuid, fresh);
-      render();
-      // The mistake cause is asked only once the correct answer is actually
-      // on screen — "missed a qualifier" or "confused two concepts" can only
-      // be diagnosed against what was actually right, not recalled blind
-      // (D7). Patched onto the attempt already committed above, rather than
-      // passed into Session.answer, since it is not known yet at that point.
-      if (!correct) {
-        const mistake = await askMistake();
-        if (mistake) {
-          rec.mistake = mistake;
-          await Session.save(s);
-          const rows = await DB.byIndex('attempts', 'sessionId', s.id);
-          const att = rows.find(a => a.questionUuid === q.uuid && a.ts === rec.at);
-          if (att) { att.mistake = mistake; await DB.put('attempts', att); }
-        }
-      }
+      // A wrong answer's mistake cause is picked from chips inside the
+      // reveal itself (classifyMistake, below) once render() paints it —
+      // there is no second dialog here to await, and diagnosing a mistake
+      // still only ever happens with the correct answer already on screen
+      // (D7), since the reveal is the only place the chips exist.
     } else {
       // A mock records the response here rather than through Session.answer,
       // which does not run until submission — so it stamps the marks itself,
@@ -10190,6 +10190,23 @@ async function runSession(s) {
       }
       await Session.save(s);
     }
+    render();
+  }
+
+  /** A mistake chip's onclick, straight from the reveal — no modal, no Save
+      step. Looked up fresh by twin key (sessionId + questionUuid + ts)
+      rather than trusting a closed-over reference, since the attempt row is
+      the one Session.commit already wrote when the question was answered
+      (roadmap #4). Clicking again changes the cause; there is no separate
+      "skip", since simply not clicking any chip already means that. */
+  async function classifyMistake(q, cause) {
+    const rec = s.responses[q.uuid];
+    if (!rec) return;
+    rec.mistake = cause;
+    await Session.save(s);
+    const rows = await DB.byIndex('attempts', 'sessionId', s.id);
+    const att = rows.find(a => a.questionUuid === q.uuid && a.ts === rec.at);
+    if (att) { att.mistake = cause; await DB.put('attempts', att); }
     render();
   }
 
@@ -10382,24 +10399,31 @@ function askConfidence(q, optId) {
       h('div', { class: 'tiny dim', text: 'Saved on the question itself, so you are only asked once. It is what lets later sessions be built around a difficulty mix.' })
     ]));
   }
-  return modal({
+  const p = modal({
     title: 'How did you arrive at that?', sticky: true, body,
     // None of these is a "primary" action over the others — they are four
     // peer self-reports, not a recommended default with three alternatives —
     // so none carries kind:'primary' and none is reflexively focused (D14).
     actions: CONFIDENCE.map(c => ({ label: c.label, value: c.k }))
-  }).then(v => v === null ? null : { confidence: v, difficulty: ungraded ? askConfidence._difficulty : null });
-}
-function askMistake() {
-  return modal({
-    title: 'What went wrong?', sticky: true,
-    body: h('div', { class: 'seg' }, MISTAKES.map(([k, label]) =>
-      h('button', { class: 'chip', dataset: { k }, onclick: (e) => { e.currentTarget.closest('.modal').dataset.pick = k; $$('.chip', e.currentTarget.parentNode).forEach(c => c.setAttribute('aria-pressed', 'false')); e.currentTarget.setAttribute('aria-pressed', 'true'); }, text: label }))),
-    actions: [
-      { label: 'Skip', value: null },
-      { label: 'Save', kind: 'primary', value: '__pick', before: (body) => { const sel = body.querySelector('.chip[aria-pressed="true"]'); askMistake._v = sel ? sel.dataset.k : null; } }
-    ]
-  }).then(v => v === '__pick' ? askMistake._v : null);
+  });
+  // modal() itself only wires Escape — a numeric path for these four peer
+  // choices, in the same order as the footer buttons, needs its own
+  // listener: scoped to the exact dialog modal() just mounted (root.appendChild
+  // is synchronous, so it is already there to grab), and torn down the
+  // moment this dialog resolves so it cannot outlive it and fire against
+  // whatever opens next (roadmap #4).
+  const box = $$('.modal').pop();
+  const onKey = (e) => {
+    const i = '1234'.indexOf(e.key);
+    if (i < 0 || !box || !box.isConnected) return;
+    const btn = $$('.modal-f button', box)[i];
+    if (btn) { e.preventDefault(); btn.click(); }
+  };
+  document.addEventListener('keydown', onKey);
+  return p.then(v => {
+    document.removeEventListener('keydown', onKey);
+    return v === null ? null : { confidence: v, difficulty: ungraded ? askConfidence._difficulty : null };
+  });
 }
 
 /* ---------- results ---------- */
@@ -23078,7 +23102,7 @@ async function showMergeReport(report, title, intro) {
     choices takes one extra, deliberate step to even reach. */
 /** Resolves to the chosen side, same as before — the "skip the backup"
     checkbox's state is stashed on this function itself (the same pattern
-    askMistake already uses for its own extra pick), since every caller here
+    askConfidence already uses for its own extra pick), since every caller here
     already awaits the dialog before reading its result, so there is no risk
     of reading a stale value from a previous call. */
 async function chooseOneSideDialog(otherLabel, otherValue, otherCount, hereCount, dramaticLoss) {
@@ -32107,7 +32131,7 @@ test('The runner\'s own dead-end "no explanation" warning is now a field that sa
     id: 'sess-' + cid, courseId: cid, mode: 'learning', status: 'active',
     questionUuids: [q.uuid], cursor: 0,
     // Already answered, so the runner renders straight into its revealed
-    // state — the same one `choose()` reaches after askConfidence/askMistake.
+    // state — the same one `choose()` reaches after askConfidence.
     responses: { [q.uuid]: { selectedOptionId: q.correctOptionId, correct: true, ms: 1000, at: nowISO() } },
     flags: {}, optionOrders: {}, startedAt: nowISO()
   };
@@ -32215,7 +32239,7 @@ test('The qid shown at the reveal is a link that opens the question (roadmap #10
   }
 });
 
-test('The mistake cause is asked after the reveal, not before it (D7)', async () => {
+test('The mistake cause is chips inside the reveal, not a second dialog (D7 / roadmap #4)', async () => {
   const was = { course: State.course, courses: State.courses, session: State.session, view: State.view, runnerStop: State.runnerStop };
   const cid = 'test-mistake-after-reveal-' + Date.now();
   State.course = { id: cid, code: 'TMR', name: 'Mistake-after-reveal test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
@@ -32237,32 +32261,79 @@ test('The mistake cause is asked after the reveal, not before it (D7)', async ()
     wrongBtn.click();
 
     const confDlg = await findModal();
-    assert(confDlg && /How did you arrive/.test(confDlg.textContent), 'the confidence dialog must open first');
+    assert(confDlg && /How did you arrive/.test(confDlg.textContent), 'the confidence dialog must still open');
     const confBtn = Array.prototype.slice.call(confDlg.querySelectorAll('.modal-f button')).find(b => b.textContent === 'Guessed');
     assert(confBtn, 'a confidence option must exist');
     confBtn.click();
 
-    // The reveal must already be on screen, behind whatever opens next,
-    // before the mistake-cause dialog appears at all — not only once it,
-    // too, has been answered.
+    // The reveal, and the mistake chips inside it, must appear together —
+    // there is no second dialog left to open, waiting or otherwise.
     let revealed = false;
     for (let i = 0; i < 100 && !revealed; i++) { await new Promise(r => setTimeout(r, 10)); revealed = !!view.querySelector('.opt.correct'); }
-    assert(revealed, 'the correct answer must be shown before the mistake-cause dialog is even asked');
+    assert(revealed, 'the correct answer must be shown');
+    await new Promise(r => setTimeout(r, 30));
+    assert(!$$('.modal').length, 'no second dialog should have opened for the mistake cause');
 
-    const mistakeDlg = await findModal();
-    assert(mistakeDlg && /What went wrong/.test(mistakeDlg.textContent), 'the mistake-cause dialog must open next, on top of the reveal');
-    const concept = Array.prototype.slice.call(mistakeDlg.querySelectorAll('.chip')).find(c => c.textContent === 'Concept not known');
-    assert(concept, 'a mistake chip must exist');
+    const concept = Array.prototype.slice.call(view.querySelectorAll('.reveal .chip')).find(c => c.textContent === 'Concept not known');
+    assert(concept, 'a mistake chip must sit right in the reveal, already on screen with the correct answer');
     concept.click();
-    const saveBtn = Array.prototype.slice.call(mistakeDlg.querySelectorAll('.modal-f button')).find(b => b.textContent === 'Save');
-    assert(saveBtn, 'a Save action must exist');
-    saveBtn.click();
 
     await new Promise(r => setTimeout(r, 30));
     const rows = await DB.byIndex('attempts', 'sessionId', s.id);
     const att = rows.find(a => a.questionUuid === q.uuid);
     assert(att, 'the attempt must be logged');
-    eq(att.mistake, 'concept', 'the mistake cause picked after the reveal must still end up on the attempt record');
+    eq(att.mistake, 'concept', 'clicking the chip must still end up on the attempt record — no Save step needed');
+    // classifyMistake calls render(), which rebuilds the reveal from
+    // scratch — the pre-click `concept` reference is now a detached node,
+    // so the picked state has to be read off a freshly queried one.
+    const conceptAfter = Array.prototype.slice.call(view.querySelectorAll('.reveal .chip')).find(c => c.textContent === 'Concept not known');
+    assert(conceptAfter && conceptAfter.getAttribute('aria-pressed') === 'true', 'the picked chip must show itself as picked, after the reveal re-renders');
+  } finally {
+    if (State.runnerStop) { try { await State.runnerStop(); } catch (e) { } }
+    await DB.del('sessions', s.id).catch(() => {});
+    const rows = await DB.byIndex('attempts', 'sessionId', s.id).catch(() => []);
+    for (const a of rows) await DB.del('attempts', a.id).catch(() => {});
+    await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses; State.session = was.session; State.view = was.view; State.runnerStop = was.runnerStop;
+    State.invalidate();
+  }
+});
+
+test('Number keys 1-4 pick a confidence level, in the same order as the buttons (roadmap #4)', async () => {
+  const was = { course: State.course, courses: State.courses, session: State.session, view: State.view, runnerStop: State.runnerStop };
+  const cid = 'test-confidence-keys-' + Date.now();
+  State.course = { id: cid, code: 'TCK', name: 'Confidence keyboard test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  const q = mkQ('confidence keyboard test', ['right', 'wrong'], 0, { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified' });
+  await DB.put('questions', q);
+  const s = {
+    id: 'sess-' + cid, courseId: cid, mode: 'learning', status: 'active',
+    questionUuids: [q.uuid], cursor: 0, responses: {}, flags: {}, optionOrders: {}, startedAt: nowISO()
+  };
+  const findModal = async () => { let dlg = null; for (let i = 0; i < 100 && !dlg; i++) { await new Promise(r => setTimeout(r, 10)); dlg = $$('.modal').pop(); } return dlg; };
+  try {
+    State.invalidate();
+    await runSession(s);
+    await new Promise(r => setTimeout(r, 20));
+    const view = $('#view');
+    const rightBtn = Array.prototype.slice.call(view.querySelectorAll('.opts button')).find(b => b.textContent.indexOf('right') >= 0);
+    assert(rightBtn, 'the right option must render');
+    rightBtn.click();
+
+    const confDlg = await findModal();
+    assert(confDlg, 'the confidence dialog must open');
+    const buttons = Array.prototype.slice.call(confDlg.querySelectorAll('.modal-f button'));
+    eq(buttons.map(b => b.textContent).join(','), CONFIDENCE.map(c => c.label).join(','), 'the footer buttons must list CONFIDENCE in its own order, or the key mapping below would pick the wrong one');
+
+    // Third button is "Unsure between two" — key "3" must reach the exact
+    // same button a click would, not just some option.
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '3', bubbles: true }));
+    await new Promise(r => setTimeout(r, 30));
+
+    const rows = await DB.byIndex('attempts', 'sessionId', s.id);
+    const att = rows.find(a => a.questionUuid === q.uuid);
+    assert(att, 'the attempt must be logged');
+    eq(att.confidence, 'unsure', 'pressing "3" must resolve the dialog with CONFIDENCE[2], the same as clicking its button');
   } finally {
     if (State.runnerStop) { try { await State.runnerStop(); } catch (e) { } }
     await DB.del('sessions', s.id).catch(() => {});
