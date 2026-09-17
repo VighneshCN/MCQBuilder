@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.60', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.61', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -5689,15 +5689,26 @@ function masteryOf(q, attempts) {
   const add = (key, label, value, max, note) => parts.push({ key, label, value: Math.round(value * 10) / 10, max, note });
   if (!a.length) return { score: 0, parts: [{ key: 'none', label: 'Never attempted', value: 0, max: 100, note: 'No evidence yet' }] };
 
+  let streak = 0;
+  for (let i = a.length - 1; i >= 0; i--) { if (a[i].correct) streak++; else break; }
+
+  // A miss on first sight used to dock these 22 points forever, no matter
+  // how solid the log became afterwards — stacked on every other
+  // component's own cap, it put the ceiling at 74 for a "reasoned" streak
+  // and 72 for anything with a guess anywhere in its history, so the
+  // default 75 target could never be reached from a first miss. It decays
+  // against the same trailing streak "Consecutive correct" already
+  // tracks: three answers running since is exactly as convincing as
+  // having gotten it right immediately, so it earns the same points back.
   const first = a[0];
-  add('first', 'First-attempt result', first.correct ? 22 : 0, 22, first.correct ? 'Answered correctly first time' : 'Missed on first sight');
+  const firstVal = first.correct ? 22 : 22 * Math.min(streak, 3) / 3;
+  add('first', 'First-attempt result', firstVal, 22, first.correct ? 'Answered correctly first time'
+    : streak ? 'Missed on first sight, ' + Math.min(streak, 3) + ' correct since' : 'Missed on first sight');
 
   const recent = a.slice(-5);
   const recAcc = recent.filter(x => x.correct).length / recent.length;
   add('recent', 'Recent accuracy (last ' + recent.length + ')', recAcc * 24, 24, Math.round(recAcc * 100) + '% of recent attempts correct');
 
-  let streak = 0;
-  for (let i = a.length - 1; i >= 0; i--) { if (a[i].correct) streak++; else break; }
   add('streak', 'Consecutive correct', Math.min(streak, 3) / 3 * 14, 14, streak + ' in a row');
 
   const cw = recent.reduce((s, x) => s + (x.correct ? confWeight(x.confidence) : 0), 0) / recent.length;
@@ -18814,7 +18825,7 @@ async function purgeSelfTestArtifacts() {
 
 /* Bumped whenever the way a counter is derived from the answer log changes,
    which makes every browser recompute once on its next start. */
-const DERIVED_STATS_REPAIR = 1;
+const DERIVED_STATS_REPAIR = 2;
 
 /**
  * Recompute every question's rolling counters, mastery and review date from
@@ -28122,13 +28133,36 @@ test('Mock-only correct answers are labelled as unrecorded, not guessed at', () 
   const mixed = [{ ts: nowISO(), correct: true, confidence: 'guessed' }, { ts: nowISO(), correct: true, confidence: null }];
   eq(masteryOf(q, mixed).parts.find(p => p.key === 'confidence').note, 'Mostly guessing', 'one real low-confidence answer in the window is enough to bucket normally');
 });
-test('A question missed on first sight recovers once the guessing stops', () => {
+test('A question missed on first sight recovers once a solid streak follows, and a later guess no longer undoes it (roadmap #11)', () => {
   const q = mkQ('x', ['a', 'b'], 0);
   const at = (d, correct, confidence) => ({ ts: new Date(Date.UTC(2026, 0, 1) + d * 86400000).toISOString(), correct, confidence });
   const hist = [at(0, false, 'knew'), at(20, true, 'guessed'),
     at(40, true, 'knew'), at(60, true, 'knew'), at(80, true, 'knew'), at(100, true, 'knew'), at(120, true, 'knew')];
-  assert(masteryOf(q, hist).score >= 75, 'five spaced confident answers must clear the default target, got ' + masteryOf(q, hist).score);
-  assert(masteryOf(q, hist.concat([at(140, true, 'guessed')])).score < 75, 'but a fresh guess must still drop it below target');
+  const recovered = masteryOf(q, hist).score;
+  assert(recovered >= 75, 'five spaced confident answers must clear the default target, got ' + recovered);
+  // The old permanent first-miss penalty used to make exactly this — one
+  // more guess, however solid the streak since — cap mastery back below
+  // target, which is the ceiling this roadmap item exists to remove: a
+  // first miss now heals against the same trailing streak "Consecutive
+  // correct" already tracks, so a single later guess costs something
+  // (still a real streak, just a less confident answer in it) without
+  // undoing an already-established recovery outright.
+  const afterGuess = masteryOf(q, hist.concat([at(140, true, 'guessed')])).score;
+  assert(afterGuess < recovered, 'a guess must still cost something, even once recovered: before=' + recovered + ' after=' + afterGuess);
+  assert(afterGuess >= 75, 'but must not undo an already-established recovery: got ' + afterGuess);
+});
+test('Missed first, then reasoned out five times on a spaced schedule, still reaches the target (roadmap #11)', () => {
+  // SR's own verified case: at 14-day spacing this used to top out at 74,
+  // just under the default target, because "reasoned" (weight 0.8) never
+  // earned back the 22 points a first miss cost permanently. A streak of
+  // three-plus correct answers now earns them back regardless of how
+  // confidently each was reasoned out.
+  const q = mkQ('x', ['a', 'b'], 0);
+  const at = (d, correct, confidence) => ({ ts: new Date(Date.UTC(2026, 0, 1) + d * 86400000).toISOString(), correct, confidence });
+  const hist = [at(0, false, 'knew'), at(14, true, 'reasoned'), at(28, true, 'reasoned'),
+    at(42, true, 'reasoned'), at(56, true, 'reasoned'), at(70, true, 'reasoned')];
+  const score = masteryOf(q, hist).score;
+  assert(score >= 75, 'a first miss followed by five spaced, reasoned-out correct answers must reach the default mastery target, got ' + score);
 });
 test('Repeating a question immediately does not inflate mastery', () => {
   const q = mkQ('x', ['a', 'b'], 0);
