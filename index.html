@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.54', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.55', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -5962,6 +5962,28 @@ function domainReadiness(pool, blueprint, masteryTarget) {
    due for review is one job, not two; counting it twice would inflate the
    backlog, inflate the daily target, and quietly tell somebody they are
    further behind than they are.                                             */
+/**
+ * Practice over the trailing 7 days ending yesterday (today excluded — see
+ * studyPlan's own note on why). `pairs` is every distinct day|question
+ * combination, for a per-day rate that divides by questions, not visits;
+ * `activeDays` is just the distinct days, for the plainer "how often" habit
+ * record (roadmap #5) that doesn't care how many questions each day held.
+ */
+function recentPractice(attempts, today) {
+  const cut = dateKeyToLocal(today);
+  cut.setDate(cut.getDate() - 7);
+  const pairs = new Set();
+  (attempts || []).forEach(a => {
+    if (!a || !a.ts) return;
+    const k = todayKey(a.ts);
+    if (k >= today) return;
+    const d = dateKeyToLocal(k);
+    if (!d || d < cut) return;
+    pairs.add(k + '|' + a.questionUuid);
+  });
+  const activeDays = new Set(Array.from(pairs).map(p => p.split('|')[0])).size;
+  return { pairs, activeDays };
+}
 function studyPlan(opts) {
   const o = opts || {};
   const today = o.today || todayKey();
@@ -6019,20 +6041,19 @@ function studyPlan(opts) {
      show, and averaging only over the days you turned up would hide it. Today
      is excluded because at nine in the morning it would drag the average to
      the floor and call you behind on no evidence. */
-  const cut = dateKeyToLocal(today);
-  cut.setDate(cut.getDate() - 7);
-  const pairs = new Set();
-  attempts.forEach(a => {
-    if (!a || !a.ts) return;
-    const k = todayKey(a.ts);
-    // Date keys are fixed-width, so they compare correctly as strings.
-    if (k >= today) return;
-    const d = dateKeyToLocal(k);
-    if (!d || d < cut) return;
-    pairs.add(k + '|' + a.questionUuid);
-  });
+  const { pairs, activeDays } = recentPractice(attempts, today);
   const recentPerDay = pairs.size ? pairs.size / 7 : null;
   const projected = recentPerDay == null ? null : Math.round(recentPerDay * daysLeft);
+  // Seven single-day buckets: today absorbs anything already overdue (the
+  // same day-granular test the due gate itself uses), each day after that is
+  // exactly that day alone, so a caller can show "today" and "tomorrow" on
+  // their own and fold the rest together however it likes.
+  const todayLocal = dateKeyToLocal(today);
+  const dueByDay = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(todayLocal); d.setDate(d.getDate() + i);
+    const dayKey = todayKey(d);
+    return pool.filter(q => q.nextReviewAt && (i === 0 ? todayKey(q.nextReviewAt) <= dayKey : todayKey(q.nextReviewAt) === dayKey)).length;
+  });
 
   let state, verdict;
   if (gap < 0) {
@@ -6073,7 +6094,8 @@ function studyPlan(opts) {
     recentPerDay, projected, state, verdict,
     phase, coverageDays, coverageBy, unseenPerDay, byDomain, focus,
     // Domains the blueprint expects and the bank holds nothing for.
-    emptyDomains: byDomain.filter(r => r.empty)
+    emptyDomains: byDomain.filter(r => r.empty),
+    activeDays, dueByDay
   };
 }
 
@@ -7987,6 +8009,15 @@ ROUTES.dashboard = async (root) => {
     plan.set && !plan.past ? { k: plan.gap === 0 ? 'Exam' : 'Exam in', v: plan.gap === 0 ? 'Today' : qtyLabel(plan.gap, 'day'), color: plan.daysLeft <= 14 ? 'var(--pencil)' : null } : null
   ].filter(Boolean), [h('button', { class: 'btn primary', onclick: () => go('practice'), text: 'Start practice' })]);
 
+  // studyPlanCard's own habit/forecast lines only ever appear once an exam
+  // date turns the same numbers into a countdown — nobody without one gets
+  // told either, so this is the whole card's worth of signal in one line
+  // instead of nothing at all (roadmap #5).
+  if (!plan.set) {
+    root.appendChild(h('p', { class: 'small muted', style: 'margin:0 0 16px' },
+      qtyLabel(due.length, 'question') + ' today · practised ' + qtyLabel(recentPractice(attempts, todayKey()).activeDays, 'day') + ' of the last 7'));
+  }
+
   // A course-level note (currently only ever set by the DISA quick-add
   // template, pointing at its single placeholder domain) is only still
   // relevant while the blueprint really is just that placeholder — it goes
@@ -8390,7 +8421,17 @@ function studyPlanCard(plan) {
       h('div', {
         class: 'notice small ' + (plan.state === 'behind' ? 'warn' : plan.state === 'clear' || plan.state === 'ontrack' ? 'ok' : ''),
         style: 'margin:0'
-      }, plan.verdict),
+      }, plan.verdict + ' — on ' + qtyLabel(plan.activeDays, 'day') + ' of the last 7'),
+
+      // The habit number answers "how often"; this answers "how much is
+      // still coming" — the same forecast a student with no exam date gets
+      // from the dashboard band, but broken out by when it actually falls
+      // due rather than folded into one running total (roadmap #5).
+      (plan.dueByDay[0] + plan.dueByDay[1] + plan.dueByDay.slice(2).reduce((a, b) => a + b, 0)) > 0
+        ? h('div', { class: 'small muted', style: 'margin:0' },
+          'Falling due: today ' + plan.dueByDay[0] + ' · tomorrow ' + plan.dueByDay[1] +
+          ' · rest of the week ' + plan.dueByDay.slice(2).reduce((a, b) => a + b, 0))
+        : null,
 
       // What today's number should be spent on. A count with no direction is
       // how somebody spends three weeks inside one domain and still reads
@@ -32886,6 +32927,69 @@ test('Today’s progress counts questions, not attempts', () => {
   const paced = studyPlan({ examDate: dayKey(5), pool, attempts: hist });
   eq(Math.round(paced.recentPerDay * 100) / 100, 3, '21 question-days over 7 days');
   eq(studyPlan({ examDate: dayKey(5), pool, attempts: [] }).recentPerDay, null, 'no history, no claim');
+
+  // Same three days, but the habit record only cares that each day happened
+  // at all — seven questions on one day and one question on another count
+  // the same (roadmap #5).
+  eq(paced.activeDays, 3, 'three distinct days practised, however many questions each held');
+  eq(studyPlan({ examDate: dayKey(5), pool, attempts: [] }).activeDays, 0, 'no history is zero days, not null');
+});
+
+test('The due-load forecast buckets by day, folding anything overdue into today (roadmap #5)', () => {
+  const pool = [
+    planQ({ nextReviewAt: addDays(-2) }),  // overdue — must fall into today's bucket
+    planQ({ nextReviewAt: addDays(0) }),   // due today
+    planQ({ nextReviewAt: addDays(1) }),   // due tomorrow
+    planQ({ nextReviewAt: addDays(1) }),   // also tomorrow
+    planQ({ nextReviewAt: addDays(4) }),   // later this week
+    planQ({ nextReviewAt: addDays(30) })   // outside the 7-day window entirely
+  ];
+  const p = studyPlan({ examDate: dayKey(9), pool, attempts: [] });
+  eq(p.dueByDay.length, 7, 'seven single-day buckets');
+  eq(p.dueByDay[0], 2, 'overdue and due-today both land in the today bucket');
+  eq(p.dueByDay[1], 2, 'tomorrow is its own bucket');
+  eq(p.dueByDay.slice(2).reduce((a, b) => a + b, 0), 1, 'day 4 falls inside the window; day 30 does not');
+});
+
+test('The study plan card reports the practice-day habit and the due-load forecast (roadmap #5)', () => {
+  const hist = [];
+  [1, 2, 3].forEach(d => { for (let i = 0; i < 2; i++) hist.push({ ts: addDays(-d), questionUuid: 'h' + d + '-' + i }); });
+  const pool = Array.from({ length: 5 }, () => planQ({})).concat([
+    planQ({ nextReviewAt: addDays(0) }),
+    planQ({ nextReviewAt: addDays(1) })
+  ]);
+  const plan = studyPlan({ examDate: dayKey(9), pool, attempts: hist });
+  const card = studyPlanCard(plan);
+  assert(card, 'the card must render for a set exam date');
+  assert(card.textContent.indexOf('on 3 days of the last 7') >= 0, 'the verdict must report the habit record: ' + card.textContent);
+  assert(/Falling due: today 1 . tomorrow 1/.test(card.textContent), 'and the due-load forecast: ' + card.textContent);
+});
+
+test('A student with no exam date still gets the habit and due-load numbers, in the dashboard band (roadmap #5)', async () => {
+  const was = { course: State.course, courses: State.courses };
+  const cid = 'test-no-exam-plan-' + Date.now();
+  State.course = { id: cid, code: 'TNE', name: 'No exam date test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  const q1 = mkQ('no exam plan q1', ['a', 'b'], 0, { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified', nextReviewAt: addDays(-1) });
+  const q2 = mkQ('no exam plan q2', ['a', 'b'], 0, { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified' });
+  await DB.put('questions', q1); await DB.put('questions', q2);
+  const att = [
+    { id: 'att-nep-1', questionUuid: q2.uuid, courseId: cid, correct: true, ts: addDays(-1) },
+    { id: 'att-nep-2', questionUuid: q2.uuid, courseId: cid, correct: true, ts: addDays(-3) }
+  ];
+  for (const a of att) await DB.put('attempts', a);
+  try {
+    State.invalidate();
+    const root = h('div');
+    await ROUTES.dashboard(root);
+    assert(!Settings.get('examDate', cid), 'this test is about the no-exam-date case');
+    assert(root.textContent.indexOf('1 question today · practised 2 days of the last 7') >= 0,
+      'the no-exam-date sentence must report both numbers: ' + root.textContent.slice(0, 400));
+  } finally {
+    for (const a of att) await DB.del('attempts', a.id);
+    await DB.del('questions', q1.uuid); await DB.del('questions', q2.uuid);
+    State.course = was.course; State.courses = was.courses; State.invalidate();
+  }
 });
 
 /* ---- the last mile ---- */
