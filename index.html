@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.48', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.49', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -2443,10 +2443,13 @@ function isCaseQuestion(q) { return !!(q && (q.caseStudyId || q.caseRef)); }
  * flagged and low-confidence questions the mode genuinely includes were not
  * counted at all. The badge could therefore say more than the mode would
  * offer, or less, and it doubled any real difference between two devices. */
+// Same gate lastMileClass (below) already applies to its own pool — recently
+// wrong, guessed, low-confidence or flagged, but only for as long as mastery
+// has not actually recovered to target — so the badge and this mode's own
+// pool reflect material still actually weak, not a lifetime tally that only
+// ever grows once a question has been wrong or guessed a single time (D9).
 function isRedoEligible(q) {
-  const st = (q && q.stats) || {};
-  return st.incorrect > 0 || st.guessedCorrect > 0 || !!q.flagged
-    || (st.attempts > 0 && (st.confidence || 1) < 0.5);
+  return lastMileClass(q, Settings.get('masteryTarget')) != null;
 }
 
 /** A question may only enter a test session if it is Active and answer-verified. */
@@ -6729,7 +6732,7 @@ const MODES = {
   learning: { label: 'Learning', reveal: true, confidence: true, desc: 'One at a time, answer revealed after each response.' },
   domain:   { label: 'Domain drill', reveal: true, confidence: true, desc: 'Focus on chosen domains of the blueprint.' },
   weak:     { label: 'Weak topics', reveal: true, confidence: true, desc: 'Prioritises where the evidence says you are weak.' },
-  redo:     { label: 'Incorrect & guessed', reveal: true, confidence: true, desc: 'Everything you missed, guessed or flagged.' },
+  redo:     { label: 'Incorrect & guessed', reveal: true, confidence: true, desc: 'Everything you’ve missed, guessed or flagged that you have not yet mastered.' },
   // Its sibling, for the last week rather than the long middle: the same
   // material, but worst-first and capped instead of shuffled and complete.
   lastmile: { label: 'Last-mile revision', reveal: true, confidence: true, desc: 'The shortlist for the final days, hardest first.' },
@@ -9203,10 +9206,12 @@ async function configureMode(mode, preset) {
       return;
     }
     if (cfg.redo) {
-      // union of incorrect / guessed / low confidence / flagged
+      // incorrect / guessed / low confidence / flagged, and — since D9 —
+      // still below mastery target, so a question that has since recovered
+      // drops out rather than sitting in this pool forever.
       const base = applyFilters(pool, f);
       const keep = base.filter(isRedoEligible);
-      if (!keep.length) { toast('Nothing to redo yet — no incorrect, guessed or flagged questions.', 'warn', 4200); return; }
+      if (!keep.length) { toast('Nothing to redo yet — no incorrect, guessed or flagged questions still below your mastery target.', 'warn', 4200); return; }
       const s = await Session.create(mode, Object.assign({}, cfg, { filters: { ...f } }));
       s.questionUuids = shuffle(keep.map(q => q.uuid), mulberry32(s.seed)).slice(0, cfg.count);
       s.optionOrders = {};
@@ -9980,9 +9985,7 @@ async function runSession(s) {
       const ans = await askConfidence(q, optId);
       if (ans === null) return;
       const correct = optId === q.correctOptionId;
-      let mistake = null;
-      if (!correct) mistake = await askMistake();
-      await Session.answer(s, q, optId, { ms, confidence: ans.confidence, mistake, difficulty: ans.difficulty });
+      const rec = await Session.answer(s, q, optId, { ms, confidence: ans.confidence, mistake: null, difficulty: ans.difficulty });
       State.invalidate();
       // One indexed read, not a walk of the whole store. Answering rewrites
       // exactly this question — its counters, its SR stage and the srReason
@@ -9992,6 +9995,22 @@ async function runSession(s) {
       // overwrite the attempt that was just committed.
       const fresh = await Questions.get(q.uuid);
       if (fresh) byId.set(q.uuid, fresh);
+      render();
+      // The mistake cause is asked only once the correct answer is actually
+      // on screen — "missed a qualifier" or "confused two concepts" can only
+      // be diagnosed against what was actually right, not recalled blind
+      // (D7). Patched onto the attempt already committed above, rather than
+      // passed into Session.answer, since it is not known yet at that point.
+      if (!correct) {
+        const mistake = await askMistake();
+        if (mistake) {
+          rec.mistake = mistake;
+          await Session.save(s);
+          const rows = await DB.byIndex('attempts', 'sessionId', s.id);
+          const att = rows.find(a => a.questionUuid === q.uuid && a.ts === rec.at);
+          if (att) { att.mistake = mistake; await DB.put('attempts', att); }
+        }
+      }
     } else {
       // A mock records the response here rather than through Session.answer,
       // which does not run until submission — so it stamps the marks itself,
@@ -31605,6 +31624,65 @@ test('The runner\'s own dead-end "no explanation" warning offers a way out (D17)
   }
 });
 
+test('The mistake cause is asked after the reveal, not before it (D7)', async () => {
+  const was = { course: State.course, courses: State.courses, session: State.session, view: State.view, runnerStop: State.runnerStop };
+  const cid = 'test-mistake-after-reveal-' + Date.now();
+  State.course = { id: cid, code: 'TMR', name: 'Mistake-after-reveal test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  const q = mkQ('mistake timing test', ['right', 'wrong'], 0, { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified' });
+  await DB.put('questions', q);
+  const s = {
+    id: 'sess-' + cid, courseId: cid, mode: 'learning', status: 'active',
+    questionUuids: [q.uuid], cursor: 0, responses: {}, flags: {}, optionOrders: {}, startedAt: nowISO()
+  };
+  const findModal = async () => { let dlg = null; for (let i = 0; i < 100 && !dlg; i++) { await new Promise(r => setTimeout(r, 10)); dlg = $$('.modal').pop(); } return dlg; };
+  try {
+    State.invalidate();
+    await runSession(s);
+    await new Promise(r => setTimeout(r, 20));
+    const view = $('#view');
+    const wrongBtn = Array.prototype.slice.call(view.querySelectorAll('.opts button')).find(b => b.textContent.indexOf('wrong') >= 0);
+    assert(wrongBtn, 'the wrong option must render');
+    wrongBtn.click();
+
+    const confDlg = await findModal();
+    assert(confDlg && /How did you arrive/.test(confDlg.textContent), 'the confidence dialog must open first');
+    const confBtn = Array.prototype.slice.call(confDlg.querySelectorAll('.modal-f button')).find(b => b.textContent === 'Guessed');
+    assert(confBtn, 'a confidence option must exist');
+    confBtn.click();
+
+    // The reveal must already be on screen, behind whatever opens next,
+    // before the mistake-cause dialog appears at all — not only once it,
+    // too, has been answered.
+    let revealed = false;
+    for (let i = 0; i < 100 && !revealed; i++) { await new Promise(r => setTimeout(r, 10)); revealed = !!view.querySelector('.opt.correct'); }
+    assert(revealed, 'the correct answer must be shown before the mistake-cause dialog is even asked');
+
+    const mistakeDlg = await findModal();
+    assert(mistakeDlg && /What went wrong/.test(mistakeDlg.textContent), 'the mistake-cause dialog must open next, on top of the reveal');
+    const concept = Array.prototype.slice.call(mistakeDlg.querySelectorAll('.chip')).find(c => c.textContent === 'Concept not known');
+    assert(concept, 'a mistake chip must exist');
+    concept.click();
+    const saveBtn = Array.prototype.slice.call(mistakeDlg.querySelectorAll('.modal-f button')).find(b => b.textContent === 'Save');
+    assert(saveBtn, 'a Save action must exist');
+    saveBtn.click();
+
+    await new Promise(r => setTimeout(r, 30));
+    const rows = await DB.byIndex('attempts', 'sessionId', s.id);
+    const att = rows.find(a => a.questionUuid === q.uuid);
+    assert(att, 'the attempt must be logged');
+    eq(att.mistake, 'concept', 'the mistake cause picked after the reveal must still end up on the attempt record');
+  } finally {
+    if (State.runnerStop) { try { await State.runnerStop(); } catch (e) { } }
+    await DB.del('sessions', s.id).catch(() => {});
+    const rows = await DB.byIndex('attempts', 'sessionId', s.id).catch(() => []);
+    for (const a of rows) await DB.del('attempts', a.id).catch(() => {});
+    await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses; State.session = was.session; State.view = was.view; State.runnerStop = was.runnerStop;
+    State.invalidate();
+  }
+});
+
 test('The results screen shows why a wrong answer was wrong, not just its letter', async () => {
   const was = { course: State.course, courses: State.courses, view: State.view };
   const course = makeCourse('RRB', 'Rationale-on-results test course', CISA_BLUEPRINT, { id: 'test-course' });
@@ -32392,6 +32470,26 @@ test('The notebook and the last mile agree on what is still broken', () => {
   eq(lastMileClass(stillWeak, 75), 'never');
   // The mastery target is the caller's, not a constant hidden in here.
   eq(lastMileClass(fixed, 95), 'never', 'raise the bar and the same question is owed again');
+});
+
+test('A once-missed question drops out of redo once mastery has recovered to target (D9)', () => {
+  const prevCourse = State.course;
+  const prevTarget = Settings.cache.masteryTarget;
+  State.course = { id: 'test-redo-target-course-' + Date.now() };
+  Settings.cache.masteryTarget = 75;
+  try {
+    const stillWeak = lmQ('SW1', { attempts: 3, incorrect: 1, mastery: 60 });
+    assert(isRedoEligible(stillWeak), 'incorrect history, still below target: stays eligible');
+    const recovered = lmQ('SW2', { attempts: 6, incorrect: 1, mastery: 90 });
+    assert(!isRedoEligible(recovered), 'the same history must drop out once mastery has actually recovered to target — a lifetime tally must not keep it in forever');
+    const flaggedButRecovered = lmQ('SW3', { attempts: 6, mastery: 95 }, true);
+    assert(isRedoEligible(flaggedButRecovered), 'a flag always keeps a question in, however well it is otherwise doing');
+    const guessedStillWeak = lmQ('SW4', { attempts: 4, guessedCorrect: 1, mastery: 50 });
+    assert(isRedoEligible(guessedStillWeak), 'a guessed-correct history, still below target: stays eligible');
+  } finally {
+    State.course = prevCourse;
+    if (prevTarget === undefined) delete Settings.cache.masteryTarget; else Settings.cache.masteryTarget = prevTarget;
+  }
 });
 
 test('The printed page is built in one place', () => {
