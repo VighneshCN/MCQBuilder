@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.47', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.48', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -1597,6 +1597,14 @@ function daysBetweenKeys(fromKey, toKey) {
   const a = dateKeyToLocal(fromKey), b = dateKeyToLocal(toKey);
   if (!a || !b) return null;
   return Math.round((b - a) / 86400000);
+}
+/** Whether a spaced-repetition date has arrived, compared by local calendar
+    day rather than exact clock time — a question that fell due at 22:00
+    must still show up in the next morning's queue, not only from 22:00
+    onward (D8). Sorting and "days until due" arithmetic still want the
+    precise timestamp; only the yes/no due gate should be day-granular. */
+function isDueByDay(nextReviewAt, now) {
+  return !!nextReviewAt && todayKey(nextReviewAt) <= todayKey(now);
 }
 /** "1 question" / "12 questions" / "1 day" — said out loud in one place, for
     the same reason marksLabel() exists: every call site was getting the plural
@@ -1941,7 +1949,12 @@ const COURSE_SETTINGS = ['mockCount', 'mockMinutes', 'mockAllowPause', 'srInterv
   'marksPerQuestion', 'marksPerCaseQuestion', 'passPct', 'negativeFraction', 'scaledScore',
   // When this course's exam actually is. Per course because a candidate
   // sitting two qualifications is counting down to two different mornings.
-  'examDate'];
+  'examDate',
+  // Whether the "treat an answer printed in the source as verified" checkbox
+  // opens ticked. Per course because how much a whole exam board's official
+  // bank is trusted has nothing to do with how much a second course's
+  // hand-typed notes are (D15).
+  'sourceTrustDefault'];
 function isCourseSetting(k) { return COURSE_SETTINGS.indexOf(k) >= 0; }
 function courseKey(k, courseId) { return k + '@' + courseId; }
 
@@ -2001,6 +2014,7 @@ const Settings = {
     externalOcrEnabled: false,
     storeSourceImages: true,
     imageMaxKB: 500,
+    sourceTrustDefault: false,
     // Null until somebody dismisses the browser-only banner for good; then the
     // question count at that moment, so growth past it can bring it back.
     browserOnlyAckedCount: null,
@@ -2145,9 +2159,18 @@ function modal(opts) {
     // only two actions are Cancel and a .danger button), so this used to
     // focus nothing at all — the opener kept real keyboard focus behind the
     // dialog, and a stray Enter could re-trigger whatever had opened it,
-    // stacking the same confirm on top of itself. Falling back to the first
-    // footer button lands on Cancel, the safe default for a dialog like this.
-    setTimeout(() => { const f = box.querySelector('input,textarea,select,button.primary') || foot.querySelector('button'); if (f) f.focus(); }, 30);
+    // stacking the same confirm on top of itself. Falling back to the ✕
+    // close button (always present, never anyone's preferred answer) is a
+    // safe default for a dialog like this — unlike the first footer button,
+    // which is whatever the actions array happens to list first, and for a
+    // multi-way self-report with no natural "safe" option (askConfidence's
+    // four peer confidence levels) used to land reflexive focus on the very
+    // first one and let a stray Enter silently claim it (D14).
+    setTimeout(() => {
+      const f = box.querySelector('input,textarea,select,button.primary')
+        || box.querySelector('.modal-h button[aria-label="Close"]');
+      if (f) f.focus();
+    }, 30);
   });
 }
 /** confirmLabel names what the confirm button actually does — "Delete" is
@@ -5728,8 +5751,8 @@ function scheduleNext(correct, confidence, srStage, cfg, from) {
   let days, reason, stage = srStage || 0;
   if (!correct) { days = I.wrong; stage = 0; reason = 'Incorrect → back to ' + days + ' day'; }
   else if (confidence === 'guessed') { days = I.guessed; stage = 0; reason = 'Correct but guessed → treated as not known'; }
-  else if (confidence === 'unsure') { days = I.lowConf; stage = Math.max(1, stage); reason = 'Correct but unsure → short interval'; }
-  else if (confidence === 'reasoned') { days = I.medConf; stage = Math.max(2, stage); reason = 'Reasoned out → medium interval'; }
+  else if (confidence === 'unsure') { days = I.lowConf; reason = 'Correct but unsure → short interval'; }
+  else if (confidence === 'reasoned') { days = I.medConf; reason = 'Reasoned out → medium interval'; }
   else if (confidence == null) {
     // A timed mock asks for no confidence, so there is no evidence you knew
     // it rather than guessed well. Advancing the ladder here would push a
@@ -5837,7 +5860,7 @@ function groupStats(list, keyFn) {
       g.mastery += q.stats.mastery || 0;
       if ((q.stats.confidence || 0) < 0.5) g.lowConf++;
     }
-    if (q.nextReviewAt && new Date(q.nextReviewAt) <= new Date()) g.due++;
+    if (isDueByDay(q.nextReviewAt)) g.due++;
   });
   return Array.from(map.values()).map(g => {
     g.firstAcc = g.firstSeen ? g.firstCorrect / g.firstSeen : null;
@@ -6204,7 +6227,7 @@ function applyFilters(pool, f) {
     if (f.guessed && !(q.stats.guessedCorrect > 0)) return false;
     if (f.lowConfidence && !(q.stats.attempts > 0 && (q.stats.confidence || 1) < 0.5)) return false;
     if (f.flagged && !q.flagged) return false;
-    if (f.due && !(q.nextReviewAt && new Date(q.nextReviewAt) <= now)) return false;
+    if (f.due && !isDueByDay(q.nextReviewAt, now)) return false;
     if (f.notMastered && (q.stats.mastery || 0) >= (f.masteryTarget || 75)) return false;
     return true;
   });
@@ -6668,6 +6691,17 @@ function describeLastMile(picked) {
       : ' — everything that qualifies');
 }
 
+/** Spaced repetition's own pick. The pool here is already filtered to due
+    questions — Session.create sets filters.due=true for this mode — so the
+    gap is only which of them come first when there are more due than the
+    session wants. Most-overdue (the oldest nextReviewAt) first, so a
+    question that has been waiting two weeks is not just as likely to be
+    skipped as one that fell due an hour ago (D2). */
+function spacedPick(pool, count, rng) {
+  return (pool || []).slice()
+    .sort((a, b) => (a.nextReviewAt < b.nextReviewAt ? -1 : a.nextReviewAt > b.nextReviewAt ? 1 : rng() - 0.5))
+    .slice(0, count);
+}
 function weakFirstPick(pool, count, rng, minSample) {
   const byTopic = groupStats(pool, q => q.topic || State.domainName(q.domainId));
   const w = new Map();
@@ -6678,7 +6712,7 @@ function weakFirstPick(pool, count, rng, minSample) {
     if (q.stats.lastResult === 'incorrect') s += 60;
     if (q.stats.guessedCorrect > 0) s += 35;
     if (q.stats.wrongStreak > 1) s += 25;
-    if (q.nextReviewAt && new Date(q.nextReviewAt) <= new Date()) s += 40;
+    if (isDueByDay(q.nextReviewAt)) s += 40;
     if (q.stats.attempts === 0) s += 12;
     if ((q.stats.mastery || 0) < 50) s += (50 - (q.stats.mastery || 0)) * 0.6;
     return { q, s: s + rng() * 8 };
@@ -6822,6 +6856,8 @@ const Session = {
       chosen = r.questions; notes = r.notes; shortfalls = r.shortfalls;
     } else if (mode === 'weak') {
       chosen = weakFirstPick(filtered, wanted, rng, Settings.get('weakMinSample'));
+    } else if (mode === 'spaced') {
+      chosen = spacedPick(filtered, wanted, rng);
     } else {
       chosen = shuffle(filtered, rng).slice(0, wanted);
     }
@@ -7809,7 +7845,7 @@ async function refreshBadges() {
   // repetition has something for you", and Spaced repetition cannot draw a
   // case-study question. Counting them made the badge promise work that the
   // mode behind it would then not have.
-  const due = eligiblePool(all).filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date()).length;
+  const due = eligiblePool(all).filter(q => isDueByDay(q.nextReviewAt)).length;
   setBadge('practice', due);
 }
 
@@ -7919,7 +7955,7 @@ ROUTES.dashboard = async (root) => {
   const recent = attempts.slice().sort((a, b) => a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0).slice(0, 100);
   const recAcc = recent.length ? recent.filter(a => a.correct).length / recent.length : null;
   const guessRate = (() => { const c = attempts.filter(a => a.correct); return c.length ? c.filter(a => a.confidence === 'guessed').length / c.length : 0; })();
-  const due = active.filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date());
+  const due = active.filter(q => isDueByDay(q.nextReviewAt));
   const never = active.filter(q => q.stats.attempts === 0);
   const inReview = all.filter(isBlocked);
   const conflicts = all.filter(q => q.conflict || q.status === 'answer_conflict');
@@ -7954,7 +7990,7 @@ ROUTES.dashboard = async (root) => {
   else if (conflicts.length) rec = { t: conflicts.length + ' answer conflict(s) to resolve', d: 'Two sources disagree on the correct answer. These cannot enter practice until you decide.', a: 'Resolve conflicts', go: 'review' };
   else if (inReview.length > active.length * 0.25 && inReview.length > 5) rec = { t: inReview.length + ' question(s) waiting for verification', d: 'Only verified questions can be practised. Clearing the queue widens the pool you draw from.', a: 'Check them now', go: 'review' };
   else if (due.length) rec = { t: due.length + ' question(s) due for review', d: 'Spaced repetition works best on the day it falls due.', a: 'Start due review', go: 'practice', mode: 'spaced' };
-  else if (never.length) rec = { t: never.length + ' question(s) never attempted', d: 'Coverage is what a mock actually measures. Work through unseen questions first.', a: 'Practise unseen', go: 'practice', mode: 'mixed' };
+  else if (never.length) rec = { t: never.length + ' question(s) never attempted', d: 'Coverage is what a mock actually measures. Work through unseen questions first.', a: 'Practise unseen', go: 'practice', mode: { mode: 'mixed', neverAttempted: true } };
   else if (caseActive.length && caseActive.filter(q => q.stats.attempts === 0).length)
     rec = { t: caseActive.filter(q => q.stats.attempts === 0).length + ' case-study question(s) never attempted', d: 'These are only asked with their scenario in front of you, so nothing else will surface them.', a: 'Practise case studies', go: 'practice', mode: 'casestudy' };
   else rec = { t: 'Sit a timed mock', d: 'Coverage and review are current. A full-length weighted mock is the useful next test.', a: 'Configure mock', go: 'practice', mode: 'mock' };
@@ -8038,7 +8074,15 @@ ROUTES.dashboard = async (root) => {
   const sortedMocks = courseSessions
     .filter(x => x.status === 'complete' && x.mode === 'mock' && (x.questionUuids || []).length)
     .sort((a, b) => new Date(a.endedAt || a.startedAt) - new Date(b.endedAt || b.startedAt));
-  const mockPcts = sortedMocks.slice(-8)
+  const mockPcts = sortedMocks
+    // A mock finished by running over its own time limit was not sat under
+    // exam conditions, whatever it scored — mockAllowPause lets the clock
+    // truly stop for days, and the readiness verdict must not count an
+    // overrun sitting as passed OR failed under those conditions (D18).
+    // tick() force-submits within ~1s of time-up on an honest sitting, so a
+    // few seconds of slack here is clock jitter, not a genuine overrun.
+    .filter(m => !(m.timeLimitMs && m.elapsedMs > m.timeLimitMs + 5000))
+    .slice(-8)
     .map(m => markSession(m, mockById))
     .filter(mk => mk.total > 0)
     .map(mk => mk.pct);
@@ -8075,7 +8119,12 @@ ROUTES.dashboard = async (root) => {
   tiles.appendChild(tile('Guessed-correct rate', attempts.length ? Math.round(guessRate * 100) + '%' : '—', attempts.length ? 'Correct answers you marked as a guess' : 'No attempts yet', attempts.length && guessRate > 0.2 ? 'hot' : ''));
   tiles.appendChild(tile('Coverage', active.length ? Math.round((active.length - never.length) / active.length * 100) + '%' : '—', active.length ? never.length + ' never attempted' : 'Nothing available to practise yet'));
   tiles.appendChild(tile('Mastered', String(mastered.length), 'At or above ' + Settings.get('masteryTarget') + ' mastery', mastered.length ? 'good' : ''));
-  tiles.appendChild(tile('Average response', attempts.length ? fmtDur(attempts.reduce((s, a) => s + (a.ms || 0), 0) / attempts.length) : '—', attempts.length ? 'Across all attempts' : 'No attempts yet'));
+  // A mean here would count a walked-away-from question as a fast answer at
+  // ms=0 and let one outlier (a phone call mid-question) drag the headline
+  // number around — exactly what the Time tab's own median already refuses
+  // to do (D12). Same cut, same reason, so the two screens cannot disagree.
+  const timedAttempts = attempts.filter(a => a.ms > 0);
+  tiles.appendChild(tile('Median response', timedAttempts.length ? fmtDur(median(timedAttempts.map(a => a.ms))) : '—', timedAttempts.length ? 'Across ' + timedAttempts.length + ' timed attempt(s)' : 'No attempts yet'));
   const unverified = all.filter(q => q.answerVerified !== 'verified' && q.status !== 'archived' && q.status !== 'merged' && q.status !== 'rejected').length;
   tiles.appendChild(tile('Unverified', String(unverified), unverified ? 'Held out of practice until checked' : 'Everything is checked', unverified ? 'hot' : 'good'));
   tiles.appendChild(tile('Total records', String(all.length), 'Every status, including archived'));
@@ -8481,7 +8530,7 @@ ROUTES.practice = async (root, preselect) => {
   const caseRecords = await CaseStudies.byCourse(State.course.id);
   const casePool = drawableCasePool(all, caseRecords);
   const heldByScenario = caseEligiblePool(all).length - casePool.length;
-  const due = pool.filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date());
+  const due = pool.filter(q => isDueByDay(q.nextReviewAt));
   await band('Practice', 'Choose how to work', [
     { k: 'Eligible', v: String(pool.length) },
     casePool.length ? { k: 'Case study', v: String(casePool.length) } : null,
@@ -8595,7 +8644,15 @@ ROUTES.practice = async (root, preselect) => {
     ]));
   });
   root.appendChild(grid);
-  if (preselect && MODES[preselect]) setTimeout(() => configureMode(preselect), 20);
+  // The dashboard's "Practise unseen" card needs to say more than which mode
+  // card to open — it means never-attempted specifically, not just whatever
+  // 'mixed' draws by default — so preselect may also arrive as an object
+  // instead of a bare mode name (D10).
+  const preselectMode = preselect && typeof preselect === 'object' ? preselect.mode : preselect;
+  if (preselectMode && MODES[preselectMode]) {
+    const preset = (preselect && typeof preselect === 'object' && preselect.neverAttempted) ? { neverAttempted: true } : undefined;
+    setTimeout(() => configureMode(preselectMode, preset), 20);
+  }
 };
 
 /* ---------- mode configuration ---------- */
@@ -8845,6 +8902,10 @@ async function configureMode(mode, preset) {
   // Only meaningful for isCaseMode (the chip row below is not even drawn
   // otherwise), so callers that only ever preset domains are unaffected.
   if (preset && preset.caseStudies) f.caseStudies = preset.caseStudies.filter(Boolean);
+  // "Practise unseen" means never-attempted, specifically — opening on the
+  // mode's ordinary weighted draw across the whole bank silently dropped the
+  // one filter the recommendation was actually about (D10).
+  if (preset && preset.neverAttempted) f.neverAttempted = true;
 
   // Read here, not beside the marks line below: drawSectionNote() runs while
   // this dialog is still being assembled, so a const declared further down is
@@ -8863,7 +8924,7 @@ async function configureMode(mode, preset) {
   let drawLastMileRef = null;
   const recount = () => {
     let p = applyFilters(pool, f);
-    if (mode === 'spaced') p = p.filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date());
+    if (mode === 'spaced') p = p.filter(q => isDueByDay(q.nextReviewAt));
     // A mock's case-study section comes out of the same total, so the pool
     // that has to satisfy the rest is smaller by however many it takes.
     const needStandalone = Math.max(0, cfg.count - (mode === 'mock' ? (cfg.caseCount || 0) : 0));
@@ -9845,6 +9906,12 @@ async function runSession(s) {
         q.srReason ? h('span', { class: 'small dim', text: '· ' + q.srReason }) : null
       ]));
       rationaleBlock(q, rec, order).forEach(n => rev.appendChild(n));
+      // The "no explanation was captured" notice above is a genuine dead end
+      // here, unlike its twin on the results screen — nothing else in this
+      // reveal offers a way to actually go add one (D17).
+      if (!q.explanation && !q.options.some(o => o.rationale)) {
+        rev.appendChild(h('button', { class: 'btn sm', style: 'margin-top:4px', onclick: () => openQuestion(q.uuid), text: 'Open question' }));
+      }
       // Every other option's reasoning, on request — useful on a question where
       // two distractors were both tempting, noise on one where they were not.
       const others = q.options.filter(o => o.rationale && o.id !== q.correctOptionId && o.id !== rec.selectedOptionId);
@@ -10088,7 +10155,10 @@ function askConfidence(q, optId) {
   }
   return modal({
     title: 'How did you arrive at that?', sticky: true, body,
-    actions: CONFIDENCE.map(c => ({ label: c.label, value: c.k, kind: c.k === 'knew' ? 'primary' : '' }))
+    // None of these is a "primary" action over the others — they are four
+    // peer self-reports, not a recommended default with three alternatives —
+    // so none carries kind:'primary' and none is reflexively focused (D14).
+    actions: CONFIDENCE.map(c => ({ label: c.label, value: c.k }))
   }).then(v => v === null ? null : { confidence: v, difficulty: ungraded ? askConfidence._difficulty : null });
 }
 function askMistake() {
@@ -10705,7 +10775,7 @@ ROUTES.bank = async (root) => {
       if (L === 'repeat' && !(q.stats.incorrect > 1)) return false;
       if (L === 'guessed' && !q.stats.guessedCorrect) return false;
       if (L === 'mastered' && (q.stats.mastery || 0) < Settings.get('masteryTarget')) return false;
-      if (L === 'due' && !(q.nextReviewAt && new Date(q.nextReviewAt) <= now)) return false;
+      if (L === 'due' && !isDueByDay(q.nextReviewAt, now)) return false;
       if (L === 'flagged' && !q.flagged) return false;
       if (term) {
         if (bankHaystack(q, caseTitle).toLowerCase().indexOf(term) < 0) return false;
@@ -10799,7 +10869,7 @@ ROUTES.bank = async (root) => {
     const tb = h('tbody');
     slice.forEach(q => {
       const acc = q.stats.attempts ? q.stats.correct / q.stats.attempts : null;
-      const dueSoon = q.nextReviewAt && new Date(q.nextReviewAt) <= new Date();
+      const dueSoon = isDueByDay(q.nextReviewAt);
       tb.appendChild(h('tr', { class: BankState.sel.has(q.uuid) ? 'sel' : '' }, [
         h('td', { class: 'gut' }, [h('input', { type: 'checkbox', checked: BankState.sel.has(q.uuid), onchange: e => { e.target.checked ? BankState.sel.add(q.uuid) : BankState.sel.delete(q.uuid); draw(); } })]),
         h('td', { class: 'tick', dataset: { mark: markFor(q) }, style: 'display:table-cell;text-align:center;width:22px', text: (STATUS[q.status] || {}).mark || '·' }),
@@ -12659,7 +12729,10 @@ async function sourceDialog(files) {
   const tmpl = h('select', {}, PARSE_TEMPLATES.map(t => h('option', { value: t.id }, t.name)));
   const tmplDesc = h('div', { class: 'tiny dim', text: PARSE_TEMPLATES[0].desc });
   tmpl.addEventListener('change', () => { tmplDesc.textContent = (PARSE_TEMPLATES.find(t => t.id === tmpl.value) || {}).desc || ''; });
-  const trust = h('input', { type: 'checkbox' });
+  // Remembered per course, not recreated unchecked on every file — importing
+  // a trusted publisher's bank one file at a time otherwise meant re-ticking
+  // this on every single import (D15).
+  const trust = h('input', { type: 'checkbox', checked: !!Settings.get('sourceTrustDefault'), onchange: async (e) => { await Settings.set('sourceTrustDefault', e.target.checked); } });
   const notes = h('textarea', { style: 'min-height:50px', placeholder: 'Copyright or usage note, edition, anything worth recording' });
 
   // Escape/✕ close exactly like Cancel despite sticky, same gap as every
@@ -15667,12 +15740,17 @@ ROUTES.analytics = async (root) => {
     topic: q => q.topic || State.domainName(q.domainId),
     module: q => q.srcModule || '(no module)',
     source: q => q.sourceId,
-    difficulty: q => q.difficulty
+    // An ungraded question still carries the stored 'medium' default — count
+    // it as a real judgement here and an ungraded bank silently reports as
+    // all medium, which is exactly what difficultyVerified exists to catch
+    // everywhere else difficulty is grouped (D11).
+    difficulty: q => q.difficultyVerified === 'verified' ? (q.difficulty || 'medium') : null
   }[AnaState.by];
   const groups = groupStats(active, keyFn);
   const label = (k) => {
     if (AnaState.by === 'domain') return k === '—' || !k ? 'Unmapped' : State.domainName(k);
     if (AnaState.by === 'source') { const s = sources.find(x => x.id === k); return s ? s.title : '(no source)'; }
+    if (AnaState.by === 'difficulty') return k === '—' || !k ? 'Ungraded' : k;
     return k;
   };
   // attach period attempts
@@ -21556,7 +21634,7 @@ async function requireNoteBackup(rec) {
     Still bank-wide rather than per-course, because a sync is. */
 function dueTodayIn(list) {
   const now = new Date();
-  return (list || []).filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= now && isPracticeEligible(q)).length;
+  return (list || []).filter(q => isDueByDay(q.nextReviewAt, now) && isPracticeEligible(q)).length;
 }
 
 function updateStorageBar() {
@@ -22032,6 +22110,27 @@ function mergeSessionRows(localRows, remoteRows) {
       if (terminal(their.status)) { base = their; other = mine; took = true; }
     } else if (stampOf(their) > stampOf(mine)) { base = their; other = mine; took = true; }
     const out = Object.assign({}, base);
+    // elapsedMs/lastTickAt track wall-clock spent on this device's own copy
+    // of the sitting; Object.assign above silently kept whichever side won
+    // the terminal/newest-updatedAt tie-break, which is not always the
+    // device that did more of the actual sitting — a checkpoint tick never
+    // bumps updatedAt (Session.checkpoint uses putRaw precisely so a timer
+    // is not mistaken for an edit), so the losing row can hold the larger,
+    // truer numbers. Never let the union of both devices' answers below
+    // pair with a smaller elapsed time than either side already recorded.
+    // Guarded on being nonzero so a session neither side ever timed does not
+    // grow a new elapsedMs:0/lastTickAt:0 key of its own (and a spurious
+    // "updated" every device would otherwise report for a byte-identical row).
+    const elapsedMs = Math.max(mine.elapsedMs || 0, their.elapsedMs || 0);
+    if (elapsedMs) out.elapsedMs = elapsedMs;
+    const lastTickAt = Math.max(mine.lastTickAt || 0, their.lastTickAt || 0);
+    if (lastTickAt) out.lastTickAt = lastTickAt;
+    // A Leave stamped on one device is meaningless once folded into a row
+    // neither device is currently looking at — carrying it through a merge
+    // would charge the next resume, on whichever device that turns out to
+    // be, for the whole gap since a pause the resuming device never made
+    // and may already have accounted for (D13).
+    if (out.leftAt) out.leftAt = null;
     out.responses = Object.assign({}, other.responses || {}, base.responses || {});
     Object.keys(other.responses || {}).forEach(k => {
       const a = (other.responses || {})[k], b = (base.responses || {})[k];
@@ -27564,6 +27663,31 @@ test('Spaced repetition intervals follow the stated ladder', () => {
   eq(scheduleNext(true, 'knew', 2, cfg).days, 60);
   eq(scheduleNext(true, 'knew', 3, cfg).days, 90);
 });
+test('A reasoned or unsure answer must not inflate the stage a following "knew" builds on', () => {
+  const cfg = { wrong: 1, guessed: 1, lowConf: 3, medConf: 7, highConf: 14, ladder: [14, 30, 60, 90] };
+  // 'unsure' must not pre-floor the stage past the first ladder rung.
+  let r = scheduleNext(true, 'unsure', 0, cfg);
+  eq(r.days, 3);
+  r = scheduleNext(true, 'knew', r.stage, cfg);
+  eq(r.days, 14, 'a knew right after an unsure must still get the first rung, not skip to 30');
+  // 'reasoned' must not let a single medium-confidence answer outrun two knews.
+  r = scheduleNext(true, 'reasoned', 0, cfg);
+  eq(r.days, 7);
+  r = scheduleNext(true, 'knew', r.stage, cfg);
+  eq(r.days, 14, 'reasoned,knew must match knew,knew at the same position, not jump to 60');
+  r = scheduleNext(true, 'knew', r.stage, cfg);
+  eq(r.days, 30, 'reasoned,knew,knew must match knew,knew,knew, not jump to 90');
+});
+test('A question due later today is due first thing this morning, not only from its exact clock-time onward', () => {
+  const dueAt2200 = new Date(2026, 2, 11, 22, 0, 0);
+  const sameMorning0900 = new Date(2026, 2, 11, 9, 0, 0);
+  const dayBefore = new Date(2026, 2, 10, 23, 59, 0);
+  const dueISO = dueAt2200.toISOString();
+  assert(isDueByDay(dueISO, sameMorning0900), 'the whole calendar day it falls due must count, not only from the exact stamped clock time (D8)');
+  assert(!isDueByDay(dueISO, dayBefore), 'the day before it falls due is not due yet, even minutes before midnight');
+  assert(isDueByDay(dueISO, new Date(2026, 2, 12, 0, 1, 0)), 'and every day after remains due');
+  assert(!isDueByDay(null, new Date()), 'a question never scheduled is not due');
+});
 test('A guessed-correct answer is not treated as mastery', () => {
   const q = mkQ('x', ['a', 'b'], 0);
   const guessed = masteryOf(q, [{ ts: nowISO(), correct: true, confidence: 'guessed' }]);
@@ -28599,6 +28723,28 @@ test('a sitting continued on a second device keeps both devices\u2019 answers', 
   eq(Object.keys(r.rows[0].responses).sort().join(','), 'q1,q2', 'taking the winning row whole used to discard the other side\u2019s answers');
   assert(r.rows[0].flags.q1, 'and its flags with them');
 });
+test('mergeSessionRows keeps the larger elapsed time, not just whichever row won the tie-break (D13)', () => {
+  // The laptop answered more recently (wins by updatedAt) but has ticked for
+  // less wall-clock time than the phone, which merely hasn't answered since —
+  // a checkpoint tick never bumps updatedAt, so the losing row can be the truer one.
+  const laptop = { id: 's5', status: 'active', updatedAt: '2026-09-01T12:00:00Z', elapsedMs: 30000, responses: {}, flags: {} };
+  const phone = { id: 's5', status: 'active', updatedAt: '2026-09-01T10:00:00Z', elapsedMs: 90000, responses: {}, flags: {} };
+  const r = mergeSessionRows([laptop], [phone]);
+  eq(r.rows[0].elapsedMs, 90000, 'the merge must not rewind the clock to whichever side merely answered last');
+});
+test('mergeSessionRows clears a stale Leave stamp so the next resume is not charged for it twice (D13)', () => {
+  const withLeave = { id: 's6', status: 'active', updatedAt: '2026-09-01T12:00:00Z', leftAt: 1000000, responses: {}, flags: {} };
+  const other = { id: 's6', status: 'active', updatedAt: '2026-09-01T10:00:00Z', responses: {}, flags: {} };
+  const r = mergeSessionRows([withLeave], [other]);
+  eq(r.rows[0].leftAt, null, 'a Leave from before the merge must not still be sitting there for the next resume to find');
+});
+test('mergeSessionRows does not manufacture a timing key for a session neither device ever timed', () => {
+  const mine = { id: 's7', courseId: 'c', status: 'active', updatedAt: '2026-09-01T10:00:00Z', responses: {}, flags: {} };
+  const theirs = JSON.parse(JSON.stringify(mine));
+  const r = mergeSessionRows([mine], [theirs]);
+  eq(r.updated, 0, 'a merge of two rows with no timing fields at all must not itself add one');
+  assert(!('elapsedMs' in r.rows[0]), 'no elapsedMs key should appear where neither side ever had one');
+});
 test('mergeSessionRows reports no update for a session merged into a byte-identical copy', () => {
   const mine = { id: 's3', courseId: 'c', status: 'active', updatedAt: '2026-09-01T10:00:00Z',
     responses: { q1: { at: '2026-09-01T09:00:00Z' }, q2: { at: '2026-09-01T09:05:00Z', committed: true } }, flags: { q2: true } };
@@ -29559,6 +29705,33 @@ test('A weighted mock with a domain filter does not report a shortfall for the d
   } finally {
     if (s) await DB.del('sessions', s.id);
     for (const q of d1qs.concat(d2qs)) await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses;
+    State.invalidate();
+  }
+});
+
+test('Spaced repetition draws the most-overdue questions first, not a random due subset', async () => {
+  const was = { course: State.course, courses: State.courses };
+  const course = makeCourse('SPD', 'Spaced overdue-order test course', CISA_BLUEPRINT, { id: 'test-course' });
+  const mk = (n, daysOverdue) => mkQ('spaced q' + n, ['a', 'b'], 0,
+    { status: 'active', answerVerified: 'verified', nextReviewAt: addDays(-daysOverdue) });
+  // Overdue by 1, 5, 10 and 20 days — a session that wants only 2 must give
+  // the 20-day and 10-day ones, not whichever the shuffle happens to favour.
+  const barelyDue = mk(1, 1), dueAWhile = mk(2, 5), dueLong = mk(3, 10), dueLongest = mk(4, 20);
+  const qs = [barelyDue, dueAWhile, dueLong, dueLongest];
+  let s = null;
+  try {
+    State.course = course; State.courses = [course];
+    for (const q of qs) await DB.put('questions', q);
+    State.invalidate();
+    s = await Session.create('spaced', { count: 2, filters: { due: true } });
+    eq(s.questionUuids.length, 2);
+    const picked = new Set(s.questionUuids);
+    assert(picked.has(dueLongest.uuid) && picked.has(dueLong.uuid),
+      'the two most-overdue questions must be drawn before the barely-due ones (D2)');
+  } finally {
+    if (s) await DB.del('sessions', s.id);
+    for (const q of qs) await DB.del('questions', q.uuid);
     State.course = was.course; State.courses = was.courses;
     State.invalidate();
   }
@@ -31212,7 +31385,7 @@ test('The due count and the mode behind it cannot disagree', () => {
   all[1].nextReviewAt = due;
   // What the dashboard tile and the sidebar badge count, and what Spaced
   // repetition will actually hand you, are now the same number.
-  const badgeCounts = eligiblePool(all).filter(q => q.nextReviewAt && new Date(q.nextReviewAt) <= new Date()).length;
+  const badgeCounts = eligiblePool(all).filter(q => isDueByDay(q.nextReviewAt)).length;
   const spacedGives = applyFilters(eligiblePool(all), { due: true }).length;
   eq(badgeCounts, spacedGives, 'a badge must never promise work the mode behind it has none of');
   eq(badgeCounts, 1, 'and the case-study one is not in it');
@@ -31398,6 +31571,38 @@ test('rationaleBlock explains the option chosen, the option that was right, or n
   const nothing = rationaleBlock(bare, { selectedOptionId: bare.options[1].id, correct: false }, bareOrder);
   eq(nothing.length, 1);
   assert(/No explanation was captured/.test(nothing[0].textContent), 'a question with no reasoning at all says so, rather than showing nothing');
+});
+
+test('The runner\'s own dead-end "no explanation" warning offers a way out (D17)', async () => {
+  const was = { course: State.course, courses: State.courses, session: State.session, view: State.view, runnerStop: State.runnerStop };
+  const cid = 'test-reveal-openq-' + Date.now();
+  State.course = { id: cid, code: 'TRO2', name: 'Reveal open-question test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  // No explanation, and no per-option rationale — the dead-end case.
+  const q = mkQ('reveal open-question test', ['a', 'b'], 0, { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified' });
+  await DB.put('questions', q);
+  const s = {
+    id: 'sess-' + cid, courseId: cid, mode: 'learning', status: 'active',
+    questionUuids: [q.uuid], cursor: 0,
+    // Already answered, so the runner renders straight into its revealed
+    // state — the same one `choose()` reaches after askConfidence/askMistake.
+    responses: { [q.uuid]: { selectedOptionId: q.correctOptionId, correct: true, ms: 1000, at: nowISO() } },
+    flags: {}, optionOrders: {}, startedAt: nowISO()
+  };
+  try {
+    State.invalidate();
+    await runSession(s);
+    await new Promise(r => setTimeout(r, 20));
+    const view = $('#view');
+    assert(/No explanation was captured/.test(view.textContent), 'the dead-end warning must still show, unchanged');
+    const openBtn = Array.prototype.slice.call(view.querySelectorAll('button')).find(b => b.textContent === 'Open question');
+    assert(openBtn, 'an escape hatch out of the dead end must exist right here, not only on the results screen');
+  } finally {
+    if (State.runnerStop) { try { await State.runnerStop(); } catch (e) { } }
+    await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses; State.session = was.session; State.view = was.view; State.runnerStop = was.runnerStop;
+    State.invalidate();
+  }
 });
 
 test('The results screen shows why a wrong answer was wrong, not just its letter', async () => {
@@ -31723,6 +31928,48 @@ test('An imported answer nobody has confirmed is never filed as merely unclassif
   const trusted = candidateToQuestion(cand, Object.assign({}, ctx, { trustSourceAnswers: true }));
   eq(trusted.status, 'needs_class', 'a confirmed answer with no domain is still merely unfiled');
   assert(isPracticeEligible(trusted), 'and no domain must not cost somebody their bank');
+});
+
+test('sourceDialog remembers the "trust source answers" choice per course, instead of resetting on every file (D15)', async () => {
+  const prevCourse = State.course, prevCourses = State.courses;
+  const cid = 'test-trust-default-' + Date.now();
+  State.course = { id: cid, code: 'TTD', name: 'Trust default test', blueprint: [] };
+  State.courses = (State.courses || []).concat([State.course]);
+  const testFile = { filename: 'sample.txt', ext: 'txt', size: 10, kind: 'text', text: 'x' };
+  const findModal = async () => { let dlg = null; for (let i = 0; i < 50 && !dlg; i++) { await new Promise(r => setTimeout(r, 10)); dlg = $$('.modal').pop(); } return dlg; };
+  try {
+    // Ticking it must persist the choice right away, not only once "Extract
+    // questions" is clicked — then untick again so the form matches exactly
+    // what it opened with, and closing raises no "discard changes?" prompt.
+    let opened = sourceDialog([testFile]);
+    let dlg = await findModal();
+    assert(dlg, 'the source dialog must open');
+    const trustBox = dlg.querySelector('input[type=checkbox]');
+    assert(trustBox, 'the trust checkbox must exist');
+    assert(!trustBox.checked, 'nothing saved yet for this course, so it opens unchecked');
+    trustBox.checked = true; trustBox.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 10));
+    eq(Settings.get('sourceTrustDefault'), true, 'ticking the box must persist the choice immediately');
+    trustBox.checked = false; trustBox.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 10));
+    if (dlg && dlg._close) dlg._close(null);
+    await opened;
+
+    // A previous import already set this course's remembered choice to true.
+    await Settings.set('sourceTrustDefault', true);
+    opened = sourceDialog([testFile]);
+    dlg = await findModal();
+    assert(dlg, 'the source dialog must open a second time');
+    assert(dlg.querySelector('input[type=checkbox]').checked,
+      'a trusted source must not have to be re-ticked on every single file');
+    if (dlg && dlg._close) dlg._close(null);
+    await opened;
+  } finally {
+    const key = courseKey('sourceTrustDefault', cid);
+    await DB.del('settings', key).catch(() => {});
+    delete Settings.cache[key];
+    State.course = prevCourse; State.courses = prevCourses;
+  }
 });
 
 /* ---- which wrong answer keeps working ---- */
@@ -32965,6 +33212,73 @@ test('Dashboard\'s Unverified tile excludes rejected records', async () => {
   }
 });
 
+test('Dashboard\'s response-time tile is a median, not a mean dragged down by untimed answers (D12)', async () => {
+  const prevCourse = State.course, prevCourses = State.courses;
+  const cid = 'test-dashboard-median-' + Date.now();
+  State.course = { id: cid, code: 'TDM', name: 'Median response test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  State.invalidate();
+  const q = mkQ('median response test q', ['a', 'b'], 0, { courseId: cid, domainId: 'D1' });
+  await DB.put('questions', q);
+  const ids = [99161, 99162, 99163, 99164];
+  try {
+    await DB.put('attempts', { id: ids[0], questionUuid: q.uuid, courseId: cid, correct: true, ms: 10000, ts: nowISO() });
+    await DB.put('attempts', { id: ids[1], questionUuid: q.uuid, courseId: cid, correct: true, ms: 20000, ts: nowISO() });
+    await DB.put('attempts', { id: ids[2], questionUuid: q.uuid, courseId: cid, correct: true, ms: 90000, ts: nowISO() });
+    // A revisit that never got a fresh timing read — must not count as an instant answer.
+    await DB.put('attempts', { id: ids[3], questionUuid: q.uuid, courseId: cid, correct: true, ms: 0, ts: nowISO() });
+    State.invalidate();
+    const root = h('div');
+    await ROUTES.dashboard(root);
+    const tile = Array.prototype.slice.call(root.querySelectorAll('.tile')).find(t => t.textContent.indexOf('Median response') >= 0);
+    assert(tile, 'the tile must render, honestly labelled as a median');
+    eq(tile.querySelector('b').textContent, '20s',
+      'the median of 10s/20s/90s is 20s — a mean (40s), or counting the untimed answer as 0s (30s), would both read differently');
+  } finally {
+    for (const id of ids) await DB.del('attempts', id).catch(() => {});
+    await DB.del('questions', q.uuid);
+    State.course = prevCourse; State.courses = prevCourses; State.invalidate();
+  }
+});
+
+test('The readiness verdict does not count a mock finished by overrunning its own time limit (D18)', async () => {
+  const prevCourse = State.course, prevCourses = State.courses;
+  const cid = 'test-readiness-overrun-' + Date.now();
+  State.course = { id: cid, code: 'TRO', name: 'Readiness overrun test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  // 30 seen questions clears readinessVerdict's own "not enough evidence"
+  // gate (seen >= 30); none has a real attempts-store record, so the only
+  // way this test can reach a real verdict — rather than "not enough
+  // evidence yet" — is if the mock below is (wrongly) counted as sat.
+  const qs = Array.from({ length: 30 }, (_, i) => mkQ('rv q' + i, ['a', 'b'], 0,
+    { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified' }));
+  qs.forEach(q => { q.stats.attempts = 1; q.stats.correct = 1; });
+  for (const q of qs) await DB.put('questions', q);
+  // A clean, entirely-correct paper — but run for four times its own time
+  // limit, the mockAllowPause:true scenario D18 describes.
+  const sess = {
+    id: 'sess-' + cid, courseId: cid, mode: 'mock', status: 'complete',
+    questionUuids: qs.map(q => q.uuid),
+    responses: Object.fromEntries(qs.map(q => [q.uuid, { selectedOptionId: q.correctOptionId, correct: true }])),
+    flags: {}, optionOrders: {}, marks: {}, marking: { passPct: 60, negativeFraction: 0 },
+    timeLimitMs: 3600000, elapsedMs: 3600000 * 4,
+    startedAt: nowISO(), endedAt: nowISO()
+  };
+  await DB.put('sessions', sess);
+  try {
+    State.invalidate();
+    const root = h('div');
+    await ROUTES.dashboard(root);
+    assert(/Not enough evidence yet to say whether you are ready/.test(root.textContent),
+      'a mock passed only by running over time must not be counted as sat under exam conditions: "' + root.textContent.slice(0, 400) + '"');
+    assert(!/of your last 1 mock/.test(root.textContent), 'the overrun sitting must not appear as "1 of your last 1 mock"');
+  } finally {
+    await DB.del('sessions', sess.id);
+    for (const q of qs) await DB.del('questions', q.uuid);
+    State.course = prevCourse; State.courses = prevCourses; State.invalidate();
+  }
+});
+
 test('An unrecognised session mode does not crash the dashboard, the practice screen, or results', async () => {
   // Merge is additive and never validated against this build's own MODES
   // table — a session written by a newer or forked build, or a hand-edited
@@ -33336,6 +33650,25 @@ test('Cancelling a modal never leaves its opener wearing a focus ring', async ()
   } finally {
     btn.remove();
   }
+});
+
+test('The confidence dialog does not reflexively focus "Knew it" (D14)', async () => {
+  const q = mkQ('confidence focus test', ['a', 'b'], 0, { difficultyVerified: 'verified' });
+  const btn = h('button', { text: 'opener' });
+  document.body.appendChild(btn);
+  try {
+    btn.focus();
+    const p = askConfidence(q, q.correctOptionId);
+    await new Promise(r => setTimeout(r, 50));
+    const knewBtn = Array.prototype.slice.call(document.querySelectorAll('.modal-bg .modal-f button')).find(b => b.textContent === 'Knew it');
+    assert(knewBtn, 'the Knew it button must exist');
+    assert(!knewBtn.classList.contains('primary'), 'no single confidence level should be styled as the default');
+    assert(document.activeElement !== knewBtn, 'a reflexive Enter right after the dialog opens must not silently claim "Knew it"');
+    const closeBtn = document.querySelector('.modal-bg [aria-label="Close"]');
+    eq(document.activeElement, closeBtn, 'focus lands on the safe close control instead');
+    closeBtn.click();
+    await p;
+  } finally { btn.remove(); }
 });
 
 test('Creating a course lands you on the dashboard, not back in Settings', () => {
@@ -35235,6 +35568,36 @@ test('A mode shortcut refuses to open while a session is unfinished', async () =
     await DB.del('sessions', s.id); State.course = prev;
   }
 });
+test('"Practise unseen" actually filters the session to never-attempted questions (D10)', async () => {
+  const prevCourse = State.course, prevCourses = State.courses;
+  const cid = 'test-unseen-filter-' + Date.now();
+  State.course = { id: cid, code: 'TUF', name: 'Unseen filter test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  State.invalidate();
+  const mk = (n) => mkQ('unseen-test q' + n, ['a', 'b'], 0, { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified' });
+  const seen1 = mk(1), seen2 = mk(2), unseen1 = mk(3), unseen2 = mk(4);
+  seen1.stats.attempts = 1; seen1.stats.correct = 1;
+  seen2.stats.attempts = 2; seen2.stats.correct = 1;
+  const qs = [seen1, seen2, unseen1, unseen2];
+  for (const q of qs) await DB.put('questions', q);
+  State.invalidate();
+  let dlg = null;
+  try {
+    // The dashboard's "Practise unseen" card reaches this exact call:
+    // ROUTES.practice forwards its object-shaped preselect into configureMode
+    // as (mode, preset) — driven directly here the way that plumbing does.
+    const opened = configureMode('mixed', { neverAttempted: true });
+    for (let i = 0; i < 50 && !dlg; i++) { await new Promise(r => setTimeout(r, 10)); dlg = $$('.modal').pop(); }
+    assert(dlg, 'the configure dialog must open');
+    assert(dlg.textContent.indexOf('2 eligible') >= 0,
+      'only the 2 never-attempted questions may be eligible, not all 4 in the course: "' + dlg.textContent.slice(0, 300) + '"');
+    if (dlg && dlg._close) dlg._close(null);
+    await opened;
+  } finally {
+    for (const q of qs) await DB.del('questions', q.uuid);
+    State.course = prevCourse; State.courses = prevCourses; State.invalidate();
+  }
+});
 test('No mode promises a preset the app cannot load back', () => {
   Object.keys(MODES).forEach(m => {
     assert(!/preset/i.test(MODES[m].desc), m + ' offers presets, but nothing in the app lists or applies a saved preset');
@@ -35531,6 +35894,32 @@ test('Analytics says which columns the period select governs', async () => {
       assert(/in the last 30 days \(/.test(root.textContent), 'the coverage notice names the period');
     }
   } finally { AnaState.days = was.days; State.course = was.course; State.courses = was.courses; }
+});
+
+test('Analytics "By difficulty" does not fold an ungraded question into medium (D11)', async () => {
+  const was = { course: State.course, courses: State.courses, by: AnaState.by, days: AnaState.days };
+  const course = makeCourse('DFG', 'Difficulty-grouping test course', CISA_BLUEPRINT, { id: 'test-course' });
+  const ungraded = mkQ('never graded', ['a', 'b'], 0, { status: 'active', answerVerified: 'verified' });
+  const graded = mkQ('graded medium', ['a', 'b'], 0,
+    { status: 'active', answerVerified: 'verified', difficulty: 'medium', difficultyVerified: 'verified' });
+  try {
+    State.course = course; State.courses = [course];
+    await DB.put('questions', ungraded); await DB.put('questions', graded);
+    // The tab bails out to "No attempts in this period" with an empty log —
+    // one attempt, on either question, is enough to reach the difficulty table.
+    await DB.put('attempts', { id: 99231, questionUuid: graded.uuid, courseId: course.id, correct: true, mode: 'learning', ts: nowISO() });
+    State.invalidate();
+    AnaState.by = 'difficulty'; AnaState.days = null;
+    const root = h('div');
+    await ROUTES.analytics(root);
+    assert(/Ungraded/.test(root.textContent),
+      'a question nobody has graded must render its own "Ungraded" row, not vanish into "medium"');
+  } finally {
+    await DB.del('attempts', 99231);
+    await DB.del('questions', ungraded.uuid); await DB.del('questions', graded.uuid);
+    State.course = was.course; State.courses = was.courses; AnaState.by = was.by; AnaState.days = was.days;
+    State.invalidate();
+  }
 });
 
 test('A backup is a package the restore path can read back', async () => {
