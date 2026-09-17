@@ -1537,7 +1537,7 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
    01 · Core: utilities, seeded RNG, hashing, IndexedDB data-access layer
    ========================================================================== */
 'use strict';
-const APP = { name: 'MCQ Mastery', version: '1.7.49', schema: 4 };
+const APP = { name: 'MCQ Mastery', version: '1.7.50', schema: 4 };
 
 /* ---------- tiny DOM + format helpers ---------- */
 const $ = (s, r) => (r || document).querySelector(s);
@@ -8894,7 +8894,12 @@ async function configureMode(mode, preset) {
     count: mode === 'mock' ? mockOpening.count
       : isCaseMode ? Math.min(10, pool.length)
         : mode === 'lastmile' ? Math.max(1, Math.min(40, lastMilePick(pool, 0, Settings.get('masteryTarget')).available))
-          : 20,
+          // The one mode whose whole purpose is a due-date queue used to open
+          // on a flat 20 regardless of how much was actually due — the same
+          // "don't let the field promise more than the bank can fill, or sit
+          // on a token 20 when 60 are waiting" idiom last-mile already uses.
+          : mode === 'spaced' ? Math.max(1, Math.min(40, pool.filter(q => isDueByDay(q.nextReviewAt)).length))
+            : 20,
     weighted: mode === 'mixed' || mode === 'mock',
     minutes: mode === 'mock' ? mockOpening.minutes : Settings.get('mockMinutes'),
     caseCount: openingCaseCount,
@@ -10015,11 +10020,23 @@ async function runSession(s) {
       // A mock records the response here rather than through Session.answer,
       // which does not run until submission — so it stamps the marks itself,
       // and carries forward the record of having changed its mind.
-      s.responses[q.uuid] = carryAnswerChanges(s.responses[q.uuid], {
-        selectedOptionId: optId, correct: optId === q.correctOptionId, ms,
-        confidence: null, mistake: null, at: nowISO(), qVersion: q.version,
-        marks: marksOf(q, s.courseId)
-      });
+      const already = s.responses[q.uuid];
+      if (already && already.selectedOptionId === optId) {
+        // Tapping the option you already picked again clears the answer —
+        // "leave it blank, it costs nothing" (the results screen's own
+        // explanation of a blank response) must be a decision you can
+        // actually take back, not just accept once you have picked
+        // something. markSession only reads this as blank when the key is
+        // absent entirely, so clearing it means deleting it, not zeroing a
+        // field (roadmap #3d).
+        delete s.responses[q.uuid];
+      } else {
+        s.responses[q.uuid] = carryAnswerChanges(already, {
+          selectedOptionId: optId, correct: optId === q.correctOptionId, ms,
+          confidence: null, mistake: null, at: nowISO(), qVersion: q.version,
+          marks: marksOf(q, s.courseId)
+        });
+      }
       await Session.save(s);
     }
     render();
@@ -18117,7 +18134,11 @@ async function courseDialog(course) {
             quickAdded = true;
             if (box && box._close) box._close(null);
             toast(c.code + ' created — its bank starts empty', 'ok');
-            renderShell(); go('dashboard');
+            // Landing on the dashboard used to mean a brand-new, empty course
+            // showing an empty dashboard — no due questions, no recommendation
+            // worth following. Straight to Add Questions is the actual next
+            // step for a course that starts with nothing in it (roadmap #9a).
+            renderShell(); go('import');
           } finally {
             quickAdding = false;
             quickAddBtns.forEach(b => b.disabled = false);
@@ -18262,7 +18283,10 @@ async function courseDialog(course) {
     toast('Course updated', 'ok');
     if (ruleChanged) await applyOptionCountRule(course);
   }
-  renderShell(); go(isNew ? 'dashboard' : 'settings');
+  // A brand-new course starts with nothing in it — Add Questions is the
+  // actual next step, not an empty dashboard with nothing to recommend
+  // (roadmap #9a, same reasoning as quick-add just below).
+  renderShell(); go(isNew ? 'import' : 'settings');
   } finally { release(); }
 }
 
@@ -29756,6 +29780,31 @@ test('Spaced repetition draws the most-overdue questions first, not a random due
   }
 });
 
+test('Spaced mode opens with the count field set to how much is actually due, not a flat 20 (roadmap #1)', async () => {
+  const prevCourse = State.course, prevCourses = State.courses;
+  const cid = 'test-spaced-count-' + Date.now();
+  State.course = { id: cid, code: 'TSC', name: 'Spaced count test course', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  const qs = Array.from({ length: 5 }, (_, i) => mkQ('spaced count q' + i, ['a', 'b'], 0,
+    { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified', nextReviewAt: addDays(-1) }));
+  for (const q of qs) await DB.put('questions', q);
+  const findModal = async () => { let dlg = null; for (let i = 0; i < 50 && !dlg; i++) { await new Promise(r => setTimeout(r, 10)); dlg = $$('.modal').pop(); } return dlg; };
+  try {
+    State.invalidate();
+    const opened = configureMode('spaced');
+    const dlg = await findModal();
+    assert(dlg, 'the configure dialog must open');
+    const countInput = dlg.querySelector('input[type=number][max="250"]');
+    assert(countInput, 'the count field must exist');
+    eq(countInput.value, '5', 'the field must open on how much is actually due, not a flat 20');
+    if (dlg && dlg._close) dlg._close(null);
+    await opened;
+  } finally {
+    for (const q of qs) await DB.del('questions', q.uuid);
+    State.course = prevCourse; State.courses = prevCourses; State.invalidate();
+  }
+});
+
 test('Session.abandon() marks a session abandoned and persists it, not just in memory', async () => {
   const s = {
     id: uuid(), courseId: 'test-course', mode: 'learning', status: 'active', startedAt: nowISO(),
@@ -31679,6 +31728,49 @@ test('The mistake cause is asked after the reveal, not before it (D7)', async ()
     for (const a of rows) await DB.del('attempts', a.id).catch(() => {});
     await DB.del('questions', q.uuid);
     State.course = was.course; State.courses = was.courses; State.session = was.session; State.view = was.view; State.runnerStop = was.runnerStop;
+    State.invalidate();
+  }
+});
+
+test('Tapping the selected mock option again clears the answer (roadmap #3d)', async () => {
+  const was = { course: State.course, courses: State.courses, session: State.session, view: State.view, runnerStop: State.runnerStop, confirmLeaveMock: Settings.cache.confirmLeaveMock };
+  // leaveGuarded (State.runnerStop) asks "Pause the exam?" for any mock with
+  // confirmLeaveMock on — off here so cleanup can call it without a dialog
+  // this test has nothing to do with.
+  Settings.cache.confirmLeaveMock = false;
+  const cid = 'test-mock-clear-' + Date.now();
+  State.course = { id: cid, code: 'TMC', name: 'Mock clear test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (State.courses || []).concat([State.course]);
+  const q = mkQ('mock clear test', ['a', 'b'], 0, { courseId: cid, domainId: 'D1', status: 'active', answerVerified: 'verified' });
+  await DB.put('questions', q);
+  const s = {
+    id: 'sess-' + cid, courseId: cid, mode: 'mock', status: 'active',
+    questionUuids: [q.uuid], cursor: 0, responses: {}, flags: {}, optionOrders: {},
+    // Already past the exam-centre ceremony — this test is about the option
+    // buttons, not that unrelated dialog.
+    startedAt: nowISO(), seatedAt: nowISO(), timeLimitMs: 3600000, elapsedMs: 0
+  };
+  try {
+    State.invalidate();
+    await runSession(s);
+    await new Promise(r => setTimeout(r, 20));
+    const optBtn = $('#view').querySelectorAll('.opts button')[0];
+    assert(optBtn, 'an option must render');
+    optBtn.click();
+    await new Promise(r => setTimeout(r, 20));
+    assert(s.responses[q.uuid], 'the first tap must record an answer');
+
+    const sameBtn = Array.prototype.slice.call($('#view').querySelectorAll('.opts button')).find(b => b.getAttribute('aria-pressed') === 'true');
+    assert(sameBtn, 'the chosen option must show as pressed');
+    sameBtn.click();
+    await new Promise(r => setTimeout(r, 20));
+    assert(!s.responses[q.uuid], 'tapping the same option again must clear the answer, not just re-record it');
+  } finally {
+    if (State.runnerStop) { try { await State.runnerStop(); } catch (e) { } }
+    await DB.del('sessions', s.id).catch(() => {});
+    await DB.del('questions', q.uuid);
+    State.course = was.course; State.courses = was.courses; State.session = was.session; State.view = was.view; State.runnerStop = was.runnerStop;
+    if (was.confirmLeaveMock === undefined) delete Settings.cache.confirmLeaveMock; else Settings.cache.confirmLeaveMock = was.confirmLeaveMock;
     State.invalidate();
   }
 });
@@ -33769,15 +33861,17 @@ test('The confidence dialog does not reflexively focus "Knew it" (D14)', async (
   } finally { btn.remove(); }
 });
 
-test('Creating a course lands you on the dashboard, not back in Settings', () => {
+test('Creating a course lands you straight on Add Questions, not back in Settings (roadmap #9a)', () => {
   // The onboarding "Add your first course" card opens courseDialog(null) —
   // reaching the Settings screen it had just replaced, rather than a
-  // greeting, on the one occasion an empty bank actually needs one.
+  // greeting, on the one occasion an empty bank actually needs one. A brand
+  // new course starts with nothing in it, so the useful next screen is where
+  // you bring questions in, not a dashboard with nothing yet to recommend.
   const src = courseDialog.toString();
-  assert(/go\(isNew \? 'dashboard' : 'settings'\)/.test(src),
-    'the shared save tail must send a brand-new course to the dashboard, and an edited one back to Settings');
-  assert(/go\('dashboard'\)/.test(src),
-    'the quick-add "create a new course" button must also land on the dashboard, not Settings');
+  assert(/go\(isNew \? 'import' : 'settings'\)/.test(src),
+    'the shared save tail must send a brand-new course to Add Questions, and an edited one back to Settings');
+  assert(/go\('import'\)/.test(src),
+    'the quick-add "create a new course" button must also land on Add Questions');
 });
 test('The Question Bank mastery bar follows the course mastery target, not a hardcoded 75', () => {
   const src = ROUTES.bank.toString();
