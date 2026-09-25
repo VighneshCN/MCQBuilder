@@ -11165,7 +11165,16 @@ ROUTES.bank = async (root) => {
   // and rescan below then works on whichever is in front of you, without any
   // of them needing to know the other exists.
   const onCase = BankState.bank === 'case';
-  const all = everything.filter(q => isCaseQuestion(q) === onCase);
+  /* The bank lists questions that are in the bank proper — practising, or
+     shelved (archived, merged, rejected). A question still held for its
+     answer, a duplicate or a conflict lives in the review queue, where every
+     tool for settling it is; it appears here the moment it is settled. Two
+     screens offering to fix the same thing, with different buttons, was the
+     confusion. */
+  const sideAll = everything.filter(q => isCaseQuestion(q) === onCase);
+  const pending = sideAll.filter(isBlocked);
+  const all = sideAll.filter(q => !isBlocked(q));
+  if (BLOCKING_STATUSES.indexOf(BankState.status) >= 0) BankState.status = '';
   const sources = await DB.byIndex('sources', 'courseId', State.course.id);
   const batches = await DB.byIndex('batches', 'courseId', State.course.id);
   // On the case side "practice-ready" has to mean askable, which needs the
@@ -11202,6 +11211,11 @@ ROUTES.bank = async (root) => {
     ]));
   }
 
+  if (pending.length) root.appendChild(h('div', { class: 'notice row wrap', style: 'margin-bottom:14px;gap:10px;align-items:center' }, [
+    h('span', { style: 'flex:1;min-width:200px', text: qtyLabel(pending.length, 'question') + ' waiting in the review queue — they appear here once settled.' }),
+    h('button', { class: 'btn sm primary', onclick: () => { State.importStep = 'check'; go('import'); }, text: 'Open review queue' })
+  ]));
+
   const filters = h('div', { class: 'card', style: 'margin-bottom:14px' });
   const fb = h('div', { style: 'margin-top:10px' });
   const line1 = h('div', { class: 'grid g3' });
@@ -11218,7 +11232,7 @@ ROUTES.bank = async (root) => {
       opts.map(o => h('option', { value: o.v, selected: BankState[key] === o.v }, o.label)));
     return h('div', { class: 'field' }, [h('label', { text: label }), s]);
   };
-  line1.appendChild(mkSel('Status', 'status', [{ v: '', label: 'Any status' }].concat(Object.keys(STATUS).map(k => ({ v: k, label: STATUS[k].label })))));
+  line1.appendChild(mkSel('Status', 'status', [{ v: '', label: 'Any status' }].concat(Object.keys(STATUS).filter(k => BLOCKING_STATUSES.indexOf(k) < 0).map(k => ({ v: k, label: STATUS[k].label })))));
   line1.appendChild(mkSel('Domain', 'domain', [{ v: '', label: 'Any domain' }].concat(State.course.blueprint.map(d => ({ v: d.id, label: d.id + ' · ' + d.name.split(' ').slice(0, 3).join(' ') }))).concat([{ v: 'none', label: 'Unmapped' }])));
   line1.appendChild(mkSel('Learning state', 'learn', [
     { v: '', label: 'Any' }, { v: 'never', label: 'Never attempted' }, { v: 'attempted', label: 'Attempted' },
@@ -11260,6 +11274,10 @@ ROUTES.bank = async (root) => {
     const term = BankState.q.trim().toLowerCase();
     let list = all.filter(q => {
       if (BankState.status && q.status !== BankState.status) return false;
+      // A merged copy lives on inside the record it was merged into, and a
+      // rejected one was turned away: neither is a question of its own, so
+      // they are listed only when asked for by status.
+      if (!BankState.status && (q.status === 'merged' || q.status === 'rejected')) return false;
       if (BankState.domain) { if (BankState.domain === 'none') { if (q.domainId) return false; } else if (q.domainId !== BankState.domain) return false; }
       if (BankState.caseStudy && q.caseStudyId !== BankState.caseStudy) return false;
       if (BankState.source && q.sourceId !== BankState.source) return false;
@@ -11326,11 +11344,15 @@ ROUTES.bank = async (root) => {
       h('button', { 'aria-pressed': String(BankState.view === 'table'), onclick: () => { BankState.view = 'table'; draw(); }, text: 'Table' }),
       h('button', { 'aria-pressed': String(BankState.view === 'card'), onclick: () => { BankState.view = 'card'; draw(); }, text: 'Cards' })
     ]));
+    // Only what applies to the selection: everything here is already settled,
+    // so there is nothing to verify or activate — those live in the queue.
     if (BankState.sel.size) {
-      toolbar.appendChild(h('button', { class: 'btn sm', onclick: () => bulkClassify(), text: 'Classify' }));
-      toolbar.appendChild(h('button', { class: 'btn sm', onclick: () => bulkVerify(), text: 'Verify answers' }));
-      toolbar.appendChild(h('button', { class: 'btn sm', onclick: () => bulkStatus('active'), text: 'Activate' }));
-      toolbar.appendChild(h('button', { class: 'btn sm', onclick: () => bulkStatus('archived'), text: 'Archive' }));
+      const picked = list.filter(q => BankState.sel.has(q.uuid));
+      const shelved = picked.filter(q => q.status === 'archived' || q.status === 'rejected');
+      const live = picked.filter(q => q.status !== 'archived' && q.status !== 'rejected' && q.status !== 'merged');
+      toolbar.appendChild(h('button', { class: 'btn sm', onclick: () => bulkClassify(), text: 'Edit details' }));
+      if (live.length) toolbar.appendChild(h('button', { class: 'btn sm', onclick: () => bulkStatus('archived', live), text: 'Archive ' + live.length }));
+      if (shelved.length) toolbar.appendChild(h('button', { class: 'btn sm', onclick: () => bulkRestore(shelved), text: 'Restore ' + shelved.length }));
       toolbar.appendChild(h('button', { class: 'btn sm ghost', onclick: () => { BankState.sel.clear(); draw(); }, text: 'Clear' }));
     }
     toolbar.appendChild(h('button', { class: 'btn sm', onclick: () => exportBank(list), text: 'Export view' }));
@@ -11342,12 +11364,27 @@ ROUTES.bank = async (root) => {
         h('h3', { text: 'Nothing matches those filters' }),
         h('p', { class: 'muted', text: all.length ? 'Widen the filters, or clear the search box.' : 'The bank is empty — import a file to begin.' })
       ])));
-    } else if (BankState.view === 'table') {
-      listWrap.appendChild(bankTable(slice));
     } else {
-      const g = h('div', { class: 'grid g2' });
-      slice.forEach(q => g.appendChild(bankCard(q)));
-      listWrap.appendChild(g);
+      // Ticking the header box selects the page; past one page, offer the
+      // whole filtered list — a bulk edit should never need fifty-at-a-time.
+      const pageAll = slice.length && slice.every(q => BankState.sel.has(q.uuid));
+      if (list.length > slice.length && BankState.sel.size === list.length) {
+        listWrap.appendChild(h('div', { class: 'notice small row wrap', style: 'gap:8px;margin-bottom:10px;align-items:center' }, [
+          h('span', { text: 'All ' + list.length + ' matching questions are selected.' }),
+          h('button', { class: 'btn sm ghost', onclick: () => { BankState.sel.clear(); draw(); }, text: 'Clear selection' })
+        ]));
+      } else if (pageAll && list.length > slice.length) {
+        listWrap.appendChild(h('div', { class: 'notice small row wrap', style: 'gap:8px;margin-bottom:10px;align-items:center' }, [
+          h('span', { text: 'All ' + slice.length + ' on this page are selected.' }),
+          h('button', { class: 'btn sm', onclick: () => { list.forEach(q => BankState.sel.add(q.uuid)); draw(); }, text: 'Select all ' + list.length + ' matching' })
+        ]));
+      }
+      if (BankState.view === 'table') listWrap.appendChild(bankTable(slice));
+      else {
+        const g = h('div', { class: 'grid g2' });
+        slice.forEach(q => g.appendChild(bankCard(q)));
+        listWrap.appendChild(g);
+      }
     }
 
     pager.textContent = '';
@@ -11356,6 +11393,10 @@ ROUTES.bank = async (root) => {
       pager.appendChild(h('span', { class: 'docnum', text: 'Page ' + (BankState.page + 1) + ' of ' + pages }));
       pager.appendChild(h('button', { class: 'btn sm', disabled: BankState.page >= pages - 1, onclick: () => { BankState.page++; draw(); }, text: 'Next →' }));
     }
+    if (list.length > 50) pager.appendChild(h('select', {
+      class: 'sm', 'aria-label': 'Questions per page',
+      onchange: e => { BankState.size = +e.target.value; BankState.page = 0; draw(); }
+    }, [50, 100, 250].map(n => h('option', { value: String(n), selected: BankState.size === n }, n + ' per page'))));
   }
 
   function bankTable(slice) {
@@ -11413,49 +11454,42 @@ ROUTES.bank = async (root) => {
     ]);
   }
 
-  // Shared with the per-record skip below, so the warning count and what
-  // actually gets skipped can never quietly disagree with each other.
-  const notActivatable = (q) => !canActivate(q);
-  async function bulkStatus(status) {
-    const sel = Array.from(BankState.sel);
-    if (status === 'active') {
-      const bad = [];
-      for (const u of sel) { const q = await Questions.get(u); if (notActivatable(q)) bad.push(q.qid); }
-      if (bad.length) { const ok = await confirmBox('Some questions cannot be activated', bad.length + ' of ' + sel.length + ' still have an unresolved answer conflict, no verified correct answer, or the wrong number of options for this course, so they will stay in the review queue. Activate the rest?'); if (!ok) return; }
-    } else if (status === 'archived') {
-      const ok = await confirmBox('Archive ' + sel.length + ' question(s)?', 'They leave the practice pool but keep their Question ID, sources and attempt history. Archiving is reversible.');
-      if (!ok) return;
-    }
-    let applied = 0;
+  async function bulkStatus(status, list) {
+    const sel = (list || []).map(q => q.uuid);
+    if (!sel.length) return;
+    const ok = await confirmBox('Archive ' + sel.length + ' question(s)?', 'They leave the practice pool but keep their Question ID, sources and attempt history. Archiving is reversible.');
+    if (!ok) return;
     for (const u of sel) {
       const q = await Questions.get(u);
-      if (status === 'active' && notActivatable(q)) continue;
+      if (!q) continue;
       const prev = q.status; q.status = status; q.updatedAt = nowISO();
       await DB.put('questions', q);
-      await audit(status === 'archived' ? 'archive' : 'activate', 'question', q.qid, { status: prev }, { status }, 'bulk');
-      applied++;
+      await audit('archive', 'question', q.qid, { status: prev }, { status }, 'bulk');
     }
     BankState.sel.clear(); State.invalidate();
-    toast(applied === sel.length ? 'Updated ' + applied + ' record(s)' : 'Updated ' + applied + ' of ' + sel.length + ' record(s)', 'ok');
+    toast('Archived ' + sel.length, 'ok');
     go('bank');
   }
-  async function bulkVerify() {
-    const sel = Array.from(BankState.sel);
-    const ok = await confirmBox('Confirm the source answers?', 'This marks the correct answer as verified for ' + sel.length + ' question(s). Only do this where you have actually checked the answer against the source.');
-    if (!ok) return;
-    let applied = 0;
-    for (const u of sel) {
-      const q = await Questions.get(u);
-      if (!q.correctOptionId) continue;
-      q.answerVerified = 'verified'; q.verifiedAt = nowISO(); q.verifyNote = 'Bulk verification';
-      if (q.status === 'needs_answer' || q.status === 'draft') q.status = deriveEntryStatus(q);
-      q.updatedAt = nowISO();
-      await DB.put('questions', q);
-      await audit('verify', 'question', q.qid, null, { answerVerified: 'verified' }, 'bulk');
-      applied++;
+  /* Restoring puts a shelved question back where its own content says it
+     belongs — through the practice gate, never by writing "active" onto it
+     (see canActivate), and with a fresh duplicate check, since the bank may
+     have gained its twin while it was away. Anything that then needs a
+     person goes to the review queue, and the toast says so. */
+  async function bulkRestore(list) {
+    let ready = 0, queued = 0;
+    for (const x of list) {
+      const q = await Questions.get(x.uuid);
+      if (!q) continue;
+      const prev = q.status;
+      let next = deriveEntryStatus(q);
+      if (next === 'active' && !canActivate(q)) next = 'needs_answer';
+      q.status = next;
+      await Questions.save(q, 'restored');
+      await audit('restore', 'question', q.qid, { status: prev }, { status: q.status }, 'bulk');
+      if (isBlocked(q)) queued++; else ready++;
     }
     BankState.sel.clear(); State.invalidate();
-    toast(applied === sel.length ? 'Verified ' + applied + ' record(s)' : 'Verified ' + applied + ' of ' + sel.length + ' record(s) — the rest have no answer chosen yet', 'ok');
+    toast(ready + ' back in practice' + (queued ? ' · ' + queued + ' need a check first — they are in the review queue' : ''), queued ? 'warn' : 'ok', 7000);
     go('bank');
   }
   async function bulkClassify() {
@@ -15533,34 +15567,224 @@ ROUTES.review = async (root) => {
   return ROUTES.import(root);
 };
 
-/* Hand a whole review-queue group to the Question Bank's bulk tools.
+/* ---- the review queue's own bulk tools ----
+   Every group is settled here, where it is listed. The queue used to hand a
+   group over to the Question Bank's bulk buttons instead ("Do all N at
+   once →"), which meant pending questions had to be visible in the bank, and
+   a student had to learn a second screen to finish the first — while the
+   biggest group of all, possible duplicates, had no bulk route anywhere. */
 
-   bulkClassify(), bulkVerify() and bulkStatus() have existed all along, and a
-   student facing four hundred unverified questions could already fix them in
-   four clicks — but nothing said so, and the screen where the problem appears
-   had no route to the screen that solves it. This is signposting, not new
-   machinery: no gate moves, and bulk verify is still a person asserting the
-   answers are right.
-
-   The two banks are shown one at a time over there, so a group that spans both
-   is narrowed to the side being opened rather than quietly acting on records
-   that are not on screen. */
-function bulkFrom(list, status) {
-  const rows = (list || []);
-  if (!rows.length) return;
-  const onCase = isCaseQuestion(rows[0]);
-  const mine = rows.filter(q => isCaseQuestion(q) === onCase);
-  Object.assign(BankState, {
-    bank: onCase ? 'case' : 'standalone',
-    // Only the filter that names this group; everything else cleared, so the
-    // list you land on is the list you came from.
-    status: status || '', q: '', domain: '', source: '', batch: '',
-    verif: '', learn: '', diff: '', caseStudy: '', page: 0,
-    sel: new Set(mine.map(q => q.uuid))
+/** How a set of duplicate pairings can be settled in one go. A pair is merged
+    only when it is plainly one question — a definite or likely match that
+    does not disagree about the answer — and the records it links are merged
+    into one survivor: the record that already has a confirmed answer, then
+    the one with more practice behind it, then the older Question ID, so
+    nothing a student has done or confirmed is thrown away. Pairs that
+    disagree about the answer, or only look alike, are left for Compare.
+    Pure: reads the records it is given, writes nothing. */
+function queueMergePlan(records, byUuid) {
+  const live = (q) => q && q.status !== 'merged' && q.status !== 'rejected';
+  const pairs = new Map();
+  records.forEach(q => (q.dupWith || []).forEach(u => {
+    const o = byUuid.get(u);
+    if (!live(q) || !live(o)) return;
+    const k = q.uuid < o.uuid ? q.uuid + '|' + o.uuid : o.uuid + '|' + q.uuid;
+    if (!pairs.has(k)) pairs.set(k, [q, o]);
+  }));
+  const parent = new Map();
+  const find = (u) => { while (parent.get(u) !== u) { parent.set(u, parent.get(parent.get(u))); u = parent.get(u); } return u; };
+  const join = (a, b) => { [a, b].forEach(x => { if (!parent.has(x)) parent.set(x, x); }); parent.set(find(a), find(b)); };
+  const needsLook = [];
+  pairs.forEach(([a, b]) => {
+    if (!comparablePair(a, b) || answersConflict(a, b)) { needsLook.push([a, b]); return; }
+    const sim = similarity(a, b);
+    const cls = classifyPair(a, b, sim);
+    // "Likely" alone is not enough to merge unseen: two stems a key word apart
+    // ("…settles a duplicate…" / "…settles a conflict…") over the same options
+    // score likely too. A likely pair merges only when the wording is nearly
+    // all shared and at most one option differs — the copy with a page number
+    // run onto an option, which is what a bulk merge is for.
+    const plain = cls === 'definite' || (cls === 'likely' && sim.stemTok >= 0.8 && sim.opts >= 0.75);
+    if (plain) join(a.uuid, b.uuid); else needsLook.push([a, b]);
   });
-  go('bank');
-  const skipped = rows.length - mine.length;
-  if (skipped) toast(skipped + ' of these are in the other bank — open it there to do those.', 'warn', 6000);
+  const rank = (q) => [q.answerVerified === 'verified' && q.correctOptionId ? 2 : q.correctOptionId ? 1 : 0, (q.stats && q.stats.attempts) || 0, -IdRegister.seqOf(q.qid)];
+  const better = (x, y) => { const a = rank(x), b = rank(y); for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] > b[i]; return false; };
+  const groups = new Map();
+  parent.forEach((_, u) => { const r = find(u); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(byUuid.get(u)); });
+  const clusters = [];
+  groups.forEach(members => {
+    let canon = members[0];
+    members.forEach(m => { if (better(m, canon)) canon = m; });
+    // Joined through a middle record, two members can still disagree with
+    // the survivor about the answer; those stay for Compare.
+    const merge = [], held = [];
+    members.forEach(m => { if (m !== canon) (answersConflict(canon, m) ? held : merge).push(m); });
+    held.forEach(m => needsLook.push([canon, m]));
+    if (merge.length) clusters.push({ canon, merge });
+  });
+  return { clusters, needsLook, pairs: pairs.size };
+}
+/** Carry out queueMergePlan() over the given records. */
+async function mergeAgreeingCopies(uuids, onProgress) {
+  const all = await Questions.byCourse(State.course.id);
+  const byUuid = new Map(all.map(q => [q.uuid, q]));
+  const plan = queueMergePlan(uuids.map(u => byUuid.get(u)).filter(Boolean), byUuid);
+  const total = plan.clusters.reduce((s, c) => s + c.merge.length, 0);
+  let done = 0;
+  for (const c of plan.clusters) {
+    for (const m of c.merge) {
+      // The survivor may lack an answer another copy carries; take it first,
+      // with the standing it had, so merging never loses it.
+      const canon = await Questions.get(c.canon.uuid), dup = await Questions.get(m.uuid);
+      if (!canon || !dup || dup.status === 'merged') continue;
+      if (!canon.correctOptionId && dup.correctOptionId) {
+        const t = (dup.options.find(o => o.id === dup.correctOptionId) || {}).text;
+        const hit = canon.options.find(o => normOptText(o.text) === normOptText(t));
+        if (hit) { canon.correctOptionId = hit.id; canon.answerVerified = dup.answerVerified; canon.verifiedAt = dup.verifiedAt; canon.updatedAt = nowISO(); await DB.put('questions', canon); }
+      }
+      await mergeQuestions(c.canon.uuid, m.uuid, 'Merged from the review queue — same question, same answer');
+      done++;
+      if (onProgress) onProgress(done, total);
+    }
+  }
+  State.invalidate();
+  return { merged: done, needsLook: plan.needsLook.length };
+}
+/** "Keep separate" for every pairing these records have, on both sides, so a
+    rescan never raises them again. The one-row button does the same. */
+async function keepPairsSeparate(uuids) {
+  let n = 0;
+  for (const uuid of uuids) {
+    const fresh = await Questions.get(uuid);
+    if (!fresh || !(fresh.dupWith || []).length) continue;
+    for (const u of fresh.dupWith.slice()) {
+      fresh.dismissedPairs = Array.from(new Set((fresh.dismissedPairs || []).concat([u])));
+      unflagPairSide(fresh, u, 'dup');
+      const other = await Questions.get(u);
+      if (other) {
+        other.dismissedPairs = Array.from(new Set((other.dismissedPairs || []).concat([fresh.uuid])));
+        unflagPairSide(other, fresh.uuid, 'dup');
+        normalizePairState(other);
+        other.updatedAt = nowISO();
+        await DB.put('questions', other);
+      }
+    }
+    normalizePairState(fresh);
+    fresh.updatedAt = nowISO();
+    await DB.put('questions', fresh);
+    n++;
+  }
+  State.invalidate();
+  return n;
+}
+/** Confirm the answer each record already shows. A record with no answer is
+    skipped — confirming means a person agreeing with an answer, and there is
+    nothing to agree with. */
+async function confirmShownAnswers(uuids) {
+  let done = 0, skipped = 0;
+  for (const u of uuids) {
+    const q = await Questions.get(u);
+    if (!q || !q.correctOptionId) { skipped++; continue; }
+    q.answerVerified = 'verified'; q.verifiedAt = nowISO(); q.verifyNote = 'Confirmed in the review queue';
+    if (q.status === 'needs_answer' || q.status === 'draft') q.status = deriveEntryStatus(q);
+    q.updatedAt = nowISO();
+    await DB.put('questions', q);
+    await audit('verify', 'question', q.qid, null, { answerVerified: 'verified' }, 'bulk, review queue');
+    done++;
+  }
+  State.invalidate();
+  return { done, skipped };
+}
+/** File records under a domain — one the person chose, or, with no domain
+    given, whatever the course's keyword hints suggest (as a suggestion). */
+async function fileUnderDomain(uuids, domainId) {
+  let done = 0;
+  for (const u of uuids) {
+    const q = await Questions.get(u);
+    if (!q) continue;
+    if (domainId) { q.domainId = domainId; q.classVerified = 'verified'; q.domainSuggested = false; }
+    else {
+      const s = suggestDomain(State.course, q.stem + ' ' + q.options.map(o => o.text).join(' '));
+      if (!s.domainId) continue;
+      q.domainId = s.domainId; q.domainSuggested = true; q.classVerified = 'unverified';
+    }
+    if (q.status === 'needs_class') q.status = deriveEntryStatus(q);
+    q.updatedAt = nowISO();
+    await DB.put('questions', q);
+    done++;
+  }
+  State.invalidate();
+  return done;
+}
+/* A pair flagged as an answer conflict under the older, stricter comparison —
+   which called "Optimize performance." and "Optimize performance. 410 Mock
+   Assessment Test Paper-6" two different answers — is re-judged under the
+   current one whenever the queue opens. One that no longer disagrees becomes
+   the possible duplicate it always was, which the queue can merge in bulk.
+   Only records already carrying a conflict are looked at, both sides are
+   updated, in place, on the list the caller is about to draw. */
+async function rejudgeConflictPairs(all) {
+  const byUuid = new Map(all.map(q => [q.uuid, q]));
+  const touched = new Set();
+  let eased = 0;
+  for (const q of all) {
+    if (q.status === 'merged' || q.status === 'rejected') continue;
+    for (const u of (q.conflictWith || []).slice()) {
+      const o = byUuid.get(u);
+      if (!o || o.status === 'merged' || o.status === 'rejected' || answersConflict(q, o)) continue;
+      unflagPairSide(q, u, 'conflict'); flagPairSide(q, u, 'dup');
+      unflagPairSide(o, q.uuid, 'conflict'); flagPairSide(o, q.uuid, 'dup');
+      touched.add(q); touched.add(o); eased++;
+    }
+  }
+  for (const q of touched) { normalizePairState(q); q.updatedAt = nowISO(); await DB.put('questions', q); }
+  return eased;
+}
+/** Would readStatedAnswers() find an answer in this question's own words? */
+function statedAnswerIn(q) {
+  if (!q || q.correctOptionId) return null;
+  const c = { options: (q.options || []).map((o, i) => ({ letter: letterOf(i), text: o.text })), explanation: q.explanation || '', answerLetter: '', answerRaw: '', conf: {} };
+  recoverStatedAnswer(c);
+  return c.answerLetter ? c : null;
+}
+/** For questions already in the bank with no answer: read one the source
+    states in prose — the same reading a fresh import now does — and
+    pre-select it, unconfirmed, so a person confirms it with the rest. An
+    explanation run onto an option is split back off it when that is plain. */
+async function readStatedAnswers(uuids) {
+  let found = 0;
+  for (const u of uuids) {
+    const q = await Questions.get(u);
+    const c = statedAnswerIn(q);
+    if (!c) continue;
+    const ix = LETTERS.indexOf(c.answerLetter);
+    if (!q.options[ix]) continue;
+    q.options.forEach((o, i) => { if (c.options[i] && c.options[i].text !== o.text) o.text = c.options[i].text; });
+    q.explanation = c.explanation;
+    q.correctOptionId = q.options[ix].id;
+    q.answerVerified = 'unverified';
+    q.verifyNote = 'Answer read from the source’s own words: “' + c.answerQuote + '”';
+    if (q.status === 'needs_answer' || q.status === 'draft') q.status = deriveEntryStatus(q);
+    await Questions.save(q, 'answer read from the source text');
+    found++;
+  }
+  State.invalidate();
+  return found;
+}
+/** "The wording reads fine" for questions the parser was unsure it had read. */
+async function markWordingChecked(uuids) {
+  let done = 0;
+  for (const u of uuids) {
+    const q = await Questions.get(u);
+    if (!q || q.status !== 'needs_content') continue;
+    q.parseConf = Object.assign({}, q.parseConf, { stem: 1, options: 1 });
+    q.status = deriveEntryStatus(q);
+    q.updatedAt = nowISO();
+    await DB.put('questions', q);
+    done++;
+  }
+  State.invalidate();
+  return done;
 }
 
 /** The checking queue itself, rendered inside Add Questions. */
@@ -15578,7 +15802,8 @@ const REVIEW_FILTER_TABS = [
 // current answer until touched), so a pick survives the local redraws that
 // ticking a checkbox or resolving a neighbouring row cause.
 const ConflictQueueState = { sel: new Set(), answers: new Map() };
-const ReviewQueueState = { filter: 'all' };
+// sel / limit: per group, what is ticked and how many rows are drawn.
+const ReviewQueueState = { filter: 'all', sel: {}, limit: {} };
 
 async function renderReviewQueue(root) {
   // Before deciding what to show: a conflict flag with no live record on the
@@ -15600,6 +15825,8 @@ async function renderReviewQueue(root) {
       (repair.cleared ? repair.cleared + ' had no disagreement left and were cleared. ' : ''),
       'info', 9000), 400);
   }
+  const eased = await rejudgeConflictPairs(all);
+  if (eased) setTimeout(() => toast(eased + ' answer conflict(s) were only a page number or a word apart — now listed as duplicates to merge.', 'info', 8000), 400);
   const queue = all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0);
   // Both banks queue here — a case-study question needing its answer
   // confirmed is confirmed in the same place as any other. Which bank it
@@ -15654,33 +15881,70 @@ async function renderReviewQueue(root) {
   const sectionsBox = h('div');
   root.appendChild(sectionsBox);
 
-  const section = (container, title, list, note, renderer) => {
+  /* One group of the queue: its count, the one action that settles the whole
+     group when there is one, a selection bar, and the rows. Rows are drawn
+     forty at a time, but "Select all" always means the whole group — never
+     just the rows that happen to be on screen. */
+  const section = (container, key, title, list, opts, renderer) => {
     if (!list.length) return;
-    // Read off the group rather than threaded through every call site: when a
-    // group is all one status the bank can open filtered to it, and when it is
-    // mixed (the "other" pile) it opens unfiltered with the selection intact.
-    const uniform = list.every(q => q.status === list[0].status) ? list[0].status : '';
-    const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
-      h('div', { class: 'card-h' }, [h('h3', { text: title }), h('span', { class: 'badge b-review', text: String(list.length) }), h('div', { class: 'spacer' }),
-        // Worth offering once there are enough of them that one at a time is
-        // plainly the wrong answer.
-        // Never for duplicates: the bank's bulk tools set status but leave
-        // dupWith alone, so an Activate or Archive there is re-derived back
-        // to possible_dup by the next save or rescan. Compare and Keep
-        // separate are the only actions that settle a pairing.
-        list.length >= 5 && uniform !== 'possible_dup' ? h('button', {
-          class: 'btn sm', onclick: () => bulkFrom(list, uniform),
-          text: 'Do all ' + list.length + ' at once →'
-        }) : null,
-        h('span', { class: 'tiny dim', text: note })].filter(Boolean))
-    ]);
-    const b = h('div', { class: 'card-b stack' });
-    list.slice(0, 40).forEach(q => b.appendChild(renderer(q)));
-    if (list.length > 40) b.appendChild(h('div', { class: 'small dim', text: 'Showing the first 40 of ' + list.length + '. Clear these and the rest will appear.' }));
-    card.appendChild(b);
+    const sel = ReviewQueueState.sel[key] || (ReviewQueueState.sel[key] = new Set());
+    const ids = new Set(list.map(q => q.uuid));
+    Array.from(sel).forEach(u => { if (!ids.has(u)) sel.delete(u); });
+    const card = h('div', { class: 'card', style: 'margin-bottom:16px' });
     container.appendChild(card);
+    const draw = () => {
+      card.textContent = '';
+      const picked = list.filter(q => sel.has(q.uuid));
+      const limit = ReviewQueueState.limit[key] || 40;
+      card.appendChild(h('div', { class: 'card-h' }, [
+        h('h3', { text: title }), h('span', { class: 'badge b-review', text: String(list.length) }),
+        opts.tip ? infoTip(title, opts.tip) : null,
+        h('div', { class: 'spacer' })
+      ].concat(opts.groupActions ? opts.groupActions(list) : []).filter(Boolean)));
+      card.appendChild(h('div', { class: 'row wrap', style: 'gap:10px;align-items:center;padding:0 16px 10px' }, [
+        h('label', { class: 'row small', style: 'gap:6px;align-items:center;cursor:pointer' }, [
+          h('input', { type: 'checkbox', checked: picked.length === list.length, onchange: e => { if (e.target.checked) list.forEach(q => sel.add(q.uuid)); else sel.clear(); draw(); } }),
+          h('span', { text: 'Select all ' + list.length })
+        ]),
+        picked.length ? h('span', { class: 'tiny dim', text: picked.length + ' selected' }) : null
+      ].concat(picked.length && opts.selectionActions ? opts.selectionActions(picked) : [])
+        .concat([picked.length ? h('button', { class: 'btn sm ghost', onclick: () => { sel.clear(); draw(); }, text: 'Clear' }) : null]).filter(Boolean)));
+      const b = h('div', { class: 'card-b stack' });
+      list.slice(0, limit).forEach(q => b.appendChild(h('div', { class: 'row', style: 'gap:10px;align-items:flex-start' }, [
+        h('input', { type: 'checkbox', style: 'margin-top:5px', 'aria-label': 'Select ' + (q.qid || 'this question'), checked: sel.has(q.uuid), onchange: e => { if (e.target.checked) sel.add(q.uuid); else sel.delete(q.uuid); draw(); } }),
+        h('div', { style: 'flex:1;min-width:0' }, renderer(q))
+      ])));
+      if (list.length > limit) b.appendChild(h('button', {
+        class: 'btn sm', style: 'align-self:center',
+        onclick: () => { ReviewQueueState.limit[key] = limit + 40; draw(); },
+        text: 'Show ' + Math.min(40, list.length - limit) + ' more · ' + (list.length - limit) + ' not shown'
+      }));
+      card.appendChild(b);
+    };
+    draw();
   };
-
+  /** The source's explanation, first few lines, expandable. */
+  const explanationPeek = (text) => {
+    const t = String(text || '').trim();
+    const box = h('div', { class: 'small', style: 'background:var(--surface-2);border-radius:8px;padding:8px 10px;white-space:pre-wrap' });
+    const short = t.length > 320 ? t.slice(0, 300).replace(/\s+\S*$/, '') + '…' : t;
+    const draw = (full) => {
+      box.textContent = '';
+      box.appendChild(h('span', { class: 'eyebrow', style: 'display:block;margin-bottom:2px', text: 'From the source' }));
+      box.appendChild(document.createTextNode(full ? t : short));
+      if (t.length > 320) box.appendChild(h('button', { class: 'btn sm ghost', style: 'margin-left:6px', onclick: () => draw(!full), text: full ? 'Less' : 'More' }));
+    };
+    draw(false);
+    return box;
+  };
+  /** Run a bulk queue action with the screen told it is working, then redraw
+      the queue and say what happened. */
+  const runBulk = async (btn, label, fn) => {
+    if (btn) { btn.disabled = true; btn.textContent = label + '…'; }
+    try { const msg = await fn(p => { if (btn) btn.textContent = label + ' ' + p; }); if (msg) toast(msg, 'ok', 6000); }
+    catch (e) { toast(e.message || String(e), 'bad', 7000); }
+    State.importStep = 'check'; go('import');
+  };
   /** A badge saying "Conflicts with CISA-Q-000042" makes you open that record
       just to find out what it actually disagrees about. State the two
       competing answers right here instead — which option each record thinks
@@ -15915,66 +16179,171 @@ async function renderReviewQueue(root) {
   function drawSections() {
     sectionsBox.textContent = '';
     const show = (key) => ReviewQueueState.filter === 'all' || ReviewQueueState.filter === key;
+    const uuidsOf = (list) => list.map(q => q.uuid);
 
     if (show('answer_conflict')) renderConflictsSection(sectionsBox);
 
-    if (show('possible_dup')) section(sectionsBox, 'Possible duplicates', dupes, 'Compare before merging — same concept is not the same question', q => quickRow(q,
-      h('div', { class: 'row', style: 'gap:6px' }, [
-        h('button', { class: 'btn sm', onclick: () => reviewDuplicate(q), text: 'Compare' }),
-        h('button', {
-          class: 'btn sm', onclick: async () => {
-            // One click dismisses every current duplicate partner at once —
-            // the button doesn't ask which one, so it clears them all, both
-            // sides, and records each dismissal so a rescan won't re-raise it.
+    if (show('possible_dup')) {
+      // What one click would settle: copies that are plainly one question
+      // with one answer. Anything that disagrees or only looks alike stays.
+      const plan = queueMergePlan(dupes, byUuid);
+      const mergeable = plan.clusters.reduce((s, c) => s + c.merge.length, 0);
+      const mergeBtn = (list, label) => {
+        const btn = h('button', { class: 'btn sm primary', text: label });
+        btn.onclick = async () => {
+          const p = queueMergePlan(list, byUuid);
+          const n = p.clusters.reduce((s, c) => s + c.merge.length, 0);
+          if (!n) { toast('None of these are plain copies with the same answer — use Compare on them', 'warn', 6000); return; }
+          const ok = await confirmBox('Merge ' + n + ' duplicate cop' + (n === 1 ? 'y' : 'ies') + '?',
+            'Each is the same question with the same answer as the one it merges into. Every source is kept, and any merge can be undone from the question’s Provenance tab.' +
+            (p.needsLook.length ? ' ' + p.needsLook.length + ' pair(s) that disagree or only look alike are left for you to compare.' : ''), false, 'Merge');
+          if (!ok) return;
+          await runBulk(btn, 'Merging', async (progress) => {
+            const r = await mergeAgreeingCopies(uuidsOf(list), (d, t) => progress(d + '/' + t));
+            return r.merged + ' merged' + (r.needsLook ? ' · ' + r.needsLook + ' left to compare' : '');
+          });
+        };
+        return btn;
+      };
+      section(sectionsBox, 'possible_dup', 'Possible duplicates', dupes, {
+        tip: 'Two records that read as the same question. Merge keeps one record and every source. Keep separate if they only look alike.',
+        groupActions: () => mergeable ? [mergeBtn(dupes, 'Merge ' + mergeable + ' same-answer cop' + (mergeable === 1 ? 'y' : 'ies'))] : [],
+        selectionActions: (picked) => [
+          mergeBtn(picked, 'Merge'),
+          h('button', {
+            class: 'btn sm', onclick: (e) => runBulk(e.currentTarget, 'Keeping separate', async () => {
+              const n = await keepPairsSeparate(uuidsOf(picked));
+              return n + ' kept separate';
+            }), text: 'Keep separate'
+          })
+        ]
+      }, q => quickRow(q,
+        h('div', { class: 'row', style: 'gap:6px' }, [
+          h('button', { class: 'btn sm', onclick: () => reviewDuplicate(q), text: 'Compare' }),
+          h('button', {
+            class: 'btn sm', onclick: async () => {
+              // One click dismisses every current duplicate partner at once —
+              // both sides, recorded so a rescan won't raise it again.
+              await keepPairsSeparate([q.uuid]);
+              toast('Kept as a separate question'); State.importStep = 'check'; go('import');
+            }, text: 'Keep separate'
+          })
+        ])));
+    }
+
+    if (show('needs_answer')) {
+      // Rows that already show an answer — one click each, or one for all —
+      // come before the ones that still need somebody to pick.
+      noAnswer.sort((a, b) => (b.correctOptionId ? 1 : 0) - (a.correctOptionId ? 1 : 0));
+      const shown = noAnswer.filter(q => q.correctOptionId);
+      const confirmBtn = (list, label) => {
+        const withAns = list.filter(q => q.correctOptionId);
+        if (!withAns.length) return null;
+        const btn = h('button', { class: 'btn sm primary', text: label });
+        btn.onclick = async () => {
+          const ok = await confirmBox('Confirm ' + withAns.length + ' answer(s)?',
+            'Each keeps the answer shown in green and goes into practice. Only do this where you trust where the answers came from.' +
+            (list.length > withAns.length ? ' ' + (list.length - withAns.length) + ' have no answer yet — pick those one by one.' : ''), false, 'Confirm');
+          if (!ok) return;
+          await runBulk(btn, 'Confirming', async () => {
+            const r = await confirmShownAnswers(uuidsOf(withAns));
+            return r.done + ' confirmed and in practice';
+          });
+        };
+        return btn;
+      };
+      const readable = noAnswer.filter(q => statedAnswerIn(q));
+      const readBtn = readable.length ? h('button', {
+        class: 'btn sm', title: 'Finds answers the source wrote out in words, such as “Option D is the correct answer”, and shows them for you to confirm.',
+        onclick: (e) => runBulk(e.currentTarget, 'Reading', async () => {
+          const n = await readStatedAnswers(uuidsOf(readable));
+          return n + ' answer(s) found in the text — check and confirm them';
+        }), text: 'Find ' + readable.length + ' answer' + (readable.length === 1 ? '' : 's') + ' in the text'
+      }) : null;
+      section(sectionsBox, 'needs_answer', 'Needs answer verification', noAnswer, {
+        tip: 'These are held out of practice until an answer is confirmed. Tap the right option to confirm it. An answer already shown in green came from the file.',
+        groupActions: () => [readBtn, shown.length ? confirmBtn(noAnswer, 'Confirm ' + shown.length + ' answer' + (shown.length === 1 ? '' : 's') + ' shown') : null].filter(Boolean),
+        selectionActions: (picked) => [confirmBtn(picked, 'Confirm answers shown')]
+      }, q => quickRow(q, h('div', { class: 'stack', style: 'gap:6px' }, [
+        h('div', { class: 'stack', style: 'gap:4px' }, q.options.map((o, i) => h('button', {
+          class: 'method-row', style: q.correctOptionId === o.id ? 'background:var(--green-tint)' : '', onclick: async () => {
             const fresh = await Questions.get(q.uuid);
-            for (const u of (fresh.dupWith || []).slice()) {
-              fresh.dismissedPairs = Array.from(new Set((fresh.dismissedPairs || []).concat([u])));
-              unflagPairSide(fresh, u, 'dup');
-              const other = await Questions.get(u);
-              if (other) {
-                other.dismissedPairs = Array.from(new Set((other.dismissedPairs || []).concat([fresh.uuid])));
-                unflagPairSide(other, fresh.uuid, 'dup');
-                normalizePairState(other);
-                other.updatedAt = nowISO();
-                await DB.put('questions', other);
-              }
-            }
-            normalizePairState(fresh);
-            fresh.updatedAt = nowISO();
-            await DB.put('questions', fresh); State.invalidate(); toast('Kept as a separate question'); (function(){ State.importStep='check'; return go('import'); })();
-          }, text: 'Keep separate'
+            fresh.correctOptionId = o.id; fresh.answerVerified = 'verified'; fresh.verifiedAt = nowISO();
+            fresh.status = deriveEntryStatus(fresh);
+            await Questions.save(fresh, 'answer verified');
+            await audit('verify', 'question', fresh.qid, null, { correctOptionId: o.id }, 'Answer set and verified in review queue');
+            State.invalidate(); toast(fresh.qid + ' verified', 'ok'); go('import');
+          }
+        }, [
+          h('span', { class: 'method-ico' + (q.correctOptionId === o.id ? ' correct-pick' : ''), style: q.correctOptionId === o.id ? 'background:var(--green)' : '', text: letterOf(i) + (q.correctOptionId === o.id ? ' ✓' : '') }),
+          h('span', { class: 'small', style: 'flex:1;text-align:left', text: o.text }),
+          // A source often explains each option in turn; that reason is
+          // what says which one is right.
+          o.rationale ? h('span', { class: 'tiny dim', style: 'flex:1;text-align:left', text: o.rationale }) : null
+        ].filter(Boolean)))),
+        // The source's own explanation is usually where the answer is written
+        // out — "C. In ITF, data is processed in production-like systems…" —
+        // so it sits right under the options instead of one click away.
+        String(q.explanation || '').trim() ? explanationPeek(q.explanation) : null
+      ].filter(Boolean))));
+    }
+
+    if (show('needs_class')) {
+      const hinted = State.course.hints ? noClass.filter(q => suggestDomain(State.course, q.stem + ' ' + q.options.map(o => o.text).join(' ')).domainId) : [];
+      const fileBtns = (list) => {
+        const pickDom = h('select', { class: 'sm', 'aria-label': 'Domain' }, State.course.blueprint.map(d => h('option', { value: d.id }, d.id + ' · ' + d.name)));
+        return [pickDom, h('button', {
+          class: 'btn sm primary', onclick: (e) => runBulk(e.currentTarget, 'Filing', async () => {
+            const n = await fileUnderDomain(uuidsOf(list), pickDom.value);
+            return n + ' filed under ' + pickDom.value;
+          }), text: 'File under this domain'
+        })];
+      };
+      section(sectionsBox, 'needs_class', 'Unclassified — already in practice', noClass, {
+        tip: 'These practise normally. A domain lets them into domain drills and exam-weighted mocks.',
+        groupActions: () => hinted.length ? [h('button', {
+          class: 'btn sm', title: 'Uses the course’s keyword hints. Each is marked as a suggestion you can change.',
+          onclick: (e) => runBulk(e.currentTarget, 'Filing', async () => {
+            const n = await fileUnderDomain(uuidsOf(hinted), null);
+            return n + ' filed by keywords';
+          }), text: 'File ' + hinted.length + ' by keywords'
+        })] : [],
+        selectionActions: (picked) => fileBtns(picked)
+      }, q => quickRow(q,
+        h('div', { class: 'row wrap', style: 'gap:6px' }, State.course.blueprint.map(d => h('button', {
+          class: 'btn sm', onclick: async () => {
+            const fresh = await Questions.get(q.uuid);
+            fresh.domainId = d.id; fresh.classVerified = 'verified';
+            fresh.status = deriveEntryStatus(fresh);
+            await Questions.save(fresh, 'classified');
+            State.invalidate(); toast('Classified as ' + d.id, 'ok'); State.importStep = 'check'; go('import');
+          }, text: d.id
+        })))));
+    }
+
+    if (show('other')) section(sectionsBox, 'other', 'Other review items', rest, {
+      tip: '“Wording unchecked”: the parser was unsure it read the text right — they still practise. Drafts and incomplete parses need opening.',
+      selectionActions: (picked) => [
+        picked.some(q => q.status === 'needs_content') ? h('button', {
+          class: 'btn sm primary', onclick: (e) => runBulk(e.currentTarget, 'Saving', async () => {
+            const n = await markWordingChecked(uuidsOf(picked));
+            return n + ' marked as reading fine';
+          }), text: 'Wording is fine'
+        }) : null,
+        h('button', {
+          class: 'btn sm', onclick: async (e) => {
+            const ok = await confirmBox('Archive ' + picked.length + ' question(s)?', 'They leave the queue and practice, and keep their Question ID and history. Archiving can be undone from the Question Bank.', false, 'Archive');
+            if (!ok) return;
+            runBulk(e.currentTarget, 'Archiving', async () => {
+              for (const q of picked) { const f = await Questions.get(q.uuid); if (!f) continue; const prev = f.status; f.status = 'archived'; f.updatedAt = nowISO(); await DB.put('questions', f); await audit('archive', 'question', f.qid, { status: prev }, { status: 'archived' }, 'review queue'); }
+              State.invalidate();
+              return picked.length + ' archived';
+            });
+          }, text: 'Archive'
         })
-      ])));
-
-    if (show('needs_answer')) section(sectionsBox, 'Needs answer verification', noAnswer, 'No answer, or an answer nobody has checked', q => quickRow(q,
-      h('div', { class: 'stack', style: 'gap:4px' }, q.options.map((o, i) => h('button', {
-        class: 'method-row', style: q.correctOptionId === o.id ? 'background:var(--green-tint)' : '', onclick: async () => {
-          const fresh = await Questions.get(q.uuid);
-          fresh.correctOptionId = o.id; fresh.answerVerified = 'verified'; fresh.verifiedAt = nowISO();
-          fresh.status = deriveEntryStatus(fresh);
-          await Questions.save(fresh, 'answer verified');
-          await audit('verify', 'question', fresh.qid, null, { correctOptionId: o.id }, 'Answer set and verified in review queue');
-          State.invalidate(); toast(fresh.qid + ' verified', 'ok'); go('import');
-        }
-      }, [
-        h('span', { class: 'method-ico' + (q.correctOptionId === o.id ? ' correct-pick' : ''), style: q.correctOptionId === o.id ? 'background:var(--green)' : '', text: letterOf(i) + (q.correctOptionId === o.id ? ' ✓' : '') }),
-        h('span', { class: 'small', style: 'flex:1;text-align:left', text: o.text })
-      ])))));
-
-    if (show('needs_class')) section(sectionsBox, 'Unclassified — already in practice', noClass, 'A domain turns on domain drills and weighted mocks', q => quickRow(q,
-      h('div', { class: 'row wrap', style: 'gap:6px' }, State.course.blueprint.map(d => h('button', {
-        class: 'btn sm', onclick: async () => {
-          const fresh = await Questions.get(q.uuid);
-          fresh.domainId = d.id; fresh.classVerified = 'verified';
-          fresh.status = deriveEntryStatus(fresh);
-          await Questions.save(fresh, 'classified');
-          State.invalidate(); toast('Classified as ' + d.id, 'ok'); (function(){ State.importStep='check'; return go('import'); })();
-        }, text: d.id
-      })))));
-
-    if (show('other')) section(sectionsBox, 'Other review items', rest, 'Drafts and incomplete parses', q => quickRow(q));
+      ].filter(Boolean)
+    }, q => quickRow(q));
   }
-
   drawTabs();
   drawSections();
 }
@@ -30632,7 +31001,76 @@ test('Only active, verified questions can enter a session', () => {
   const d = base(); d.status = 'draft'; assert(!isPracticeEligible(d), 'a draft must be blocked');
   const x = base(); x.correctOptionId = 'nope'; assert(!isPracticeEligible(x), 'a dangling correct-option id must be blocked');
 });
-test('Bulk Activate asks the practice gate rather than a copy of it', () => {
+test('The review queue merges plain copies in bulk, keeps the record with the confirmed answer, and leaves disagreements for Compare', async () => {
+  const cid = 'test-queue-merge-' + Date.now();
+  const opts = ['Wording', 'Sourcing', 'Answering', 'Explaining'];
+  const stem = 'Which of the following BEST settles a duplicate in the review queue?';
+  const mk = (ix, extra) => mkQ(stem, opts, ix, Object.assign({ courseId: cid, status: 'possible_dup', domainId: 'D1' }, extra || {}));
+  const older = mk(null, { qid: 'QMG-Q-000001', status: 'possible_dup' });                       // no answer
+  const confirmed = mk(1, { qid: 'QMG-Q-000007', answerVerified: 'verified' });               // the one to keep
+  const disagree = mk(2, { qid: 'QMG-Q-000009', answerVerified: 'verified' });                // different answer
+  const lookalike = mkQ('Which of the following BEST settles a conflict in the review queue?', ['Wording', 'Sourcing', 'Answering', 'Explaining'], 1, { courseId: cid, qid: 'QMG-Q-000011', status: 'possible_dup', answerVerified: 'verified', domainId: 'D1' });
+  const recs = [older, confirmed, disagree, lookalike];
+  const link = (a, b) => { a.dupWith = (a.dupWith || []).concat([b.uuid]); b.dupWith = (b.dupWith || []).concat([a.uuid]); };
+  link(older, confirmed); link(confirmed, disagree); link(older, lookalike);
+  for (const q of recs) await recomputeFingerprint(q);
+  const byUuid = new Map(recs.map(q => [q.uuid, q]));
+  const plan = queueMergePlan(recs, byUuid);
+  eq(plan.clusters.length, 1, 'one set of plain copies');
+  eq(plan.clusters[0].canon.uuid, confirmed.uuid, 'kept: the record whose answer is already confirmed, not merely the older one');
+  eq(plan.clusters[0].merge.map(q => q.uuid).join(), older.uuid, 'merged into it: the copy with no answer');
+  eq(plan.needsLook.length, 2, 'the disagreeing copy and the look-alike are left for Compare');
+  const was = { course: State.course };
+  State.course = { id: cid, code: 'QMG', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  for (const q of recs) await DB.put('questions', q);
+  try {
+    const r = await mergeAgreeingCopies(recs.map(q => q.uuid));
+    eq(r.merged, 1, 'one merge carried out');
+    eq((await DB.get('questions', older.uuid)).status, 'merged', 'the copy is merged away');
+    const kept = await DB.get('questions', confirmed.uuid);
+    assert((kept.aliasQids || []).indexOf('QMG-Q-000001') >= 0, 'and its Question ID lives on as an alias of the one kept');
+    eq(kept.answerVerified, 'verified', 'the confirmed answer is untouched');
+    const n = await keepPairsSeparate([lookalike.uuid]);
+    eq(n, 1);
+    const la = await DB.get('questions', lookalike.uuid);
+    eq((la.dupWith || []).length, 0, 'keep separate clears the pairing');
+    assert((la.dismissedPairs || []).length, 'and remembers it, so a rescan does not raise it again');
+  } finally {
+    State.course = was.course;
+    for (const q of await Questions.byCourse(cid)) await DB.del('questions', q.uuid);
+  }
+});
+test('Queue bulk tools confirm only answers that exist, and file by hand or by keywords', async () => {
+  const cid = 'test-queue-tools-' + Date.now();
+  const withAns = mkQ('Which firewall rule is reviewed first?', ['Deny all', 'Allow all'], 0, { courseId: cid, status: 'needs_answer', domainId: 'D5' });
+  const without = mkQ('Which is it?', ['This', 'That'], null, { courseId: cid, status: 'needs_answer', domainId: 'D5' });
+  const unfiled = mkQ('Which firewall configuration uses encryption best?', ['a', 'b'], 0, { courseId: cid, status: 'needs_class', answerVerified: 'verified' });
+  const unfiled2 = mkQ('Which of these is best?', ['a', 'b'], 0, { courseId: cid, status: 'needs_class', answerVerified: 'verified' });
+  const was = { course: State.course };
+  State.course = { id: cid, code: 'QTL', blueprint: CISA_BLUEPRINT, hints: CISA_HINTS };
+  for (const q of [withAns, without, unfiled, unfiled2]) await DB.put('questions', q);
+  try {
+    const r = await confirmShownAnswers([withAns.uuid, without.uuid]);
+    eq(r.done, 1); eq(r.skipped, 1, 'a question with no answer has nothing to confirm');
+    eq((await DB.get('questions', withAns.uuid)).status, 'active', 'the confirmed one goes into practice');
+    eq((await DB.get('questions', without.uuid)).status, 'needs_answer', 'the other waits for a pick');
+    eq(await fileUnderDomain([unfiled.uuid, unfiled2.uuid], null), 1, 'keywords file only what they can place');
+    const f = await DB.get('questions', unfiled.uuid);
+    eq(f.domainId, 'D5'); assert(f.domainSuggested, 'as a suggestion'); eq(f.status, 'active');
+    eq(await fileUnderDomain([unfiled2.uuid], 'D2'), 1, 'a chosen domain files anything');
+    eq((await DB.get('questions', unfiled2.uuid)).classVerified, 'verified', 'and counts as a person’s decision');
+  } finally {
+    State.course = was.course;
+    for (const q of await Questions.byCourse(cid)) await DB.del('questions', q.uuid);
+  }
+});
+test('The Question Bank lists only questions that are settled; pending ones are the queue’s', () => {
+  const src = ROUTES.bank.toString();
+  assert(/const all = sideAll\.filter\(q => !isBlocked\(q\)\)/.test(src), 'blocked questions are kept out of the bank’s list');
+  assert(!/bulkVerify|'Activate'|text: 'Verify answers'/.test(src), 'and the bank no longer offers to verify or activate');
+  assert(/Select all ' \+ list\.length \+ ' matching'/.test(src), 'a selection can reach every match, not just the page');
+});
+test('Restoring a question asks the practice gate rather than a copy of it', () => {
   const base = () => { const q = mkQ('q', ['a', 'b'], 0); q.status = 'answer_conflict'; q.answerVerified = 'verified'; return q; };
   assert(canActivate(base()), 'a settled record is activatable');
   const c = base(); c.conflict = true;
