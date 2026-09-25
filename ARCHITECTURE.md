@@ -27,7 +27,10 @@ missing file rather than letting the library reach for a CDN. Where the probe
 itself cannot answer — `file://`, where `fetch` is blocked — it runs on the
 usual names and retries once with the other gzip setting.
 
-Source is one `<script>` block in `index.html`, divided by banner comments.
+Source is one main `<script>` block in `index.html`, divided by banner comments.
+The only other script is a dozen lines at the top of `<body>` that start the
+opening screen before the main block has even been read (see "The opening
+screen" below).
 The numbered ones are listed below in file order (the numbers are the
 original reading order, not the file order — `17` sits before `15B`); the
 unnumbered ones are named after the section they follow. Find a section with
@@ -351,6 +354,30 @@ the old, focused node) on that route anyway. `.opt` also gained its own
 external keyboard, an iPad) reads as focus rather than as a choice, on top of
 the fix that stops a stale one appearing in the first place.
 
+## Course templates, and filing questions under them
+
+`COURSE_TEMPLATES` holds CISA and DISA AT. DISA's blueprint is CISA's five
+domains and weights (`DISA_BLUEPRINT = CISA_BLUEPRINT.map(copy)`), confirmed
+by the course owner; it was a single "General" placeholder, which switched off
+domain drills and weighted mocks for every DISA student. `courseTemplateFor(code)`
+finds a template by code, so `courseDialog()` fills the blueprint and mock
+defaults when CISA or DISA is typed into a blank form. The fill stops the
+moment a domain row has been typed into (`bpTouched`), and the note says what
+was filled from where. A course still on the placeholder
+(`onPlaceholderBlueprint()`) gets a Dashboard button and an Edit-dialog box
+that run `applyCourseTemplate()`: the real blueprint, then every question
+re-filed by `suggestDomain()` and marked suggested. Only `active` and
+`needs_class` statuses move, so a question waiting on an answer stays in the
+queue.
+
+`hintsFor(course)` gives a template course the template's current keyword
+lists (curated, and restricted to the course's own domain ids), so an old
+course benefits when the lists improve. `suggestDomain()` matches keywords at
+word starts only (`' ' + k`): substring matching let a short keyword fire
+inside longer, unrelated words. It files only on a score of at least 1 and a
+lead of at least 1 over the runner-up. A tie is left for a person rather than
+guessed.
+
 ## What blocks practice, and what merely locks a feature
 
 `isPracticeEligible()` reads `STATUS[q.status].practice` rather than naming a
@@ -362,7 +389,7 @@ something **wrong**.
 
 This was not cosmetic. `deriveEntryStatus()` files a question as `needs_class`
 whenever it has no `domainId`, and `suggestDomain()` can only guess from
-`course.hints`, which only the CISA template ships. So a course
+`course.hints`, which only the CISA and DISA templates ship. So a course
 somebody sets up themselves classified nothing, and every question fell out of
 practice. Measured in a browser on a self-made course with a plain question
 file: 30 imported, 30 practisable now, 0 before.
@@ -505,15 +532,48 @@ whose questions have since been deleted returns zero from `markSession()` and
 would otherwise read as a failure, holding somebody below `ready` on a record
 that no longer refers to anything.
 
-## Routing to the bulk tools
+## Settling the checking queue in bulk
 
-`bulkClassify()`, `bulkVerify()` and `bulkStatus()` predate all of this, driven
-by `BankState.sel`. `bulkFrom(list, status)` is the route that was missing: it
-sets `BankState` and calls `go('bank')`, the same pattern
-`State.importStep = 'check'; go('import')` already used. The status to filter by
-is read off the group — uniform when it shares one, blank for the mixed pile —
-rather than threaded through four call sites. A group spanning both banks is
-narrowed to the side being opened and reports what it left behind.
+The Question Bank used to hold the bulk tools (Classify, Verify, Activate), and
+the checking queue routed a group to them. Two things were wrong with that:
+the bank listed questions that were still blocked, next to an **Activate**
+button that did the queue's job from the wrong screen, and a page of 50 rows
+made "select all" mean fifty. Now each screen has one job:
+
+- **The queue settles.** `section()` gives every group its own buttons, each a
+  thin wrapper over one pure-ish function, run through `runBulk()` with a
+  progress count:
+  - `queueMergePlan(records, byUuid)` decides which duplicate pairs may merge
+    without a person: `definite`, or `likely` with `stemTok ≥ 0.8` and
+    `opts ≥ 0.75`, and never a pair whose answers conflict. Looser pairs are
+    look-alikes a key word apart, and merging those loses a question. The
+    survivor is the one with a verified answer, then the most attempts, then
+    the older Question ID. `mergeAgreeingCopies()` carries an answer across
+    when only the loser had one.
+  - `keepPairsSeparate()` writes `dismissedPairs` on both sides.
+  - `statedAnswerIn()` / `readStatedAnswers()` run the import's own
+    `answerStatementsIn()` over a queued question's explanation, and
+    `confirmShownAnswers()` then verifies what is on screen.
+  - `fileUnderDomain(uuids, id | null)` files by `suggestDomain()` (null) or
+    under one domain, and moves only statuses that the filing settles.
+  - `markWordingChecked()` clears `needs_content`.
+  - `rejudgeConflictPairs()` runs when the queue opens, after the orphan
+    repair: pairs recorded as conflicts under the old exact-text comparison are
+    judged again by `answersConflict()`, which is how 53 of a student's 63
+    "conflicts" turned out to be the same answer.
+- **Conflicts need a pick for every record.** `pickOf` has no default, the
+  resolve button stays disabled until every record in the pair has one, and it
+  names what it will do: *Same answer for both* when the picks agree
+  (`answersConflict` over temporary copies), *Keep as different questions*
+  after a confirm when they do not. The bulk resolver only settles pairs whose
+  picks agree.
+- **The bank lists settled questions.** `ROUTES.bank` splits `isBlocked`
+  records out into one line with a button to the queue. The status filter
+  offers no blocking status, and merged and rejected records appear only when
+  asked for. The bulk bar is **Edit details** (`bulkClassify`), **Archive**
+  and **Restore** (`bulkRestore`, which re-derives the status and asks
+  `canActivate()` rather than writing `active`). **Select all N matching**
+  selects past the page, and the page size is 50, 100 or 250.
 
 ## The calendar file
 
@@ -1034,6 +1094,23 @@ rather than just naming the other record.
 Within a batch, each processed candidate joins the live index, so a batch is
 checked against itself without a growing linear scan.
 
+**Same answer, different letter.** `answersConflict()` used to compare the
+correct options' text exactly, so a stray page number, a different case, or
+the same answer under another letter all read as conflicts. It now finds, for
+each record's correct option, the `closestOption()` in the other record:
+equal once spaces are removed, or one containing the other at ≥ 0.8 of its
+words. A tie is never a match. Two records conflict only when their correct
+options are not the same option.
+
+**Copies inside one file.** `stagingDecisionFor()` merges a definite match
+that already has a Question ID, and a word-for-word copy inside the same batch
+(same `simParts().ckey`). `admitBatch()` folds those in-file copies into their
+root before the status loop (`batchMergeRoot()` / `foldCopyInto()`): a copy
+of a rejected root is rejected with it, a copy whose root merges into the bank
+joins that merge, and a copy that disagrees with its root becomes a conflict
+rather than a silent merge. `sourceRefs` are de-duplicated on the way. The
+staging row says which copy it will merge with.
+
 ## Import pipeline
 
 ```
@@ -1077,6 +1154,49 @@ each call their first case "1". `admitBatch()` writes the scenarios **before**
 the questions, and only those that actually keep a question, so a case-study
 question is never in the bank pointing at a case study that does not exist.
 
+### Reading the answer a source gives in words
+
+`recoverStatedAnswer(c)` runs first in `candidateToQuestion()` and in the
+trust preview. `ANSWER_STATEMENTS` recognises "Option D is the correct answer",
+"Hence b is answer", "The correct answer is (c)" and their relatives, and
+`answerStatementsIn()` returns every letter they name. One is taken as the
+answer at `conf.answer` 0.9 with `answerQuote` / `answerFound` recorded, so the
+verification note says where it came from. Lower-case "a" only counts at the
+end of a phrase or in brackets, because "the correct answer is a combination"
+is an article. When the statement was glued onto the last option by PDF
+extraction, the option is split back off if what precedes the statement is
+option-sized (≤ max(40, twice the longest other option + 20) characters).
+Otherwise `conf.options` drops to 0.6 so the wording is checked.
+
+A JSON question can carry `checkAnswer: true` and a `checkNote`.
+`candidateToQuestion()` never trusts a flagged answer, and the note becomes
+its `verifyNote`. `previewTrustDefault()` counts only answered, unflagged
+candidates, reads rows through the mapping the person chose, and ticks
+"The answers in this file are right" only when every one of them is a
+confident answer. The hint says which way it went and why.
+
+### What students actually bring
+
+- **Chat-tool pastes.** `stripChatMarkdown()` (in `cleanLines`) removes bold,
+  headings and bullet markers. A stem-like line starts a question only when an
+  option follows within three lines and it is not `CHAT_CHATTER_RX` ("Sure!
+  Here are…"). Chatter after an answer goes to unresolved, not into an
+  explanation.
+- **Spreadsheets.** Option columns accept `Option 1`, `Option1`, `Opt 1`,
+  `Choice 1` and friends, and `mapHeader()` strips `_ - . ( )` before looking
+  a heading up. `answerLetterFrom(raw, optionCount, bareDigits)` reads a
+  letter, "Option C", or a bare digit (rows only: in JSON a bare 2 is too
+  ambiguous). An answer that is the option's own text is matched against the
+  options later. `runParse()` opens `columnMapDialog()` whenever there is no
+  stem column or fewer than two option columns, not only when nothing matched.
+- **After the import.** `showReconciliation()` leads with four live tiles
+  (ready to practise via `isPracticeEligible`, need you via `isBlocked`,
+  merged, rejected) and **Practise now** / **Review the N waiting**. The
+  per-candidate table is folded under Details. `intake()` asks before
+  re-reading a file whose `fileHash` a batch already records.
+  `stagedBatchBanner()` puts an unconfirmed batch on the Dashboard and Practice
+  screens, and `refreshBadges()` counts it.
+
 The reconciliation report is the point: every question that entered the parser
 is accounted for. Low confidence does not block import, and — since
 `needs_content` (see "What blocks practice, and what merely locks a feature"
@@ -1098,6 +1218,14 @@ Order is randomised per presentation, seeded by session. Questions whose options
 reference each other — "All of the above", "Both A and B" — are detected at
 import and pinned. Answers are stored as an option **id**, never a letter or
 index, so randomisation cannot desynchronise the correct answer from its text.
+
+What shuffling *can* break is an explanation that talks in letters ("D is
+correct because…"). Rather than pin every such question, `CITES_LETTER_RX`
+spots them and `sourceLettersNeeded(q, order)` says when the displayed order
+differs from the source's. Each option then shows its source letter
+(`sourceLetterOf()`), and the reveal reads *Answer: B (D in the source)*. The
+regex takes a letter only at the end of the phrase or in brackets, so "the
+answer is a matter of…" is not a citation.
 
 ## Dependency-free file handling
 
@@ -1625,9 +1753,68 @@ window, and a bank switch that is only drawn when the course has a case bank
 control on screen to undo the other choice with).
 
 The day window — All time / 7 / 30 / 90 days — filters **attempts** and
-nothing else. Attempts, Questions seen, the three accuracy tiles, the "seen"
-half of the coverage sentence and every tab are computed from the windowed
-attempts. The **Mastered** tile and the "of N active questions" denominators
-read each question's `stats.mastery` and practice eligibility, which are
-all-time state: mastery is a property of the question, not of the period, so
-under "Last 7 days" three tiles are windowed and that one is not.
+nothing else. The Answers count, the *Right first time*, *Last N answers* and
+*Questions seen* tiles, and every tab are computed from the windowed attempts,
+and their sub-lines name the period. The *Your questions* tile and the **By
+domain** card read each question's current state, which is all-time: a
+question is solid or not, whatever the period, so that card says "All time"
+while a window is set.
+
+**What a student sees instead of a score.** `masteryOf()` still computes its
+0–100 blend of five parts, and the planner still ranks by it, but no screen a
+student studies from shows it. `learnState(q, target)` maps it onto the three
+states `domainReadiness()` already used: `new` (no attempts), `shaky` (below
+the target), `solid`. `learnMix()` counts them, and `mixBar()` / `mixLegend()`
+/ `mixKey()` draw them. Because both read `stats.mastery` against the same
+`masteryTarget`, the Dashboard's counts and the study plan's buckets cannot
+disagree, and a test holds them to it. The question's **Progress** tab is the
+one place the number appears: the state, how far the score is from the
+target, and each `masteryOf().parts` entry as a checklist line in plain words.
+That is where a label can be checked.
+
+`domainProgressList(pool, blueprint)` is the shared domain view: blueprint
+order, one `mixBar` per domain, its share of the exam, answered count, first-
+time accuracy, and `domainVerdict(firstAcc, firstN, passPct, minN)`: *below
+the pass mark*, *just above* (within 10 points), *comfortably above*, or *too
+early to tell* under `weakMinSample` first attempts. **Focus here** marks the
+same domain the readiness verdict names, the first by `domainReadiness()` risk
+with any risk at all. `weaknessScore()` still drives the Weak topics mode's
+ordering, but it is no longer printed anywhere.
+
+The Dashboard keeps three tiles (Right first time, Questions seen, Your
+questions) and the domain card. Guessed-correct rate and response time live in
+Analytics' Confidence and Time tabs, unverified answers in the band's In review
+count, and the record total in the Question Bank. Analytics has four tiles, the
+same domain card, and four tabs: Mistakes (the default), Time, Confidence, and
+**Other breakdowns**, which puts Topic, Source module, Source, Difficulty and
+Practice mode behind one select. `AnaState.by === 'domain'`, the old default,
+is read as Mistakes. The breakdown tables give each row the same pass-mark
+verdict a domain gets, never a weakness number.
+
+## The opening screen
+
+The owner's ask was a first impression that did not look like a school
+project. The constraints were that it must never cost a student time or break
+anything:
+
+- **Painted before the script is read.** The markup is the first thing in
+  `<body>` and its CSS is in the head, so it is on screen while the 2 MB
+  script is parsed. Inline SVG and CSS only, with no font, image or network
+  request, so it is identical offline. Only `transform` and `opacity` animate.
+- **Boot never waits for it.** `boot()` runs underneath from the first
+  moment. `startApp()` calls `Splash.appReady()` in `finally`, so it goes
+  whether boot drew the dashboard, stopped at a dialog, or failed on a refused
+  database. `modal()` calls `Splash.hide()` first, so a dialog raised during
+  boot is never behind it.
+- **It only lingers to finish its own sequence.** The set-up script writes
+  `data-min`: 2150 ms from navigation start on the first open in a tab, 750 ms
+  on a reload in the same tab (a `sessionStorage` flag, and `.sp-quick` plays
+  every timing at a third via `--sp-s`), and 300 ms under
+  `prefers-reduced-motion`, where nothing moves at all. An app ready sooner
+  waits out the remainder; an app ready later keeps the loader bar running.
+  A tap or any key sets `data-skip` and it goes as soon as the app is ready.
+- **It leaves the page.** `hide()` fades and scales it out, then removes it
+  on `transitionend`, with a 900 ms timer in case the transition never ends
+  (a background tab), so nothing invisible is left over the app.
+- **Tests never see it.** `#tools`, the test runner's address, removes it
+  before it paints.

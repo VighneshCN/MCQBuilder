@@ -11,8 +11,16 @@ or external OCR (an API of your choosing, with your own key).
 
 Nothing is preloaded — no courses, no questions. **Add a course** offers
 **CISA** and **DISA AT** as one-click starting points, blueprint and mock
-defaults already filled in, or a blank form for any other exam. You import
-your own questions either way.
+defaults already filled in, or a blank form for any other exam. Typing CISA or
+DISA as the code on the blank form fills in the same thing. DISA follows
+CISA's five domains and weights (18 / 18 / 12 / 26 / 26). A DISA course made
+before it had a real blueprint gets a **Use the standard domains** button on
+its dashboard, which also files its questions under them. You import your own
+questions either way.
+
+The app opens on a short animated screen while it loads. Tap or press any key
+to skip it. A reload in the same tab shows only a glimpse of it, and nothing
+moves if your system is set to reduce motion.
 
 ---
 
@@ -23,7 +31,8 @@ The nine sections below cover everything in detail. This is the shape of it.
 **1. Set up a course.** A course is one exam — CISA, CA Final Audit, whatever
 you are sitting. You give it chapters (the app calls them domains) and the
 weight each one carries in the real paper. That weighting is what later makes a
-mock resemble the exam rather than resemble your bank.
+mock resemble the exam rather than resemble your bank. For CISA and DISA AT all
+of this is filled in for you.
 
 **2. Get questions in.** Four ways in: drop a file (Word, Excel, CSV, JSON,
 plain text, text-based PDF), photograph a page, paste raw text, or type one by
@@ -70,7 +79,10 @@ the mode that practises whatever has fallen due.
 **7. What comes back to you.** Marks and whether that would have been a pass.
 Where your time went, and which questions cost you the clock. Whether you knew
 what you thought you knew. Which wrong option keeps catching you, and on which
-questions. What you changed your mind about, and what changing it cost.
+questions. What you changed your mind about, and what changing it cost. Your
+progress is told in three words, **new**, **shaky** and **solid**, drawn as
+one coloured bar per domain, with no hidden score behind a number. See
+[Solid, shaky and new](#solid-shaky-and-new).
 
 **8. Getting to the date.** Set an exam date and the dashboard works backwards
 from what your bank still owes you to a questions-a-day target — and, using
@@ -87,8 +99,11 @@ rebuilt from that home every time you open the app.
 
 **Filing questions under domains.** Without it, domain drill cannot focus, a
 mock cannot follow your exam weights, and accuracy-by-domain has nothing to
-split. With it, all three switch on. You can do it whenever you like — in bulk
-from the Question Bank, or as one field at import for a whole file.
+split. With it, all three switch on. For CISA and DISA AT the app files most
+questions itself at import, by keywords, and marks each one it placed that way
+as a suggestion. For the rest, use **File by keywords** or **File under this
+domain** in the checking queue, **Edit details** in the Question Bank, or the
+one field at import that files a whole file.
 
 Two smaller ones: **difficulty** unlocks papers built to a difficulty mix (grade
 them as you practise, one question at a time, and it switches on the moment the
@@ -307,7 +322,7 @@ Three things, and only three:
 |---|---|
 | The question text | Obvious |
 | At least two options, one marked correct | Otherwise there is nothing to mark |
-| That answer confirmed | The app will not drill you on an answer key nobody has checked. One tick at import — *"Treat an answer printed in the source as verified"* — does this for a whole file |
+| That answer confirmed | The app will not drill you on an answer key nobody has checked. One tick at import — *"The answers in this file are right"* — does this for a whole file |
 
 **Everything else is optional and unlocks something.** Nothing else holds a
 question out of practice:
@@ -440,9 +455,18 @@ step.
 
 ### Two settings that matter on import
 
-**"Treat an answer printed in the source as verified"** — tick this when your
-document prints its own answer key, or every question will need its answer
-confirmed by hand.
+**"The answers in this file are right"** — tick this when your document
+prints its own answer key, or every question will need its answer confirmed by
+hand. The app ticks it for you when every answer in the file is printed
+plainly, and leaves it off when some answers had to be inferred, saying which.
+Questions with no answer at all wait for you either way. So does any question
+the file itself marks for checking (`"checkAnswer": true` in JSON, with an
+optional `"checkNote"` saying why).
+
+An answer written out in words is read as printed: *"Option D is the correct
+answer"*, *"Hence b is answer"*, *"The correct answer is (c)"*. When that
+sentence has been glued onto the end of the last option, which PDF extraction
+often does, it is split back off.
 
 **"Official domain for this batch"** — set this only when the whole file belongs
 to one domain. Leave it empty for a file that carries its own per-question
@@ -482,7 +506,32 @@ Explanation: Authorisation stops the event before it happens.
 
 It also copes with `The correct answer is: B.`, answers stated in the same
 paragraph as the explanation, options split across lines, and answer keys
-(`1-B, 2-C, 3-A`) at the end of a document.
+(`1-B, 2-C, 3-A`) at the end of a document. The chat tools' own formatting
+(bold, headings, bullet markers) is stripped, and their chatter ("Sure! Here
+are ten questions…") is not mistaken for a question.
+
+Spreadsheets can name their option columns **Option 1–4**, **Choice A–D** or
+**Opt1**, and give the answer as a letter, the option's number, or the option's
+own text. A sheet whose question or option columns the app cannot find opens
+the column dialog below rather than importing nothing.
+
+### Copies, conflicts and the import report
+
+The same question twice **inside one file** becomes one question, with both
+places recorded as its sources. A copy that disagrees on the answer goes to the
+checking queue as a conflict instead. Answers are compared by the option they
+point at, not the letter, so the same answer under a different letter, or with
+a stray page number or different spacing, is not a conflict.
+
+When the import finishes, the report says in four tiles how many questions are
+**ready to practise**, how many **need you**, how many **merged** into
+questions you already had, and how many were **rejected**, with **Practise
+now** and **Review the N waiting** buttons. The full reconciliation table is
+folded underneath.
+
+Adding a file you have added before asks first. A batch you have read but not
+confirmed shows a banner on the Dashboard and Practice screens until you finish
+or discard it.
 
 **Start from a template** in Add Questions gives you a worked example of every
 supported field. The app generates these itself; there are no template files to
@@ -534,6 +583,13 @@ than treated as knowing it.
 Mock exams draw questions weighted to the course blueprint, and can carry a
 case-study section — see section 5.
 
+Options are shuffled, except on a question that refers to them by position
+("all of the above", "both A and B"), which keeps its order. When a question's
+explanation talks in letters, each option also shows its letter in the source,
+and the reveal names both: *Answer: B (D in the source)*. That way "D is
+correct" in the source's own words still makes sense. The answer itself is held
+by option, not by letter, so shuffling can never change which one is right.
+
 ### Keyboard shortcuts
 
 While a paper is on screen:
@@ -562,8 +618,8 @@ the date.
 
 It counts what your bank still owes you, and each question owes exactly one
 thing: it has **never been attempted**, or it has been attempted and is **still
-below your mastery target**, or it is mastered but its **review falls due before
-the day**. Nothing is counted twice, so the three add up to the number of
+shaky**, or it is solid but its **review falls due before the day**. Nothing is
+counted twice, so the three add up to the number of
 questions you have left, and dividing that by the days remaining — today
 included — is the number you have to get through daily.
 
@@ -606,12 +662,35 @@ than a scramble.
 Once everything has been seen once it switches to **consolidation** — what is
 left is the shaky ones and the reviews falling due.
 
-#### "Solid" is stricter than "I got it right"
+#### Solid, shaky and new
 
-A question counts as solid only at or above your mastery target, and mastery
-docks points for a correct answer you marked as a **guess**. So a question you
-guessed right stays on the list, and the card says so rather than leaving you
-to work it out.
+Every question is in one of three states, and these are the only progress words
+the app shows you. There is no mastery score or weakness score on any screen
+you study from:
+
+- **New**: never answered.
+- **Shaky**: answered, but not solid yet.
+- **Solid**: you keep getting it right, and you are sure of your answer.
+
+What counts towards solid: getting it right the first time you saw it, your
+last five answers, several right in a row, how sure you said you were, and
+still getting it right after a gap of days. A wrong answer or a guess counts
+against it, so a question you guessed right stays shaky and stays on the list.
+Open any question in the Question Bank and its **Progress** tab ticks off which
+of those it has and which it is still missing.
+
+The Dashboard and Analytics draw the three as one coloured bar for the whole
+bank and one for each domain. Each domain's bar sits beside its share of the
+exam, how many of its questions you have answered, and how often you get them
+right first time. Each domain also gets one plain verdict against your
+course's pass mark: *below the pass mark*, *just above the pass mark*,
+*comfortably above the pass mark*, or *too early to tell* until five of its
+questions are answered. The domain with the most exam marks not yet solid is
+marked **Focus here**, and every row has a **Practise** button.
+
+How strict "solid" is lives in Settings → Practice and mock → **Advanced**
+(75 out of 100 by default), next to how many answers a domain needs before it
+gets a verdict (5). Neither needs touching.
 
 ### Are you ready?
 
@@ -661,16 +740,26 @@ you today's number. It stays quiet if you practised yesterday.
 
 ### A big import is not a long queue
 
-Anything the app could not confirm waits in the checking queue — and if that is
-three hundred questions, doing them one at a time is the wrong answer.
+Anything the app could not confirm waits in the checking queue, and if that is
+three hundred questions, doing them one at a time is the wrong answer. Each
+group in the queue has buttons that settle all of it, or just the ones you
+select:
 
-Each group in the queue offers **"Do all 312 at once →"**. It opens the Question
-Bank filtered to exactly that group with every one of them selected, where
-**Classify**, **Verify answers**, **Activate** and **Archive** act on the lot.
+| Group | One click |
+|---|---|
+| Possible duplicates | **Merge N same-answer copies** merges only pairs that are word for word, or nearly, *and* mark the same answer. The copy with a confirmed answer and the most practice behind it is kept. **Keep separate** is for pairs that only look alike |
+| No confirmed answer | **Find N answers in the text** reads answers written out in the explanation ("Option D is the correct answer"), and sorts those first. **Confirm N answers shown** then confirms what is on screen |
+| No domain | **File N by keywords**, or **File under this domain** for the ones you select |
+| Wording to check | **Wording is fine** |
+| Any group | **Archive** |
 
-Those bulk tools were always there. Nothing pointed at them from the screen
-where the problem shows up, which is the only reason anybody was clicking three
-hundred times.
+Answer conflicts start with nothing picked. Choose the answer for each record:
+**Same answer for both** settles the pair, and **Keep as different questions**
+is for two records that were never the same question. Settling conflicts in
+bulk only touches pairs whose picks agree.
+
+The queue is in Question ID order and shows each question's number in its
+source ("No. 214"), so you can check it against the paper.
 
 ### The last week
 
@@ -683,7 +772,7 @@ ones.
 Four reasons put a question on the list, and each question appears once, under
 the highest that applies — **wrong last time** (and not since put right),
 **you flagged it**, **guessed it right** (which is not the same as knowing it),
-**never mastered**. The reason is shown against the question when the answer is
+**not solid yet**. The reason is shown against the question when the answer is
 revealed, so you always know why it is in front of you. Before you start, the
 setup shows exactly what the list is made of and what a shorter one would leave
 behind.
@@ -694,7 +783,7 @@ fix it — that is coverage work, and the daily target above is what drives it.
 
 ### The error notebook
 
-**Backup & Restore → Error notebook**, or the button on Analytics → Mistake.
+**Backup & Restore → Error notebook**, or the button on Analytics → Mistakes.
 Everything the app has recorded about what you got wrong, on one printable page
 per question: the question with the right answer marked, **the wrong option you
 keep choosing** and how often, **why it went wrong** from the causes you
@@ -838,7 +927,7 @@ Options are named by their text, not their letter — letters move, because the
 options shuffle. Getting it right after missing it says that too.
 
 The question's own detail shows the full breakdown of what you have chosen and
-how often. **Analytics → Mistake** lists the questions that keep catching you
+how often. **Analytics → Mistakes** lists the questions that keep catching you
 and what each one catches you with, and the Question Bank has a **missed more
 than once** filter. Where no single wrong option dominates it says so rather
 than inventing a pattern — one miss is not a habit, and an even split is not a
@@ -855,8 +944,8 @@ Underneath, the same figure by domain, worst first. The headline says whether
 you have the problem; that table says which part of the syllabus to distrust,
 which is the part you can do something about before the date.
 
-**Practice settings are per course.** Mock length, time limit, mastery target
-and all spaced-repetition intervals are set separately for CISA and DISA, since
+**Practice settings are per course.** Mock length, time limit, how strict
+"solid" is and all spaced-repetition intervals are set separately for CISA and DISA, since
 they are different exams. Settings shows a badge telling you which you are
 editing. Appearance and shuffle behaviour are shared across courses.
 
@@ -1116,10 +1205,18 @@ Adding questions is two steps, both on the **Add Questions** screen.
 **Step 1 — bring questions in.** Drop files, paste text, or add from an image.
 
 **Step 2 — check what needs confirming.** Questions land here when the app could
-not be certain: the source stated no answer, or there was no reliable way to
-tell the domain. They stay out of practice until you confirm them, one click
-each — practising a question whose answer was guessed is worse than not
-practising it.
+not be certain: the source stated no answer, two sources disagree on it, it
+looks like a question already in your bank, or the file itself marked the
+answer for checking. They stay out of practice until you settle them, because
+practising a question whose answer was guessed is worse than not practising it.
+Most of the queue settles in bulk: see
+[A big import is not a long queue](#a-big-import-is-not-a-long-queue).
+
+The Question Bank lists only settled questions. Anything still waiting is
+counted in one line at its top, with a button to the queue. The bank's own
+bulk bar is just **Edit details**, **Archive** and **Restore**, and **Select
+all N matching** reaches past the page (50, 100 or 250 a page) to every
+question the filters match.
 
 The step badge shows how many are waiting, and the sidebar carries the same
 count on Add Questions, so a queue left half-finished is never invisible.

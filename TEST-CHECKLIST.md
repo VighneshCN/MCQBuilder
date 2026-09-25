@@ -5,7 +5,7 @@ Open the app with `#tools` on the URL (for example `index.html#tools`), then
 that hash is present. The suite runs against a scratch course, so it never
 touches your real bank.
 
-**Current result: 485 passed, 0 failed, of 485.**
+**Current result: 581 passed, 0 failed, of 581.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -231,6 +231,38 @@ nine different requested counts.
 151. The note in the box says the things that would otherwise be a support message
 152. The bundle is a real zip that a zip reader can read back
 
+### From one student's DISA file to practice (17)
+153. DISA quick add carries the five CISA domains, their weights and the keyword hints
+154. Typing a template code into Add a course fills in its blueprint, and never over rows you typed
+155. A course still on the old "General" placeholder moves onto its template, re-filing its questions
+156. A slip in Add a course keeps the dialog open with everything typed
+157. An answer the source states only in prose is read — and "not the correct answer" never is
+158. A file can mark one of its answers for checking: kept and pre-selected, never trusted
+159. A trailing page number or a dropped word in the correct option is not an answer conflict
+160. An in-file word-for-word copy is merged into the copy before it, not queued for review
+161. Admission folds in-file copies into the one kept: sources, answer and explanation travel; a disagreeing copy is a conflict
+162. The review queue merges plain copies in bulk, keeps the record with the confirmed answer, and leaves disagreements for Compare
+163. Queue bulk tools confirm only answers that exist, and file by hand or by keywords
+164. An answer conflict starts with nothing picked, and can only be settled on answers a person chose
+165. The Question Bank lists only questions that are settled; pending ones are the queue's
+166. Restoring a question asks the practice gate rather than a copy of it
+167. Keyword hints match at word starts, and a template course files by its template's current list
+168. At the reveal, options show their source letter only when the explanation cites letters and the order moved
+169. No two top-level functions share a name — the later one would silently replace the earlier
+
+### Progress in plain words (8)
+170. Solid, shaky and new are counted exactly as the planner counts them
+171. A domain's verdict is its first-time accuracy against the pass mark, and nothing before a handful
+172. The dashboard shows states and a drill button per domain, not scores
+173. The Your questions tile explains none solid instead of just reporting a zero
+174. The Question Bank's Solid label follows the course target, not a hardcoded 75
+175. Analytics says which numbers the period select governs
+176. Dashboard's In review count excludes rejected records
+177. Response time is a median, not a mean dragged down by untimed answers
+
+### The opening screen (1)
+178. The opening screen waits for its own sequence, but never for a tap or a dialog
+
 ### Everything else (5)
 29. Practice settings are per course, app preferences are shared
 34. Appearance resolves Light, Dark and Auto correctly
@@ -294,6 +326,64 @@ Automated tests cannot verify rendering or real browser storage.
 - [ ] Toggle Light / Dark / Auto; check the practice screen and bank table
 - [ ] Resize to phone width; the ☰ menu appears and opens the sidebar
 - [ ] Edit a question that has attempt history; history survives and the version increments
+
+### From a messy file to practice
+
+- [ ] Add a course, type `DISA` as the code on the blank form: five domains
+      appear with 18 / 18 / 12 / 26 / 26, and a note says where they came from
+- [ ] Type into a domain row first, then type `CISA`: your row is not overwritten
+- [ ] Import a JSON file where some explanations say "Option D is the correct
+      answer" and the answer field is blank: those questions arrive with D
+      confirmed, and the verification note quotes the sentence
+- [ ] The source dialog's "The answers in this file are right" is ticked for a
+      file of plainly printed answers, and off, with a count, when some had to
+      be inferred
+- [ ] Import a file containing the same question twice: one question arrives,
+      with two source references. Change the answer on one copy and re-import:
+      a conflict is queued instead
+- [ ] The import report shows four tiles and **Practise now** starts a session
+- [ ] Add the same file again: it asks first
+- [ ] Checking queue: **Merge N same-answer copies**, **Find N answers in the
+      text**, **Confirm N answers shown**, **File N by keywords** each settle
+      their group and report a count
+- [ ] An answer conflict opens with nothing picked; the button names what it
+      will do once both are picked
+- [ ] The Question Bank never lists a question still waiting in the queue; its
+      top line counts them and links there
+- [ ] **Select all N matching** selects beyond the page; switch to 250 a page
+- [ ] With shuffle on, a question whose explanation says "D is correct" shows
+      each option's source letter and the reveal reads *Answer: X (D in the
+      source)*
+
+### Progress in plain words
+
+- [ ] Dashboard: three tiles (Right first time, Questions seen, Your
+      questions) and a By domain card. No "score", "weakness" or "mastery"
+      number anywhere
+- [ ] Each domain row: one bar (green solid, amber shaky, empty new), its exam
+      share, answered count, right-first-time percentage, a pass-mark verdict
+      and a Practise button that opens a domain drill on that domain
+- [ ] Exactly one row says **Focus here**, and it is the domain the "Are you
+      ready?" card names
+- [ ] Analytics: four tiles, the same By domain card, and four tabs. Other
+      breakdowns has a select for Topic / Source module / Source / Difficulty /
+      Practice mode
+- [ ] Question Bank: the Progress column shows New / Shaky / Solid; the
+      learning-state filter has Solid and Shaky
+- [ ] Open a practised question → Progress tab: the state, how far it is from
+      solid, and a ticked checklist of what counts
+- [ ] Settings reads in short lines; Practice and mock → Advanced holds the
+      two knobs behind the labels
+
+### The opening screen
+
+- [ ] First open in a new tab: the mark draws, the name rises, A–D appear and C
+      turns green, then it fades into the app in about two seconds
+- [ ] Reload: only a short glimpse
+- [ ] Tap or press a key during it: it goes as soon as the app is ready
+- [ ] With the system's reduced-motion setting on: nothing moves
+- [ ] Offline (installed or cached): identical, and no network request
+- [ ] Open with `#tools`: no opening screen at all
 
 ### Writing questions by hand
 
