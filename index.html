@@ -4971,9 +4971,25 @@ function cleanLines(text) {
   const pages = Math.max(1, Math.round(raw.length / 45));
   const repeat = new Set();
   freq.forEach((v, k) => { if (v >= Math.max(4, pages * 0.6)) repeat.add(k); });
-  return raw.map((l, i) => ({ n: i + 1, t: l.replace(/\u00a0/g, ' ').replace(/[ \t]+$/, '') }))
+  return raw.map((l, i) => ({ n: i + 1, t: stripChatMarkdown(l.replace(/\u00a0/g, ' ').replace(/[ \t]+$/, '')) }))
     .filter(l => !(repeat.has(normText(l.t)) || RX.header.test(l.t) && l.t.length < 60));
 }
+/* ChatGPT and Gemini answer in Markdown: "**Question 1:**", "**Answer:** B",
+   "* A) …", "### Explanation". Pasted as is, not one of those labels was
+   recognised and ten questions arrived as a single junk one. Emphasis, heading
+   marks and the bullet in front of an option letter are formatting, not
+   content, so they go before anything is matched. "5 * 3" keeps its star —
+   only stars hugging a word are emphasis. */
+function stripChatMarkdown(t) {
+  return String(t)
+    .replace(/\*\*|__/g, '')
+    .replace(/^(\s*)#{1,6}\s+/, '$1')
+    .replace(/^(\s*)[*\-•]\s+(?=[\(\[]?[A-Ha-h][\)\].:]\s)/, '$1')
+    .replace(/(^|\s)\*(?=\S)([^*]*\S)\*(?=\s|$|[:.,;])/g, '$1$2');
+}
+/* The lines a chat tool wraps its answer in: "Here are 10 questions…",
+   "Let me know if you want more…". Neither is content. */
+const CHAT_CHATTER_RX = /^(?:sure|certainly|of course|here(?:'s| is| are)\b|below (?:are|is)\b|let me know|hope (?:this|these) helps?|would you like|do you want|i can (?:also )?(?:create|make|generate|provide)|feel free|good luck|happy (?:studying|learning))/i;
 
 /**
  * A line belonging to a separate answer key rather than to a question.
@@ -5223,6 +5239,12 @@ function parseText(text, opts) {
     // sources keep the restatement and the real explanation in one paragraph
     // ("Correct Answer: C. Explanation: …"), so the label is hunted for
     // anywhere in the line, not just at its start.
+    // A chat tool's sign-off after the last answer is not that question's
+    // explanation.
+    if (cur && (mode === 'answer' || mode === 'expl') && CHAT_CHATTER_RX.test(t)) {
+      unresolved.push({ line: L.n, text: t.slice(0, 160) });
+      continue;
+    }
     if (cur && (mode === 'answer' || mode === 'expl') && t) {
       let line = t;
       // Anchored, not hunted: only an answer restatement may stand before the
@@ -5304,7 +5326,12 @@ function parseText(text, opts) {
       continue;
     }
     if (!cur && t.length > 25 && /\?$|:$/.test(t) && template !== 'table') {
-      startQ('', t, L.n); continue;
+      // Only when options follow. A chat tool's "Here are 10 questions on
+      // IS audit:" has none after it, and used to become a phantom first
+      // question — which, having no answer, also switched the batch's
+      // trust tick off.
+      const next = lines.slice(i + 1, i + 4).map(x => x.t.trim()).filter(Boolean);
+      if (!CHAT_CHATTER_RX.test(t) && next.some(x => RX.option.test(x) || RX.optionOnly.test(x))) { startQ('', t, L.n); continue; }
     }
     if (!cur) unresolved.push({ line: L.n, text: t.slice(0, 160) });
   }
@@ -5434,24 +5461,24 @@ function tableRowToCandidate(cells, lineNo) {
    order given.                                                              */
 const IMPORT_FIELDS = [
   { f: 'stem',            label: 'The question',            need: 'required',
-    cols: ['question', 'stem', 'question text', 'questiontext', 'q', 'prompt'],
+    cols: ['question', 'stem', 'question text', 'questiontext', 'q', 'prompt', 'ques', 'questions', 'qn', 'question statement'],
     json: ['stem', 'question', 'text'] },
   { f: 'a',               label: 'Option A',                need: 'required',
-    cols: ['a', 'option a', 'optiona', 'opt a', 'choice a'], json: [] },
+    cols: ['a', 'option a', 'optiona', 'opt a', 'choice a', 'option 1', 'option1', 'opt 1', 'opt1', 'choice 1', 'choice1'], json: [] },
   { f: 'b',               label: 'Option B',                need: 'required',
-    cols: ['b', 'option b', 'optionb', 'opt b', 'choice b'], json: [] },
+    cols: ['b', 'option b', 'optionb', 'opt b', 'choice b', 'option 2', 'option2', 'opt 2', 'opt2', 'choice 2', 'choice2'], json: [] },
   { f: 'c',               label: 'Option C',
-    cols: ['c', 'option c', 'optionc', 'opt c', 'choice c'], json: [] },
+    cols: ['c', 'option c', 'optionc', 'opt c', 'choice c', 'option 3', 'option3', 'opt 3', 'opt3', 'choice 3', 'choice3'], json: [] },
   { f: 'd',               label: 'Option D',
-    cols: ['d', 'option d', 'optiond', 'opt d', 'choice d'], json: [] },
+    cols: ['d', 'option d', 'optiond', 'opt d', 'choice d', 'option 4', 'option4', 'opt 4', 'opt4', 'choice 4', 'choice4'], json: [] },
   { f: 'e',               label: 'Option E',
-    cols: ['e', 'option e', 'optione', 'choice e'], json: [] },
+    cols: ['e', 'option e', 'optione', 'choice e', 'option 5', 'option5', 'opt 5', 'opt5', 'choice 5', 'choice5'], json: [] },
   { f: 'f',               label: 'Option F',
-    cols: ['f', 'option f', 'optionf', 'choice f'], json: [] },
+    cols: ['f', 'option f', 'optionf', 'choice f', 'option 6', 'option6', 'opt 6', 'opt6', 'choice 6', 'choice6'], json: [] },
   { f: 'g',               label: 'Option G',
-    cols: ['g', 'option g', 'optiong', 'choice g'], json: [] },
+    cols: ['g', 'option g', 'optiong', 'choice g', 'option 7', 'option7', 'opt 7', 'opt7', 'choice 7', 'choice7'], json: [] },
   { f: 'h',               label: 'Option H',
-    cols: ['h', 'option h', 'optionh', 'choice h'], json: [] },
+    cols: ['h', 'option h', 'optionh', 'choice h', 'option 8', 'option8', 'opt 8', 'opt8', 'choice 8', 'choice8'], json: [] },
   { f: 'answer',          label: 'Correct answer',          need: 'strongly advised',
     note: 'A letter (B), or the full text of the right option. Without it the question is admitted needing answer verification and cannot be practised until you set it.',
     cols: ['answer', 'correct', 'correct answer', 'correctanswer', 'key', 'ans', 'correct option'],
@@ -5504,7 +5531,7 @@ const IMPORT_FIELDS = [
     note: 'What this one question is worth. Leave the column out entirely and every question takes the course\u2019s own rate.',
     cols: ['marks', 'mark', 'weight', 'points', 'score'], json: ['marks', 'mark', 'points'] },
   { f: 'originalNumber',  label: 'Number in the source',
-    cols: ['no', 'no.', 'q no', 'qno', 'sr no', 'sl no', 'number', 'question number', 'srno'],
+    cols: ['no', 'no.', 'q no', 'qno', 'sr no', 'sl no', 's no', 'number', 'question number', 'question no', 'srno'],
     json: ['originalNumber', 'number'] },
   { f: 'externalId',      label: 'Source reference',
     cols: ['id', 'external id', 'source id', 'ref', 'reference'], json: ['externalId', 'id'] },
@@ -5559,16 +5586,43 @@ function jsonPick(o, field) {
   return undefined;
 }
 
+/** The option letter an answer cell names, however it is written: "C",
+    "c)", "(c)", "Option C", "Choice: c", "Ans: D", "Answer - b", "Option 3".
+    A bare number ("3") is read as the third option only where the caller
+    allows it: in a spreadsheet a person numbering options counts from one,
+    while a bare number in JSON could be a zero-based index, and reading it
+    the wrong way would shift every answer by one without a word. '' when the
+    cell names no option; matching the option's full text is the caller's. */
+function answerLetterFrom(raw, optionCount, bareDigits) {
+  const s = String(raw == null ? '' : raw).trim()
+    .replace(/^(?:the\s+)?(?:correct\s+)?(?:ans(?:wer)?|key)\s*(?:is\b)?\s*[:\-–.=]?\s*/i, '');
+  const worded = /^(?:option|choice|opt)\b\.?\s*[:\-–]?\s*[\(\[]?\s*([a-hA-H1-8])\s*[\)\].:]?\s*$/i.exec(s);
+  const bare = /^[\(\[]?\s*([a-hA-H1-8])\s*[\)\].:]?\s*$/.exec(s);
+  const m = worded || bare;
+  if (!m) return '';
+  const c = m[1];
+  if (/\d/.test(c)) {
+    if (!worded && !bareDigits) return '';
+    const n = +c;
+    return n >= 1 && n <= (optionCount || 8) ? LETTERS[n - 1] : '';
+  }
+  return c.toUpperCase();
+}
+
 /* ---------- structured rows (CSV / XLSX) ---------- */
 const COLUMN_ALIASES = (() => {
   const m = {};
   IMPORT_FIELDS.forEach(x => { m[x.f] = x.cols; });
   return m;
 })();
+/** How many answer-option columns a header mapping found. */
+function optionColumnsIn(map) { return 'abcdefgh'.split('').filter(k => map && map[k] !== undefined).length; }
 function mapHeader(headerRow) {
   const map = {};
   headerRow.forEach((raw, i) => {
-    const key = String(raw || '').trim().toLowerCase().replace(/[_\-]+/g, ' ').replace(/\s+/g, ' ');
+    // Dots and brackets are punctuation in a heading: "Q.No" reads as "q no",
+    // "Option (a)" as "option a".
+    const key = String(raw || '').trim().toLowerCase().replace(/[_\-.()]+/g, ' ').replace(/\s+/g, ' ').trim();
     for (const field in COLUMN_ALIASES) {
       if (COLUMN_ALIASES[field].indexOf(key) >= 0 && map[field] === undefined) { map[field] = i; return; }
     }
@@ -5604,14 +5658,12 @@ function rowsToCandidates(rows, opts) {
       if (v) opts.push({ letter: letterOf(ix), text: v, rationale: get('why' + k.toUpperCase()) });
     });
     const ansRaw = get('answer');
-    let letter = '';
-    // Same "Option B"/"Choice: C" allowance as RX.answerLetter, and for the
-    // same reason: a spreadsheet answer column is exactly as likely to spell
-    // the letter out as a free-text answer line is.
-    const lm = /^(?:(?:option|choice)\b\s*[:\-–]?\s*)?[\(\[]?\s*([a-hA-H])\s*[\)\].:]?\s*$/i.exec(ansRaw);
-    if (lm) letter = lm[1].toUpperCase();
-    else if (ansRaw) {
-      const hit = opts.findIndex(o => normText(o.text) === normText(ansRaw));
+    // "C", "Option C", "Ans: D", "3" (the third option — a spreadsheet counts
+    // from one), or the right option's full text.
+    let letter = answerLetterFrom(ansRaw, opts.length, true);
+    if (!letter && ansRaw) {
+      const bare = ansRaw.replace(/^(?:the\s+)?(?:correct\s+)?(?:ans(?:wer)?|key)\s*[:\-–.=]\s*/i, '');
+      const hit = opts.findIndex(o => normText(o.text) === normText(ansRaw) || normText(o.text) === normText(bare));
       if (hit >= 0) letter = opts[hit].letter;
     }
     // Rows sharing a case reference are one scenario. The first non-empty
@@ -5681,7 +5733,7 @@ function jsonToCandidates(json) {
     if (!stem || opts.length < 2) { unresolved.push({ line: i + 1, text: JSON.stringify(o).slice(0, 160) }); return; }
     let letter = '';
     const ansRaw = jsonPick(o, 'answer') != null ? String(jsonPick(o, 'answer')) : '';
-    if (/^[a-hA-H]$/.test(ansRaw)) letter = ansRaw.toUpperCase();
+    if (answerLetterFrom(ansRaw, opts.length, false)) letter = answerLetterFrom(ansRaw, opts.length, false);
     else if (o.correctIndex != null) letter = letterOf(+o.correctIndex);
     else if (ansRaw) { const hit = opts.findIndex(x => normText(x.text) === normText(ansRaw)); if (hit >= 0) letter = opts[hit].letter; }
     // A record written by "JSON (full structure)" names its answer by option
@@ -13394,7 +13446,16 @@ async function sourceDialog(files) {
     for (const f of files) {
       try {
         let out;
-        if (f.kind === 'rows') out = rowsToCandidates(f.rows);
+        if (f.kind === 'rows') {
+          // A file whose headings are not understood yet is read with the
+          // mapping chosen for it, or not counted at all: read blind, its
+          // heading row was counted as a question with no answer, which
+          // turned the tick off for everything else.
+          const chosen = columnMaps[f.filename];
+          const auto = mapHeader(f.rows[0] || []);
+          if (!chosen && (auto.stem === undefined || optionColumnsIn(auto) < 2)) continue;
+          out = rowsToCandidates(f.rows, chosen || undefined);
+        }
         else if (f.kind === 'json') out = jsonToCandidates(f.json);
         else out = parseText(f.text, { template: tmpl.value });
         (out.candidates || []).forEach(c => {
@@ -13473,6 +13534,7 @@ async function sourceDialog(files) {
             const chosenMap = await columnMapDialog(f.rows, mapHeader(f.rows[0] || []), f.filename);
             if (!chosenMap) return;
             columnMaps[f.filename] = chosenMap;
+            refreshTrustDefault();
             e.currentTarget.textContent = 'Columns set \u2713';
             toast('Column mapping saved for ' + f.filename, 'ok');
           }, text: 'Columns'
@@ -13742,7 +13804,11 @@ async function runParse(files, meta) {
         let mapping = (meta.columnMaps || {})[f.filename];
         if (!mapping) {
           const auto = mapHeader(f.rows[0] || []);
-          if (auto.stem === undefined) {
+          // Asked, too, when the question column was found but fewer than two
+          // option columns were: a file with "Option 1…4" headings used to
+          // import every question with no options at all, and the preview
+          // blamed a missing answer.
+          if (auto.stem === undefined || optionColumnsIn(auto) < 2) {
             mapping = await columnMapDialog(f.rows, auto, f.filename);
             if (!mapping) {
               staging.unresolved.push({ file: f.filename, line: 0, text: 'Column mapping cancelled — nothing was read from this file.' });
@@ -19156,9 +19222,10 @@ function showLicence() {
 
 async function courseDialog(course) {
   const isNew = !course;
-  const code = h('input', { type: 'text', value: course ? course.code : '', placeholder: 'DISA' });
-  const name = h('input', { type: 'text', value: course ? course.name : '', placeholder: 'Diploma in Information Systems Audit' });
-  const prefix = h('input', { type: 'text', value: course ? course.qidPrefix : '', placeholder: 'DISA' });
+  // "e.g." so an empty field can never be mistaken for a filled one.
+  const code = h('input', { type: 'text', value: course ? course.code : '', placeholder: 'e.g. DISA' });
+  const name = h('input', { type: 'text', value: course ? course.name : '', placeholder: 'e.g. Diploma in Information Systems Audit' });
+  const prefix = h('input', { type: 'text', value: course ? course.qidPrefix : '', placeholder: 'Same as the code' });
   // Exams like CISA and DISA always offer exactly four options, so a
   // two-option record is a parsing failure rather than a real question —
   // but that is a per-course fact, not a universal one, so it is opt-in
@@ -19317,6 +19384,39 @@ async function courseDialog(course) {
     h('div', { class: 'tiny dim', text: 'Adds that course right away, with its exam blueprint and weights already set. Building a course for something else? Just fill in the form below.' })
   ]) : null;
 
+  /* Checked before the dialog closes, so a slip costs one correction rather
+     than the form: it used to close first and complain afterwards, and a
+     typed-in blueprint went with it. */
+  const validateForm = () => {
+    const bad = (msg, el) => { toast(msg, 'bad', 6000); if (el) el.focus(); return false; };
+    if (!code.value.trim()) return bad('Give the course a short code, such as DISA', code);
+    if (!name.value.trim()) return bad('Give the course its full name', name);
+    // Two courses sharing a code look identical in the picker and would each
+    // run their own id register issuing the same-looking Question IDs.
+    const clash = State.courses.find(c => c.code.trim().toUpperCase() === code.value.trim().toUpperCase() && (isNew || c.id !== course.id));
+    if (clash) return bad('A course called ' + clash.code + ' already exists' + (clash.archived ? ' (archived)' : '') + ' — choose another code, or edit that one', code);
+    const kept = bp.filter(d => d.id && d.name.trim());
+    if (!kept.length) return bad('Name at least one domain: a code and a name');
+    // "+ Add domain" numbers from the current length, so deleting a middle row
+    // and adding another can re-issue a code already in use.
+    const twice = kept.map(d => d.id).filter((id, i, a) => a.indexOf(id) !== i);
+    if (twice.length) return bad('Two domains share the code ' + Array.from(new Set(twice)).join(', ') + ' — each needs its own');
+    return true;
+  };
+  /** Removing a domain that still has questions filed under it leaves them
+      pointing at nothing. Asked before saving; saying no brings the form back
+      exactly as it was. */
+  const confirmDroppedDomains = async () => {
+    const newIds = new Set(bp.filter(d => d.id && d.name.trim()).map(d => d.id));
+    const droppedIds = course.blueprint.map(d => d.id).filter(id => !newIds.has(id));
+    if (!droppedIds.length) return true;
+    const mine = await Questions.byCourse(course.id);
+    const affected = droppedIds.map(id => ({ id, count: mine.filter(q => q.domainId === id).length })).filter(a => a.count > 0);
+    if (!affected.length) return true;
+    return confirmBox('Some removed domains still have questions',
+      affected.map(a => a.count + ' question(s) filed under ' + a.id).join(', ') + ' will point at a domain this blueprint no longer has, and weighted mocks won’t count them until they are filed again. Save anyway?');
+  };
+
   const release = guardUnsaved(hasUnsavedChanges);
   try {
   let res;
@@ -19352,9 +19452,10 @@ async function courseDialog(course) {
       // is a second, deliberate step past that reversible one, not a
       // shortcut available on a course still in active use.
       !isNew && course.archived ? { label: 'Delete permanently', value: 'delete', kind: 'danger' } : null,
-      { label: isNew ? 'Create course' : 'Save', value: 'save', kind: 'primary' }
+      { label: isNew ? 'Create course' : 'Save', value: 'save', kind: 'primary', before: validateForm }
     ].filter(Boolean)
     });
+    if (res === 'save' && !isNew && !(await confirmDroppedDomains())) continue;
     if (res || quickAdded || !hasUnsavedChanges()) break;
     const discard = await confirmBox('Discard your changes?', 'Nothing entered on this course has been saved yet.', true, 'Discard');
     if (discard) break;
@@ -19376,46 +19477,8 @@ async function courseDialog(course) {
     if (State.course.id === course.id && course.archived) await State.setCourse((State.courses.find(c => !c.archived) || State.courses[0]).id);
     renderShell(); go('settings'); return;
   }
-  if (!code.value.trim() || !name.value.trim()) { toast('A course needs a code and a name', 'bad'); return; }
-  // Two courses sharing a code look identical in the picker and would each
-  // run their own id register issuing the same-looking Question IDs —
-  // renaming into a collision is exactly as unsafe as creating one.
-  const dupCode = State.courses.find(c => c.code.trim().toUpperCase() === code.value.trim().toUpperCase() && (isNew || c.id !== course.id));
-  if (dupCode) {
-    toast('A course with that code already exists' + (dupCode.archived ? ' (archived)' : '') + ' — codes must be unique. Edit ' + dupCode.code + ' instead, or choose a different code.', 'bad', 6000);
-    return;
-  }
+  // Validated before the dialog closed (validateForm, confirmDroppedDomains).
   bp = bp.filter(d => d.id && d.name.trim());
-  if (!bp.length) { toast('Add at least one domain', 'bad'); return; }
-  // "+ Add domain" numbers the new row from the current length, so deleting a
-  // middle domain and adding another re-issues a code already in use. Two rows
-  // sharing a code both draw from the same questions, which puts the same
-  // question in a weighted paper twice and splits the domain's weight in a way
-  // nobody asked for.
-  const dupeIds = bp.map(d => d.id).filter((id, i, a) => a.indexOf(id) !== i);
-  if (dupeIds.length) {
-    toast('Two domains share the code ' + Array.from(new Set(dupeIds)).join(', ') + '. Codes must be unique — questions are filed under them.', 'bad', 7000);
-    return;
-  }
-  if (!isNew) {
-    // A domain code that's renamed or removed here looks, to the rest of
-    // the app, identical to one that simply no longer exists — any
-    // question still classified under it silently loses exam-weighted
-    // coverage with nothing on screen to say so. Warn with a real count
-    // before that happens, rather than after.
-    const oldIds = new Set(course.blueprint.map(d => d.id));
-    const newIds = new Set(bp.map(d => d.id));
-    const droppedIds = Array.from(oldIds).filter(id => !newIds.has(id));
-    if (droppedIds.length) {
-      const mine = await Questions.byCourse(course.id);
-      const affected = droppedIds.map(id => ({ id, count: mine.filter(q => q.domainId === id).length })).filter(a => a.count > 0);
-      if (affected.length) {
-        const ok = await confirmBox('Some removed domains still have questions',
-          affected.map(a => a.count + ' question(s) filed under ' + a.id).join(', ') + ' will be left pointing at a domain that no longer exists in this blueprint — exam-weighted selection won’t count them until they’re reclassified from the Question Bank. Save anyway?');
-        if (!ok) return;
-      }
-    }
-  }
   const optionCount = clamp(parseInt(optCount.value, 10) || 4, 2, 8);
   const enforceOptionCount = !!enforceOpts.checked;
   if (isNew) {
@@ -35984,6 +36047,41 @@ test('Typing a template code into Add a course fills in its blueprint, and never
     eq(State.courses.length, beforeCount, 'nothing was created');
   } finally {
     document.querySelectorAll('.modal-bg').forEach(el => el.remove());
+  }
+});
+test('A slip in Add a course keeps the dialog open with everything typed', async () => {
+  const fieldByLabel = (label) => {
+    const field = Array.from(document.querySelectorAll('.modal-bg .field')).find(f => { const lab = f.querySelector('label'); return lab && lab.textContent.trim() === label; });
+    return field && field.querySelector('input');
+  };
+  const type = (el, v) => { el.value = v; el.dispatchEvent(new Event('input')); };
+  const before = State.courses.length, prevCourse = State.course;
+  const realGo = globalThis.go; globalThis.go = () => { };
+  let p, made = null;
+  try {
+    p = courseDialog(null);
+    await new Promise(r => setTimeout(r, 50));
+    type(fieldByLabel('Short code'), 'ZZSLIP');
+    const rowName = document.querySelector('.modal-bg input[placeholder="Domain name"]');
+    type(rowName, 'My only domain');
+    const create = () => Array.from(document.querySelectorAll('.modal-bg .modal-f button')).find(b => b.textContent === 'Create course');
+    create().click();
+    await new Promise(r => setTimeout(r, 80));
+    assert(fieldByLabel('Short code'), 'a missing name keeps the dialog open');
+    eq(fieldByLabel('Short code').value, 'ZZSLIP', 'with the code still typed');
+    eq(document.querySelector('.modal-bg input[placeholder="Domain name"]').value, 'My only domain', 'and the blueprint row too');
+    eq(State.courses.length, before, 'and nothing is created');
+    type(fieldByLabel('Full name'), 'Slip test course');
+    create().click();
+    await p;
+    made = State.courses.find(c => c.code === 'ZZSLIP');
+    assert(made, 'once the name is there, the course is created');
+    eq(made.blueprint.map(d => d.name).join(), 'My only domain', 'with the blueprint as typed');
+  } finally {
+    globalThis.go = realGo;
+    document.querySelectorAll('.modal-bg').forEach(el => el.remove());
+    if (made) { await DB.del('courses', made.id); await DB.del('idRegister', made.id); State.courses = await DB.all('courses'); }
+    if (prevCourse && State.course !== prevCourse) await State.setCourse(prevCourse.id);
   }
 });
 test('A course still on the old "General" placeholder moves onto its template, re-filing its questions', async () => {
