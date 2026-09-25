@@ -31,6 +31,9 @@
      start_url to resolve against, so Chrome discards it and the app is
      not installable — checked with Page.getInstallabilityErrors. -->
 <link rel="manifest" href="manifest.webmanifest">
+<!-- The same mark as the manifest's icon, so the browser tab shows it too
+     (and stops asking the server for a favicon.ico that is not there). -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIj48cmVjdCB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgcng9IjExMiIgZmlsbD0iIzE2MjAyQiIvPjxyZWN0IHg9IjEzNiIgeT0iMTM2IiB3aWR0aD0iMjQwIiBoZWlnaHQ9IjI0MCIgcng9IjM0IiBmaWxsPSJub25lIiBzdHJva2U9IiNFOThENzYiIHN0cm9rZS13aWR0aD0iMjYiLz48cGF0aCBkPSJNMTk2IDI1OGw0NCA0NiA4NC0xMDAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0U5OEQ3NiIgc3Ryb2tlLXdpZHRoPSIzMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PC9zdmc+">
 <meta name="theme-color" content="#16202B">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="MCQ Mastery">
@@ -2531,6 +2534,9 @@ function makeOption(text, id, rationale) {
   return o;
 }
 const LETTERS = 'ABCDEFGH';
+/** A phone or tablet: nothing to drag files onto, and no keyboard shortcut to
+    paste with, so copy that says "drop" or "Ctrl+V" says the wrong thing. */
+const TOUCH_FIRST = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
 const letterOf = (i) => LETTERS[i] || String(i + 1);
 
 /** Whether q's own course expects a fixed number of options per question and
@@ -4831,6 +4837,7 @@ function decodeTextBytes(buf) {
 async function readFile(file) {
   const ext = extOf(file.name);
   if (ext === '.doc') throw new Error('Legacy .doc is not supported. Open it in Word and save as .docx, then import again.');
+  if (ext === '.xls') throw new Error('Old .xls workbooks can’t be read. Open it in Excel, choose File → Save As → Excel Workbook (.xlsx) or CSV, and import that.');
   if (ACCEPTED.indexOf(ext) < 0) throw new Error('Unsupported file type "' + (ext || '?') + '". Accepted: ' + ACCEPTED.join(', '));
   if (file.size > MAX_FILE_MB * 1048576) throw new Error('File is larger than ' + MAX_FILE_MB + ' MB. Split it and import in parts.');
   const buf = await file.arrayBuffer();
@@ -8205,10 +8212,15 @@ async function _goRun(view, arg, fromPop) {
   closeMobileNav();
   const target = $('#view');
   if (!target) return;   // the shell has not rendered yet; nothing to draw into
+  // A repaint of the screen already open keeps its place. Every action in
+  // the review queue repaints it, and answering the fortieth question used to
+  // throw the student back to the top forty times over.
+  const keepY = prevView === view ? window.scrollY : 0;
   target.textContent = '';
   window.scrollTo(0, 0);
   try {
     await (ROUTES[view] || ROUTES.dashboard)(target, arg);
+    if (keepY) window.scrollTo(0, keepY);
   } catch (e) {
     console.error(e);
     target.appendChild(h('div', { class: 'notice bad' }, 'Something went wrong rendering this screen: ' + e.message));
@@ -8216,12 +8228,24 @@ async function _goRun(view, arg, fromPop) {
   refreshBadges();
   updateRiskBar();
 }
+/** A batch read but not yet confirmed lives only in this tab. Wherever a
+    student lands after wandering off, this says so and leads back. */
+function stagedBatchBanner() {
+  const st = State.staging;
+  if (!st || !st.items || !st.items.length) return null;
+  return h('div', { class: 'notice warn row wrap', style: 'margin-bottom:14px;gap:10px;align-items:center' }, [
+    h('span', { style: 'flex:1;min-width:200px', text: qtyLabel(st.items.length, 'question') + ' read from “' + ((st.meta && st.meta.title) || 'your file') + '” are not added yet.' }),
+    h('button', { class: 'btn sm primary', onclick: () => go('import'), text: 'Finish import' })
+  ]);
+}
 async function refreshBadges() {
   if (!State.course) return;
   const all = await State.questions();
   // Only what is actually held back. A badge reading 400 for questions the
   // candidate can already practise is the same noise in a different place.
-  setBadge('import', all.filter(isBlocked).length);
+  // Questions extracted but not yet confirmed count too: they exist only in
+  // this tab until "Confirm import", and nothing else points back to them.
+  setBadge('import', all.filter(isBlocked).length + (State.staging ? State.staging.items.length : 0));
   // Counted over the standalone bank only: this badge means "Spaced
   // repetition has something for you", and Spaced repetition cannot draw a
   // case-study question. Counting them made the badge promise work that the
@@ -8298,6 +8322,8 @@ ROUTES.onboarding = async (root) => {
 
 /* ---------- dashboard ---------- */
 ROUTES.dashboard = async (root) => {
+  const staged = stagedBatchBanner();
+  if (staged) root.appendChild(staged);
   const all = await State.questions();
   // Everything below drives recommendations that lead to the ordinary
   // practice modes, and those modes cannot draw a case-study question. A
@@ -9018,6 +9044,8 @@ function firstAttemptTrendCard(firstArr) {
    ========================================================================== */
 
 ROUTES.practice = async (root, preselect) => {
+  const staged = stagedBatchBanner();
+  if (staged) root.appendChild(staged);
   const all = await State.questions();
   const pool = eligiblePool(all);
   const caseRecords = await CaseStudies.byCourse(State.course.id);
@@ -13133,10 +13161,10 @@ ROUTES.import = async (root) => {
   // which is the first point it actually orients anybody.
   const drop = h('div', { class: 'drop', tabindex: '0', role: 'button' }, [
     h('div', { style: 'font-size:26px;line-height:1;margin-bottom:8px', text: '↧' }),
-    h('h3', { text: 'Drop files here, or click to choose' }),
+    h('h3', { text: TOUCH_FIRST ? 'Tap to choose a file' : 'Drop files here, or click to choose' }),
     h('p', { class: 'muted small', style: 'margin:6px 0 0', text: 'Accepted: ' + ACCEPTED.filter(e => e !== '.pdf').join(' · ') + ' · text-based .pdf' }),
-    h('p', { class: 'tiny dim', style: 'margin:4px 0 0', text: 'You can also paste a screenshot with Ctrl+V / ⌘V anywhere on this screen.' })
-  ]);
+    TOUCH_FIRST ? null : h('p', { class: 'tiny dim', style: 'margin:4px 0 0', text: 'You can also paste a screenshot with Ctrl+V / ⌘V anywhere on this screen.' })
+  ].filter(Boolean));
   const input = h('input', { type: 'file', multiple: true, class: 'hidden', accept: ACCEPTED.join(','), onchange: e => intake(Array.from(e.target.files)) });
   drop.addEventListener('click', () => input.click());
   drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } });
@@ -13412,6 +13440,19 @@ async function intake(files) {
   // Every image in the drop goes through the adjust/transcribe modal in turn,
   // and the transcriptions join whatever documents were dropped alongside, so
   // the whole drop is one Source details dialog and one batch.
+  // The same file again is the commonest slip there is, and its fingerprint
+  // is already known here — ask before the paperwork, not after it.
+  const seen = [];
+  for (const f of docs) {
+    if (!f.fileHash || !State.course) continue;
+    const ex = (await DB.byIndex('sources', 'fileHash', f.fileHash)).filter(x => x.courseId === State.course.id)[0];
+    if (ex) seen.push('“' + f.filename + '” was added ' + (ex.importedAt ? 'on ' + fmtDate(ex.importedAt) : 'before') + (ex.admitted ? ' (' + qtyLabel(ex.admitted, 'question') + ')' : '') + '.');
+  }
+  if (seen.length) {
+    const again = await confirmBox(seen.length === 1 ? 'You have added this file before' : 'You have added these files before',
+      seen.join(' ') + ' Adding it again changes nothing that is already in your bank — any copy just merges into the question it matches.', false, 'Add again');
+    if (!again) return;
+  }
   const pages = images.length ? await transcribeImages(images.map(i => i.blob)) : [];
   const all = docs.concat(pages);
   if (!all.length) return;
@@ -13509,18 +13550,32 @@ async function sourceDialog(files) {
     res = await modal({
     title: 'Source details', wide: true, sticky: true,
     body: h('div', { class: 'stack' }, [
-      h('div', { class: 'notice small' }, 'These details are attached to every question from this batch, so a question can always be traced back to where it came from.'),
-      h('div', { class: 'grid g2' }, [
-        h('div', { class: 'field' }, [h('label', { text: 'Source title' }), title]),
-        h('div', { class: 'field' }, [h('label', { text: 'Publisher or author' }), author]),
-        h('div', { class: 'field' }, [h('label', { text: 'Source type' }), type]),
-        h('div', { class: 'field' }, [h('label', { text: 'Parsing template' }), tmpl, tmplDesc]),
-        h('div', { class: 'field' }, [h('label', { text: 'Source module (as printed)' }), mod]),
-        h('div', { class: 'field' }, [h('label', { text: 'Source chapter' }), chap]),
-        h('div', { class: 'field' }, [h('label', { text: 'Official domain for this batch' }), dom])
+      // The one choice that decides whether this batch can be practised the
+      // moment it lands comes first, in plain words. It used to sit last,
+      // under seven optional fields, below the fold on a phone.
+      h('label', { class: 'check', style: 'align-items:flex-start' }, [trust, h('span', {}, [
+        h('b', { text: 'The answers in this file are right' }),
+        h('span', { class: 'dim tiny', style: 'display:block', text: 'Ticked, they go straight into practice. Unticked, you confirm each answer first.' }),
+        trustHint
+      ])]),
+      h('details', {}, [
+        h('summary', { class: 'small', style: 'cursor:pointer' }, 'More about this source (optional)'),
+        h('div', { class: 'stack', style: 'margin-top:10px' }, [
+          h('div', { class: 'grid g2' }, [
+            h('div', { class: 'field' }, [h('label', { text: 'Source title' }), title]),
+            h('div', { class: 'field' }, [h('label', { text: 'Publisher or author' }), author]),
+            h('div', { class: 'field' }, [h('label', { text: 'Source type' }), type]),
+            // Only text-like files are parsed by a template; a spreadsheet
+            // or JSON file has its own structure, so the choice would do
+            // nothing there.
+            files.some(f => f.kind !== 'rows' && f.kind !== 'json') ? h('div', { class: 'field' }, [h('label', { text: 'Parsing template' }), tmpl, tmplDesc]) : null,
+            h('div', { class: 'field' }, [h('label', { text: 'Source module (as printed)' }), mod]),
+            h('div', { class: 'field' }, [h('label', { text: 'Source chapter' }), chap]),
+            h('div', { class: 'field' }, [h('label', { text: 'Official domain for this batch' }), dom])
+          ].filter(Boolean)),
+          h('div', { class: 'field' }, [h('label', { text: 'Notes' }), notes])
+        ])
       ]),
-      h('div', { class: 'field' }, [h('label', { text: 'Notes' }), notes]),
-      h('label', { class: 'check' }, [trust, h('span', {}, ['Treat an answer printed in the source as verified ', h('span', { class: 'dim tiny', text: '— leave off if you want to check each answer yourself' }), trustHint])]),
       h('div', { class: 'card' }, [h('div', { class: 'card-b tight small muted' }, files.map(f => h('div', { class: 'row' }, [
         h('span', { class: 'docnum', text: f.ext }),
         h('span', { style: 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', title: f.filename, text: f.filename }),
@@ -13622,8 +13677,9 @@ async function columnMapDialog(rows, autoMap, filename) {
       Array.from(sel.options).forEach(o => { if (o.value === chosen[i]) o.selected = true; });
       tb.appendChild(h('tr', {}, [
         h('td', {}, [h('b', { class: 'small', text: columnLabel(header, i) }),
-          h('div', { class: 'tiny dim', text: samples.length ? samples.map(x => x.slice(0, 60)).join(' · ') : '(empty in the first few rows)' })]),
-        h('td', { style: 'min-width:190px' }, sel)
+          h('div', { class: 'tiny dim', style: 'overflow-wrap:anywhere', text: samples.length ? samples.map(x => x.slice(0, 60)).join(' · ') : '(empty in the first few rows)' })]),
+        // Narrow enough to fit a phone beside the column's samples.
+        h('td', { style: 'min-width:min(190px, 42vw)' }, [sel])
       ]));
     }
     table.appendChild(h('table', {}, [h('thead', {}, h('tr', {}, ['Column in your file', 'Means'].map(t => h('th', { text: t })))), tb]));
@@ -13811,7 +13867,7 @@ async function runParse(files, meta) {
           if (auto.stem === undefined || optionColumnsIn(auto) < 2) {
             mapping = await columnMapDialog(f.rows, auto, f.filename);
             if (!mapping) {
-              staging.unresolved.push({ file: f.filename, line: 0, text: 'Column mapping cancelled — nothing was read from this file.' });
+              staging.unresolved.push({ file: f.filename, line: 0, text: 'Column mapping cancelled — nothing was read from this file.', cancelled: true });
               continue;
             }
           }
@@ -13862,6 +13918,11 @@ async function runParse(files, meta) {
     if (existing) staging.duplicateFileWarning = true;
   }
 
+  // Cancelling the column question is a choice, not a failed parse.
+  if (!staging.items.length && staging.unresolved.length && staging.unresolved.every(u => u.cancelled)) {
+    toast('Import cancelled — nothing was added.', 'info');
+    return;
+  }
   if (!staging.items.length) {
     await modal({
       title: 'No questions detected',
@@ -13900,7 +13961,8 @@ async function runParse(files, meta) {
 /* Each filter answers one question a reviewer actually asks of a batch. */
 const STAGE_FILTERS = [
   ['all',      'Everything',        () => true],
-  ['ready',    'Ready to import',   it => !it.dup && !!it.q.correctOptionId && !!it.q.domainId],
+  // Ready means ready to practise: an unfiled question practises too.
+  ['ready',    'Ready to practise', it => !it.dup && !!it.q.correctOptionId && it.q.answerVerified === 'verified'],
   ['noanswer', 'No answer found',   it => !it.q.correctOptionId],
   ['unmapped', 'No domain',         it => !it.q.domainId],
   ['dup',      'Duplicates',        it => !!it.dup && !it.dup.conflict],
@@ -14034,8 +14096,19 @@ function renderStaging(root) {
   root.appendChild(list);
   const pager = h('div', { class: 'row', style: 'margin-top:14px;justify-content:center;gap:10px' });
   root.appendChild(pager);
+  // Confirm stays within reach however far down a long batch the student
+  // has scrolled — on a phone, the button at the top was a screen and a
+  // half away before the first card.
+  const footBar = h('div', { class: 'row wrap', style: 'position:sticky;bottom:0;z-index:5;gap:10px;align-items:center;padding:10px 12px;margin-top:14px;background:var(--surface);border-top:1px solid var(--rule);box-shadow:0 -6px 16px rgba(0,0,0,.06)' });
+  root.appendChild(footBar);
+  const drawFoot = () => {
+    const c = counts();
+    footBar.textContent = '';
+    footBar.appendChild(h('span', { class: 'small', style: 'flex:1;min-width:160px', text: (c.import + c.review + c.conflict) + ' to add' + (c.merge ? ' · ' + c.merge + ' duplicates to merge' : '') + (c.reject ? ' · ' + c.reject + ' to reject' : '') }));
+    footBar.appendChild(h('button', { class: 'btn primary', onclick: () => commitBatch(), text: 'Confirm import' }));
+  };
 
-  function drawAll() { drawBulk(); drawList(); drawSummary(); caseRefreshers.forEach(fn => fn()); }
+  function drawAll() { drawBulk(); drawList(); drawSummary(); drawFoot(); caseRefreshers.forEach(fn => fn()); }
 
   function drawBulk() {
     bulk.textContent = '';
@@ -14193,7 +14266,14 @@ function renderStaging(root) {
       q.options.forEach((o, oi) => {
         optBox.appendChild(h('div', { class: 'row', style: 'gap:8px;align-items:flex-start' }, [
           h('label', { class: 'check', style: 'margin-top:8px' }, [
-            h('input', { type: 'radio', name: 'c' + q.uuid, checked: q.correctOptionId === o.id, onchange: () => { q.correctOptionId = o.id; if (q.status === 'needs_answer') q.status = q.domainId ? 'draft' : 'needs_class'; drawAll(); } }),
+            // A person choosing the answer here is the check itself — the
+            // same click in the review queue verifies, and treating this one
+            // as unconfirmed made every hand-picked answer need picking twice.
+            h('input', { type: 'radio', name: 'c' + q.uuid, checked: q.correctOptionId === o.id, onchange: () => {
+              q.correctOptionId = o.id; q.answerVerified = 'verified'; q.verifiedAt = nowISO(); q.verifyNote = 'Chosen by hand at import';
+              if (q.status === 'needs_answer') q.status = q.domainId ? 'draft' : 'needs_class';
+              drawAll();
+            } }),
             h('span', { class: 'docnum', text: letterOf(oi) })
           ]),
           h('input', { type: 'text', value: o.text, oninput: e => { o.text = e.target.value; it.edited = true; } }),
@@ -14224,7 +14304,7 @@ function renderStaging(root) {
     body.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Options — pick the correct one' }), optBox]));
     if (!q.correctOptionId) body.appendChild(h('div', { class: 'notice warn small' }, 'No answer was found in the source. This will be admitted as “Needs answer verification” and kept out of every test session until you set and verify the answer. Nothing will be invented for you.'));
     const g = h('div', { class: 'grid g4', style: 'margin-top:10px' });
-    g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Domain' }), h('select', { onchange: e => { q.domainId = e.target.value || null; if (q.status === 'needs_class' && q.domainId) q.status = 'draft'; drawAll(); } }, [h('option', { value: '' }, 'Unmapped')].concat(State.course.blueprint.map(d => h('option', { value: d.id, selected: q.domainId === d.id }, d.id))))]));
+    g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Domain' }), h('select', { onchange: e => { q.domainId = e.target.value || null; if (q.status === 'needs_class' && q.domainId) q.status = 'draft'; drawAll(); } }, [h('option', { value: '' }, 'Unmapped')].concat(State.course.blueprint.map(d => h('option', { value: d.id, selected: q.domainId === d.id }, State.domainShort(d.id)))))]));
     g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Topic' }), h('input', { type: 'text', value: q.topic, oninput: e => q.topic = e.target.value })]));
     g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Difficulty' }), h('select', { onchange: e => q.difficulty = e.target.value }, DIFFICULTY.map(d => h('option', { value: d, selected: q.difficulty === d }, d)))]));
     g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Decision' }), h('select', {
@@ -14444,7 +14524,10 @@ async function admitBatch() {
     const existing = await Questions.get(target.uuid);
     if (!existing) { toAdmit.push(it.q); continue; }
     const before = JSON.parse(JSON.stringify(existing));
-    existing.sourceRefs = (existing.sourceRefs || []).concat(it.q.sourceRefs);
+    // A source already recorded (the same file imported twice) is not a
+    // second source.
+    const has = new Set((existing.sourceRefs || []).map(r => r.sourceId + '|' + (r.locator || '')));
+    existing.sourceRefs = (existing.sourceRefs || []).concat((it.q.sourceRefs || []).filter(r => !has.has(r.sourceId + '|' + (r.locator || ''))));
     if (!existing.explanation && it.q.explanation) existing.explanation = it.q.explanation;
     if (!existing.topic && it.q.topic) existing.topic = it.q.topic;
     existing.updatedAt = nowISO();
@@ -14546,7 +14629,14 @@ async function showReconciliation(batch) {
     const rows = await DB.byIndex('questions', 'batchId', batch.id);
     const now = {};
     rows.forEach(q => { now[q.status] = (now[q.status] || 0) + 1; });
-    live = { total: rows.length, byStatus: now };
+    live = {
+      total: rows.length, byStatus: now,
+      // What a student asks of an import: how many can I practise, and how
+      // many need me. Counted from the bank as it is now, with the same gate
+      // practice uses — an unfiled question practises, so it is ready.
+      ready: rows.filter(isPracticeEligible).length,
+      waiting: rows.filter(isBlocked).length
+    };
   } catch (e) { live = null; }
   const tbl = h('table', { class: 'recon' });
   const tb = h('tbody');
@@ -14611,22 +14701,44 @@ async function showReconciliation(batch) {
     ]);
   };
 
-  modal({
-    title: 'Import reconciliation · batch ' + batch.id.slice(0, 8), wide: true,
+  /* Three numbers and the next step first; the full reconciliation — every
+     candidate accounted for — stays one click away for anyone auditing it.
+     The table used to be the whole report, and it told a student whose 100
+     questions were all practising that 0 had been "admitted as Active". */
+  const tile = (label, v, color) => h('div', { class: 'tile', style: 'flex:1;min-width:120px' }, [
+    h('span', { class: 'eyebrow', text: label }), h('b', { style: color ? 'color:' + color : '', text: String(v) })
+  ]);
+  const ready = live ? live.ready : (r.imported || 0), waiting = live ? live.waiting : (r.drafts || 0);
+  const box = modal({
+    title: 'Import finished', wide: true,
     body: h('div', { class: 'stack' }, [
-      h('div', { class: 'tiny dim' },
-        'As recorded when this import finished' + (batch.finishedAt ? ' on ' + fmtDate(batch.finishedAt, true) : '') +
-        '. It is a record of that moment and never changes — the review queue moves on as you work, so the two are meant to differ.'),
-      h('div', { class: 'notice ' + (r.balanced ? 'ok' : 'bad') },
-        r.balanced
-          ? 'Reconciled. Detected candidates equal imported + drafts + merged + rejected, so no candidate has gone missing.'
-          : 'Out of balance by ' + Math.abs((r.detected || 0) - (r.accounted || 0)) + '. Check the batch before relying on it.'),
-      tbl,
-      liveBlock(),
-      h('div', { class: 'small muted' }, 'Sources in this batch: ' + (r.sources || []).map(s => s.title + ' (' + s.detected + ')').join(' · ')),
-      h('div', { class: 'row' }, [h('button', { class: 'btn sm', onclick: () => exportReconciliation(batch), text: 'Export this report' })])
+      h('div', { class: 'row wrap', style: 'gap:10px;align-items:stretch' }, [
+        tile('Ready to practise', ready, 'var(--green)'),
+        tile('Need you', waiting, waiting ? 'var(--amber)' : ''),
+        r.merged ? tile('Merged duplicates', r.merged) : null,
+        r.rejected ? tile('Rejected', r.rejected) : null
+      ].filter(Boolean)),
+      r.balanced ? null : h('div', { class: 'notice bad' }, 'Out of balance by ' + Math.abs((r.detected || 0) - (r.accounted || 0)) + ' — check this batch before relying on it.'),
+      h('div', { class: 'row wrap', style: 'gap:8px' }, [
+        ready ? h('button', { class: 'btn primary', onclick: () => { closeTop(); go('practice'); }, text: 'Practise now' }) : null,
+        waiting ? h('button', { class: 'btn', onclick: () => { closeTop(); State.importStep = 'check'; go('import'); }, text: 'Review the ' + waiting + ' waiting' }) : null
+      ].filter(Boolean)),
+      h('details', {}, [
+        h('summary', { class: 'small', style: 'cursor:pointer' }, 'Details'),
+        h('div', { class: 'stack', style: 'margin-top:8px' }, [
+          h('div', { class: 'tiny dim' },
+            'As recorded when this import finished' + (batch.finishedAt ? ' on ' + fmtDate(batch.finishedAt, true) : '') + '.' +
+            (r.balanced ? ' Every candidate is accounted for.' : '')),
+          tbl,
+          liveBlock(),
+          h('div', { class: 'small muted' }, 'Sources in this batch: ' + (r.sources || []).map(s => s.title + ' (' + s.detected + ')').join(' · ')),
+          h('div', { class: 'row' }, [h('button', { class: 'btn sm', onclick: () => exportReconciliation(batch), text: 'Export this report' })])
+        ])
+      ])
     ])
   });
+  function closeTop() { const m = $$('.modal').pop(); if (m && m._close) m._close(null); }
+  return box;
 }
 function exportReconciliation(batch) {
   const r = batch.report || {};
@@ -16000,7 +16112,10 @@ async function renderReviewQueue(root) {
   }
   const eased = await rejudgeConflictPairs(all);
   if (eased) setTimeout(() => toast(eased + ' answer conflict(s) were only a page number or a word apart — now listed as duplicates to merge.', 'info', 8000), 400);
-  const queue = all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0);
+  // In the order the questions came in, so a student working from the
+  // source (or an answer key) can keep their place.
+  const queue = all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0)
+    .sort((a, b) => IdRegister.seqOf(a.qid) - IdRegister.seqOf(b.qid));
   // Both banks queue here — a case-study question needing its answer
   // confirmed is confirmed in the same place as any other. Which bank it
   // belongs to changes where it will show up afterwards, so rows say so.
@@ -16151,7 +16266,9 @@ async function renderReviewQueue(root) {
   };
   const quickRow = (q, extra) => h('div', { style: 'border-left:3px solid var(--rule);padding-left:12px' }, [
     h('div', { class: 'row wrap', style: 'gap:8px' }, [
-      h('span', { class: 'docnum dim', text: q.qid || '(no id)' }), statusBadge(q),
+      h('span', { class: 'docnum dim', text: q.qid || '(no id)' }),
+      q.originalNumber ? h('span', { class: 'tiny dim', title: 'Its number in the file it came from', text: 'No. ' + q.originalNumber }) : null,
+      statusBadge(q),
       q.caseStudyId ? h('span', { class: 'badge b-info', title: 'Belongs to the case study bank', text: '❐ ' + (caseTitles.get(q.caseStudyId) || 'case study') }) : null,
       h('span', { class: 'tiny dim', text: (q.sourceRefs[0] || {}).sourceTitle || '' }),
       h('div', { class: 'spacer' }),
@@ -16188,13 +16305,27 @@ async function renderReviewQueue(root) {
     container.appendChild(card);
 
     const toggle = (q, checked) => { if (checked) ConflictQueueState.sel.add(q.uuid); else ConflictQueueState.sel.delete(q.uuid); };
-    /** What's currently picked for a record — its own stored answer until
-        someone touches it on this screen. */
-    const pickOf = (rec) => ConflictQueueState.answers.get(rec.uuid) || rec.correctOptionId;
+    /** What a person has picked for a record on this screen — nothing until
+        they pick. Each record used to start on its own stored answer, so
+        Resolve, pressed as offered, confirmed BOTH of two contradictory
+        answers and silenced the pair for good: a wrong key put into practice
+        by the most prominent button on the screen. */
+    const pickOf = (rec) => ConflictQueueState.answers.get(rec.uuid) || null;
+    /** Every record picked, and all picks naming the same option — judged the
+        way the conflict itself is, so the same option worded a little
+        differently in each record counts as the same. */
+    const allPicked = (group) => group.every(rec => pickOf(rec));
+    const picksAgree = (group) => allPicked(group) && group.every(rec =>
+      !answersConflict(Object.assign({}, group[0], { correctOptionId: pickOf(group[0]) }), Object.assign({}, rec, { correctOptionId: pickOf(rec) })));
 
     async function resolveGroup(group) {
       const choices = group.map(rec => ({ uuid: rec.uuid, optionId: pickOf(rec) }));
-      if (choices.some(c => !c.optionId)) { toast('Choose an answer for each record first', 'warn'); return; }
+      if (choices.some(c => !c.optionId)) { toast('Pick the right answer for each record first', 'warn'); return; }
+      if (!picksAgree(group)) {
+        const ok = await confirmBox('Keep them as different questions?',
+          'You picked different answers, so these are treated as two different questions — each keeps the answer you picked, and they won’t be flagged against each other again.', false, 'Keep both');
+        if (!ok) return;
+      }
       const r = await resolveConflictGroup(choices);
       State.invalidate();
       if (!r) { toast('Already resolved', 'ok'); go('import'); return; }
@@ -16221,9 +16352,9 @@ async function renderReviewQueue(root) {
       const sel = Array.from(ConflictQueueState.sel);
       if (!sel.length) return;
       const ok = await confirmBox('Resolve ' + sel.length + ' pair(s)?',
-        'Each ticked pair is settled using the answers currently shown for both of its records — exactly as pressing Resolve on each row would. Rows you didn’t tick are left untouched.');
+        'Each ticked pair where you picked the same answer for every record is settled with that answer. Pairs still missing a pick, or picked differently, are left for you to do one at a time.');
       if (!ok) return;
-      let settled = 0, skipped = 0;
+      let settled = 0, skipped = 0, unpicked = 0;
       const done = new Set();
       for (const u of sel) {
         // Both sides of one pair can be ticked; the first settles it, and
@@ -16232,8 +16363,10 @@ async function renderReviewQueue(root) {
         const fresh = await Questions.get(u);
         if (!fresh || (!fresh.conflict && fresh.status !== 'answer_conflict')) { skipped++; continue; }
         const group = [fresh].concat((fresh.conflictWith || []).map(pu => byUuid.get(pu)).filter(Boolean));
-        const choices = group.map(rec => ({ uuid: rec.uuid, optionId: pickOf(rec) })).filter(c => c.optionId);
-        if (!choices.length) { skipped++; continue; }
+        // In bulk, only a pair a person has settled on screen — one answer,
+        // picked for every record — is ever written.
+        if (!picksAgree(group)) { unpicked++; group.forEach(rec => done.add(rec.uuid)); continue; }
+        const choices = group.map(rec => ({ uuid: rec.uuid, optionId: pickOf(rec) }));
         const r = await resolveConflictGroup(choices);
         if (!r) { skipped++; continue; }
         group.forEach(rec => done.add(rec.uuid));
@@ -16242,7 +16375,7 @@ async function renderReviewQueue(root) {
       ConflictQueueState.sel.clear();
       ConflictQueueState.answers.clear();
       State.invalidate();
-      toast(settled + ' pair(s) settled' + (skipped ? ', ' + skipped + ' already handled' : ''), 'ok', 6000);
+      toast(settled + ' pair(s) settled' + (unpicked ? ' · ' + unpicked + ' left: pick one answer for both first' : '') + (skipped ? ' · ' + skipped + ' already handled' : ''), unpicked ? 'warn' : 'ok', 7000);
       go('import');
     }
 
@@ -16253,7 +16386,7 @@ async function renderReviewQueue(root) {
         h('span', { class: 'badge b-review', text: pairs.length + (pairs.length === 1 ? ' disagreement' : ' disagreements') }),
         infoTip('Answer conflicts', h('div', { class: 'stack' }, [
           h('div', { class: 'small' }, 'Each pair reads as the same question but disagrees on the right answer — usually the same question imported twice from different papers.'),
-          h('div', { class: 'small' }, 'Both records are shown side by side. Pick the correct answer for each, then press Resolve. That settles the pair for good, whether you brought them into agreement or accepted that they differ.'),
+          h('div', { class: 'small' }, 'Both records are shown side by side, with nothing picked. Tap the right answer in each. The same answer for both settles the disagreement; different answers keep them as two different questions.'),
           h('div', { class: 'small' }, '“Not the same question” clears the flag without changing either answer — for records that only look alike.')
         ])),
         h('div', { class: 'spacer' }),
@@ -16320,7 +16453,11 @@ async function renderReviewQueue(root) {
           h('div', { class: 'row wrap', style: 'gap:16px;align-items:flex-start;margin-top:4px' },
             group.map((rec, i) => recordColumn(rec, i === 0))),
           h('div', { class: 'row wrap', style: 'gap:12px;align-items:center;margin-top:10px;padding-top:8px;border-top:1px dashed var(--rule)' }, [
-            h('button', { class: 'btn sm primary', onclick: () => resolveGroup(group), text: 'Resolve' }),
+            h('button', {
+              class: 'btn sm primary', disabled: !allPicked(group), onclick: () => resolveGroup(group),
+              title: allPicked(group) ? '' : 'Pick the right answer for each record first',
+              text: !allPicked(group) ? 'Pick an answer for each' : picksAgree(group) ? (group.length > 2 ? 'Same answer for all' : 'Same answer for both') : 'Keep as different questions'
+            }),
             h('button', {
               class: 'btn sm ghost', title: 'Clear this conflict without changing either answer — for records that only look alike',
               onclick: () => dismissOne(q), text: 'Not the same question'
@@ -16484,13 +16621,13 @@ async function renderReviewQueue(root) {
         selectionActions: (picked) => fileBtns(picked)
       }, q => quickRow(q,
         h('div', { class: 'row wrap', style: 'gap:6px' }, State.course.blueprint.map(d => h('button', {
-          class: 'btn sm', onclick: async () => {
+          class: 'btn sm', title: d.name, onclick: async () => {
             const fresh = await Questions.get(q.uuid);
             fresh.domainId = d.id; fresh.classVerified = 'verified';
             fresh.status = deriveEntryStatus(fresh);
             await Questions.save(fresh, 'classified');
-            State.invalidate(); toast('Classified as ' + d.id, 'ok'); State.importStep = 'check'; go('import');
-          }, text: d.id
+            State.invalidate(); toast('Filed under ' + State.domainShort(d.id), 'ok'); State.importStep = 'check'; go('import');
+          }, text: State.domainShort(d.id)
         })))));
     }
 
@@ -20270,7 +20407,10 @@ function updateRiskBar() {
       now: Date.now()
     });
     bar.textContent = '';
-    bar.classList.toggle('hidden', !risk && !behind);
+    // Never between a student and the question in front of them: the strip
+    // waits for the session to end, when the next screen redraws it.
+    const practising = !!(State.session && State.session.status === 'active');
+    bar.classList.toggle('hidden', practising || (!risk && !behind));
     if (risk) {
       bar.appendChild(h('span', { class: 'rb-text' }, [h('b', { text: 'Not saved anywhere else. ' }), risk.text]));
       if (FileStore.tier !== 'manual') {
@@ -31266,6 +31406,43 @@ test('At the reveal, options show their source letter only when the explanation 
   assert(sourceLettersNeeded(q, moved), 'a per-option reason citing a letter counts too');
   q.options[1].rationale = 'The answer is a matter of scope.';
   assert(!sourceLettersNeeded(q, moved), '"answer is a matter" is prose, not a letter');
+});
+test('An answer conflict starts with nothing picked, and can only be settled on answers a person chose', async () => {
+  const cid = 'test-conflict-ui-' + Date.now();
+  const opts = ['Check digit', 'Existence check', 'Completeness check', 'Reasonableness check'];
+  const stem = 'Which edit check makes sure a field holds data, not zeros or blanks?';
+  const a = mkQ(stem, opts, 2, { courseId: cid, qid: 'CUI-Q-000001', status: 'answer_conflict', conflict: true, domainId: 'D1' });
+  const b = mkQ(stem, opts, 3, { courseId: cid, qid: 'CUI-Q-000002', status: 'answer_conflict', conflict: true, domainId: 'D1' });
+  a.conflictWith = [b.uuid]; b.conflictWith = [a.uuid];
+  const was = { course: State.course, filter: ReviewQueueState.filter };
+  State.course = { id: cid, code: 'CUI', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  for (const q of [a, b]) { await recomputeFingerprint(q); await DB.put('questions', q); }
+  ConflictQueueState.answers.clear(); ConflictQueueState.sel.clear();
+  ReviewQueueState.filter = 'answer_conflict';
+  State.invalidate();
+  try {
+    const root = document.createElement('div');
+    await renderReviewQueue(root);
+    const resolveBtn = () => Array.from(root.querySelectorAll('button')).find(x => /^(Pick an answer for each|Same answer for both|Keep as different questions)$/.test(x.textContent));
+    eq(root.querySelectorAll('.correct-pick').length, 0, 'neither record’s own answer is pre-picked');
+    assert(resolveBtn() && resolveBtn().disabled, 'so there is nothing to resolve yet');
+    const pick = (qid, text) => {
+      const col = Array.from(root.querySelectorAll('.docnum')).find(x => x.textContent === qid).closest('div[style*="min-width:260px"]');
+      Array.from(col.querySelectorAll('.method-row')).find(x => x.textContent.indexOf(text) >= 0).click();
+    };
+    pick('CUI-Q-000001', 'Completeness check');
+    assert(resolveBtn().disabled, 'one side picked is still not enough');
+    pick('CUI-Q-000002', 'Reasonableness check');
+    eq(resolveBtn().textContent, 'Keep as different questions', 'different picks say what they will do');
+    pick('CUI-Q-000002', 'Completeness check');
+    eq(resolveBtn().textContent, 'Same answer for both', 'and the same pick says that');
+    assert(!resolveBtn().disabled);
+  } finally {
+    State.course = was.course; ReviewQueueState.filter = was.filter;
+    ConflictQueueState.answers.clear(); ConflictQueueState.sel.clear();
+    for (const q of [a, b]) await DB.del('questions', q.uuid);
+    State.invalidate();
+  }
 });
 test('Restoring a question asks the practice gate rather than a copy of it', () => {
   const base = () => { const q = mkQ('q', ['a', 'b'], 0); q.status = 'answer_conflict'; q.answerVerified = 'verified'; return q; };
