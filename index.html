@@ -317,6 +317,9 @@ body:has(.game-root) .view{padding-bottom:16px}
 
 /* --- surfaces --------------------------------------------------------- */
 .card{background:var(--surface);border:1px solid var(--rule);border-radius:var(--r-lg);box-shadow:var(--shadow)}
+.settings-cols{column-count:2;column-gap:16px}
+.settings-cols > .card{break-inside:avoid;margin-bottom:16px}
+@media(max-width:880px){.settings-cols{column-count:1}}
 .card.clickable{cursor:pointer;transition:transform .14s ease,box-shadow .14s ease,border-color .14s ease;width:100%}
 .card.clickable:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg);border-color:var(--accent-1)}
 .card.clickable:active{transform:translateY(0)}
@@ -1255,6 +1258,32 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 .bar{height:5px;background:var(--surface-3);border-radius:3px;overflow:hidden;min-width:52px}
 .bar > i{display:block;height:100%;background:var(--blue);border-radius:3px}
 .bar > i.g{background:var(--green)} .bar > i.a{background:var(--amber)} .bar > i.r{background:var(--pencil)}
+/* Solid / shaky / new as one bar. New is the empty track itself, so a bank
+   nobody has started reads as an empty bar rather than a grey one. */
+.mixbar{display:flex;height:10px;background:var(--surface-3);border-radius:5px;overflow:hidden;min-width:60px}
+.mixbar > i{display:block;height:100%}
+.mix-solid{background:var(--green)}
+.mix-shaky{background:#D9A441}
+.mix-new{background:transparent}
+[data-theme="dark"] .mix-shaky{background:var(--amber)}
+.mix-legend{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px;font-size:12.5px;color:var(--txt-2)}
+.mix-key{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.mix-key > i{width:10px;height:10px;border-radius:3px;display:inline-block}
+.mix-key > i.mix-new{background:var(--surface-3);border:1px solid var(--rule)}
+.mix-key > b{font-family:var(--mono);font-weight:600;color:var(--txt)}
+.dom-list{display:flex;flex-direction:column}
+.dom-row{display:flex;flex-direction:column;gap:7px;padding:12px 0;border-bottom:1px solid var(--rule-soft)}
+.dom-row:first-child{padding-top:2px}
+.dom-row:last-child{border-bottom:0;padding-bottom:2px}
+.dom-top{display:flex;align-items:center;gap:8px}
+.dom-name{font-size:14px;flex:1;min-width:0;display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px}
+.dom-top .btn{flex:none}
+/* The legend inside a tile is its headline, so it reads large — but not at the
+   tile's own 26px, which pushed three numbers onto two lines at four tiles a row. */
+.tile .mix-key > b{font-size:20px;line-height:1.1}
+.verdict.r{color:var(--pencil);font-weight:600}
+.verdict.a{color:var(--amber);font-weight:600}
+.verdict.g{color:var(--green);font-weight:600}
 
 /* --- empty / notice --------------------------------------------------- */
 .empty{padding:38px 22px;text-align:center;color:var(--txt-2)}
@@ -1528,9 +1557,168 @@ progress::-webkit-progress-value{background:var(--blue);border-radius:3px}
 .timer.urgent{color:var(--pencil)}
 .timer.critical{color:var(--rose);animation:timerPulse 1.1s ease-in-out infinite}
 @keyframes timerPulse{0%,100%{opacity:1}50%{opacity:.55}}
+
+/* --- opening screen ----------------------------------------------------
+   Drawn by the markup at the top of <body>, so it is on screen while the
+   script is still being read, and lifted by Splash.hide() once the first
+   view is ready. Everything here is CSS and inline SVG: nothing to fetch,
+   so it looks the same offline. Only transform and opacity animate. Every
+   timing is multiplied by --sp-s, so a reload in the same tab (.sp-quick)
+   plays the same sequence at a third of the length. */
+#splash{
+  --sp-s:1;
+  position:fixed;inset:0;z-index:10000;display:grid;place-items:center;overflow:hidden;
+  background:radial-gradient(120% 90% at 50% 0%,#1C2A38 0%,#0E1720 55%,#070B10 100%);
+  color:#F0F5F8;font-family:var(--ui);cursor:default;
+  transition:opacity .5s ease,transform .65s cubic-bezier(.2,.7,.2,1);
+}
+#splash.sp-quick{--sp-s:.34}
+#splash.sp-out{opacity:0;transform:scale(1.05);pointer-events:none}
+.sp-orb{position:absolute;border-radius:50%;opacity:.55;will-change:transform;pointer-events:none}
+.sp-orb1{width:60vmax;height:60vmax;left:-22vmax;top:-26vmax;background:radial-gradient(circle,rgba(44,107,160,.9) 0%,rgba(44,107,160,0) 62%);animation:spDrift1 9s ease-in-out infinite alternate}
+.sp-orb2{width:66vmax;height:66vmax;right:-26vmax;bottom:-30vmax;background:radial-gradient(circle,rgba(91,63,191,.85) 0%,rgba(91,63,191,0) 62%);animation:spDrift2 11s ease-in-out infinite alternate}
+@keyframes spDrift1{to{transform:translate(8vmax,6vmax) scale(1.08)}}
+@keyframes spDrift2{to{transform:translate(-7vmax,-5vmax) scale(1.1)}}
+.sp-grid{
+  position:absolute;inset:0;pointer-events:none;
+  background-image:linear-gradient(rgba(255,255,255,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.045) 1px,transparent 1px);
+  background-size:46px 46px;background-position:center;
+  -webkit-mask-image:radial-gradient(ellipse at center,#000 15%,transparent 68%);mask-image:radial-gradient(ellipse at center,#000 15%,transparent 68%);
+}
+/* Question cards drifting past behind the mark: a stem, a second line, and
+   a row of answer bubbles, one of them already ticked green. */
+.sp-cards{position:absolute;inset:0;pointer-events:none}
+.sp-cards i{
+  position:absolute;left:var(--x);top:var(--y);width:168px;height:104px;border-radius:14px;
+  border:1px solid rgba(255,255,255,.10);
+  background:linear-gradient(160deg,rgba(255,255,255,.075),rgba(255,255,255,.015));
+  box-shadow:0 20px 40px -24px rgba(0,0,0,.8);
+  opacity:0;transform:translateY(24px) rotate(var(--r));
+  animation:spCardIn calc(1s * var(--sp-s)) cubic-bezier(.2,.7,.2,1) calc(var(--d) * var(--sp-s)) forwards,
+            spFloat 8s ease-in-out calc(var(--d) * var(--sp-s)) infinite alternate;
+}
+.sp-cards i::before{
+  content:"";position:absolute;left:16px;right:40px;top:18px;height:7px;border-radius:4px;
+  background:rgba(255,255,255,.18);box-shadow:0 14px 0 -1px rgba(255,255,255,.09);
+}
+.sp-cards i::after{
+  content:"";position:absolute;left:16px;bottom:16px;width:118px;height:14px;
+  background:
+    radial-gradient(circle at 7px 7px,#6DC5A4 0 5px,transparent 5.5px) var(--k,52px) 0/14px 14px no-repeat,
+    radial-gradient(circle at 7px 7px,rgba(255,255,255,.26) 0 4.5px,transparent 5px) 0 0/26px 14px repeat-x;
+}
+@keyframes spCardIn{to{opacity:var(--o,.9);transform:translateY(0) rotate(var(--r))}}
+@keyframes spFloat{from{translate:0 0}to{translate:0 -14px}}
+.sp-core{position:relative;display:flex;flex-direction:column;align-items:center;text-align:center;padding:24px}
+.sp-mark{width:96px;height:96px;overflow:visible;filter:drop-shadow(0 12px 30px rgba(233,141,118,.35))}
+.sp-box{fill:rgba(233,141,118,.07);stroke:#E98D76;stroke-width:3.2;stroke-dasharray:300;stroke-dashoffset:300;
+  animation:spDraw calc(.8s * var(--sp-s)) cubic-bezier(.65,0,.35,1) calc(.12s * var(--sp-s)) forwards}
+.sp-tick{fill:none;stroke:#F7C1B2;stroke-width:6.5;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:64;stroke-dashoffset:64;
+  animation:spDraw calc(.4s * var(--sp-s)) cubic-bezier(.65,0,.35,1) calc(.72s * var(--sp-s)) forwards}
+.sp-ring{fill:none;stroke:rgba(233,141,118,.5);stroke-width:1.5;opacity:0;transform-origin:48px 48px;
+  animation:spRing calc(1.1s * var(--sp-s)) ease-out calc(1s * var(--sp-s)) forwards}
+@keyframes spDraw{to{stroke-dashoffset:0}}
+@keyframes spRing{0%{opacity:.9;transform:scale(1)}100%{opacity:0;transform:scale(1.7)}}
+.sp-word{
+  margin:24px -.34em 0 0;font-family:var(--mono);font-weight:700;letter-spacing:.34em;
+  font-size:clamp(19px,5vw,28px);display:flex;white-space:nowrap;
+}
+.sp-word span{display:inline-block;opacity:0;transform:translateY(14px);
+  animation:spRise calc(.55s * var(--sp-s)) cubic-bezier(.2,.7,.2,1) calc((.82s + var(--i) * 45ms) * var(--sp-s)) forwards}
+.sp-word .sp-gap{width:.55em}
+.sp-word .sp-hi{background:linear-gradient(135deg,#9BC9EE 0%,#C6B3F5 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+@keyframes spRise{to{opacity:1;transform:none}}
+.sp-tag{margin-top:12px;font-family:var(--display);font-size:clamp(14px,3.6vw,17px);letter-spacing:.01em;color:rgba(240,245,248,.72);
+  opacity:0;animation:spFade calc(.6s * var(--sp-s)) ease calc(1.3s * var(--sp-s)) forwards}
+@keyframes spFade{to{opacity:1}}
+.sp-opts{display:flex;gap:12px;margin-top:26px}
+.sp-opts b{
+  width:42px;height:42px;border-radius:50%;display:grid;place-items:center;
+  font-family:var(--mono);font-weight:600;font-size:14px;color:rgba(240,245,248,.82);
+  border:1.5px solid rgba(255,255,255,.24);background:rgba(255,255,255,.045);
+  opacity:0;transform:scale(.6);
+  animation:spPop calc(.42s * var(--sp-s)) cubic-bezier(.3,1.45,.5,1) calc((1.12s + var(--i) * 80ms) * var(--sp-s)) forwards;
+}
+.sp-opts b.sp-right{
+  animation:spPop calc(.42s * var(--sp-s)) cubic-bezier(.3,1.45,.5,1) calc((1.12s + var(--i) * 80ms) * var(--sp-s)) forwards,
+            spPick calc(.45s * var(--sp-s)) ease calc(1.72s * var(--sp-s)) forwards;
+}
+@keyframes spPop{to{opacity:1;transform:scale(1)}}
+@keyframes spPick{to{background:#12654C;border-color:#6DC5A4;color:#fff;box-shadow:0 0 0 7px rgba(109,197,164,.16),0 12px 28px rgba(18,101,76,.55)}}
+.sp-bar{margin-top:30px;width:min(220px,58vw);height:3px;border-radius:3px;background:rgba(255,255,255,.1);overflow:hidden;
+  opacity:0;animation:spFade .4s ease calc(.3s * var(--sp-s)) forwards}
+.sp-bar i{display:block;height:100%;width:40%;border-radius:3px;background:linear-gradient(90deg,#79B2E0,#B79CF0);
+  animation:spLoad 1.15s ease-in-out infinite}
+@keyframes spLoad{from{transform:translateX(-110%)}to{transform:translateX(260%)}}
+.sp-foot{position:absolute;bottom:calc(22px + env(safe-area-inset-bottom));left:0;right:0;text-align:center;
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:rgba(240,245,248,.38);
+  opacity:0;animation:spFade .6s ease calc(1.5s * var(--sp-s)) forwards}
+@media (max-width:640px){ .sp-cards i:nth-child(n+4){display:none} .sp-cards i{width:132px;height:84px} .sp-cards i::after{width:92px} }
+/* Nothing moves for somebody who has asked for no motion: the finished frame,
+   briefly, then a plain fade. */
+@media (prefers-reduced-motion:reduce){
+  #splash *,#splash *::before,#splash *::after{animation:none !important}
+  .sp-box,.sp-tick{stroke-dashoffset:0}
+  .sp-word span,.sp-tag,.sp-opts b,.sp-bar,.sp-foot,.sp-cards i{opacity:1;transform:none}
+  .sp-cards i{opacity:.9;transform:rotate(var(--r))}
+  .sp-opts b.sp-right{background:#12654C;border-color:#6DC5A4;color:#fff}
+  .sp-bar i{width:100%}
+  #splash{transition:opacity .2s ease}
+  #splash.sp-out{transform:none}
+}
 </style>
 </head>
 <body>
+<!-- The opening screen. First in <body> so it paints while the script below
+     is still being read; its styles are the "opening screen" block above,
+     and Splash (in the script) lifts it once the first view is ready. -->
+<div id="splash" aria-hidden="true">
+  <div class="sp-orb sp-orb1"></div><div class="sp-orb sp-orb2"></div>
+  <div class="sp-grid"></div>
+  <div class="sp-cards">
+    <i style="--x:7%;--y:12%;--r:-9deg;--d:.1s;--k:26px"></i>
+    <i style="--x:73%;--y:9%;--r:7deg;--d:.25s;--k:78px"></i>
+    <i style="--x:77%;--y:67%;--r:-6deg;--d:.4s;--k:0px;--o:.75"></i>
+    <i style="--x:5%;--y:71%;--r:8deg;--d:.55s;--k:52px;--o:.75"></i>
+  </div>
+  <div class="sp-core">
+    <svg class="sp-mark" viewBox="0 0 96 96">
+      <rect class="sp-ring" x="10" y="10" width="76" height="76" rx="18"/>
+      <rect class="sp-box" x="10" y="10" width="76" height="76" rx="18"/>
+      <path class="sp-tick" d="M29 50l13 13 25-28"/>
+    </svg>
+    <div class="sp-word"><span style="--i:0">M</span><span style="--i:1">C</span><span style="--i:2">Q</span><span class="sp-gap"></span><span class="sp-hi" style="--i:4">M</span><span class="sp-hi" style="--i:5">A</span><span class="sp-hi" style="--i:6">S</span><span class="sp-hi" style="--i:7">T</span><span class="sp-hi" style="--i:8">E</span><span class="sp-hi" style="--i:9">R</span><span class="sp-hi" style="--i:10">Y</span></div>
+    <div class="sp-tag">Practise smarter. Walk in ready.</div>
+    <div class="sp-opts"><b style="--i:0">A</b><b style="--i:1">B</b><b class="sp-right" style="--i:2">C</b><b style="--i:3">D</b></div>
+    <div class="sp-bar"><i></i></div>
+  </div>
+  <div class="sp-foot">Practise · Review · Mock exams</div>
+</div>
+<script>
+/* The opening screen's own start, before the app's script is even read:
+   which version to play, and a tap or a key to skip it. Splash, in the main
+   script, takes it away. #tools is the test runner's address, and a test
+   should never have to wait behind an animation. */
+(function () {
+  var el = document.getElementById('splash');
+  if (!el) return;
+  if (location.hash === '#tools') { el.parentNode.removeChild(el); return; }
+  var still = false, seen = false;
+  try { still = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { }
+  try { seen = sessionStorage.getItem('mcqSplashSeen') === '1'; sessionStorage.setItem('mcqSplashSeen', '1'); } catch (e) { }
+  if (!still && seen) el.className += ' sp-quick';
+  // Milliseconds from navigation start that the sequence needs to finish:
+  // all of it the first time in a tab, a glimpse on a reload, and only a
+  // moment for somebody who has asked for no motion.
+  el.setAttribute('data-min', still ? '300' : seen ? '750' : '2150');
+  var skip = function () {
+    el.setAttribute('data-skip', '1');
+    if (typeof Splash !== 'undefined') Splash.maybeHide();
+  };
+  el.addEventListener('pointerdown', skip);
+  document.addEventListener('keydown', skip, { once: true });
+})();
+</script>
 <div class="toasts" id="toasts" aria-live="polite"></div>
 <div id="modalRoot"></div>
 <div class="app" id="app"></div>
@@ -2104,7 +2292,41 @@ function toast(msg, kind, ms) {
 const _dirtyGuards = new Set();
 function guardUnsaved(fn) { _dirtyGuards.add(fn); return () => _dirtyGuards.delete(fn); }
 function anyUnsavedEdit() { return Array.from(_dirtyGuards).some(f => { try { return f(); } catch (e) { return false; } }); }
+/* ---------- the opening screen ----------
+   The markup and a few lines of set-up sit at the top of <body>; this takes
+   it away. It never holds the app back: boot runs underneath it from the
+   first moment, a dialog that needs the screen clears it at once, and a tap
+   or a key skips the rest. It only lingers until its own sequence has
+   finished (data-min, counted from navigation start), and only if the app
+   was ready sooner than that. */
+const Splash = {
+  ready: false,
+  _t: null,
+  /** Boot calls this when the first view is drawn, or has failed to be. */
+  appReady() { this.ready = true; this.maybeHide(); },
+  maybeHide() {
+    const el = document.getElementById('splash');
+    if (!el || !this.ready) return;
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Infinity;
+    const left = (+el.getAttribute('data-min') || 0) - now;
+    if (el.getAttribute('data-skip') === '1' || !(left > 0)) this.hide();
+    else { clearTimeout(this._t); this._t = setTimeout(() => this.hide(), left); }
+  },
+  hide() {
+    const el = document.getElementById('splash');
+    if (!el || el.classList.contains('sp-out')) return;
+    clearTimeout(this._t);
+    el.classList.add('sp-out');
+    const gone = () => { if (el.parentNode) el.parentNode.removeChild(el); };
+    el.addEventListener('transitionend', (e) => { if (e.target === el) gone(); });
+    // A transition that never ends (a background tab, no animation support)
+    // must not leave an invisible sheet over the app.
+    setTimeout(gone, 900);
+  }
+};
+
 function modal(opts) {
+  Splash.hide();
   return new Promise(resolve => {
     const root = $('#modalRoot');
     // A dialog with nowhere to render must not take the app down; callers
@@ -6302,6 +6524,138 @@ function domainReadiness(pool, blueprint, masteryTarget) {
     String(a.id == null ? '￿' : a.id).localeCompare(String(b.id == null ? '￿' : b.id)));
 }
 
+/* ---------- what a student sees instead of a score ----------
+   masteryOf() is a 0–100 blend of five parts, and "mastery 67" or "weakness
+   97" told a student nothing they could picture or check. What they see
+   instead is one of three states, the same three the planner already reasons
+   in (domainReadiness above): never answered, answered but not solid yet, and
+   solid. The number stays underneath, unchanged, so the two can never
+   disagree, and a question's own Progress tab lists which parts it has and
+   which it is still missing. */
+const LEARN_STATES = {
+  solid: { label: 'Solid', badge: 'b-active' },
+  shaky: { label: 'Shaky', badge: 'b-review' },
+  new:   { label: 'New',   badge: 'b-draft' }
+};
+const LEARN_STATES_HELP = [
+  'New: never answered.',
+  'Shaky: answered, but not solid yet.',
+  'Solid: you keep getting it right, and you are sure of your answer.',
+  'What counts: getting it right the first time, your last five answers, several right in a row, how sure you were, and still getting it right after a gap of days. A wrong answer or a guess counts against it.',
+  'Open any question in the Question Bank and its Progress tab shows where it stands on each.'
+];
+function learnState(q, target) {
+  const st = (q && q.stats) || {};
+  if (!st.attempts) return 'new';
+  const t = target != null ? target : Settings.get('masteryTarget');
+  return (st.mastery || 0) >= t ? 'solid' : 'shaky';
+}
+function learnMix(list, target) {
+  const t = target != null ? target : Settings.get('masteryTarget');
+  const mix = { solid: 0, shaky: 0, new: 0, total: 0 };
+  (list || []).forEach(q => { mix[learnState(q, t)]++; mix.total++; });
+  return mix;
+}
+function learnBadge(q, target) {
+  const k = learnState(q, target);
+  return h('span', { class: 'badge ' + LEARN_STATES[k].badge, text: LEARN_STATES[k].label });
+}
+function learnHelpTip() {
+  return infoTip('Solid, shaky and new', h('div', { class: 'stack', style: 'gap:8px' },
+    LEARN_STATES_HELP.map(t => h('div', { class: 'small', text: t }))));
+}
+/** One bar, three colours: how much of a set is solid, shaky and new. */
+function mixBar(mix) {
+  const seg = (k, n) => n ? h('i', { class: 'mix-' + k, style: 'width:' + (n / mix.total * 100).toFixed(2) + '%' }) : null;
+  return h('div', {
+    class: 'mixbar', role: 'img',
+    'aria-label': mix.solid + ' solid, ' + mix.shaky + ' shaky, ' + mix.new + ' new'
+  }, mix.total ? [seg('solid', mix.solid), seg('shaky', mix.shaky), seg('new', mix.new)].filter(Boolean) : []);
+}
+/** The colour key alone, for a card whose bars carry their own numbers. */
+function mixKey() {
+  return h('div', { class: 'mix-legend', style: 'margin:0' }, ['solid', 'shaky', 'new'].map(k =>
+    h('span', { class: 'mix-key' }, [h('i', { class: 'mix-' + k }), LEARN_STATES[k].label])));
+}
+function mixLegend(mix) {
+  return h('div', { class: 'mix-legend' }, ['solid', 'shaky', 'new'].map(k =>
+    h('span', { class: 'mix-key' }, [h('i', { class: 'mix-' + k }), h('b', { text: String(mix[k]) }), ' ' + LEARN_STATES[k].label.toLowerCase()])));
+}
+
+/* The one verdict a domain gets, and it is a comparison anybody can check:
+   how often you get its questions right the first time you meet them, against
+   the pass mark this course is set to. Not before a handful are answered —
+   two right out of two is not "comfortably above" anything. */
+function domainVerdict(firstAcc, firstN, passPct, minN) {
+  const n = firstN || 0;
+  if (!n) return { text: 'Not started', cls: '' };
+  if (n < (minN || 5)) return { text: 'Too early to tell', cls: '' };
+  const p = (passPct != null ? passPct : 60) / 100;
+  if (firstAcc < p) return { text: 'Below the pass mark', cls: 'r' };
+  if (firstAcc < p + 0.1) return { text: 'Just above the pass mark', cls: 'a' };
+  return { text: 'Comfortably above the pass mark', cls: 'g' };
+}
+
+/** Drill one domain: the standalone pool when it has any, otherwise the case
+    studies that carry that domain's questions. */
+async function practiseDomain(domainId) {
+  const all = await State.questions();
+  if (eligiblePool(all).some(q => q.domainId === domainId)) {
+    configureMode('domain', { domains: [domainId] });
+    return;
+  }
+  // Domain mode only ever draws from the standalone pool, so a domain whose
+  // questions all sit inside case studies is reached through those instead.
+  const caseRecords = await CaseStudies.byCourse(State.course.id);
+  const caseIds = Array.from(new Set(
+    drawableCasePool(all, caseRecords).filter(q => q.domainId === domainId).map(q => q.caseStudyId)));
+  configureMode('casestudy', caseIds.length ? { caseStudies: caseIds } : null);
+}
+
+/* One row per domain, in blueprint order: how much of it is solid, shaky or
+   new, how often it is right first time against the pass mark, and a button
+   that drills it. The Dashboard and Analytics both draw this, so the two
+   pages cannot tell different stories. "Focus here" marks the same domain the
+   readiness verdict names: the most exam marks still not solid. */
+function domainProgressList(pool, blueprint) {
+  const target = Settings.get('masteryTarget');
+  const passPct = Settings.get('passPct');
+  const minN = Settings.get('weakMinSample');
+  const bp = (blueprint || []).filter(d => d && d.id != null);
+  const ids = new Set(bp.map(d => d.id));
+  const byRisk = domainReadiness(pool, bp, target);
+  const focus = byRisk.find(r => r.total && r.risk > 0) || null;
+  const firsts = new Map(groupStats(pool || [], q => ids.has(q.domainId) ? q.domainId : null).map(g => [g.key, g]));
+  const rows = bp.map(d => byRisk.find(r => r.id === d.id)).filter(Boolean)
+    .concat(byRisk.filter(r => r.id == null && r.total));
+  const list = h('div', { class: 'dom-list' });
+  rows.forEach(r => {
+    const g = firsts.get(r.id == null ? '—' : r.id);
+    const seen = r.total - r.unseen;
+    const v = domainVerdict(g ? g.firstAcc : null, g ? g.firstSeen : 0, passPct, minN);
+    const accText = g && g.firstSeen ? Math.round(g.firstAcc * 100) + '% right first time' : '';
+    list.appendChild(h('div', { class: 'dom-row' }, [
+      h('div', { class: 'dom-top' }, [
+        h('span', { class: 'docnum dim', text: r.id || '—' }),
+        h('div', { class: 'dom-name' }, [
+          h('b', { text: r.id == null ? 'Not filed under a domain' : r.name }),
+          focus && r.id === focus.id ? h('span', { class: 'badge b-conflict', title: 'The most exam marks still not solid', text: 'Focus here' }) : null
+        ]),
+        r.total && r.id != null ? h('button', { class: 'btn sm', onclick: () => practiseDomain(r.id), text: 'Practise' }) : null
+      ]),
+      r.total ? mixBar({ solid: r.solid, shaky: r.shaky, new: r.unseen, total: r.total })
+        : h('div', { class: 'tiny dim', text: 'No questions for this domain in your bank yet.' }),
+      h('div', { class: 'small muted' }, [
+        r.share ? Math.round(r.share * 100) + '% of the exam · ' : '',
+        r.total ? seen + ' of ' + r.total + ' answered' : '',
+        accText ? ' · ' + accText : '',
+        seen ? h('span', { class: 'verdict ' + v.cls, text: ' · ' + v.text }) : null
+      ])
+    ]));
+  });
+  return list;
+}
+
 /* ---------- what is left, and by when ----------
    Every measure in this app so far answers "how am I doing". A candidate in
    the last month is asking something else: what has to happen between now and
@@ -6416,7 +6770,7 @@ function studyPlan(opts) {
       '. Set the next one and this works out what is left again.';
   } else if (!backlog) {
     state = 'clear';
-    verdict = 'Nothing outstanding: every question is seen, at your mastery target, and not due again before the day. Sit a timed mock.';
+    verdict = 'Nothing outstanding: every question is seen, solid, and not due again before the day. Sit a timed mock.';
   } else if (gap === 0) {
     state = 'today';
     // Phrased to sidestep verb agreement: qtyLabel gives the noun its plural,
@@ -6558,7 +6912,7 @@ function modeLock(mode, ctx) {
   if (mode === 'redo' && !ctx.redo)
     return hard('Nothing missed, guessed or flagged yet. This is where those collect.');
   if (mode === 'lastmile' && !ctx.lastmile)
-    return hard('Nothing to repair yet. A question you have attempted arrives here once you get it wrong, flag it, or leave it below your mastery target.');
+    return hard('Nothing to repair yet. A question you have answered arrives here once you get it wrong, flag it, or it is still shaky.');
   // These two still draw a perfectly good paper. They just cannot yet do the
   // clever part, so they are dimmed rather than closed.
   if (mode === 'domain' && ctx.domainsLocked)
@@ -7005,7 +7359,7 @@ const LASTMILE_REASONS = [
   ['wrong',   'Wrong last time',  'wrong and not since put right'],
   ['flagged', 'You flagged it',   'flagged by you'],
   ['lucky',   'Guessed it right', 'got right off a guess'],
-  ['never',   'Never mastered',   'still below your mastery target']
+  ['never',   'Not solid yet',    'answered, but still shaky']
 ];
 function lastMileClass(q, target) {
   const st = (q && q.stats) || {};
@@ -7107,8 +7461,8 @@ function weakFirstPick(pool, count, rng, minSample) {
 const MODES = {
   learning: { label: 'Learning', reveal: true, confidence: true, desc: 'One at a time, answer revealed after each response.' },
   domain:   { label: 'Domain drill', reveal: true, confidence: true, desc: 'Focus on chosen domains of the blueprint.' },
-  weak:     { label: 'Weak topics', reveal: true, confidence: true, desc: 'Prioritises where the evidence says you are weak.' },
-  redo:     { label: 'Incorrect & guessed', reveal: true, confidence: true, desc: 'Everything you’ve missed, guessed or flagged that you have not yet mastered.' },
+  weak:     { label: 'Weak topics', reveal: true, confidence: true, desc: 'Your weakest topics first.' },
+  redo:     { label: 'Incorrect & guessed', reveal: true, confidence: true, desc: 'Everything you’ve missed, guessed or flagged that is not solid yet.' },
   // Its sibling, for the last week rather than the long middle: the same
   // material, but worst-first and capped instead of shuffled and complete.
   lastmile: { label: 'Last-mile revision', reveal: true, confidence: true, desc: 'The shortlist for the final days, hardest first.' },
@@ -8359,14 +8713,10 @@ ROUTES.dashboard = async (root) => {
   }
   const firstArr = Array.from(firstAttempts.values());
   const firstAcc = firstArr.length ? firstArr.filter(a => a.correct).length / firstArr.length : null;
-  const recent = attempts.slice().sort((a, b) => a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0).slice(0, 100);
-  const recAcc = recent.length ? recent.filter(a => a.correct).length / recent.length : null;
-  const guessRate = (() => { const c = attempts.filter(a => a.correct); return c.length ? c.filter(a => a.confidence === 'guessed').length / c.length : 0; })();
   const due = active.filter(q => isDueByDay(q.nextReviewAt));
   const never = active.filter(q => q.stats.attempts === 0);
   const inReview = all.filter(isBlocked);
   const conflicts = all.filter(q => q.conflict || q.status === 'answer_conflict');
-  const mastered = active.filter(q => (q.stats.mastery || 0) >= Settings.get('masteryTarget'));
 
   const plan = studyPlan({
     examDate: Settings.get('examDate'), masteryTarget: Settings.get('masteryTarget'),
@@ -8496,7 +8846,7 @@ ROUTES.dashboard = async (root) => {
   else if (all.length >= 20) {
     root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:16px' }, [
       h('div', { class: 'row wrap', style: 'gap:10px;align-items:center' }, [
-        h('span', { style: 'flex:1;min-width:220px' }, 'No exam date set. Add one and this page works out how many questions a day it takes to clear what your bank still owes you.'),
+        h('span', { style: 'flex:1;min-width:220px' }, 'Add your exam date and this page sets you a daily target.'),
         h('button', { class: 'btn sm', onclick: () => examDateDialog(), text: 'Set the exam date' })
       ])
     ]));
@@ -8564,60 +8914,33 @@ ROUTES.dashboard = async (root) => {
     ]));
   }
 
-  const tiles = h('div', { class: 'grid g4', style: 'margin-bottom:16px' });
-  const tile = (k, v, sub, cls) => h('div', { class: 'tile ' + (cls || '') }, [h('span', { class: 'eyebrow', text: k }), h('b', { text: v }), sub ? h('div', { class: 'sub', text: sub }) : null]);
-  tiles.appendChild(tile('First-attempt accuracy', firstAcc == null ? '—' : Math.round(firstAcc * 100) + '%', firstArr.length ? firstArr.length + ' question(s) seen once' : 'No questions attempted yet', firstAcc != null && firstAcc >= 0.75 ? 'good' : ''));
-  tiles.appendChild(tile('Recent accuracy', recAcc == null ? '—' : Math.round(recAcc * 100) + '%', recent.length ? 'Last ' + recent.length + ' attempts' : 'No attempts yet'));
-  tiles.appendChild(tile('Guessed-correct rate', attempts.length ? Math.round(guessRate * 100) + '%' : '—', attempts.length ? 'Correct answers you marked as a guess' : 'No attempts yet', attempts.length && guessRate > 0.2 ? 'hot' : ''));
-  tiles.appendChild(tile('Coverage', active.length ? Math.round((active.length - never.length) / active.length * 100) + '%' : '—', active.length ? never.length + ' never attempted' : 'Nothing available to practise yet'));
-  tiles.appendChild(tile('Mastered', String(mastered.length), 'At or above ' + Settings.get('masteryTarget') + ' mastery', mastered.length ? 'good' : ''));
-  // A mean here would count a walked-away-from question as a fast answer at
-  // ms=0 and let one outlier (a phone call mid-question) drag the headline
-  // number around — exactly what the Time tab's own median already refuses
-  // to do (D12). Same cut, same reason, so the two screens cannot disagree.
-  const timedAttempts = attempts.filter(a => a.ms > 0);
-  tiles.appendChild(tile('Median response', timedAttempts.length ? fmtDur(median(timedAttempts.map(a => a.ms))) : '—', timedAttempts.length ? 'Across ' + timedAttempts.length + ' timed attempt(s)' : 'No attempts yet'));
-  const unverified = all.filter(q => q.answerVerified !== 'verified' && q.status !== 'archived' && q.status !== 'merged' && q.status !== 'rejected').length;
-  tiles.appendChild(tile('Unverified', String(unverified), unverified ? 'Held out of practice until checked' : 'Everything is checked', unverified ? 'hot' : 'good'));
-  tiles.appendChild(tile('Total records', String(all.length), 'Every status, including archived'));
+  /* Three numbers a student can check for themselves, where there used to be
+     eight. What sat beside them has a better home: the guessed-correct rate
+     and response time are Analytics' Confidence and Time tabs, unverified
+     answers are the review queue (the band's "In review"), and the total
+     record count is the Question Bank's. */
+  const pool = active.concat(caseActive);
+  const mix = learnMix(pool);
+  const seenN = mix.total - mix.new;
+  const tiles = h('div', { class: 'grid g3 stretch', style: 'margin-bottom:16px' });
+  const tile = (k, v, sub, cls, extra) => h('div', { class: 'tile ' + (cls || '') }, [
+    h('span', { class: 'eyebrow', text: k }), h('b', { text: v }), extra || null, sub ? h('div', { class: 'sub', text: sub }) : null]);
+  tiles.appendChild(tile('Right first time', firstAcc == null ? '—' : Math.round(firstAcc * 100) + '%',
+    firstArr.length ? 'Of the ' + qtyLabel(firstArr.length, 'question') + ' you have answered, the first time you met each' : 'Nothing answered yet',
+    firstAcc != null && firstAcc >= 0.75 ? 'good' : ''));
+  tiles.appendChild(tile('Questions seen', mix.total ? seenN + ' / ' + mix.total : '—',
+    mix.total ? Math.round(seenN / mix.total * 100) + '% of your bank answered at least once' : 'Nothing to practise yet', '',
+    mix.total ? h('div', { class: 'bar', style: 'margin-top:10px' }, h('i', { style: 'width:' + (seenN / mix.total * 100).toFixed(1) + '%' })) : null));
+  tiles.appendChild(h('div', { class: 'tile' }, [
+    h('div', { class: 'row', style: 'gap:6px;margin-bottom:10px' }, [h('span', { class: 'eyebrow', style: 'margin:0', text: 'Your questions' }), learnHelpTip()]),
+    mixBar(mix), mixLegend(mix)
+  ]));
   root.appendChild(tiles);
 
-  // domain performance + weak topics
-  const grid = h('div', { class: 'grid g2' });
-  const domCard = h('div', { class: 'card' }, [h('div', { class: 'card-h' }, [h('h3', { text: 'Accuracy by domain' }), h('div', { class: 'spacer' }), h('span', { class: 'small dim', text: 'first-attempt basis' })])]);
-  const domBody = h('div', { class: 'card-b stack' });
-  const domGroups = groupStats(active, q => q.domainId || null);
-  State.course.blueprint.concat([{ id: null, name: 'Unmapped', weight: 0 }]).forEach(d => {
-    const g = domGroups.find(x => x.key === (d.id || '—')) || domGroups.find(x => x.key === d.id);
-    const acc = g && g.firstAcc != null ? g.firstAcc : null;
-    domBody.appendChild(h('div', {}, [
-      h('div', { class: 'row', style: 'gap:8px' }, [
-        h('span', { class: 'docnum', text: d.id || '—' }),
-        h('span', { class: 'small', style: 'flex:1', text: d.name }),
-        h('span', { class: 'num small', text: acc == null ? 'no data' : Math.round(acc * 100) + '%' }),
-        h('span', { class: 'tiny dim nowrap', text: (g ? g.attempted : 0) + '/' + (g ? g.total : 0) })
-      ]),
-      h('div', { class: 'bar', style: 'margin-top:5px' }, [h('i', { class: acc == null ? '' : acc >= 0.75 ? 'g' : acc >= 0.6 ? 'a' : 'r', style: 'width:' + Math.round((acc || 0) * 100) + '%' })])
-    ]));
-  });
-  domCard.appendChild(domBody);
-  grid.appendChild(domCard);
-
-  const weakCard = h('div', { class: 'card' }, [h('div', { class: 'card-h' }, [h('h3', { text: 'Weakest topics' }), h('div', { class: 'spacer' }), h('span', { class: 'small dim', text: 'min sample ' + Settings.get('weakMinSample') })])]);
-  const weakBody = h('div', { class: 'card-b stack' });
-  const topics = groupStats(active, q => q.topic || State.domainName(q.domainId))
-    .map(g => ({ g, w: weaknessScore(g, Settings.get('weakMinSample')) }))
-    .filter(x => x.w.score != null).sort((a, b) => b.w.score - a.w.score).slice(0, 6);
-  if (!topics.length) weakBody.appendChild(h('p', { class: 'muted small', style: 'margin:0', text: 'Not enough evidence yet. Attempt at least ' + Settings.get('weakMinSample') + ' questions in a topic before it can be called weak or strong.' }));
-  topics.forEach(x => {
-    weakBody.appendChild(h('div', {}, [
-      h('div', { class: 'row' }, [h('b', { class: 'small', style: 'flex:1', text: x.g.key }), h('span', { class: 'badge b-review', text: 'score ' + x.w.score })]),
-      h('div', { class: 'evidence', style: 'margin-top:3px', text: x.w.why.join(' · ') })
-    ]));
-  });
-  weakCard.appendChild(weakBody);
-  grid.appendChild(weakCard);
-  root.appendChild(grid);
+  root.appendChild(h('div', { class: 'card' }, [
+    h('div', { class: 'card-h' }, [h('h3', { text: 'By domain' }), h('div', { class: 'spacer' }), mixKey()]),
+    h('div', { class: 'card-b' }, domainProgressList(pool, State.course.blueprint))
+  ]));
 
   // recent sessions
   const sessions = courseSessions
@@ -8723,10 +9046,10 @@ function readinessVerdict(o) {
   if (mocks.length) why.push(passedMocks + ' of your last ' + mocks.length + ' mock' + (mocks.length === 1 ? '' : 's') +
     ' at or above the ' + passPct + '% pass mark (' + mocks.map(m => Math.round(m) + '%').join(', ') + ')');
   else why.push('No timed mock sat yet — the only measure taken under exam conditions');
-  why.push('First-attempt accuracy ' + (firstAcc == null ? 'not measurable yet' : pc(firstAcc)) + ' over ' + firstN + ' question(s)');
-  why.push('Coverage ' + pc(coverage) + ' — ' + seen + ' of ' + active + ' questions seen at least once');
-  if (calBad) why.push('Calibration says you are overconfident, so your own sense of what you know is not yet reliable');
-  if (risk) why.push('Weakest for what it is worth: ' + risk.name + ', ' + pc(risk.share) + ' of the paper and ' + pc(risk.ready) + ' of it solid');
+  why.push('Right first time: ' + (firstAcc == null ? 'not measurable yet' : pc(firstAcc) + ' of ' + qtyLabel(firstN, 'question')));
+  why.push('Seen: ' + seen + ' of ' + active + ' questions (' + pc(coverage) + ')');
+  if (calBad) why.push('Often wrong on answers you were sure of, so your own sense of what you know is not reliable yet');
+  if (risk) why.push('Most marks at risk: ' + risk.name + ' — ' + pc(risk.share) + ' of the paper, ' + pc(risk.ready) + ' of it solid');
 
   const tail = risk ? ' The risk is ' + risk.name + '.' : '';
   const headline =
@@ -8760,7 +9083,7 @@ function studyPlanCard(plan) {
   const rows = [
     plan.unseen ? [plan.unseen, 'never attempted'] : null,
     plan.weak ? [plan.weak, 'attempted, still shaky — including ones you got right by guessing'] : null,
-    plan.dueBefore ? [plan.dueBefore, 'mastered, but falling due for review before the day'] : null
+    plan.dueBefore ? [plan.dueBefore, 'solid, but falling due for review before the day'] : null
   ].filter(Boolean);
 
   const left = h('div', { style: 'flex:1;min-width:250px' }, [
@@ -8863,21 +9186,9 @@ function studyPlanCard(plan) {
           // that is furthest behind purely on the strength of its case-study
           // questions (a real, reachable state: domainReadiness counts every
           // question by its own domainId, case or not) would open a domain
-          // configurator with nothing in it. casestudy mode can reach those
-          // questions, but only by picking whole scenarios — it deliberately
-          // has no domain filter of its own, so the scenarios have to be
-          // found here and handed over as a caseStudies preset instead.
-          onclick: async () => {
-            const all = await State.questions();
-            if (eligiblePool(all).some(q => q.domainId === plan.focus.id)) {
-              configureMode('domain', { domains: [plan.focus.id] });
-              return;
-            }
-            const caseRecords = await CaseStudies.byCourse(State.course.id);
-            const caseIds = Array.from(new Set(
-              drawableCasePool(all, caseRecords).filter(q => q.domainId === plan.focus.id).map(q => q.caseStudyId)));
-            configureMode('casestudy', caseIds.length ? { caseStudies: caseIds } : null);
-          }
+          // configurator with nothing in it. practiseDomain() hands those
+          // over as whole scenarios instead.
+          onclick: () => practiseDomain(plan.focus.id)
         })
       ]) : null,
 
@@ -8912,7 +9223,7 @@ async function examDateDialog() {
     body: h('div', { class: 'stack' }, [
       h('div', { class: 'field' }, [h('label', { text: 'Exam date for ' + State.course.code }), input]),
       h('p', { class: 'small muted', style: 'margin:0' },
-        'The dashboard then works backwards from what your bank still owes you — questions never attempted, questions below your mastery target, and reviews falling due before the day — to how many you need to get through daily.')
+        'The Dashboard then counts down, and works out how many questions a day get you through what is left: questions never answered, questions still shaky, and reviews falling due before the day.')
     ]),
     actions: [
       { label: 'Cancel', value: null },
@@ -9028,7 +9339,7 @@ function firstAttemptTrendCard(firstArr) {
   const last = weeks[weeks.length - 1].pct, first = weeks[0].pct;
   const move = Math.round(last - first);
   return h('div', { class: 'card', style: 'margin-top:16px' }, [
-    h('div', { class: 'card-h' }, [h('h3', { text: 'First-attempt accuracy by week' })]),
+    h('div', { class: 'card-h' }, [h('h3', { text: 'Right first time, week by week' })]),
     h('div', { class: 'card-b stack' }, [
       h('div', { html: svg, style: 'color:var(--txt-2)' }),
       h('div', { class: 'small muted', style: 'margin:0' },
@@ -9544,7 +9855,7 @@ async function configureMode(mode, preset) {
     if (srcs.length) body.appendChild(chipRow('Sources', srcs.map(s => ({ v: s.id, label: s.title })), f.sources));
     body.appendChild(chipRow('Difficulty', DIFFICULTY.map(d => ({ v: d, label: d })), f.difficulty));
     const flags = h('div', { class: 'grid g2' });
-    [['neverAttempted', 'Never attempted'], ['incorrect', 'Previously incorrect'], ['guessed', 'Guessed correct'], ['lowConfidence', 'Answered with low confidence'], ['flagged', 'Flagged'], ['due', 'Due for review'], ['notMastered', 'Below mastery target']].forEach(([k, label]) => {
+    [['neverAttempted', 'Never attempted'], ['incorrect', 'Previously incorrect'], ['guessed', 'Guessed correct'], ['lowConfidence', 'Answered with low confidence'], ['flagged', 'Flagged'], ['due', 'Due for review'], ['notMastered', 'Not solid yet']].forEach(([k, label]) => {
       flags.appendChild(h('label', { class: 'check' }, [h('input', { type: 'checkbox', checked: !!f[k], onchange: (e) => { f[k] = e.target.checked; if (k === 'notMastered') f.masteryTarget = Settings.get('masteryTarget'); recount(); } }), h('span', { text: label })]));
     });
     body.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Include only' }), flags]));
@@ -9561,7 +9872,7 @@ async function configureMode(mode, preset) {
       note.textContent = '';
       if (!p.available) {
         note.className = 'notice warn small';
-        note.appendChild(h('div', {}, 'Nothing qualifies yet. This mode draws only on questions you have already attempted — once something is wrong, flagged, guessed right or still below your mastery target of ' + Settings.get('masteryTarget') + ', it appears here.'));
+        note.appendChild(h('div', {}, 'Nothing qualifies yet. This mode draws only on questions you have already answered — once something is wrong, flagged, guessed right or still shaky, it appears here.'));
         return;
       }
       note.className = 'notice small';
@@ -9734,7 +10045,7 @@ async function configureMode(mode, preset) {
       // drops out rather than sitting in this pool forever.
       const base = applyFilters(pool, f);
       const keep = base.filter(isRedoEligible);
-      if (!keep.length) { toast('Nothing to redo yet — no incorrect, guessed or flagged questions still below your mastery target.', 'warn', 4200); return; }
+      if (!keep.length) { toast('Nothing to redo yet — no incorrect, guessed or flagged question is still shaky.', 'warn', 4200); return; }
       const s = await Session.create(mode, Object.assign({}, cfg, { filters: { ...f } }));
       s.questionUuids = shuffle(keep.map(q => q.uuid), mulberry32(s.seed)).slice(0, cfg.count);
       s.optionOrders = {};
@@ -10803,7 +11114,7 @@ function askConfidence(q, optId) {
   const ungraded = difficultyUngraded(q);
   askConfidence._difficulty = null;
   const body = h('div', { class: 'stack' }, [
-    h('p', { class: 'muted', style: 'margin:0', text: 'This is what separates knowing from getting lucky, so the mastery score can tell them apart.' })
+    h('p', { class: 'muted', style: 'margin:0', text: 'This is what separates knowing it from getting lucky.' })
   ]);
   if (ungraded) {
     const seg = h('div', { class: 'seg' }, DIFFICULTY.map(d => h('button', {
@@ -11424,7 +11735,7 @@ ROUTES.bank = async (root) => {
   line1.appendChild(mkSel('Learning state', 'learn', [
     { v: '', label: 'Any' }, { v: 'never', label: 'Never attempted' }, { v: 'attempted', label: 'Attempted' },
     { v: 'incorrect', label: 'Answered incorrectly' }, { v: 'repeat', label: 'Missed more than once' }, { v: 'guessed', label: 'Guessed correct' },
-    { v: 'mastered', label: 'Mastered' }, { v: 'due', label: 'Due for review' }, { v: 'flagged', label: 'Flagged' }
+    { v: 'solid', label: 'Solid' }, { v: 'shaky', label: 'Shaky' }, { v: 'due', label: 'Due for review' }, { v: 'flagged', label: 'Flagged' }
   ]));
   fb.appendChild(line1);
   const line2 = h('div', { class: 'grid g4', style: 'margin-top:10px' });
@@ -11459,6 +11770,7 @@ ROUTES.bank = async (root) => {
   function filtered() {
     const now = new Date();
     const term = BankState.q.trim().toLowerCase();
+    const target = Settings.get('masteryTarget');
     let list = all.filter(q => {
       if (BankState.status && q.status !== BankState.status) return false;
       // A merged copy lives on inside the record it was merged into, and a
@@ -11481,7 +11793,7 @@ ROUTES.bank = async (root) => {
       if (L === 'incorrect' && !q.stats.incorrect) return false;
       if (L === 'repeat' && !(q.stats.incorrect > 1)) return false;
       if (L === 'guessed' && !q.stats.guessedCorrect) return false;
-      if (L === 'mastered' && (q.stats.mastery || 0) < Settings.get('masteryTarget')) return false;
+      if ((L === 'solid' || L === 'shaky') && learnState(q, target) !== L) return false;
       if (L === 'due' && !isDueByDay(q.nextReviewAt, now)) return false;
       if (L === 'flagged' && !q.flagged) return false;
       if (term) {
@@ -11588,9 +11900,9 @@ ROUTES.bank = async (root) => {
 
   function bankTable(slice) {
     const card = h('div', { class: 'card' });
-    // Read once per render, not once per row: the same bar colouring the
-    // "Mastered" filter above already judges by, so a course that raised its
-    // target no longer shows a green bar under a row that filter excludes.
+    // Read once per render, not once per row: the same line the Solid and
+    // Shaky filters above judge by, so a course that raised its target never
+    // labels a row Solid that the Solid filter excludes.
     const T = Settings.get('masteryTarget');
     const th = (label, key) => h('th', {
       class: key ? 'sortable' : '', onclick: key ? () => { if (BankState.sort === key) BankState.dir *= -1; else { BankState.sort = key; BankState.dir = 1; } draw(); } : null,
@@ -11609,7 +11921,7 @@ ROUTES.bank = async (root) => {
         h('td', {}, statusBadge(q)),
         h('td', { class: 'num', text: String(q.stats.attempts) }),
         h('td', { class: 'num', text: acc == null ? '—' : Math.round(acc * 100) + '%' }),
-        h('td', {}, h('div', { class: 'bar' }, h('i', { class: (q.stats.mastery || 0) >= T ? 'g' : (q.stats.mastery || 0) >= T * 2 / 3 ? 'a' : 'r', style: 'width:' + (q.stats.mastery || 0) + '%' }))),
+        h('td', {}, learnBadge(q, T)),
         h('td', { class: 'tiny nowrap', style: dueSoon ? 'color:var(--pencil)' : '', text: q.nextReviewAt ? fmtDate(q.nextReviewAt) : '—' })
       ]));
     });
@@ -11617,7 +11929,7 @@ ROUTES.bank = async (root) => {
       h('thead', {}, h('tr', {}, [
         h('th', { class: 'gut' }, h('input', { type: 'checkbox', onchange: e => { slice.forEach(q => e.target.checked ? BankState.sel.add(q.uuid) : BankState.sel.delete(q.uuid)); draw(); } })),
         h('th', { text: '' }), th('Question ID', 'qid'), h('th', { text: 'Question' }), h('th', { text: 'Dom' }),
-        h('th', { text: 'Status' }), th('Att', 'att'), th('Acc', 'acc'), th('Mastery', 'mastery'), th('Due', 'due')
+        h('th', { text: 'Status' }), th('Att', 'att'), th('Acc', 'acc'), th('Progress', 'mastery'), th('Due', 'due')
       ])), tb
     ])));
     return card;
@@ -11635,7 +11947,7 @@ ROUTES.bank = async (root) => {
           h('span', { text: State.domainShort(q.domainId) }),
           h('span', { text: q.stats.attempts + ' attempt(s)' }),
           h('span', { text: acc == null ? 'no accuracy yet' : Math.round(acc * 100) + '% accurate' }),
-          h('span', { text: 'mastery ' + (q.stats.mastery || 0) })
+          learnBadge(q)
         ])
       ])
     ]);
@@ -11762,7 +12074,7 @@ async function openQuestion(uuidStr) {
   const body = h('div', { class: 'stack' });
   const tabs = h('div', { class: 'btn-group', style: 'margin-bottom:12px' });
   const pane = h('div', { class: 'stack' });
-  const TABS = [['content', 'Content'], ['class', 'Classification'], ['source', 'Provenance'], ['history', 'Attempts'], ['mastery', 'Mastery'], ['versions', 'Versions'], ['trail', 'History']];
+  const TABS = [['content', 'Content'], ['class', 'Classification'], ['source', 'Provenance'], ['history', 'Attempts'], ['mastery', 'Progress'], ['versions', 'Versions'], ['trail', 'History']];
   let tab = 'content';
   TABS.forEach(([k, label]) => tabs.appendChild(h('button', { 'aria-pressed': String(tab === k), onclick: (e) => { tab = k; $$('button', tabs).forEach(b => b.setAttribute('aria-pressed', 'false')); e.currentTarget.setAttribute('aria-pressed', 'true'); drawPane(); }, text: label })));
   body.appendChild(h('div', { class: 'row wrap' }, [
@@ -12028,15 +12340,33 @@ async function openQuestion(uuidStr) {
       }
     }
     if (tab === 'mastery') {
-      pane.appendChild(h('div', { class: 'row', style: 'margin-bottom:12px' }, [h('b', { class: 'num', style: 'font-size:30px', text: String(m.score) }), h('span', { class: 'muted', text: 'of 100' })]));
-      m.parts.forEach(p => {
-        pane.appendChild(h('div', { style: 'margin-bottom:10px' }, [
-          h('div', { class: 'row' }, [h('span', { class: 'small', style: 'flex:1', text: p.label }), h('span', { class: 'num small', text: p.value + (p.max ? ' / ' + p.max : '') })]),
-          h('div', { class: 'bar', style: 'margin:4px 0' }, h('i', { class: p.value < 0 ? 'r' : 'g', style: 'width:' + Math.abs(p.max ? (p.value / p.max) * 100 : 0) + '%' })),
-          h('div', { class: 'tiny dim', text: p.note })
+      /* The one place the number behind Solid / Shaky / New is shown, part by
+         part, so the label anywhere else in the app can be checked here. */
+      const T = Settings.get('masteryTarget');
+      const k = learnState(q, T);
+      pane.appendChild(h('div', { class: 'row wrap', style: 'gap:10px;align-items:center' }, [
+        learnBadge(q, T),
+        h('span', { class: 'small muted', text: k === 'new' ? 'Not answered yet.'
+          : k === 'solid' ? 'It scores ' + m.score + ' of 100, and ' + T + ' makes a question solid.'
+            : 'It scores ' + m.score + ' of the ' + T + ' it takes to be solid.' })
+      ]));
+      if (k !== 'new') {
+        pane.appendChild(h('div', { class: 'bar', style: 'margin:10px 0 16px' },
+          h('i', { class: k === 'solid' ? 'g' : 'a', style: 'width:' + Math.round(clamp(m.score / (T || 1), 0, 1) * 100) + '%' })));
+        pane.appendChild(h('div', { class: 'eyebrow', style: 'margin-bottom:8px', text: 'What counts' }));
+      }
+      const PLAIN = { first: 'Right the first time', streak: 'Several right in a row', confidence: 'Sure of your answers', guessed: 'Guessed right', retention: 'Still right after a gap of days' };
+      if (k !== 'new') m.parts.forEach(p => {
+        const full = p.max > 0 && p.value >= p.max;
+        const mark = p.value < 0 ? '\u2717' : full ? '\u2713' : p.value > 0 ? '\u25D0' : '\u25CB';
+        const name = PLAIN[p.key] || (p.key === 'recent' ? p.label.replace(/^Recent accuracy \(last (\d+)\)$/, 'Your last $1 answers') : p.label);
+        pane.appendChild(h('div', { class: 'row', style: 'gap:10px;align-items:flex-start;margin-bottom:9px' }, [
+          h('span', { class: 'num', style: 'width:16px;text-align:center;color:' + (p.value < 0 ? 'var(--pencil)' : full ? 'var(--green)' : 'var(--txt-3)'), text: mark }),
+          h('div', { style: 'flex:1;min-width:0' }, [h('div', { class: 'small', text: name }), h('div', { class: 'tiny dim', text: p.note })]),
+          h('span', { class: 'num tiny dim nowrap', text: p.value + (p.max ? ' / ' + p.max : '') })
         ]));
       });
-      if (q.nextReviewAt) pane.appendChild(h('div', { class: 'notice' }, 'Next review ' + fmtDate(q.nextReviewAt) + (q.srReason ? ' — ' + q.srReason : '')));
+      if (q.nextReviewAt) pane.appendChild(h('div', { class: 'notice small', style: 'margin-top:8px' }, 'Next review ' + fmtDate(q.nextReviewAt) + (q.srReason ? ' — ' + q.srReason : '')));
     }
     if (tab === 'trail') {
       pane.appendChild(h('p', { class: 'tiny dim', style: 'margin-top:0' },
@@ -16739,7 +17069,7 @@ async function reviewDuplicate(q) {
 
 // `bank` defaults to 'all', so these numbers open exactly as they always
 // have; reading the two banks apart is a deliberate switch.
-const AnaState = { by: 'domain', days: 0, bank: 'all' };
+const AnaState = { by: 'mistake', days: 0, bank: 'all' };
 
 ROUTES.analytics = async (root) => {
   const everything = await State.questions();
@@ -16770,9 +17100,8 @@ ROUTES.analytics = async (root) => {
   }
   const sources = await DB.byIndex('sources', 'courseId', State.course.id);
 
-  await band('Analytics', 'Where the evidence points', [
-    { k: 'Attempts', v: String(attempts.length) },
-    { k: 'Questions seen', v: String(new Set(attempts.map(a => a.questionUuid)).size) }
+  await band('Analytics', 'How you are doing', [
+    { k: 'Answers', v: String(attempts.length) }
   ], [
     caseTotal ? h('select', {
       onchange: e => { AnaState.bank = e.target.value; go('analytics'); }
@@ -16817,36 +17146,69 @@ ROUTES.analytics = async (root) => {
   // the number is moving instead of leaving that to memory across re-renders
   // of the period select. Only said on a real sample, never on a handful.
   const prior = newestFirst.slice(100, 200);
-  const mastered = active.filter(q => (q.stats.mastery || 0) >= Settings.get('masteryTarget')).length;
   // Coverage is measured against the active pool, so only count attempts on
   // questions still in it — a merged, archived or doubtful question keeps
   // its attempts but has left the denominator. Same definition as the
   // dashboard's readiness "seen", so the two screens agree.
   const activeIds = new Set(active.map(q => q.uuid));
   const seen = new Set(attempts.map(a => a.questionUuid).filter(u => activeIds.has(u))).size;
+  const inPeriod = AnaState.days ? ' in the last ' + AnaState.days + ' days' : '';
 
-  const tiles = h('div', { class: 'grid g4', style: 'margin-bottom:16px' });
-  const t = (k, v, sub) => tiles.appendChild(h('div', { class: 'tile' }, [h('span', { class: 'eyebrow', text: k }), h('b', { text: v }), h('div', { class: 'sub', text: sub })]));
-  t('First-attempt accuracy', pct(firstArr.filter(a => a.correct).length, firstArr.length), 'The honest measure of what you knew');
-  t('Overall accuracy', pct(attempts.filter(a => a.correct).length, attempts.length), 'Every attempt, including repeats');
-  t('Recent accuracy', pct(recent.filter(a => a.correct).length, recent.length), 'Last ' + recent.length + ' attempts' +
-    (prior.length >= 30 ? ' · was ' + pct(prior.filter(a => a.correct).length, prior.length) + ' over the ' + prior.length + ' before' : ''));
-  t('Mastered', pct(mastered, active.length),
-    // Zero mastered with real practice behind it is not "nothing to report" —
-    // it is the same retention gate masteryOf() reports per question, just
-    // never said out loud at the tile level until now (roadmap #7).
-    (mastered === 0 && attempts.length)
-      ? 'Needs a second correct answer after a gap — nothing has cleared retention yet'
-      : mastered + ' of ' + active.length + ' active questions' + (bothBanks ? ' across both banks' : '') + (AnaState.days ? ' (all time)' : ''));
+  /* Four tiles, each one sentence a student can check against their own
+     memory of practising. There used to be three accuracies side by side and
+     a "Mastered 7%"; the overall accuracy only ever sat between the other two,
+     and mastery is now said as solid / shaky / new. */
+  const tiles = h('div', { class: 'grid g4 stretch', style: 'margin-bottom:16px' });
+  const t = (k, v, sub, extra) => tiles.appendChild(h('div', { class: 'tile' }, [
+    h('span', { class: 'eyebrow', text: k }), h('b', { text: v }), extra || null, h('div', { class: 'sub', text: sub })]));
+  t('Right first time', pct(firstArr.filter(a => a.correct).length, firstArr.length),
+    firstArr.length ? (AnaState.days ? 'Of the ' + qtyLabel(firstArr.length, 'question') + ' you met for the first time' + inPeriod
+      : 'Of the ' + qtyLabel(firstArr.length, 'question') + ' you have answered, the first time you met each')
+      : 'Nothing met for the first time' + inPeriod);
+  t('Last ' + recent.length + ' answers', pct(recent.filter(a => a.correct).length, recent.length),
+    prior.length >= 30 ? 'Right, against ' + pct(prior.filter(a => a.correct).length, prior.length) + ' in the ' + prior.length + ' before'
+      : 'Right, repeats included');
+  t('Questions seen', seen + ' / ' + active.length, pct(seen, active.length) + ' of your bank' + (bothBanks ? ' (both banks)' : '') + inPeriod,
+    active.length ? h('div', { class: 'bar', style: 'margin-top:10px' }, h('i', { style: 'width:' + (seen / active.length * 100).toFixed(1) + '%' })) : null);
+  const mix = learnMix(active);
+  tiles.appendChild(h('div', { class: 'tile' }, [
+    h('div', { class: 'row', style: 'gap:6px;margin-bottom:10px' }, [h('span', { class: 'eyebrow', style: 'margin:0', text: 'Your questions' }), learnHelpTip()]),
+    mixBar(mix), mixLegend(mix),
+    // None solid with real practice behind it is not "nothing to report" —
+    // it is what the next few right answers are for, said once, plainly
+    // (roadmap #7).
+    (!mix.solid && attempts.length)
+      ? h('div', { class: 'sub', text: 'None solid yet — that takes several right answers in a row, sure of them, or a right answer again after a gap of days.' })
+      : null
+  ]));
   root.appendChild(tiles);
-  root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:16px' },
-    'Coverage is separate from accuracy: you have seen ' + seen + ' of ' + active.length + ' active questions' + (bothBanks ? ' across both banks' : '') + (AnaState.days ? ' in the last ' + AnaState.days + ' days' : '') + ' (' + pct(seen, active.length) + '). Repeating the same questions raises accuracy but not coverage.'));
+
+  // The breakdown every student needs is always on screen, not a tab.
+  root.appendChild(h('div', { class: 'card', style: 'margin-bottom:16px' }, [
+    h('div', { class: 'card-h' }, [h('h3', { text: 'By domain' }), h('div', { class: 'spacer' }),
+      AnaState.days ? h('span', { class: 'tiny dim', text: 'All time' }) : null, mixKey()]),
+    h('div', { class: 'card-b' }, domainProgressList(active, State.course.blueprint))
+  ]));
   const trendCard = firstAttemptTrendCard(firstArr);
   if (trendCard) root.appendChild(trendCard);
 
-  const tabs = h('div', { class: 'btn-group', style: 'margin-bottom:14px' });
-  [['domain', 'Domain'], ['topic', 'Topic'], ['module', 'Source module'], ['source', 'Source'], ['difficulty', 'Difficulty'], ['mistake', 'Mistake'], ['mode', 'Mode'], ['time', 'Time'], ['confidence', 'Confidence']]
-    .forEach(([k, label]) => tabs.appendChild(h('button', { 'aria-pressed': String(AnaState.by === k), onclick: () => { AnaState.by = k; go('analytics'); }, text: label })));
+  // Four tabs where there were nine: the rarely-read groupings share one,
+  // behind a select, and "Domain" left because it is always shown above.
+  const GROUPINGS = [['topic', 'Topic'], ['module', 'Source module'], ['source', 'Source'], ['difficulty', 'Difficulty'], ['mode', 'Practice mode']];
+  if (AnaState.by === 'domain' || !AnaState.by) AnaState.by = 'mistake';
+  const inGroupings = GROUPINGS.some(([k]) => k === AnaState.by);
+  const tabs = h('div', { class: 'row wrap', style: 'gap:10px;margin:22px 0 12px' });
+  const tabGroup = h('div', { class: 'btn-group' });
+  [['mistake', 'Mistakes'], ['time', 'Time'], ['confidence', 'Confidence'], ['groupings', 'Other breakdowns']].forEach(([k, label]) =>
+    tabGroup.appendChild(h('button', {
+      'aria-pressed': String(k === 'groupings' ? inGroupings : AnaState.by === k),
+      onclick: () => { AnaState.by = k === 'groupings' ? (inGroupings ? AnaState.by : 'topic') : k; go('analytics'); }, text: label
+    })));
+  tabs.appendChild(tabGroup);
+  if (inGroupings) {
+    tabs.appendChild(h('select', { 'aria-label': 'Break down by', onchange: e => { AnaState.by = e.target.value; go('analytics'); } },
+      GROUPINGS.map(([k, label]) => h('option', { value: k, selected: AnaState.by === k }, 'By ' + label.toLowerCase()))));
+  }
   root.appendChild(tabs);
 
   const card = h('div', { class: 'card' });
@@ -16932,7 +17294,7 @@ ROUTES.analytics = async (root) => {
       h('td', { class: 'num right', text: pct(g.c, g.n) }),
       h('td', { class: 'num right', text: fmtDur(g.ms / g.n) })
     ])));
-    card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, ['Mode', 'Attempts', 'Correct', '', 'Accuracy', 'Avg time'].map(x => h('th', { text: x })))), tb])));
+    card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, ['Mode', 'Answers', 'Right', '', 'Accuracy', 'Avg time'].map(x => h('th', { text: x })))), tb])));
     root.appendChild(card);
     return;
   }
@@ -17105,27 +17467,27 @@ ROUTES.analytics = async (root) => {
     const g = attByKey.get(k); g.n++; if (a.correct) g.c++; if (a.correct && a.confidence === 'guessed') g.g++; g.ms += a.ms || 0;
   });
 
-  card.appendChild(h('div', { class: 'card-h' }, [h('h3', { text: 'By ' + AnaState.by }), h('div', { class: 'spacer' }), h('span', { class: 'tiny dim', text: AnaState.days
-    ? 'Accuracy, Guessed and Avg time: last ' + AnaState.days + ' days · Coverage, First-attempt and Weakness: all time'
-    : 'weak = below expectation on the evidence available' })]));
+  // No weakness score: each row gets the same pass-mark verdict a domain
+  // does, so "Below the pass mark" means one thing everywhere it appears.
+  const passPct = Settings.get('passPct'), minN = Settings.get('weakMinSample');
+  const noun = { domain: 'Domain', topic: 'Topic', module: 'Source module', source: 'Source', difficulty: 'Difficulty' }[AnaState.by];
+  card.appendChild(h('div', { class: 'card-h' }, [h('h3', { text: 'By ' + noun.toLowerCase() }), h('div', { class: 'spacer' }),
+    AnaState.days ? h('span', { class: 'tiny dim', text: 'Last column: last ' + AnaState.days + ' days · the rest: all time' }) : null]));
   groups.sort((a, b) => (b.total - a.total)).forEach(g => {
     const per = attByKey.get(g.key) || { n: 0, c: 0, g: 0, ms: 0 };
-    const w = weaknessScore(g, Settings.get('weakMinSample'));
-    const acc = per.n ? per.c / per.n : null;
+    const v = domainVerdict(g.firstAcc, g.firstSeen, passPct, minN);
     tb.appendChild(h('tr', {}, [
-      h('td', {}, [h('b', { class: 'small', text: label(g.key) }), w.score == null ? h('div', { class: 'evidence', text: 'insufficient evidence' }) : h('div', { class: 'evidence', text: w.why[0] })]),
+      h('td', {}, [h('b', { class: 'small', text: label(g.key) }), g.attempted ? h('div', { class: 'tiny verdict ' + v.cls, text: v.text }) : null]),
       h('td', { class: 'num', text: String(g.total) }),
-      h('td', { class: 'num', text: pct(g.attempted, g.total) }),
-      h('td', { class: 'num', text: g.firstAcc == null ? '—' : Math.round(g.firstAcc * 100) + '%' }),
-      h('td', {}, h('div', { class: 'bar' }, h('i', { class: acc == null ? '' : acc >= 0.75 ? 'g' : acc >= 0.6 ? 'a' : 'r', style: 'width:' + Math.round((acc || 0) * 100) + '%' }))),
-      h('td', { class: 'num right', text: acc == null ? '—' : Math.round(acc * 100) + '%' }),
-      h('td', { class: 'num right', text: per.c ? Math.round(per.g / per.c * 100) + '%' : '—' }),
-      h('td', { class: 'num right', text: per.n ? fmtDur(per.ms / per.n) : '—' }),
-      h('td', { class: 'num right', text: w.score == null ? '—' : String(w.score) })
+      h('td', { class: 'num', text: g.attempted + ' (' + pct(g.attempted, g.total) + ')' }),
+      h('td', {}, h('div', { class: 'bar' }, h('i', { class: g.firstAcc == null ? '' : v.cls, style: 'width:' + Math.round((g.firstAcc || 0) * 100) + '%' }))),
+      h('td', { class: 'num right', text: g.firstAcc == null ? '—' : Math.round(g.firstAcc * 100) + '%' }),
+      AnaState.days ? h('td', { class: 'num right', text: per.n ? pct(per.c, per.n) + ' of ' + per.n : '—' }) : null
     ]));
   });
   card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [
-    h('thead', {}, h('tr', {}, ['Group', 'Questions', 'Coverage', 'First-attempt', '', 'Accuracy', 'Guessed-correct', 'Avg time', 'Weakness'].map(x => h('th', { text: x })))), tb
+    h('thead', {}, h('tr', {}, [h('th', { text: noun }), h('th', { text: 'Questions' }), h('th', { text: 'Seen' }),
+      h('th', { colspan: '2', text: 'Right first time' }), AnaState.days ? h('th', { class: 'right', text: 'Right lately' }) : null])), tb
   ])));
   root.appendChild(card);
 };
@@ -17877,7 +18239,7 @@ async function exportShareableBank() {
       h('div', { class: 'notice small', style: 'margin:0' },
         'Your own progress is not in it. The file is written in the ordinary import format, which has no place to put a mastery score, an attempt count, a review date or a flag — and nothing typed into "My learning point" travels either, since that is your own note, not part of the question.'),
       h('p', { class: 'tiny dim', style: 'margin:0' },
-        'Only questions that already reach practice are included. Whoever imports it drops it on Add Questions like any other file — and if they tick “treat an answer printed in the source as verified”, it reaches practice straight away.')
+        'Only questions that already reach practice are included. Whoever imports it drops it on Add Questions like any other file — and if they tick “The answers in this file are right”, it reaches practice straight away.')
     ]),
     actions: [{ label: 'Cancel', value: null }, { label: 'Download', value: 'go', kind: 'primary' }]
   });
@@ -18710,14 +19072,12 @@ ROUTES.settings = async (root) => {
     activeMode === 'drive' ? { c: (DriveSync.problem || driveSignedOut) ? 'b-conflict' : 'b-active', t: 'Google Drive' } :
     FileStore.needsReconnect ? { c: 'b-conflict', t: 'Reconnect needed' } : { c: 'b-review', t: 'Browser only' };
   const dataCard = h('div', { class: 'card', style: 'margin-bottom:16px' }, [
-    h('div', { class: 'card-h' }, [h('h3', { text: 'Where your data lives' }), h('div', { class: 'spacer' }),
+    h('div', { class: 'card-h' }, [h('h3', { text: 'Where your data lives' }),
+      infoTip('Where your data lives', 'One place holds your bank at a time — a local folder, or your own Google Drive — never both. Switch whenever you like; whichever you switch away from keeps everything saved up to that point, untouched.'),
+      h('div', { class: 'spacer' }),
       h('span', { class: 'badge ' + modeBadge.c, text: modeBadge.t })])
   ]);
   const db = h('div', { class: 'card-b stack' });
-  db.appendChild(h('div', { class: 'row', style: 'gap:8px;align-items:center;margin-bottom:4px' }, [
-    h('span', { class: 'eyebrow', text: 'One place at a time' }),
-    infoTip('Where your data lives', 'One place holds your bank at a time — a local folder, or your own Google Drive — never both. Switch whenever you like; whichever you switch away from keeps everything saved up to that point, untouched.')
-  ]));
 
   const localBlock = h('div', { class: 'stack' });
   const driveBlock = h('div', { class: 'stack' });
@@ -18776,7 +19136,7 @@ ROUTES.settings = async (root) => {
     localBlock.appendChild(h('div', { class: 'eyebrow' }, 'Local folder'));
     localBlock.appendChild(h('p', { class: 'small muted' }, activeMode === 'drive'
       ? 'Currently using Google Drive. Connecting a folder switches to it — your Drive file is left exactly as it is.'
-      : 'Move your bank into a real file on disk — questions, attempt history, sources and settings, all in one place you own.'));
+      : 'Keep your whole bank in a file on this computer.'));
     localBlock.appendChild(h('button', { class: 'btn primary', onclick: () => connectFlow().then(() => go('settings')), text: activeMode === 'drive' ? 'Switch to a local folder' : 'Connect a folder' }));
   }
 
@@ -18844,7 +19204,7 @@ ROUTES.settings = async (root) => {
     driveBlock.appendChild(h('p', { class: 'small muted' }, 'Currently using a local folder. Connecting Google Drive switches to it — your local file is left exactly as it is.'));
     driveBlock.appendChild(h('button', { class: 'btn primary', onclick: () => driveConnectFlow(), text: 'Switch to Google Drive' }));
   } else {
-    driveBlock.appendChild(h('p', { class: 'small' }, 'Your own Google Drive, reachable from a phone or a different computer. This is the one thing in the app that leaves this machine other than the opt-in external OCR path; it goes only to your own Google account, using a scope that lets it see nothing in your Drive except the one file it creates.'));
+    driveBlock.appendChild(h('p', { class: 'small muted' }, 'Use it from your phone and other computers. The app can see only the one file it creates in your Drive.'));
     if (DEFAULT_DRIVE_CLIENT_ID && !customDriveClientId()) {
       // The deployer has already done the one-time setup — nothing for
       // anyone else opening this app to configure. Sign in with your own
@@ -18923,14 +19283,16 @@ ROUTES.settings = async (root) => {
     installed: Durability.installed()
   });
   if (dAdv) {
+    // The headline and the one button are what somebody needs; why browsers
+    // clear storage, and every way to stop it, is one click further in.
     const box = h('div', { class: 'notice ' + (dAdv.tone === 'ok' ? 'small' : 'warn small'), style: 'margin-top:12px' }, [
       h('div', {}, [h('b', { text: dAdv.headline })]),
-      h('div', { class: 'tiny dim', style: 'margin-top:4px', text: dAdv.note })
+      h('details', { style: 'margin-top:4px' }, [
+        h('summary', { class: 'tiny', style: 'cursor:pointer', text: dAdv.fixes.length ? 'Why, and what fixes it' : 'What this does not cover' }),
+        h('div', { class: 'tiny dim', style: 'margin-top:4px', text: dAdv.note }),
+        dAdv.fixes.length ? h('ul', { class: 'small', style: 'margin:6px 0 0 18px;padding:0' }, dAdv.fixes.map(f => h('li', { text: f }))) : null
+      ])
     ]);
-    if (dAdv.fixes.length) {
-      box.appendChild(h('ul', { class: 'small', style: 'margin:8px 0 0 18px;padding:0' },
-        dAdv.fixes.map(f => h('li', { text: f }))));
-    }
     if (dAdv.tone === 'warn' && Durability.supported) {
       box.appendChild(h('button', {
         class: 'btn sm', style: 'margin-top:8px', text: 'Ask my browser to keep it',
@@ -18964,15 +19326,14 @@ ROUTES.settings = async (root) => {
         // watermark can outlive whatever prefix was in force when it moved,
         // so composing the two together used to show an ID no question of
         // this course's actually carries, and never the case-study watermark.
-        h('span', { class: 'docnum', text: 'Question IDs issued: ' + ((reg && reg.lastSeq) || 0) + ' · Case study IDs: ' + ((reg && reg.lastCaseSeq) || 0) }),
-        h('b', { style: 'flex:1', text: c.code + ' — ' + c.name }),
+        h('b', { style: 'flex:1', title: 'Question IDs issued: ' + ((reg && reg.lastSeq) || 0) + ' · Case study IDs: ' + ((reg && reg.lastCaseSeq) || 0), text: c.code + ' — ' + c.name }),
         // An archived course can't be the active one (it's not even in the
         // sidebar picker), so a "Select" button here would just create a
         // mismatched state — Edit → Unarchive is the way back in.
         isArchivedRow ? null : (c.id === State.course.id ? h('span', { class: 'badge b-active', text: 'Selected' }) : h('button', { class: 'btn sm', onclick: async () => { await State.setCourse(c.id); renderShell(); go('settings'); }, text: 'Select' })),
         h('button', { class: 'btn sm', onclick: () => courseDialog(c), text: 'Edit' })
       ]),
-      h('div', { class: 'small muted', style: 'margin-top:4px', text: mine + ' question(s) · ' + c.blueprint.length + ' domain(s) · weights ' + c.blueprint.map(d => d.weight + '%').join(' / ') + ' (total ' + c.blueprint.reduce((s, d) => s + (+d.weight || 0), 0) + '%)' })
+      h('div', { class: 'small muted', style: 'margin-top:4px', text: qtyLabel(mine, 'question') + ' · ' + qtyLabel(c.blueprint.length, 'domain') + ' · weights ' + c.blueprint.map(d => d.weight + '%').join(' / ') + (c.blueprint.reduce((s, d) => s + (+d.weight || 0), 0) === 100 ? '' : ' (total ' + c.blueprint.reduce((s, d) => s + (+d.weight || 0), 0) + '%, not 100)') })
     ]);
   };
   const activeCourses = State.courses.filter(c => !c.archived);
@@ -18993,7 +19354,9 @@ ROUTES.settings = async (root) => {
   root.appendChild(courseCard);
 
   /* ---- practice behaviour ---- */
-  const grid = h('div', { class: 'grid g2' });
+  // Cards differ wildly in height, and a grid lines them up by row, so a
+  // short card beside a tall one left a hole under it. Columns pack them.
+  const grid = h('div', { class: 'settings-cols' });
   const numField = (label, key, min, max, note) => h('div', { class: 'field' }, [
     h('label', { text: label }),
     h('input', { type: 'number', min: String(min), max: String(max), value: String(Settings.get(key)), onchange: async e => { const v = clamp(parseInt(e.target.value, 10) || min, min, max); await Settings.set(key, v); e.target.value = String(v); toast('Saved'); } }),
@@ -19021,13 +19384,14 @@ ROUTES.settings = async (root) => {
 
   grid.appendChild(h('div', { class: 'card' }, [
     h('div', { class: 'card-h' }, [h('h3', { text: 'Practice and mock' }), h('div', { class: 'spacer' }),
-      h('span', { class: 'badge b-active', text: State.course.code + ' only' })]),
+      h('span', { class: 'badge b-active', title: 'Switch course in the sidebar to set these for another one', text: State.course.code + ' only' })]),
     h('div', { class: 'card-b stack' }, [
-      scopeNote('These apply to ' + State.course.code + ' alone. Switch course in the sidebar to set them for another one — a CISA mock and a DISA AT are different exams.'),
-      numField('Default mock length (questions)', 'mockCount', 5, 400),
-      numField('Default mock time limit (minutes)', 'mockMinutes', 5, 600),
-      checkField('Allow pausing a mock exam', 'mockAllowPause', 'Off by default, because the real exam does not pause.'),
-      checkField('Exam centre simulation before a timed mock', 'mockSimulation', 'Registration, hall ticket and invigilator, so the pressure is familiar before it counts. Skippable from its first frame with Esc.'),
+      h('div', { class: 'grid g2' }, [
+        numField('Mock length (questions)', 'mockCount', 5, 400),
+        numField('Mock time limit (minutes)', 'mockMinutes', 5, 600)
+      ]),
+      checkField('Allow pausing a mock', 'mockAllowPause', 'The real exam does not pause.'),
+      checkField('Exam centre walk-in before a timed mock', 'mockSimulation', 'Registration, hall ticket, invigilator. Esc skips it.'),
       h('div', { class: 'field' }, [
         h('label', { text: 'Exam date' }),
         h('input', {
@@ -19039,10 +19403,17 @@ ROUTES.settings = async (root) => {
             go('settings');
           }
         }),
-        h('div', { class: 'tiny dim', text: 'Optional. Set it and the dashboard counts down, and works out a questions-a-day target from what is still unseen, still below your mastery target, and falling due for review before the day.' })
+        h('div', { class: 'tiny dim', text: 'Gives you a countdown and a daily target on the Dashboard.' })
       ]),
-      numField('Mastery target', 'masteryTarget', 40, 100, 'A question counts as mastered at or above this score.'),
-      numField('Minimum sample before calling a topic weak or strong', 'weakMinSample', 1, 50)
+      // The two knobs behind Solid / Shaky / New and the pass-mark verdicts.
+      // Nobody needs them to study, so they no longer sit in plain view.
+      h('details', {}, [
+        h('summary', { class: 'small', style: 'cursor:pointer', text: 'Advanced: how strict the progress labels are' }),
+        h('div', { class: 'stack', style: 'margin-top:10px' }, [
+          numField('Score a question needs to count as solid', 'masteryTarget', 40, 100, 'Out of 100. Default 75; higher is stricter. A question’s Progress tab shows its score.'),
+          numField('Answers a domain needs before it gets a verdict', 'weakMinSample', 1, 50, 'Default 5. Until then it says “Too early to tell”.')
+        ])
+      ])
     ])
   ]));
 
@@ -19103,8 +19474,8 @@ ROUTES.settings = async (root) => {
       h('span', { class: 'badge b-review', text: 'All courses' })]),
     h('div', { class: 'card-b stack' }, [
       checkField('Confirm before leaving a running mock', 'confirmLeaveMock'),
-      checkField('Show how long you have spent on the current question', 'mockShowQuestionTimer', 'During a timed mock only. Off by default \u2014 a second clock is a distraction unless you are working on pace deliberately.'),
-      checkField('Shuffle answer options', 'shuffleOptions', 'Questions that refer to a fixed position keep their order regardless.')
+      checkField('Show a clock for the current question', 'mockShowQuestionTimer', 'Timed mocks only.'),
+      checkField('Shuffle answer options', 'shuffleOptions', 'Options like “all of the above” or “both A and B” keep their place.')
     ])
   ]));
 
@@ -19123,7 +19494,7 @@ ROUTES.settings = async (root) => {
         }
       }),
       h('span', {}, ['Keep the app available offline',
-        h('div', { class: 'tiny dim', text: 'Stores a copy of the app itself so it opens on a train. Your bank was already local; this is only the page. When you are online you always get the current version — the copy is the fallback, never the first answer.' })])
+        h('div', { class: 'tiny dim', text: 'Opens with no connection. Online, you always get the latest version.' })])
     ]));
     offlineBody.appendChild(h('div', { class: 'notice ' + (st.on && st.ready ? 'ok' : '') + ' small', style: 'margin:0' },
       !st.on ? 'Off. The app needs the network to open.'
@@ -19187,7 +19558,7 @@ ROUTES.settings = async (root) => {
   // field already used — a student who came here to change mock length
   // shouldn't be confronted with a test runner and a permanent delete
   // button in the same unfiltered list.
-  const grid2 = h('div', { class: 'grid g2', style: 'margin-top:16px' });
+  const grid2 = grid;
   grid2.appendChild(h('div', { class: 'card' }, [
     h('div', { class: 'card-h' }, h('h3', { text: 'Images and OCR' })),
     h('div', { class: 'card-b stack' }, [
@@ -19249,8 +19620,6 @@ ROUTES.settings = async (root) => {
           h('a', { class: 'btn sm', href: DIAGRAM_SYNC, target: '_blank', rel: 'noopener noreferrer', text: 'Where your work goes' }),
           h('a', { class: 'btn sm', href: DIAGRAM_DATA, target: '_blank', rel: 'noopener noreferrer', text: 'How it is stored' })
         ]),
-        h('div', { class: 'tiny dim', style: 'margin-top:6px' },
-          'Flowcharts of syncing, merging and the record shapes — worth a look if two devices ever disagree. Opens outside the app; nothing from your bank goes with it.')
       ]),
       support ? h('div', { class: 'notice small', style: 'margin:0' }, [
         h('div', { style: 'margin-bottom:8px' }, support.note || 'Something not working, or not making sense? There is a group for people using this app — ask there.'),
@@ -19286,10 +19655,9 @@ ROUTES.settings = async (root) => {
       h('button', { class: 'btn', onclick: () => showAudit(), text: 'View audit trail' }),
       h('button', { class: 'btn danger', onclick: () => wipeCourse(), text: 'Delete this course\u2019s questions' })
       ].filter(Boolean)),
-      h('div', { class: 'small muted', style: 'margin-top:10px', text: 'Everything lives in this browser (and your file, if connected) by default. Nothing is sent anywhere unless you turn on external OCR or Google Drive above, both off by default.' })
+      h('div', { class: 'tiny dim', style: 'margin-top:10px', text: 'Nothing leaves this device unless you turn on Google Drive or external OCR.' })
     ])
   ]));
-  root.appendChild(grid2);
 };
 
 /** The licence, in the app as well as the repository. Someone who opens the
@@ -29507,7 +29875,7 @@ test('First-attempt accuracy under a period window counts genuine first attempts
     AnaState.days = 7;
     const root = h('div');
     await ROUTES.analytics(root);
-    const tile = Array.prototype.slice.call(root.querySelectorAll('.tile')).find(t => t.textContent.indexOf('First-attempt accuracy') >= 0);
+    const tile = Array.prototype.slice.call(root.querySelectorAll('.tile')).find(t => t.textContent.indexOf('Right first time') >= 0);
     assert(tile, 'the first-attempt tile must render');
     assert(tile.querySelector('b').textContent !== '100%', 'a repeat inside the window must not be counted as a first attempt');
   } finally {
@@ -29535,7 +29903,7 @@ test('The dashboard\'s first-attempt reducer sorts by ts, not by which attempt w
     await DB.put('attempts', { id: 99141, questionUuid: q.uuid, courseId: State.course.id, correct: true, ts: nowISO() });
     const root = h('div');
     await ROUTES.dashboard(root);
-    const tile = Array.prototype.slice.call(root.querySelectorAll('.tile')).find(t => t.textContent.indexOf('First-attempt accuracy') >= 0);
+    const tile = Array.prototype.slice.call(root.querySelectorAll('.tile')).find(t => t.textContent.indexOf('Right first time') >= 0);
     assert(tile, 'the first-attempt tile must render');
     eq(tile.querySelector('b').textContent, '0%', 'the chronologically earlier, incorrect attempt must win regardless of write order');
   } finally {
@@ -34109,22 +34477,25 @@ test('Weekly first-attempt accuracy buckets by real practice weeks, skipping gap
   assert(!firstAttemptTrendCard([{ ts: '2026-01-01T00:00:00.000Z', correct: true }]), 'a single week of history is not a trend');
 });
 
-test('The Mastered tile explains a zero instead of just reporting one, once there is real practice behind it (roadmap #7)', async () => {
+test('The Your questions tile explains none solid instead of just reporting a zero, once there is real practice behind it (roadmap #7)', async () => {
   const was = { course: State.course, courses: State.courses, days: AnaState.days };
   const cid = 'test-mastered-sub-' + Date.now();
   const q = mkQ('mastered sub-line test', ['a', 'b'], 0, { courseId: cid, status: 'active', answerVerified: 'verified' });
   try {
     State.course = { id: cid, code: 'TMS', name: 'Mastered sub-line test', blueprint: [] };
     State.courses = [State.course];
+    const att = { id: 'att-tms-1', questionUuid: q.uuid, courseId: cid, correct: false, ts: nowISO(), ms: 30000 };
+    applyAttempt(q, att); q.stats.mastery = masteryOf(q, [att]).score;
     await DB.put('questions', q);
-    await DB.put('attempts', { id: 'att-tms-1', questionUuid: q.uuid, courseId: cid, correct: false, ts: nowISO() });
+    await DB.put('attempts', att);
     AnaState.days = 0;
     const root = h('div');
     await ROUTES.analytics(root);
-    const tile = Array.prototype.slice.call(root.querySelectorAll('.tile')).find(t => t.textContent.indexOf('Mastered') >= 0);
-    assert(tile, 'the Mastered tile must render');
-    assert(tile.textContent.indexOf('Needs a second correct answer after a gap') >= 0,
-      'zero mastered with real attempts behind it must explain why, not just repeat the 0: ' + tile.textContent);
+    const tile = Array.prototype.slice.call(root.querySelectorAll('.tile')).find(t => t.textContent.indexOf('Your questions') >= 0);
+    assert(tile, 'the Your questions tile must render');
+    assert(tile.textContent.indexOf('None solid yet') >= 0,
+      'none solid with real attempts behind it must say what it takes, not just show a 0: ' + tile.textContent);
+    assert(tile.textContent.indexOf('0 solid') >= 0 && tile.textContent.indexOf('1 shaky') >= 0, 'the counts are there to check: ' + tile.textContent);
   } finally {
     await DB.del('attempts', 'att-tms-1'); await DB.del('questions', q.uuid);
     State.course = was.course; State.courses = was.courses; AnaState.days = was.days;
@@ -35339,7 +35710,7 @@ test('The verdict names its risk and shows its working, and never a percentage',
   assert(v.risk === RVFOCUS, 'the risk is the domain the readiness table ranks first');
   assert(v.headline.indexOf('Protection') > 0, 'and it ends somewhere actionable');
   assert(v.why.length >= 3, 'the evidence is listed, not asserted');
-  assert(v.why.some(w => w.indexOf('Coverage') === 0) && v.why.some(w => w.indexOf('First-attempt') === 0));
+  assert(v.why.some(w => w.indexOf('Seen: ') === 0) && v.why.some(w => w.indexOf('Right first time: ') === 0));
   // The one thing it must never do: put a number on the chance of passing.
   [v.headline].concat(v.why).forEach(t =>
     assert(!/\d+\s*%\s*(chance|likel|probab)/i.test(t), 'no likelihood may be quoted: ' + t));
@@ -35682,10 +36053,12 @@ test('The dashboard reads the session store once per render', async () => {
   eq(sessionReads, 1, 'one getAll of the session store, not three');
 });
 
-test('Dashboard\'s Unverified tile excludes rejected records', async () => {
+test('Dashboard\'s In review count excludes rejected records', async () => {
   // A rejected record's answerVerified stays 'unverified' forever — nobody
-  // is ever going to check it — so counting it here contradicted the tile's
-  // own subtitle, "Held out of practice until checked".
+  // is ever going to check it — so counting it as waiting for a check would
+  // send a student to a review queue with nothing in it. The Unverified tile
+  // that used to count it is gone; the band's In review count is what is
+  // left saying how much is waiting.
   const prevCourse = State.course, prevCourses = State.courses;
   const cid = 'test-dashboard-unverified-' + Date.now();
   State.course = { id: cid, code: 'TDBU', name: 'Unverified tile test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
@@ -35696,17 +36069,17 @@ test('Dashboard\'s Unverified tile excludes rejected records', async () => {
   try {
     const root = h('div');
     await ROUTES.dashboard(root);
-    const tile = Array.prototype.slice.call(root.querySelectorAll('.tile')).find(t => t.textContent.indexOf('Unverified') >= 0);
-    assert(tile, 'the Unverified tile must render');
-    eq(tile.querySelector('b').textContent, '0', 'a rejected record must not count as merely "not yet checked"');
+    const stat = Array.prototype.slice.call(document.querySelectorAll('#band .band-stat')).find(t => t.textContent.indexOf('In review') >= 0);
+    assert(stat, 'the In review count must render');
+    eq(stat.querySelector('b').textContent, '0', 'a rejected record must not count as merely "not yet checked"');
   } finally {
     await DB.del('questions', q.uuid);
     State.course = prevCourse; State.courses = prevCourses; State.invalidate();
   }
 });
 
-test('Dashboard\'s response-time tile is a median, not a mean dragged down by untimed answers (D12)', async () => {
-  const prevCourse = State.course, prevCourses = State.courses;
+test('Response time is a median, not a mean dragged down by untimed answers (D12)', async () => {
+  const prevCourse = State.course, prevCourses = State.courses, prevBy = AnaState.by, prevDays = AnaState.days;
   const cid = 'test-dashboard-median-' + Date.now();
   State.course = { id: cid, code: 'TDM', name: 'Median response test', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
   State.courses = (State.courses || []).concat([State.course]);
@@ -35721,15 +36094,17 @@ test('Dashboard\'s response-time tile is a median, not a mean dragged down by un
     // A revisit that never got a fresh timing read — must not count as an instant answer.
     await DB.put('attempts', { id: ids[3], questionUuid: q.uuid, courseId: cid, correct: true, ms: 0, ts: nowISO() });
     State.invalidate();
+    // The dashboard's own response-time tile went with the declutter; the
+    // Time tab in Analytics is where the number lives now.
+    AnaState.by = 'time'; AnaState.days = 0;
     const root = h('div');
-    await ROUTES.dashboard(root);
-    const tile = Array.prototype.slice.call(root.querySelectorAll('.tile')).find(t => t.textContent.indexOf('Median response') >= 0);
-    assert(tile, 'the tile must render, honestly labelled as a median');
-    eq(tile.querySelector('b').textContent, '20s',
-      'the median of 10s/20s/90s is 20s — a mean (40s), or counting the untimed answer as 0s (30s), would both read differently');
+    await ROUTES.analytics(root);
+    assert(/median 20s a question, over 3 timed attempt/.test(root.textContent),
+      'the median of 10s/20s/90s is 20s — a mean (40s), or counting the untimed answer as 0s (30s), would both read differently: ' + root.textContent.slice(0, 300));
   } finally {
     for (const id of ids) await DB.del('attempts', id).catch(() => {});
     await DB.del('questions', q.uuid);
+    AnaState.by = prevBy; AnaState.days = prevDays;
     State.course = prevCourse; State.courses = prevCourses; State.invalidate();
   }
 });
@@ -35907,10 +36282,10 @@ test('Dashboard and Analytics compare .ts as a string, not by constructing two D
   // specifically, not every use of new Date() on a .ts field.
   const dash = ROUTES.dashboard.toString();
   assert(!/new Date\([a-z]\.ts\) [-] new Date\([a-z]\.ts\)/.test(dash), 'dashboard must not construct two Dates to compare .ts');
-  // 2, not 4: the "earliest attempt per question" site no longer sorts at
-  // all (see the next test) — only the "most recent 100" site, a genuine
-  // top-k selection a linear pass cannot replace, still does.
-  assert((dash.match(/\.ts [<>] [a-z]\.ts/g) || []).length >= 2, 'the remaining dashboard sort site must still compare .ts directly');
+  // The dashboard no longer sorts attempts at all: the "earliest attempt per
+  // question" site is a linear pass (see the next test), and the "most
+  // recent 100" tile it used to sort for moved to Analytics with the
+  // declutter. Analytics still has that genuine top-k selection.
   const ana = ROUTES.analytics.toString();
   assert(!/new Date\([a-z]\.ts\) [-] new Date\([a-z]\.ts\)/.test(ana), 'analytics must not construct two Dates to compare .ts');
   assert((ana.match(/\.ts [<>] [a-z]\.ts/g) || []).length >= 2, 'the remaining analytics sort site must still compare .ts directly');
@@ -36295,11 +36670,13 @@ test('A course still on the old "General" placeholder moves onto its template, r
     for (const q of qs) await DB.del('questions', q.uuid);
   }
 });
-test('The Question Bank mastery bar follows the course mastery target, not a hardcoded 75', () => {
+test('The Question Bank\'s Solid label follows the course target, not a hardcoded 75', () => {
   const src = ROUTES.bank.toString();
   assert(!/>=\s*75\s*\?\s*'g'/.test(src),
-    'the green threshold must not be hardcoded — a course that raised its mastery target would show green under a row the "Mastered" filter on this same screen already excludes');
-  assert(/masteryTarget/.test(src), 'the bar must read the same masteryTarget setting the "Mastered" filter already uses');
+    'the threshold must not be hardcoded — a course that raised its target would label a row Solid that the Solid filter on this same screen excludes');
+  assert(/masteryTarget/.test(src), 'the label must read the same masteryTarget setting the Solid filter uses');
+  const q = { stats: { attempts: 3, mastery: 80 } };
+  eq(learnState(q, 75), 'solid'); eq(learnState(q, 85), 'shaky', 'a stricter course target moves the same question back to shaky');
 });
 test('Every sort key the Question Bank implements is reachable from a column header', () => {
   const src = ROUTES.bank.toString();
@@ -38493,21 +38870,33 @@ test('A course-only backup carries nothing filed under another course', async ()
   }
 });
 
-test('Analytics says which columns the period select governs', async () => {
+test('Analytics says which numbers the period select governs', async () => {
   // ROUTES.analytics renders per-course tiles unconditionally, which a fresh
-  // headless run never has selected.
-  const root = h('div');
-  const was = { days: AnaState.days, course: State.course, courses: State.courses };
+  // headless run never has selected. One attempt, so the page gets past its
+  // "No attempts in this period" state and actually draws the labels.
+  const was = { days: AnaState.days, by: AnaState.by, course: State.course, courses: State.courses };
+  const course = makeCourse('OC2', 'Analytics label test course', CISA_BLUEPRINT, { id: 'test-course' });
+  const q = mkQ('period label test', ['a', 'b'], 0, { status: 'active', answerVerified: 'verified', domainId: 'D1' });
   AnaState.days = 30;
   try {
-    State.course = makeCourse('OC2', 'Analytics label test course', CISA_BLUEPRINT, {});
-    State.courses = [State.course];
+    State.course = course; State.courses = [course];
+    await DB.put('questions', q);
+    await DB.put('attempts', { id: 99241, questionUuid: q.uuid, courseId: course.id, correct: true, mode: 'learning', ts: nowISO() });
+    State.invalidate();
+    let root = h('div');
     await ROUTES.analytics(root);
-    if (!/No .*attempts in this period/.test(root.textContent)) {
-      assert(/Coverage, First-attempt and Weakness: all time/.test(root.textContent), 'the all-time columns are named on the card');
-      assert(/in the last 30 days \(/.test(root.textContent), 'the coverage notice names the period');
-    }
-  } finally { AnaState.days = was.days; State.course = was.course; State.courses = was.courses; }
+    assert(/in the last 30 days/.test(root.textContent), 'the tiles name the period they cover');
+    const dom = Array.prototype.slice.call(root.querySelectorAll('.card')).find(c => /By domain/.test(c.textContent));
+    assert(dom && /All time/.test(dom.textContent), 'the domain card says the period does not apply to it');
+    AnaState.by = 'topic';
+    root = h('div');
+    await ROUTES.analytics(root);
+    assert(/Last column: last 30 days · the rest: all time/.test(root.textContent), 'a breakdown table names which of its columns the period governs');
+    assert(!/Weakness/.test(root.textContent), 'no weakness score is shown to a student any more');
+  } finally {
+    await DB.del('attempts', 99241); await DB.del('questions', q.uuid);
+    AnaState.days = was.days; AnaState.by = was.by; State.course = was.course; State.courses = was.courses; State.invalidate();
+  }
 });
 
 test('Analytics "By difficulty" does not fold an ungraded question into medium (D11)', async () => {
@@ -38681,6 +39070,117 @@ test('OCR worker reuse: caches by options, rebuilds on a changed key, and stays 
     self.Tesseract = wasTesseract;
   }
 });
+/* ---- what a student is shown instead of a score ---- */
+
+test('No two top-level functions share a name — the later one would silently replace the earlier', () => {
+  // One classic script, tens of thousands of lines: a second
+  // "function passVerdict" further down replaces the first one everywhere,
+  // with no error, and the screen that used the first one quietly breaks.
+  const src = Array.prototype.map.call(document.querySelectorAll('script:not([src])'), el => el.textContent).join('\n');
+  const seen = new Set(), dup = [];
+  src.replace(/^(?:async\s+)?function\s+([A-Za-z0-9_$]+)\s*\(/gm, (m, name) => { if (seen.has(name)) dup.push(name); seen.add(name); return m; });
+  assert(seen.size > 300, 'the scan found the app’s functions (' + seen.size + ')');
+  eq(dup.join(', '), '', 'every top-level function name is declared once');
+});
+
+test('Solid, shaky and new are counted exactly as the planner counts them', () => {
+  const q = (attempts, mastery, domainId) => ({ uuid: uuid(), domainId, stats: { attempts, mastery } });
+  const pool = [q(0, 0, 'D1'), q(3, 74, 'D1'), q(3, 75, 'D1'), q(1, 90, 'D2'), q(2, 10, 'D2'), q(0, 0, 'D2')];
+  eq(learnState(pool[0], 75), 'new', 'never answered');
+  eq(learnState(pool[1], 75), 'shaky', 'one under the target');
+  eq(learnState(pool[2], 75), 'solid', 'at the target');
+  const mix = learnMix(pool, 75);
+  eq([mix.solid, mix.shaky, mix.new, mix.total].join(','), '2,2,2,6');
+  const rows = domainReadiness(pool, [{ id: 'D1', name: 'One', weight: 50 }, { id: 'D2', name: 'Two', weight: 50 }], 75);
+  const sum = rows.reduce((t, r) => ({ solid: t.solid + r.solid, shaky: t.shaky + r.shaky, unseen: t.unseen + r.unseen }), { solid: 0, shaky: 0, unseen: 0 });
+  eq([sum.solid, sum.shaky, sum.unseen].join(','), [mix.solid, mix.shaky, mix.new].join(','),
+    'the dashboard’s three counts and the study plan’s can never disagree');
+  const bar = mixBar(mix);
+  eq(bar.children.length, 3, 'one segment per state that has any');
+  eq(bar.getAttribute('aria-label'), '2 solid, 2 shaky, 2 new', 'the bar reads out its counts');
+});
+
+test('A domain’s verdict is its first-time accuracy against the pass mark, and nothing before a handful', () => {
+  eq(domainVerdict(null, 0, 60, 5).text, 'Not started');
+  eq(domainVerdict(1, 4, 60, 5).text, 'Too early to tell', 'four right out of four is not a verdict');
+  eq(domainVerdict(0.59, 20, 60, 5).text, 'Below the pass mark');
+  eq(domainVerdict(0.6, 20, 60, 5).text, 'Just above the pass mark', 'exactly on the pass mark is not below it');
+  eq(domainVerdict(0.69, 20, 60, 5).text, 'Just above the pass mark');
+  eq(domainVerdict(0.7, 20, 60, 5).text, 'Comfortably above the pass mark');
+  eq(domainVerdict(0.7, 20, 65, 5).text, 'Just above the pass mark', 'the course’s own pass mark decides');
+});
+
+test('The dashboard shows states and a drill button per domain, not scores', async () => {
+  const was = { course: State.course, courses: State.courses };
+  const cid = 'test-dash-states-' + Date.now();
+  const course = { id: cid, code: 'TDS2', name: 'Dashboard states test', blueprint: [{ id: 'D1', name: 'Auditing', weight: 30 }, { id: 'D2', name: 'Security', weight: 70 }] };
+  const qs = [];
+  for (let i = 0; i < 8; i++) {
+    const dom = i < 4 ? 'D1' : 'D2';
+    const q = mkQ('dashboard states q' + i, ['a', 'b'], 0, { courseId: cid, domainId: dom, status: 'active', answerVerified: 'verified' });
+    if (i % 2 === 0) {
+      const att = { id: 'att-dst-' + i, questionUuid: q.uuid, courseId: cid, correct: i < 4, confidence: 'knew', ms: 20000, ts: nowISO(), mode: 'learning' };
+      applyAttempt(q, att); q.stats.mastery = masteryOf(q, [att]).score;
+      await DB.put('attempts', att);
+    }
+    qs.push(q);
+    await DB.put('questions', q);
+  }
+  try {
+    State.course = course; State.courses = (was.courses || []).concat([course]); State.invalidate();
+    const root = h('div');
+    await ROUTES.dashboard(root);
+    const text = root.textContent;
+    assert(!/Weakest topics|score \d|Mastered|mastery \d/i.test(text), 'no score, weakness or mastery number on the dashboard: ' + text.slice(0, 500));
+    const tile = Array.prototype.slice.call(root.querySelectorAll('.tile')).find(t => t.textContent.indexOf('Your questions') >= 0);
+    assert(tile && /0 solid/.test(tile.textContent) && /4 shaky/.test(tile.textContent) && /4 new/.test(tile.textContent),
+      'the three states are counted where the old Mastered tile was: ' + (tile && tile.textContent));
+    const rows = root.querySelectorAll('.dom-row');
+    eq(rows.length, 2, 'one row per blueprint domain');
+    eq(root.querySelectorAll('.dom-row button').length, 2, 'every domain with questions can be drilled from here');
+    const focus = Array.prototype.slice.call(rows).find(r => /Focus here/.test(r.textContent));
+    assert(focus && /Security/.test(focus.textContent), 'the domain worth the most marks still not solid is the one to focus on');
+  } finally {
+    for (const q of qs) await DB.del('questions', q.uuid);
+    for (let i = 0; i < 8; i += 2) await DB.del('attempts', 'att-dst-' + i).catch(() => {});
+    State.course = was.course; State.courses = was.courses; State.invalidate();
+  }
+});
+
+test('The opening screen waits for its own sequence, but never for a tap or a dialog', async () => {
+  const was = Splash.ready;
+  const later = () => String(performance.now() + 60000);
+  const a = h('div', { id: 'splash', 'data-min': later() });
+  document.body.appendChild(a);
+  try {
+    Splash.ready = false;
+    Splash.maybeHide();
+    assert(!a.classList.contains('sp-out'), 'nothing happens before the app is ready');
+    Splash.appReady();
+    assert(!a.classList.contains('sp-out'), 'an app that is ready early lets the sequence finish');
+    a.setAttribute('data-skip', '1');
+    Splash.maybeHide();
+    assert(a.classList.contains('sp-out'), 'a tap or a key skips the rest');
+    await new Promise(r => setTimeout(r, 950));
+    assert(!a.parentNode, 'and it leaves the page, so nothing invisible is left over the app');
+
+    // A dialog opened during boot (a data file that needs a decision, say)
+    // must never sit behind the opening screen waiting for an answer.
+    const b = h('div', { id: 'splash', 'data-min': later() });
+    document.body.appendChild(b);
+    Splash.ready = false;
+    const answer = modal({ title: 'A question at boot', body: h('div'), actions: [{ label: 'OK', value: 'ok', kind: 'primary' }] });
+    assert(b.classList.contains('sp-out'), 'the dialog clears the opening screen at once');
+    const ok = Array.from(document.querySelectorAll('.modal-bg .modal-f button')).find(x => x.textContent === 'OK');
+    ok.click();
+    eq(await answer, 'ok');
+  } finally {
+    document.querySelectorAll('#splash').forEach(el => el.remove());
+    clearTimeout(Splash._t);
+    Splash.ready = was;
+  }
+});
+
 test('The suite leaves nothing of its own in the bank', async () => {
   const left = (await DB.all('questions')).filter(x => String(x.courseId || '').indexOf('test-') === 0 || String(x.courseId || '').indexOf('selftest-') === 0);
   eq(left.length, 0, 'a test wrote a question and did not remove it: ' + left.map(x => x.qid || x.stem).join('; '));
@@ -38899,8 +39399,11 @@ async function boot() {
   // expose a small surface for debugging without opening the internals
   self.MCQ = { State, DB, Settings, runSelfTests, runIntegrity, APP, TESTS };
 }
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
-else boot();
+// Whatever boot does — draws the dashboard, stops at a dialog, or fails on a
+// refused database — the opening screen gets out of the way afterwards.
+const startApp = () => boot().finally(() => Splash.appReady());
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startApp);
+else startApp();
 </script>
 </body>
 </html>
