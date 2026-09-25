@@ -377,11 +377,13 @@ Automated tests cannot verify rendering or real browser storage.
 
 ### The opening screen
 
-- [ ] First open in a new tab: the mark draws, the name rises, A–D appear and C
-      turns green, then it fades into the app in about two seconds
-- [ ] Reload: only a short glimpse
-- [ ] Tap or press a key during it: it goes as soon as the app is ready
-- [ ] With the system's reduced-motion setting on: nothing moves
+- [ ] Open the app: the mark draws, the name rises, A–D appear and C turns
+      green, then four scenes follow under a filling bar, and it fades into
+      the app at about ten seconds. A reload plays it again
+- [ ] The footer says "Tap anywhere to skip" on a phone and "Click or press
+      any key to skip" on a computer, and doing so skips it
+- [ ] With the system's reduced-motion setting on: one still frame for about a
+      second, nothing moves
 - [ ] Offline (installed or cached): identical, and no network request
 - [ ] Open with `#tools`: no opening screen at all
 

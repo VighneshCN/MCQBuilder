@@ -18,9 +18,10 @@ before it had a real blueprint gets a **Use the standard domains** button on
 its dashboard, which also files its questions under them. You import your own
 questions either way.
 
-The app opens on a short animated screen while it loads. Tap or press any key
-to skip it. A reload in the same tab shows only a glimpse of it, and nothing
-moves if your system is set to reduce motion.
+The app opens on an animated screen of about ten seconds while it loads: the
+mark draws itself, an answer row picks C, and four short scenes say what the app
+does. A tap, a click or any key skips it. If your system is set to reduce
+motion, you see one still frame for about a second instead.
 
 ---
 

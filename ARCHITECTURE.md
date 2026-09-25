@@ -1794,8 +1794,9 @@ verdict a domain gets, never a weakness number.
 ## The opening screen
 
 The owner's ask was a first impression that did not look like a school
-project. The constraints were that it must never cost a student time or break
-anything:
+project, held for about ten seconds. The constraints were that it must never
+break anything, and that the ten seconds must be worth watching, never a
+loader left spinning:
 
 - **Painted before the script is read.** The markup is the first thing in
   `<body>` and its CSS is in the head, so it is on screen while the 2 MB
@@ -1806,13 +1807,22 @@ anything:
   whether boot drew the dashboard, stopped at a dialog, or failed on a refused
   database. `modal()` calls `Splash.hide()` first, so a dialog raised during
   boot is never behind it.
-- **It only lingers to finish its own sequence.** The set-up script writes
-  `data-min`: 2150 ms from navigation start on the first open in a tab, 750 ms
-  on a reload in the same tab (a `sessionStorage` flag, and `.sp-quick` plays
-  every timing at a third via `--sp-s`), and 300 ms under
-  `prefers-reduced-motion`, where nothing moves at all. An app ready sooner
-  waits out the remainder; an app ready later keeps the loader bar running.
-  A tap or any key sets `data-skip` and it goes as soon as the app is ready.
+- **Ten seconds with something in them.** The mark draws, the name rises, and
+  an A–D row picks C. Then four scenes take turns on one stage (`.sp-feat`,
+  each timed by `--t`): importing any file, timed mocks weighted to the
+  syllabus, solid/shaky/new per domain, and the plan to the exam date. A
+  determinate bar fills to the moment the screen lifts, so the wait is visibly
+  finite. Every timing is a multiple of `--sp-s`, one knob for the whole
+  sequence.
+- **It stays for its sequence, never longer than boot.** The set-up script
+  writes `data-min`: 10,300 ms from navigation start (about ten seconds on
+  screen), or 1,200 ms under `prefers-reduced-motion`, where one still frame
+  shows, since a still frame held for ten seconds reads as a hang. An app
+  ready sooner waits out the remainder. On a phone still booting when the bar
+  is full, `.sp-wait` turns the bar back into a running loader. A tap, a click
+  or any key sets `data-skip`, and the screen goes as soon as the app is
+  ready. The footer says how to skip, in the words of the device in hand
+  (`hover`/`pointer` media queries).
 - **It leaves the page.** `hide()` fades and scales it out, then removes it
   on `transitionend`, with a 900 ms timer in case the transition never ends
   (a background tab), so nothing invisible is left over the app.
