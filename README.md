@@ -102,9 +102,10 @@ rebuilt from that home every time you open the app.
 mock cannot follow your exam weights, and accuracy-by-domain has nothing to
 split. With it, all three switch on. For CISA and DISA AT the app files most
 questions itself at import, by keywords, and marks each one it placed that way
-as a suggestion. For the rest, use **File by keywords** or **File under this
-domain** in the checking queue, **Edit details** in the Question Bank, or the
-one field at import that files a whole file.
+as a suggestion. For the rest, the Question Bank says how many practise
+without a domain and offers **File N by keywords** in one click. **Edit
+details** there files any selection by hand, and one field at import files a
+whole file.
 
 Two smaller ones: **difficulty** unlocks papers built to a difficulty mix (grade
 them as you practise, one question at a time, and it switches on the moment the
@@ -524,11 +525,19 @@ checking queue as a conflict instead. Answers are compared by the option they
 point at, not the letter, so the same answer under a different letter, or with
 a stray page number or different spacing, is not a conflict.
 
-When the import finishes, the report says in four tiles how many questions are
-**ready to practise**, how many **need you**, how many **merged** into
-questions you already had, and how many were **rejected**, with **Practise
-now** and **Review the N waiting** buttons. The full reconciliation table is
-folded underneath.
+When the import finishes, the report shows where its questions stand, and the
+lines always add up to the number in the file:
+
+| | |
+|---|---|
+| **Ready to practise** | practising now, including any not yet filed under a domain |
+| **Needs you** | in the review queue, with what each pile needs ("234 need an answer · 50 may be duplicates") |
+| **Merged** | copies folded into another question, every source kept |
+| **Removed** | archived or rejected, shown only when there are any |
+
+**Practise now** and **Review the N** sit under it. Open the report again
+later from **Your imports** and it shows the position that day, not the day of
+the import, so it never disagrees with the queue.
 
 Adding a file you have added before asks first. A batch you have read but not
 confirmed shows a banner on the Dashboard and Practice screens until you finish
@@ -749,10 +758,13 @@ select:
 | Group | One click |
 |---|---|
 | Possible duplicates | **Merge N same-answer copies** merges only pairs that are word for word, or nearly, *and* mark the same answer. The copy with a confirmed answer and the most practice behind it is kept. **Keep separate** is for pairs that only look alike |
-| No confirmed answer | **Find N answers in the text** reads answers written out in the explanation ("Option D is the correct answer"), and sorts those first. **Confirm N answers shown** then confirms what is on screen |
-| No domain | **File N by keywords**, or **File under this domain** for the ones you select |
-| Wording to check | **Wording is fine** |
-| Any group | **Archive** |
+| Need an answer | **Find N answers in the text** reads answers written out in the explanation ("Option D is the correct answer"), and sorts those first. **Confirm N answers shown** then confirms what is on screen |
+| Need a look | Too few options, or the wrong number for this course: **Open** one to fix it, or **Archive** |
+
+The queue holds only questions that cannot be practised yet, so its total is
+the **Needs you** number on every screen. A question with no domain, or whose
+wording the reader was unsure of, already practises: it is counted as Ready,
+and filing it is offered in the Question Bank instead.
 
 Answer conflicts start with nothing picked. Choose the answer for each record:
 **Same answer for both** settles the pair, and **Keep as different questions**
@@ -1213,11 +1225,18 @@ practising a question whose answer was guessed is worse than not practising it.
 Most of the queue settles in bulk: see
 [A big import is not a long queue](#a-big-import-is-not-a-long-queue).
 
-The Question Bank lists only settled questions. Anything still waiting is
-counted in one line at its top, with a button to the queue. The bank's own
-bulk bar is just **Edit details**, **Archive** and **Restore**, and **Select
-all N matching** reaches past the page (50, 100 or 250 a page) to every
-question the filters match.
+**The same four words, everywhere.** Every question is Ready to practise,
+Needs you, Merged, or Removed (archived or rejected), and every screen counts
+them the same way: the Dashboard, the Question Bank, the review queue, each
+import's report and the **Your imports** table. For any import they add up to
+the questions in the file.
+
+The Question Bank lists the Ready ones; its unfiltered count is the Ready
+number. Anything that needs you is counted in one line at its top, with a
+button to the queue, and merged, archived and rejected records appear only
+when you filter for them. The bank's own bulk bar is just **Edit details**,
+**Archive** and **Restore**, and **Select all N matching** reaches past the
+page (50, 100 or 250 a page) to every question the filters match.
 
 The step badge shows how many are waiting, and the sidebar carries the same
 count on Add Questions, so a queue left half-finished is never invisible.

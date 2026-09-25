@@ -532,6 +532,41 @@ whose questions have since been deleted returns zero from `markSession()` and
 would otherwise read as a failure, holding somebody below `ready` on a record
 that no longer refers to anything.
 
+## One tally
+
+The course owner compared the import report, the "where these stand today"
+table, the source register, the batch table, the queue's chips and the
+Question Bank's band for the same 1,359 questions and found six different
+sets of numbers: import-time counts beside live ones, "Records" that included
+merged copies, a queue "All" that included questions already practising, and
+a badge capped at 99. None of them was wrong on its own terms, and together
+they were unusable.
+
+So there is one partition and every count is made from it. `standingOf(q)`
+puts each record in exactly one of **ready** (`isPracticeEligible`), **needs**
+(everything else still in the bank), **merged** or **removed** (archived or
+rejected). `tally(records, atImport)` counts them and adds what an import
+settled without making a record (`report.merged`, `report.rejected`), so for
+any batch `ready + needs + merged + removed` is the number of questions in the
+file. `STANDING_WORDS` holds the four labels, so the Dashboard band, the
+Question Bank band, the Add Questions band, the report and the **Your
+imports** table all say *Ready to practise* and *Needs you*.
+
+`isBlocked(q)` now means exactly `standingOf(q) === 'needs'`: live and refused
+by the practice gate. It used to be a list of statuses, so a record whose
+status said "practises" while the gate refused it (an unconfirmed answer, a
+wrong option count) was in neither practice nor the queue. The review queue
+lists `all.filter(isBlocked)` and nothing else, grouped by `queueGroupOf()` so
+its piles add up to its total. Unfiled (`needs_class`) and unsure-wording
+(`needs_content`) questions practise, so they are Ready and out of the queue;
+the Question Bank offers **File N by keywords** for the unfiled ones.
+`BLOCKING_STATUSES` survives only for the bank's status filter.
+
+The Question Bank's unfiltered list hides merged, archived and rejected
+records, so its count is the Ready number. The rail badge shows up to 999
+rather than "99+", and the browser-only warning no longer quotes a raw record
+count.
+
 ## Settling the checking queue in bulk
 
 The Question Bank used to hold the bulk tools (Classify, Verify, Activate), and
@@ -555,8 +590,9 @@ made "select all" mean fifty. Now each screen has one job:
     `answerStatementsIn()` over a queued question's explanation, and
     `confirmShownAnswers()` then verifies what is on screen.
   - `fileUnderDomain(uuids, id | null)` files by `suggestDomain()` (null) or
-    under one domain, and moves only statuses that the filing settles.
-  - `markWordingChecked()` clears `needs_content`.
+    under one domain, and moves only statuses that the filing settles. It is
+    offered from the Question Bank, where unfiled questions already practise,
+    not from the queue.
   - `rejudgeConflictPairs()` runs when the queue opens, after the orphan
     repair: pairs recorded as conflicts under the old exact-text comparison are
     judged again by `answersConflict()`, which is how 53 of a student's 63
@@ -1189,13 +1225,14 @@ confident answer. The hint says which way it went and why.
   ambiguous). An answer that is the option's own text is matched against the
   options later. `runParse()` opens `columnMapDialog()` whenever there is no
   stem column or fewer than two option columns, not only when nothing matched.
-- **After the import.** `showReconciliation()` leads with four live tiles
-  (ready to practise via `isPracticeEligible`, need you via `isBlocked`,
-  merged, rejected) and **Practise now** / **Review the N waiting**. The
-  per-candidate table is folded under Details. `intake()` asks before
-  re-reading a file whose `fileHash` a batch already records.
-  `stagedBatchBanner()` puts an unconfirmed batch on the Dashboard and Practice
-  screens, and `refreshBadges()` counts it.
+- **After the import.** `showReconciliation(batch)` is the batch's position
+  *now*, as a `tally()` (see "One tally" below) that adds up to the questions
+  in the file, with **Practise now** / **Review the N**. The import-time
+  snapshot (`batch.report`) is no longer on screen beside it; it stays in the
+  record and in the exported CSV. `intake()` asks before re-reading a file
+  whose `fileHash` a batch already records. `stagedBatchBanner()` puts an
+  unconfirmed batch on the Dashboard and Practice screens, and
+  `refreshBadges()` counts it.
 
 The reconciliation report is the point: every question that entered the parser
 is accounted for. Low confidence does not block import, and — since

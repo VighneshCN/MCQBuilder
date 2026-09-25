@@ -1445,6 +1445,7 @@ td.gut{width:26px;padding:9px 0 9px 10px;font-family:var(--mono);font-weight:700
 .step[data-on="1"]{background:var(--blue-tint);color:var(--blue)}
 .step[data-done="1"]{color:var(--green)}
 .recon{width:100%;font-size:13.5px}
+.recon .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;vertical-align:1px}
 .recon td{padding:6px 10px}
 .recon tr.total td{border-top:2px solid var(--txt);font-weight:600;background:var(--surface-2)}
 .recon .amt{font-family:var(--mono);text-align:right;font-variant-numeric:tabular-nums}
@@ -2488,13 +2489,43 @@ const STATUS = {
   merged:           { label: 'Merged duplicate',    badge: 'b-dup',     mark: '⇢', practice: false },
   rejected:         { label: 'Rejected',            badge: 'b-arch',    mark: '✕', practice: false }
 };
-/* Everything the review queue lists. */
+/* The statuses that describe a question still being settled. */
 const REVIEW_STATUSES = ['needs_content', 'needs_answer', 'needs_class', 'possible_dup', 'answer_conflict', 'parsing', 'draft'];
-/* The subset that actually holds a question OUT of practice, and so the only
-   subset worth a red badge or a "you must deal with this" prompt. Derived from
-   the same table the gate reads, so the two can never drift. */
+/* The subset that holds a question OUT of practice by status alone. Derived
+   from the same table the gate reads, so the two can never drift. */
 const BLOCKING_STATUSES = REVIEW_STATUSES.filter(k => !(STATUS[k] && STATUS[k].practice));
-function isBlocked(q) { return BLOCKING_STATUSES.indexOf(q.status) >= 0; }
+
+/* ---------- where a question stands, in the four words every screen uses ----------
+   Ready (it practises), Needs you (the review queue), Merged (a copy folded
+   into another question, every source kept) and Removed (archived or
+   rejected). Every count of an import, a source, the bank, the queue and the
+   dashboard is made from these, so they always add up to the questions
+   brought in and no two screens can disagree.
+
+   "Needs you" is read from the practice gate itself, not from a list of
+   statuses: a question that can be practised is never also waiting, whatever
+   its status says, and one the gate refuses (an answer never confirmed, a
+   wrong option count) is never missing from the queue. Unfiled questions
+   and unchecked wording practise, so they are Ready; filing them is offered
+   in the Question Bank, not queued as work. */
+function isBlocked(q) {
+  return !!q && q.status !== 'merged' && q.status !== 'archived' && q.status !== 'rejected' && !isPracticeEligible(q);
+}
+function standingOf(q) {
+  if (q.status === 'merged') return 'merged';
+  if (q.status === 'archived' || q.status === 'rejected') return 'removed';
+  return isPracticeEligible(q) ? 'ready' : 'needs';
+}
+/** `atImport` adds what an import settled without making a record at all:
+    copies folded or merged there, and questions rejected there. */
+function tally(records, atImport) {
+  const t = { ready: 0, needs: 0, merged: 0, removed: 0 };
+  (records || []).forEach(q => { t[standingOf(q)]++; });
+  if (atImport) { t.merged += atImport.merged || 0; t.removed += atImport.rejected || 0; }
+  t.total = t.ready + t.needs + t.merged + t.removed;
+  return t;
+}
+const STANDING_WORDS = { ready: 'Ready to practise', needs: 'Needs you', merged: 'Merged', removed: 'Removed' };
 const VERIF = { unverified: 'Unverified', verified: 'Verified', doubtful: 'Doubtful' };
 const DIFFICULTY = ['easy', 'medium', 'hard'];
 const CONFIDENCE = [
@@ -8425,7 +8456,9 @@ function setBadge(view, n) {
   const b = document.querySelector('[data-badge="' + view + '"]');
   if (!b) return;
   b.classList.toggle('hidden', !n);
-  b.textContent = n > 99 ? '99+' : String(n);
+  // The same number the page behind it shows: a queue of 294 read "99+"
+  // here, which was one more figure that did not match anything.
+  b.textContent = n > 999 ? '999+' : String(n);
 }
 
 /** A small circled i that opens the explanation on demand.
@@ -8778,9 +8811,9 @@ ROUTES.dashboard = async (root) => {
   });
 
   await band('Dashboard', 'Position at a glance', [
-    { k: 'Active', v: String(active.length) },
+    { k: 'Ready', v: String(active.length) },
     caseActive.length ? { k: 'Case study', v: String(caseActive.length) } : null,
-    { k: 'In review', v: String(inReview.length), color: inReview.length ? 'var(--amber)' : null },
+    { k: STANDING_WORDS.needs, v: String(inReview.length), color: inReview.length ? 'var(--amber)' : null },
     { k: 'Due today', v: String(due.length), color: due.length ? 'var(--pencil)' : null },
     plan.set && !plan.past ? { k: plan.gap === 0 ? 'Exam' : 'Exam in', v: plan.gap === 0 ? 'Today' : qtyLabel(plan.gap, 'day'), color: plan.daysLeft <= 14 ? 'var(--pencil)' : null } : null
   ].filter(Boolean), [h('button', { class: 'btn primary', onclick: () => go('practice'), text: 'Start practice' })]);
@@ -8824,7 +8857,7 @@ ROUTES.dashboard = async (root) => {
   let rec = null;
   if (!all.length) rec = { t: 'Put your first questions in', d: 'The bank is empty. Bring in a .docx, .csv, .json, .xlsx or PDF and the Add Questions screen will reconcile every candidate it finds — or just write one yourself.', a: 'Open Add Questions', go: 'import', alt: { label: 'Write one by hand', run: () => newQuestion() } };
   else if (conflicts.length) rec = { t: conflicts.length + ' answer conflict(s) to resolve', d: 'Two sources disagree on the correct answer. These cannot enter practice until you decide.', a: 'Resolve conflicts', go: 'review' };
-  else if (inReview.length > active.length * 0.25 && inReview.length > 5) rec = { t: inReview.length + ' question(s) waiting for verification', d: 'Only verified questions can be practised. Clearing the queue widens the pool you draw from.', a: 'Check them now', go: 'review' };
+  else if (inReview.length > active.length * 0.25 && inReview.length > 5) rec = { t: qtyLabel(inReview.length, 'question') + ' need you', d: 'They are held out of practice until you settle them, and most can be settled together.', a: 'Review them', go: 'review' };
   else if (due.length) rec = { t: due.length + ' question(s) due for review', d: 'Spaced repetition works best on the day it falls due.', a: 'Start due review', go: 'practice', mode: 'spaced' };
   else if (never.length) rec = { t: never.length + ' question(s) never attempted', d: 'Coverage is what a mock actually measures. Work through unseen questions first.', a: 'Practise unseen', go: 'practice', mode: { mode: 'mixed', neverAttempted: true } };
   else if (caseActive.length && caseActive.filter(q => q.stats.attempts === 0).length)
@@ -9417,7 +9450,7 @@ ROUTES.practice = async (root, preselect) => {
   const heldByScenario = caseEligiblePool(all).length - casePool.length;
   const due = pool.filter(q => isDueByDay(q.nextReviewAt));
   await band('Practice', 'Choose how to work', [
-    { k: 'Eligible', v: String(pool.length) },
+    { k: 'Ready', v: String(pool.length) },
     casePool.length ? { k: 'Case study', v: String(casePool.length) } : null,
     { k: 'Due', v: String(due.length), color: due.length ? 'var(--pencil)' : null }
   ].filter(Boolean));
@@ -11732,10 +11765,12 @@ ROUTES.bank = async (root) => {
   // scenario to exist and have text — otherwise this number and the one on
   // the Practice screen disagree, and the Practice one is the true one.
   const readyHere = onCase ? drawableCasePool(everything, caseRecords).length : all.filter(isPracticeEligible).length;
+  // The same words, and the same counts, as the Dashboard, the review queue
+  // and every import report: what practises, and what is waiting on you.
   await band('Question Bank', onCase ? 'Case-study register' : 'Controlled register', [
-    { k: 'Records', v: String(all.length) },
-    { k: 'Practice-ready', v: String(readyHere), color: 'var(--green)' }
-  ], [
+    { k: STANDING_WORDS.ready, v: String(readyHere), color: 'var(--green)' },
+    pending.length ? { k: STANDING_WORDS.needs, v: String(pending.length), color: 'var(--amber)' } : null
+  ].filter(Boolean), [
     h('button', { class: 'btn', onclick: () => go('import'), text: 'Import' }),
     onCase
       ? h('button', { class: 'btn primary', onclick: () => go('cases'), text: 'Open Case Studies' })
@@ -11763,9 +11798,31 @@ ROUTES.bank = async (root) => {
   }
 
   if (pending.length) root.appendChild(h('div', { class: 'notice row wrap', style: 'margin-bottom:14px;gap:10px;align-items:center' }, [
-    h('span', { style: 'flex:1;min-width:200px', text: qtyLabel(pending.length, 'question') + ' waiting in the review queue — they appear here once settled.' }),
+    h('span', { style: 'flex:1;min-width:200px', text: qtyLabel(pending.length, 'question') + ' need you in the review queue before they can be practised. They appear here once settled.' }),
     h('button', { class: 'btn sm primary', onclick: () => { State.importStep = 'check'; go('import'); }, text: 'Open review queue' })
   ]));
+  /* Questions with no domain practise like any other; what they miss is
+     domain drills and exam-weighted mocks. So filing them is offered here,
+     where they already are, as one click, not queued as work to be done. */
+  if (!onCase) {
+    const unfiled = all.filter(q => isPracticeEligible(q) && !q.domainId);
+    if (unfiled.length) {
+      const hinted = Object.keys(hintsFor(State.course)).length
+        ? unfiled.filter(q => suggestDomain(State.course, q.stem + ' ' + q.options.map(o => o.text).join(' ')).domainId) : [];
+      root.appendChild(h('div', { class: 'notice row wrap', style: 'margin-bottom:14px;gap:10px;align-items:center' }, [
+        h('span', { style: 'flex:1;min-width:200px', text: qtyLabel(unfiled.length, 'question') + ' practise without a domain, so domain drills and exam-weighted mocks leave them out.' }),
+        hinted.length ? h('button', {
+          class: 'btn sm primary', onclick: async (e) => {
+            e.currentTarget.disabled = true;
+            const n = await fileUnderDomain(hinted.map(q => q.uuid), null);
+            toast(n + ' filed by keywords' + (unfiled.length > n ? ' · ' + (unfiled.length - n) + ' left: tick them and use Edit details' : ''), 'ok', 7000);
+            go('bank');
+          }, text: 'File ' + hinted.length + ' by keywords'
+        }) : null,
+        h('button', { class: 'btn sm', onclick: () => { BankState.domain = 'none'; BankState.status = ''; BankState.page = 0; BankState.sel.clear(); go('bank'); }, text: 'Show them' })
+      ].filter(Boolean)));
+    }
+  }
 
   const filters = h('div', { class: 'card', style: 'margin-bottom:14px' });
   const fb = h('div', { style: 'margin-top:10px' });
@@ -11827,9 +11884,10 @@ ROUTES.bank = async (root) => {
     let list = all.filter(q => {
       if (BankState.status && q.status !== BankState.status) return false;
       // A merged copy lives on inside the record it was merged into, and a
-      // rejected one was turned away: neither is a question of its own, so
-      // they are listed only when asked for by status.
-      if (!BankState.status && (q.status === 'merged' || q.status === 'rejected')) return false;
+      // rejected or archived one has been taken out: none is a question you
+      // practise, so they are listed only when asked for by status — which
+      // makes the unfiltered list exactly the band's Ready count.
+      if (!BankState.status && (q.status === 'merged' || q.status === 'rejected' || q.status === 'archived')) return false;
       if (BankState.domain) { if (BankState.domain === 'none') { if (q.domainId) return false; } else if (q.domainId !== BankState.domain) return false; }
       if (BankState.caseStudy && q.caseStudyId !== BankState.caseStudy) return false;
       if (BankState.source && q.sourceId !== BankState.source) return false;
@@ -13480,12 +13538,10 @@ ROUTES.import = async (root) => {
   // Only what is genuinely stuck. Questions that are merely unfiled or whose
   // wording nobody has double-checked are already in practice.
   const waiting = all.filter(isBlocked).length;
-  const tidy = all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0).length - waiting;
 
-  await band('Add Questions', 'Bring questions in, then confirm the ones the app could not be sure about', [
-    { k: 'Sources', v: String(sources.length) },
-    { k: 'Batches', v: String(batches.length) },
-    { k: 'To check', v: String(waiting), color: waiting ? 'var(--amber)' : 'var(--green)' }
+  await band('Add Questions', 'Bring questions in, then settle the ones the app could not be sure about', [
+    { k: STANDING_WORDS.ready, v: String(all.filter(isPracticeEligible).length), color: 'var(--green)' },
+    { k: STANDING_WORDS.needs, v: String(waiting), color: waiting ? 'var(--amber)' : 'var(--green)' }
   ]);
 
   // A staged import takes over the screen: it is a decision in progress.
@@ -13513,7 +13569,7 @@ ROUTES.import = async (root) => {
     h('button', {
       class: 'btn' + (step === 'registers' ? ' primary' : ''),
       onclick: () => { State.importStep = 'registers'; go('import'); },
-      text: '3 · Sources & batches'
+      text: '3 · Your imports'
     })
   ]);
   root.appendChild(stepBar);
@@ -13523,18 +13579,11 @@ ROUTES.import = async (root) => {
 
   if (waiting) {
     root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:14px' }, [
-      String(waiting) + ' question(s) from earlier imports are waiting on you and cannot be practised until confirmed. ' +
+      qtyLabel(waiting, 'question') + ' need you before they can be practised. ' +
       // Somebody looking at three figures needs to know they are not facing
       // three hundred individual decisions.
-      (waiting >= 20 ? 'Most of a batch like this can be confirmed together rather than one at a time. ' : ''),
+      (waiting >= 20 ? 'Most can be settled together rather than one at a time. ' : ''),
       h('a', { href: '#', onclick: (e) => { e.preventDefault(); State.importStep = 'check'; go('import'); }, text: 'Review them now →' })
-    ]));
-  }
-  // Never phrased as a hold-up: these are already being practised.
-  if (!waiting && tidy) {
-    root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:14px' }, [
-      'Nothing is held up. ' + tidy + ' question(s) are in practice but not fully filled in — filing them under a domain turns on domain drills and weighted mocks. ',
-      h('a', { href: '#', onclick: (e) => { e.preventDefault(); State.importStep = 'check'; go('import'); }, text: 'Tidy them up →' })
     ]));
   }
 
@@ -13634,45 +13683,59 @@ async function renderRegisters(root, sources, batches) {
     return;
   }
   
-  if (sources.length) {
-    const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [h('div', { class: 'card-h' }, [h('h3', { text: 'Source register' }), h('div', { class: 'spacer' }), h('button', { class: 'btn sm', onclick: () => exportSourceRegister(sources), text: 'Export' })])]);
-    const tb = h('tbody');
+  /* One table, one row per import, in the four words used everywhere else:
+     each row adds up to the questions that file held. The source register
+     used to sit above it with its own Detected / In bank / Practice-ready
+     columns, and the batch table beside it with Imported / Drafts as they
+     were on the day, which was three sets of numbers for the same questions. */
+  if (batches.length) {
     const all = await State.questions();
+    const byBatch = new Map();
+    all.forEach(q => { if (!q.batchId) return; if (!byBatch.has(q.batchId)) byBatch.set(q.batchId, []); byBatch.get(q.batchId).push(q); });
+    const rowsFor = batches.slice(0, 25).map(b => {
+      const r = b.report || {};
+      return { b, t: tally(byBatch.get(b.id) || [], { merged: r.merged, rejected: r.rejected }) };
+    });
+    const anyRemoved = rowsFor.some(x => x.t.removed);
+    const fmtN = (n) => Number(n || 0).toLocaleString('en-IN');
+    const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [h('div', { class: 'card-h' }, [h('h3', { text: 'Your imports' }), h('div', { class: 'spacer' }),
+      h('span', { class: 'tiny dim', text: 'Counted now. Each row adds up to the questions in that file.' })])]);
+    const tb = h('tbody');
+    rowsFor.forEach(({ b, t }) => {
+      const files = ((b.report || {}).sources || []).map(x => x.title).filter(Boolean).join(', ') || b.label || '';
+      tb.appendChild(h('tr', {}, [
+        h('td', {}, [h('b', { class: 'small', text: files }), h('div', { class: 'tiny dim', text: fmtDate(b.finishedAt || b.startedAt, true) })]),
+        h('td', { class: 'num', text: fmtN(t.total) }),
+        h('td', { class: 'num', style: 'color:var(--green)', text: fmtN(t.ready) }),
+        h('td', { class: 'num', style: t.needs ? 'color:var(--amber)' : '', text: fmtN(t.needs) }),
+        h('td', { class: 'num', text: fmtN(t.merged) }),
+        anyRemoved ? h('td', { class: 'num', text: fmtN(t.removed) }) : null,
+        h('td', {}, h('button', { class: 'btn sm', onclick: () => { showReconciliation(b); }, text: 'Report' }))
+      ].filter(Boolean)));
+    });
+    card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {},
+      ['File', 'Questions', 'Ready', 'Needs you', 'Merged', anyRemoved ? 'Removed' : null, ''].filter(x => x !== null).map(t => h('th', { text: t })))), tb])));
+    if (batches.length > 25) card.appendChild(h('div', { class: 'small dim', style: 'margin-top:8px', text: 'Showing the 25 most recent of ' + batches.length + '.' }));
+    root.appendChild(card);
+  }
+
+  // Where each file came from, for tracing a question back: reference, not a
+  // second count of the same questions.
+  if (sources.length) {
+    const tb = h('tbody');
     sources.forEach(s => {
-      const mine = all.filter(q => q.sourceId === s.id);
       tb.appendChild(h('tr', {}, [
         h('td', {}, [h('b', { class: 'small', text: s.title }), h('div', { class: 'srcline', text: s.filename || '—' })]),
         h('td', { class: 'tiny', text: s.type }),
         h('td', { class: 'tiny nowrap', text: fmtDate(s.importedAt) }),
-        h('td', { class: 'num', text: String(s.detected || 0) }),
-        h('td', { class: 'num', text: String(mine.length) }),
-        h('td', { class: 'num', text: String(mine.filter(isPracticeEligible).length) }),
         h('td', { class: 'srcline', text: (s.fileHash || '').slice(0, 12) })
       ]));
     });
-    card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, ['Source', 'Type', 'Imported', 'Detected', 'In bank', 'Practice-ready', 'Hash'].map(t => h('th', { text: t })))), tb])));
-    root.appendChild(card);
-  }
-
-  if (batches.length) {
-    const card = h('div', { class: 'card', style: 'margin-bottom:16px' }, [h('div', { class: 'card-h' }, h('h3', { text: 'Import batches' }))]);
-    const tb = h('tbody');
-    batches.slice(0, 25).forEach(b => {
-      const r = b.report || {};
-      tb.appendChild(h('tr', {}, [
-        h('td', { class: 'docnum', text: b.id.slice(0, 8) }),
-        h('td', { class: 'tiny nowrap', text: fmtDate(b.startedAt, true) }),
-        h('td', { class: 'small', text: b.label || '' }),
-        h('td', { class: 'num', text: String(r.detected || 0) }),
-        h('td', { class: 'num', text: String(r.imported || 0) }),
-        h('td', { class: 'num', text: String(r.drafts || 0) }),
-        h('td', {}, h('span', { class: 'balanced', style: 'color:' + (r.balanced ? 'var(--green)' : 'var(--pencil)'), text: r.balanced ? '✓ Reconciled' : '✕ Check' })),
-        h('td', {}, h('button', { class: 'btn sm', onclick: () => { showReconciliation(b); }, text: 'Report' }))
-      ]));
-    });
-    card.appendChild(h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, ['Batch', 'Started', 'Label', 'Detected', 'Imported', 'Drafts', 'Reconciled', ''].map(t => h('th', { text: t })))), tb])));
-    if (batches.length > 25) card.appendChild(h('div', { class: 'small dim', style: 'margin-top:8px', text: 'Showing the 25 most recent of ' + batches.length + '.' }));
-    root.appendChild(card);
+    root.appendChild(h('details', { class: 'card', style: 'margin-bottom:16px' }, [
+      h('summary', { class: 'card-h', style: 'cursor:pointer' }, [h('h3', { style: 'display:inline', text: 'Sources' }), h('span', { class: 'tiny dim', style: 'margin-left:10px', text: 'Where each file came from' })]),
+      h('div', { class: 'row', style: 'justify-content:flex-end;padding:8px 16px 0' }, h('button', { class: 'btn sm', onclick: () => exportSourceRegister(sources), text: 'Export' })),
+      h('div', { class: 'tbl-wrap' }, h('table', {}, [h('thead', {}, h('tr', {}, ['Source', 'Type', 'Imported', 'Hash'].map(t => h('th', { text: t })))), tb]))
+    ]));
   }
 }
 
@@ -14990,146 +15053,85 @@ async function admitBatch() {
   // the next visit assumes there is one.
   ensureDurableStorage().catch(() => { });
   go('import');
-  showReconciliation(st.batch);
+  showReconciliation(st.batch, { fresh: true });
 }
 
-// Statuses already covered by their own named row in the reconciliation
-// report — anything in byStatus outside this set gets an "of which" row of
-// its own instead of vanishing into the drafts total. Shared by the modal
-// and the CSV export so the two can never itemise differently.
+// Statuses already covered by their own named row in the exported
+// import-time record — anything in byStatus outside this set gets an
+// "of which" row of its own instead of vanishing into the drafts total.
 const RECONCILIATION_NAMED_STATUSES = ['needs_answer', 'parsing', 'possible_dup', 'answer_conflict', 'active'];
 
-async function showReconciliation(batch) {
+/** Which pile of the review queue a waiting question belongs to — one pile
+    each, so the queue's piles always add up to its total. */
+function queueGroupOf(q) {
+  if (q.status === 'answer_conflict' || q.conflict) return 'conflict';
+  if (q.status === 'possible_dup') return 'dup';
+  if (q.status === 'needs_answer' || q.answerVerified !== 'verified' || !q.correctOptionId) return 'answer';
+  return 'other';
+}
+const QUEUE_GROUP_WORDS = { conflict: 'answers disagree', dup: 'may be duplicates', answer: 'need an answer', other: 'need a look' };
+
+/* Where an import stands now, counted from the bank every time it is opened,
+   in the same four words as everywhere else: Ready, Needs you, Merged,
+   Removed. They add up to the questions the file held. The figures as they
+   were at the moment of import stay in the batch record and in the exported
+   CSV for anybody auditing it; putting them on screen beside today's figures
+   was two different sets of numbers for the same questions. */
+async function showReconciliation(batch, opts) {
   const r = batch.report || {};
-  /* Where this batch's questions stand TODAY, counted now. The table below is a
-     record of the import as it finished and is never recomputed — which is
-     right for an audit trail and wrong for anybody comparing it against the
-     review queue, where the same questions have since been verified, classified
-     and resolved. Showing both, and saying which is which, is the difference
-     between "the numbers disagree" and "here is what you have done since". */
-  let live = null;
-  try {
-    const rows = await DB.byIndex('questions', 'batchId', batch.id);
-    const now = {};
-    rows.forEach(q => { now[q.status] = (now[q.status] || 0) + 1; });
-    live = {
-      total: rows.length, byStatus: now,
-      // What a student asks of an import: how many can I practise, and how
-      // many need me. Counted from the bank as it is now, with the same gate
-      // practice uses — an unfiled question practises, so it is ready.
-      ready: rows.filter(isPracticeEligible).length,
-      waiting: rows.filter(isBlocked).length
-    };
-  } catch (e) { live = null; }
-  const tbl = h('table', { class: 'recon' });
+  let rows = [];
+  try { rows = await DB.byIndex('questions', 'batchId', batch.id); } catch (e) { rows = []; }
+  const t = tally(rows, { merged: r.merged, rejected: r.rejected });
+  const why = { conflict: 0, dup: 0, answer: 0, other: 0 };
+  rows.filter(isBlocked).forEach(q => { why[queueGroupOf(q)]++; });
+  const needsNote = ['answer', 'dup', 'conflict', 'other'].filter(k => why[k]).map(k => why[k] + ' ' + QUEUE_GROUP_WORDS[k]).join(' · ');
+  const fmtN = (n) => Number(n || 0).toLocaleString('en-IN');
   const tb = h('tbody');
-  const row = (label, v, note) => tb.appendChild(h('tr', {}, [h('td', { text: label }), h('td', { class: 'amt', text: String(v || 0) }), h('td', { class: 'tiny dim', text: note || '' })]));
-  row('Raw question candidates detected', r.detected, 'Everything the parser identified');
-  tb.appendChild(h('tr', {}, [h('td', { colspan: '3', class: 'eyebrow', style: 'padding-top:12px' }, 'Accounted for as')]));
-  row('Admitted as Active', r.imported, 'Verified answer, classified, in the practice pool');
-  row('Admitted as drafts / review items', r.drafts, 'In the bank and visible, but out of every test session');
-  const sub = (label, v) => tb.appendChild(h('tr', { class: 'sub-row' }, [
-    h('td', { class: 'sub', text: label }), h('td', { class: 'amt', text: String(v || 0) }), h('td', {})
+  const line = (key, color, note) => tb.appendChild(h('tr', {}, [
+    h('td', {}, [h('span', { class: 'dot', style: 'background:' + color }), STANDING_WORDS[key]]),
+    h('td', { class: 'amt', text: fmtN(t[key]) }),
+    h('td', { class: 'tiny dim', text: note || '' })
   ]));
-  sub('of which — needs answer verification', r.incomplete);
-  sub('of which — possible duplicate', r.possibleDup);
-  sub('of which — answer conflict', r.conflicts);
-  // byStatus covers every non-active status, so anything left over after the
-  // three named lines above gets its own row too — the "of which" rows always
-  // sum to the drafts total above them, nothing is silently folded in.
-  if (r.byStatus) {
-    Object.keys(r.byStatus)
-      .filter(k => RECONCILIATION_NAMED_STATUSES.indexOf(k) < 0)
-      .sort((a, b) => r.byStatus[b] - r.byStatus[a])
-      .forEach(k => sub('of which — ' + ((STATUS[k] || {}).label || k).toLowerCase(), r.byStatus[k]));
-  } else if (r.drafts > r.incomplete + r.possibleDup + r.conflicts) {
-    tb.appendChild(h('tr', {}, [h('td', { colspan: '3', class: 'tiny dim', style: 'padding:4px 0 0 12px' },
-      'This import ran before per-status breakdowns were recorded, so the remaining ' +
-      (r.drafts - r.incomplete - r.possibleDup - r.conflicts) + ' aren’t itemised here — open the Review Queue for their current status.')]));
-  }
-  row('Merged as duplicates', r.merged, 'Copies of a question already in the bank, or earlier in this file — every source kept');
-  row('Rejected during review', r.rejected, 'Logged in the audit trail');
-  tb.appendChild(h('tr', { class: 'total' }, [h('td', { text: 'Total accounted for' }), h('td', { class: 'amt', text: String(r.accounted || 0) }), h('td', {})]));
-  row('Unresolved text blocks (not question candidates)', r.unresolved, 'Reported separately — never counted as questions');
-  tbl.appendChild(tb);
-
-  /* The same questions, counted now. Two columns of the same thing, side by
-     side, so "these numbers do not agree" resolves itself into "this is what I
-     have done since" without anybody having to work it out. */
-  const liveBlock = () => {
-    if (!live) return null;
-    const stillOpen = live.total - (live.byStatus.active || 0);
-    const wasOpen = (r.drafts || 0);
-    const rows = Object.keys(live.byStatus).sort((a, b) => live.byStatus[b] - live.byStatus[a]);
-    const t = h('table', { class: 'recon' });
-    const body = h('tbody');
-    rows.forEach(k => body.appendChild(h('tr', {}, [
-      h('td', { text: (STATUS[k] || {}).label || k }),
-      h('td', { class: 'amt', text: String(live.byStatus[k]) }),
-      h('td', { class: 'tiny dim', text: k === 'active' ? 'in the practice pool' : 'still in the review queue' })
-    ])));
-    body.appendChild(h('tr', { class: 'total' }, [
-      h('td', { text: 'These questions today' }), h('td', { class: 'amt', text: String(live.total) }), h('td', {})
-    ]));
-    t.appendChild(body);
-    const moved = wasOpen - stillOpen;
-    return h('details', { style: 'margin-top:4px' }, [
-      h('summary', { class: 'small', style: 'cursor:pointer' },
-        'Where these questions stand today' + (moved > 0 ? ' — ' + moved + ' cleared since the import' : '')),
-      h('div', { class: 'stack', style: 'margin-top:8px' }, [
-        h('div', { class: 'tiny dim' },
-          'Counted now, from the bank. The report above is what the import found; this is what you have since done with it — which is why the review queue rarely matches it.'),
-        t
-      ])
-    ]);
-  };
-
-  /* Three numbers and the next step first; the full reconciliation — every
-     candidate accounted for — stays one click away for anyone auditing it.
-     The table used to be the whole report, and it told a student whose 100
-     questions were all practising that 0 had been "admitted as Active". */
-  const tile = (label, v, color) => h('div', { class: 'tile', style: 'flex:1;min-width:120px' }, [
-    h('span', { class: 'eyebrow', text: label }), h('b', { style: color ? 'color:' + color : '', text: String(v) })
-  ]);
-  const ready = live ? live.ready : (r.imported || 0), waiting = live ? live.waiting : (r.drafts || 0);
+  line('ready', 'var(--green)', '');
+  line('needs', 'var(--amber)', needsNote);
+  line('merged', 'var(--violet)', t.merged ? 'copies folded into another question, every source kept' : '');
+  if (t.removed) line('removed', 'var(--txt-3)', 'archived or rejected');
+  tb.appendChild(h('tr', { class: 'total' }, [h('td', { text: 'Questions in this import' }), h('td', { class: 'amt', text: fmtN(t.total) }), h('td', {})]));
+  const files = (r.sources || []).map(x => x.title).filter(Boolean).join(', ') || batch.label || 'This import';
+  const when = batch.finishedAt || batch.startedAt;
+  const off = r.detected != null && r.detected !== t.total;
   const box = modal({
-    title: 'Import finished', wide: true,
+    title: opts && opts.fresh ? 'Import finished' : 'Import report', wide: true,
     body: h('div', { class: 'stack' }, [
-      h('div', { class: 'row wrap', style: 'gap:10px;align-items:stretch' }, [
-        tile('Ready to practise', ready, 'var(--green)'),
-        tile('Need you', waiting, waiting ? 'var(--amber)' : ''),
-        r.merged ? tile('Merged duplicates', r.merged) : null,
-        r.rejected ? tile('Rejected', r.rejected) : null
-      ].filter(Boolean)),
-      r.balanced ? null : h('div', { class: 'notice bad' }, 'Out of balance by ' + Math.abs((r.detected || 0) - (r.accounted || 0)) + ' — check this batch before relying on it.'),
+      h('div', { class: 'small muted', text: files + (when ? ' · imported ' + fmtDate(when, true) : '') }),
+      h('table', { class: 'recon' }, tb),
+      off ? h('div', { class: 'notice warn small', style: 'margin:0' },
+        'The file held ' + fmtN(r.detected) + ' questions and ' + fmtN(t.total) + ' are accounted for here — ' +
+        (r.detected > t.total ? 'some were deleted from the bank since.' : 'some were added to this import since.')) : null,
+      r.unresolved ? h('div', { class: 'tiny dim', text: fmtN(r.unresolved) + ' block(s) of text in the file were not questions and were skipped.' }) : null,
       h('div', { class: 'row wrap', style: 'gap:8px' }, [
-        ready ? h('button', { class: 'btn primary', onclick: () => { closeTop(); go('practice'); }, text: 'Practise now' }) : null,
-        waiting ? h('button', { class: 'btn', onclick: () => { closeTop(); State.importStep = 'check'; go('import'); }, text: 'Review the ' + waiting + ' waiting' }) : null
-      ].filter(Boolean)),
-      h('details', {}, [
-        h('summary', { class: 'small', style: 'cursor:pointer' }, 'Details'),
-        h('div', { class: 'stack', style: 'margin-top:8px' }, [
-          h('div', { class: 'tiny dim' },
-            'As recorded when this import finished' + (batch.finishedAt ? ' on ' + fmtDate(batch.finishedAt, true) : '') + '.' +
-            (r.balanced ? ' Every candidate is accounted for.' : '')),
-          tbl,
-          liveBlock(),
-          h('div', { class: 'small muted' }, 'Sources in this batch: ' + (r.sources || []).map(s => s.title + ' (' + s.detected + ')').join(' · ')),
-          h('div', { class: 'row' }, [h('button', { class: 'btn sm', onclick: () => exportReconciliation(batch), text: 'Export this report' })])
-        ])
-      ])
+        t.ready ? h('button', { class: 'btn primary', onclick: () => { closeTop(); go('practice'); }, text: 'Practise now' }) : null,
+        t.needs ? h('button', { class: 'btn', onclick: () => { closeTop(); State.importStep = 'check'; go('import'); }, text: 'Review the ' + fmtN(t.needs) }) : null,
+        h('div', { class: 'spacer' }),
+        h('button', { class: 'btn sm ghost', onclick: () => exportReconciliation(batch), text: 'Export' })
+      ].filter(Boolean))
     ])
   });
   function closeTop() { const m = $$('.modal').pop(); if (m && m._close) m._close(null); }
   return box;
 }
-function exportReconciliation(batch) {
+async function exportReconciliation(batch) {
   const r = batch.report || {};
+  let live = [];
+  try { live = await DB.byIndex('questions', 'batchId', batch.id); } catch (e) { live = []; }
+  const t = tally(live, { merged: r.merged, rejected: r.rejected });
   const extraRows = r.byStatus
     ? Object.keys(r.byStatus).filter(k => RECONCILIATION_NAMED_STATUSES.indexOf(k) < 0).sort((a, b) => r.byStatus[b] - r.byStatus[a])
       .map(k => [((STATUS[k] || {}).label || k), r.byStatus[k]])
     : [];
-  const rows = [['Batch', batch.id], ['Label', batch.label || ''], ['Started', batch.startedAt], ['Finished', batch.finishedAt || ''], [], ['Line', 'Count'],
+  const rows = [['Batch', batch.id], ['Label', batch.label || ''], ['Started', batch.startedAt], ['Finished', batch.finishedAt || ''], [],
+  ['Now', 'Count'], ['Ready to practise', t.ready], ['Needs you', t.needs], ['Merged', t.merged], ['Removed', t.removed], ['Questions in this import', t.total], [],
+  ['At the moment of import', 'Count'],
   ['Detected candidates', r.detected], ['Admitted active', r.imported], ['Admitted as drafts/review', r.drafts],
   ['Needs answer verification', r.incomplete], ['Possible duplicates', r.possibleDup], ['Answer conflicts', r.conflicts]]
     .concat(extraRows)
@@ -16458,11 +16460,10 @@ async function markWordingChecked(uuids) {
 /** The checking queue itself, rendered inside Add Questions. */
 const REVIEW_FILTER_TABS = [
   ['all', 'All'],
-  ['answer_conflict', 'Answer conflicts'],
+  ['answer_conflict', 'Answers disagree'],
   ['possible_dup', 'Possible duplicates'],
-  ['needs_answer', 'Needs answer verification'],
-  ['needs_class', 'Unclassified'],
-  ['other', 'Other']
+  ['needs_answer', 'Need an answer'],
+  ['other', 'Need a look']
 ];
 // Persists across renders (like BankState) so switching tabs, or a resolve
 // action that redraws the whole queue, doesn't lose what was ticked.
@@ -16495,19 +16496,22 @@ async function renderReviewQueue(root) {
   }
   const eased = await rejudgeConflictPairs(all);
   if (eased) setTimeout(() => toast(eased + ' answer conflict(s) were only a page number or a word apart — now listed as duplicates to merge.', 'info', 8000), 400);
-  // In the order the questions came in, so a student working from the
-  // source (or an answer key) can keep their place.
-  const queue = all.filter(q => REVIEW_STATUSES.indexOf(q.status) >= 0)
+  // Exactly the questions that cannot be practised yet — the same test the
+  // badge, the Dashboard, the Question Bank and every import report count
+  // by, so the queue's total is the "Needs you" number everywhere. In the
+  // order the questions came in, so a student working from the source (or
+  // an answer key) can keep their place.
+  const queue = all.filter(isBlocked)
     .sort((a, b) => IdRegister.seqOf(a.qid) - IdRegister.seqOf(b.qid));
   // Both banks queue here — a case-study question needing its answer
   // confirmed is confirmed in the same place as any other. Which bank it
   // belongs to changes where it will show up afterwards, so rows say so.
   const caseTitles = new Map((await CaseStudies.byCourse(State.course.id)).map(c => [c.id, c.title || c.csid || 'Untitled']));
-  const conflicts = queue.filter(q => q.status === 'answer_conflict' || q.conflict);
-  const dupes = queue.filter(q => q.status === 'possible_dup');
-  const noAnswer = queue.filter(q => q.status === 'needs_answer');
-  const noClass = queue.filter(q => q.status === 'needs_class');
-  const rest = queue.filter(q => ['answer_conflict', 'possible_dup', 'needs_answer', 'needs_class'].indexOf(q.status) < 0);
+  // One pile each, so the piles add up to the queue.
+  const conflicts = queue.filter(q => queueGroupOf(q) === 'conflict');
+  const dupes = queue.filter(q => queueGroupOf(q) === 'dup');
+  const noAnswer = queue.filter(q => queueGroupOf(q) === 'answer');
+  const rest = queue.filter(q => queueGroupOf(q) === 'other');
 
 
   if (!queue.length) {
@@ -16544,7 +16548,7 @@ async function renderReviewQueue(root) {
   // A tab a person isn't even looking at any more is not a filter worth
   // keeping — if it emptied out entirely, drop back to All rather than show
   // a picker with nothing selected under it.
-  const counts = { all: queue.length, answer_conflict: conflicts.length, possible_dup: dupes.length, needs_answer: noAnswer.length, needs_class: noClass.length, other: rest.length };
+  const counts = { all: queue.length, answer_conflict: conflicts.length, possible_dup: dupes.length, needs_answer: noAnswer.length, other: rest.length };
   if (ReviewQueueState.filter !== 'all' && !counts[ReviewQueueState.filter]) ReviewQueueState.filter = 'all';
 
   const tabsBar = h('div', { class: 'seg', style: 'margin-bottom:14px' });
@@ -16765,15 +16769,15 @@ async function renderReviewQueue(root) {
     function refresh() {
       card.textContent = '';
       card.appendChild(h('div', { class: 'card-h' }, [
-        h('h3', { text: 'Answer conflicts' }),
-        h('span', { class: 'badge b-review', text: pairs.length + (pairs.length === 1 ? ' disagreement' : ' disagreements') }),
-        infoTip('Answer conflicts', h('div', { class: 'stack' }, [
+        h('h3', { text: 'Answers disagree' }),
+        h('span', { class: 'badge b-review', text: pairs.length + ' to settle' }),
+        infoTip('Answers disagree', h('div', { class: 'stack' }, [
           h('div', { class: 'small' }, 'Each pair reads as the same question but disagrees on the right answer — usually the same question imported twice from different papers.'),
           h('div', { class: 'small' }, 'Both records are shown side by side, with nothing picked. Tap the right answer in each. The same answer for both settles the disagreement; different answers keep them as two different questions.'),
           h('div', { class: 'small' }, '“Not the same question” clears the flag without changing either answer — for records that only look alike.')
         ])),
         h('div', { class: 'spacer' }),
-        h('span', { class: 'tiny dim', text: conflicts.length + ' record(s), shown as one row per disagreement' })
+        h('span', { class: 'tiny dim', text: 'between ' + conflicts.length + ' questions' })
       ]));
 
       const toolbar = h('div', { class: 'row wrap', style: 'gap:10px;align-items:center;padding:0 16px 12px' });
@@ -16861,7 +16865,8 @@ async function renderReviewQueue(root) {
 
   function drawTabs() {
     tabsBar.textContent = '';
-    REVIEW_FILTER_TABS.forEach(([key, label]) => {
+    // A pile with nothing in it is not a choice worth offering.
+    REVIEW_FILTER_TABS.filter(([key]) => key === 'all' || counts[key]).forEach(([key, label]) => {
       tabsBar.appendChild(h('button', {
         class: 'chip', 'aria-pressed': String(ReviewQueueState.filter === key),
         onclick: () => { ReviewQueueState.filter = key; drawTabs(); drawSections(); },
@@ -16953,7 +16958,7 @@ async function renderReviewQueue(root) {
           return n + ' answer(s) found in the text — check and confirm them';
         }), text: 'Find ' + readable.length + ' answer' + (readable.length === 1 ? '' : 's') + ' in the text'
       }) : null;
-      section(sectionsBox, 'needs_answer', 'Needs answer verification', noAnswer, {
+      section(sectionsBox, 'needs_answer', 'Need an answer', noAnswer, {
         tip: 'These are held out of practice until an answer is confirmed. Tap the right option to confirm it. An answer already shown in green came from the file.',
         groupActions: () => [readBtn, shown.length ? confirmBtn(noAnswer, 'Confirm ' + shown.length + ' answer' + (shown.length === 1 ? '' : 's') + ' shown') : null].filter(Boolean),
         selectionActions: (picked) => [confirmBtn(picked, 'Confirm answers shown')]
@@ -16981,48 +16986,9 @@ async function renderReviewQueue(root) {
       ].filter(Boolean))));
     }
 
-    if (show('needs_class')) {
-      const hinted = Object.keys(hintsFor(State.course)).length ? noClass.filter(q => suggestDomain(State.course, q.stem + ' ' + q.options.map(o => o.text).join(' ')).domainId) : [];
-      const fileBtns = (list) => {
-        const pickDom = h('select', { class: 'sm', 'aria-label': 'Domain' }, State.course.blueprint.map(d => h('option', { value: d.id }, d.id + ' · ' + d.name)));
-        return [pickDom, h('button', {
-          class: 'btn sm primary', onclick: (e) => runBulk(e.currentTarget, 'Filing', async () => {
-            const n = await fileUnderDomain(uuidsOf(list), pickDom.value);
-            return n + ' filed under ' + pickDom.value;
-          }), text: 'File under this domain'
-        })];
-      };
-      section(sectionsBox, 'needs_class', 'Unclassified — already in practice', noClass, {
-        tip: 'These practise normally. A domain lets them into domain drills and exam-weighted mocks.',
-        groupActions: () => hinted.length ? [h('button', {
-          class: 'btn sm', title: 'Uses the course’s keyword hints. Each is marked as a suggestion you can change.',
-          onclick: (e) => runBulk(e.currentTarget, 'Filing', async () => {
-            const n = await fileUnderDomain(uuidsOf(hinted), null);
-            return n + ' filed by keywords';
-          }), text: 'File ' + hinted.length + ' by keywords'
-        })] : [],
-        selectionActions: (picked) => fileBtns(picked)
-      }, q => quickRow(q,
-        h('div', { class: 'row wrap', style: 'gap:6px' }, State.course.blueprint.map(d => h('button', {
-          class: 'btn sm', title: d.name, onclick: async () => {
-            const fresh = await Questions.get(q.uuid);
-            fresh.domainId = d.id; fresh.classVerified = 'verified';
-            fresh.status = deriveEntryStatus(fresh);
-            await Questions.save(fresh, 'classified');
-            State.invalidate(); toast('Filed under ' + State.domainShort(d.id), 'ok'); State.importStep = 'check'; go('import');
-          }, text: State.domainShort(d.id)
-        })))));
-    }
-
-    if (show('other')) section(sectionsBox, 'other', 'Other review items', rest, {
-      tip: '“Wording unchecked”: the parser was unsure it read the text right — they still practise. Drafts and incomplete parses need opening.',
+    if (show('other')) section(sectionsBox, 'other', 'Need a look', rest, {
+      tip: 'These cannot be practised as they stand: too few options, the wrong number of options for this course, or never finished. Open one to fix it, or archive it.',
       selectionActions: (picked) => [
-        picked.some(q => q.status === 'needs_content') ? h('button', {
-          class: 'btn sm primary', onclick: (e) => runBulk(e.currentTarget, 'Saving', async () => {
-            const n = await markWordingChecked(uuidsOf(picked));
-            return n + ' marked as reading fine';
-          }), text: 'Wording is fine'
-        }) : null,
         h('button', {
           class: 'btn sm', onclick: async (e) => {
             const ok = await confirmBox('Archive ' + picked.length + ' question(s)?', 'They leave the queue and practice, and keep their Question ID and history. Archiving can be undone from the Question Bank.', false, 'Archive');
@@ -20756,7 +20722,10 @@ function browserOnlyRisk(o) {
   if (i.hiddenThisSession) return null;  // "not now" means not now
   if (i.ackedCount !== null && i.ackedCount !== undefined && i.questions <= i.ackedCount + RISK_ACK_GROWTH) return null;
   return {
-    text: i.questions + ' question' + (i.questions === 1 ? '' : 's') + ' saved only in this browser. Clearing browsing data — or the browser clearing it for you — would take them.',
+    // No count of its own: this one counted every record in the database,
+    // merged copies included, and read as a different number from every
+    // other screen's.
+    text: 'Your questions are saved only in this browser. Clearing browsing data — or the browser clearing it for you — would take them.',
     acked: i.ackedCount !== null && i.ackedCount !== undefined
   };
 }
@@ -35425,7 +35394,7 @@ test('A question nobody has filed still practises; one nobody can mark does not'
   const unfiled = gateQ({ domainId: null, status: 'needs_class' });
   assert(isPracticeEligible(unfiled), 'no domain is not a reason to be unable to answer a question');
   assert(isBlocked(unfiled) === false, 'and it is not counted as stuck');
-  assert(REVIEW_STATUSES.indexOf(unfiled.status) >= 0, 'though it is still listed for tidying');
+  eq(standingOf(unfiled), 'ready', 'every count in the app files it under Ready, and the review queue leaves it out');
 
   const shaky = gateQ({ status: 'needs_content' });
   assert(isPracticeEligible(shaky), 'wording nobody has double-checked is still answerable');
@@ -36106,7 +36075,7 @@ test('The dashboard reads the session store once per render', async () => {
   eq(sessionReads, 1, 'one getAll of the session store, not three');
 });
 
-test('Dashboard\'s In review count excludes rejected records', async () => {
+test('Dashboard\'s Needs you count excludes rejected records', async () => {
   // A rejected record's answerVerified stays 'unverified' forever — nobody
   // is ever going to check it — so counting it as waiting for a check would
   // send a student to a review queue with nothing in it. The Unverified tile
@@ -36122,8 +36091,8 @@ test('Dashboard\'s In review count excludes rejected records', async () => {
   try {
     const root = h('div');
     await ROUTES.dashboard(root);
-    const stat = Array.prototype.slice.call(document.querySelectorAll('#band .band-stat')).find(t => t.textContent.indexOf('In review') >= 0);
-    assert(stat, 'the In review count must render');
+    const stat = Array.prototype.slice.call(document.querySelectorAll('#band .band-stat')).find(t => t.textContent.indexOf('Needs you') >= 0);
+    assert(stat, 'the Needs you count must render');
     eq(stat.querySelector('b').textContent, '0', 'a rejected record must not count as merely "not yet checked"');
   } finally {
     await DB.del('questions', q.uuid);
@@ -37062,8 +37031,8 @@ test('The browser-only warning is loud once, then respects being waved away', ()
   // browser and throwing it away afterwards must be able to end it.
   const on = { browserOnly: true, questions: 40, hiddenThisSession: false, ackedCount: null };
   assert(browserOnlyRisk(on), 'a bank with nowhere else to go says so');
-  assert(/40 questions/.test(browserOnlyRisk(on).text), 'and says how much is at stake');
-  eq(browserOnlyRisk(Object.assign({}, on, { questions: 1 })).text.indexOf('1 question saved') === 0, true, 'singular reads properly');
+  assert(/saved only in this browser/.test(browserOnlyRisk(on).text), 'and says what is at stake');
+  assert(!/\d/.test(browserOnlyRisk(on).text), 'without a count of its own, which never matched the counts on every other screen');
 
   eq(browserOnlyRisk(Object.assign({}, on, { browserOnly: false })), null, 'a folder or Drive silences it entirely');
   eq(browserOnlyRisk(Object.assign({}, on, { questions: 0 })), null, 'nothing to lose, nothing to say');
@@ -39231,6 +39200,111 @@ test('The opening screen waits for its own sequence, but never for a tap or a di
     document.querySelectorAll('#splash').forEach(el => el.remove());
     clearTimeout(Splash._t);
     Splash.ready = was;
+  }
+});
+
+/* ---- one tally everywhere ---- */
+
+test('Every question stands in exactly one of Ready, Needs you, Merged or Removed, and they add up', () => {
+  const ok = (extra) => Object.assign(mkQ('tally ' + Math.random(), ['a', 'b'], 0), { answerVerified: 'verified', domainId: 'D1' }, extra);
+  const recs = [
+    ok({ status: 'active' }),
+    ok({ status: 'needs_class', domainId: null }),        // unfiled: it practises
+    ok({ status: 'needs_content' }),                       // unsure wording: it practises
+    ok({ status: 'needs_answer', answerVerified: 'unverified' }),
+    ok({ status: 'possible_dup' }),
+    ok({ status: 'answer_conflict', conflict: true }),
+    ok({ status: 'active', answerVerified: 'unverified' }), // the gate refuses it, whatever its status says
+    ok({ status: 'merged' }),
+    ok({ status: 'archived' }),
+    ok({ status: 'rejected' })
+  ];
+  eq(recs.map(standingOf).join(','), 'ready,ready,ready,needs,needs,needs,needs,merged,removed,removed');
+  recs.forEach(q => eq(isBlocked(q), standingOf(q) === 'needs', 'isBlocked is exactly "Needs you" for ' + q.status));
+  const t = tally(recs, { merged: 5, rejected: 2 });
+  eq([t.ready, t.needs, t.merged, t.removed, t.total].join(','), '3,4,6,4,17', 'what an import settled without a record counts too');
+  eq(t.total, recs.length + 5 + 2, 'and the four always add up to everything brought in');
+});
+
+test('The import report is today’s position, and it adds up to the questions in the file', async () => {
+  const cid = 'test-tally-report-' + Date.now();
+  const batch = { id: 'batch-' + cid, courseId: cid, label: 'tally test', startedAt: nowISO(), finishedAt: nowISO(),
+    report: { detected: 6, imported: 0, drafts: 4, merged: 2, rejected: 0, sources: [{ title: 'tally-file' }] } };
+  const mk = (extra) => Object.assign(mkQ('report tally ' + Math.random(), ['a', 'b'], 0), { courseId: cid, batchId: batch.id, answerVerified: 'verified', domainId: 'D1' }, extra);
+  const recs = [mk({ status: 'active' }), mk({ status: 'needs_class', domainId: null }), mk({ status: 'needs_answer', answerVerified: 'unverified' }), mk({ status: 'merged' })];
+  for (const q of recs) await DB.put('questions', q);
+  try {
+    const p = showReconciliation(batch);
+    await new Promise(r => setTimeout(r, 60));
+    const dlg = document.querySelector('.modal-bg .recon');
+    assert(dlg, 'the report opens');
+    const rows = Array.from(dlg.querySelectorAll('tr')).map(tr => Array.from(tr.children).map(td => td.textContent.trim()).join(' ').trim());
+    assert(rows.some(r => /^Ready to practise 2/.test(r)), 'two practise, the unfiled one included: ' + rows.join(' | '));
+    assert(rows.some(r => /^Needs you 1/.test(r)), 'one needs an answer: ' + rows.join(' | '));
+    assert(rows.some(r => /^Merged 3/.test(r)), 'one merged since, two folded at import: ' + rows.join(' | '));
+    assert(rows.some(r => /^Questions in this import 6/.test(r)), 'and they add up to the six in the file: ' + rows.join(' | '));
+    assert(!/Admitted as|drafts|as recorded/i.test(document.querySelector('.modal-bg').textContent), 'no second, import-time set of figures on screen');
+    document.querySelectorAll('.modal-bg').forEach(m => m.remove());
+    void p;
+  } finally {
+    document.querySelectorAll('.modal-bg').forEach(m => m.remove());
+    for (const q of recs) await DB.del('questions', q.uuid);
+  }
+});
+
+test('The review queue lists exactly what needs you: an unfiled question is not in it', async () => {
+  const cid = 'test-tally-queue-' + Date.now();
+  const was = { course: State.course, filter: ReviewQueueState.filter };
+  const unfiled = Object.assign(mkQ('An unfiled question that practises?', ['a', 'b'], 0), { courseId: cid, qid: 'TQ-Q-000001', status: 'needs_class', answerVerified: 'verified', domainId: null });
+  const noAns = Object.assign(mkQ('A question nobody has answered?', ['a', 'b'], null), { courseId: cid, qid: 'TQ-Q-000002', status: 'needs_answer', domainId: 'D1' });
+  State.course = { id: cid, code: 'TQ', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  ReviewQueueState.filter = 'all';
+  for (const q of [unfiled, noAns]) await DB.put('questions', q);
+  State.invalidate();
+  try {
+    const root = document.createElement('div');
+    await renderReviewQueue(root);
+    const chips = Array.from(root.querySelectorAll('.chip')).map(c => c.textContent);
+    eq(chips.join(' | '), 'All (1) | Need an answer (1)', 'one waiting, one pile, and no empty piles offered');
+    assert(root.textContent.indexOf('An unfiled question') < 0, 'the unfiled question practises, so it is not listed as work');
+    assert(root.textContent.indexOf('A question nobody has answered') >= 0);
+  } finally {
+    State.course = was.course; ReviewQueueState.filter = was.filter;
+    for (const q of [unfiled, noAns]) await DB.del('questions', q.uuid);
+    State.invalidate();
+  }
+});
+
+test('The Question Bank’s Ready count is its unfiltered list, and it offers to file unfiled questions', async () => {
+  const cid = 'test-tally-bank-' + Date.now();
+  const was = { course: State.course, courses: State.courses, bs: Object.assign({}, BankState, { sel: new Set() }) };
+  const mk = (stem, extra) => Object.assign(mkQ(stem, ['a', 'b'], 0), { courseId: cid, answerVerified: 'verified', domainId: 'D1' }, extra);
+  const recs = [
+    mk('Ready and filed?', { status: 'active' }),
+    mk('Ready but unfiled?', { status: 'needs_class', domainId: null }),
+    mk('Waiting for an answer?', { status: 'needs_answer', answerVerified: 'unverified' }),
+    mk('Merged away?', { status: 'merged' }),
+    mk('Archived?', { status: 'archived' })
+  ];
+  State.course = { id: cid, code: 'TB', blueprint: [{ id: 'D1', name: 'One', weight: 100 }] };
+  State.courses = (was.courses || []).concat([State.course]);
+  Object.assign(BankState, { q: '', status: '', domain: '', source: '', batch: '', verif: '', learn: '', diff: '', bank: 'standalone', caseStudy: '', page: 0 });
+  for (const q of recs) await DB.put('questions', q);
+  State.invalidate();
+  try {
+    const root = h('div');
+    await ROUTES.bank(root);
+    const stat = (k) => Array.from(document.querySelectorAll('#band .band-stat')).find(x => x.textContent.indexOf(k) >= 0);
+    eq(stat('Ready to practise').querySelector('b').textContent, '2', 'two practise');
+    eq(stat('Needs you').querySelector('b').textContent, '1', 'one waits in the queue');
+    assert(!stat('Records'), 'no third count of the same questions');
+    assert(/^2 matching/.test(root.textContent.match(/\d+ matching/)[0]), 'the unfiltered list is exactly the Ready count, archived and merged left out');
+    assert(/1 question practise without a domain/.test(root.textContent), 'the unfiled one is offered filing here, not queued');
+  } finally {
+    Object.assign(BankState, was.bs);
+    State.course = was.course; State.courses = was.courses;
+    for (const q of recs) await DB.del('questions', q.uuid);
+    State.invalidate();
   }
 });
 

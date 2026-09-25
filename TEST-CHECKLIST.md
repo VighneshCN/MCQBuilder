@@ -5,7 +5,7 @@ Open the app with `#tools` on the URL (for example `index.html#tools`), then
 that hash is present. The suite runs against a scratch course, so it never
 touches your real bank.
 
-**Current result: 581 passed, 0 failed, of 581.**
+**Current result: 585 passed, 0 failed, of 585.**
 
 Verified against the exact `index.html` in this repository, not merely against
 the source it was built from, and run headlessly in Chromium as well as in the
@@ -263,6 +263,12 @@ nine different requested counts.
 ### The opening screen (1)
 178. The opening screen waits for its own sequence, but never for a tap or a dialog
 
+### One tally (4)
+179. Every question stands in exactly one of Ready, Needs you, Merged or Removed, and they add up
+180. The import report is today's position, and it adds up to the questions in the file
+181. The review queue lists exactly what needs you: an unfiled question is not in it
+182. The Question Bank's Ready count is its unfiltered list, and it offers to file unfiled questions
+
 ### Everything else (5)
 29. Practice settings are per course, app preferences are shared
 34. Appearance resolves Light, Dark and Auto correctly
@@ -341,11 +347,16 @@ Automated tests cannot verify rendering or real browser storage.
 - [ ] Import a file containing the same question twice: one question arrives,
       with two source references. Change the answer on one copy and re-import:
       a conflict is queued instead
-- [ ] The import report shows four tiles and **Practise now** starts a session
+- [ ] The import report shows Ready to practise, Needs you, Merged (and
+      Removed if any) adding up to the questions in the file, and **Practise
+      now** starts a session
+- [ ] The same Ready and Needs you numbers appear on the Dashboard, the
+      Question Bank, Add Questions, the queue's **All** chip, the sidebar badge
+      and the **Your imports** row
 - [ ] Add the same file again: it asks first
 - [ ] Checking queue: **Merge N same-answer copies**, **Find N answers in the
-      text**, **Confirm N answers shown**, **File N by keywords** each settle
-      their group and report a count
+      text**, **Confirm N answers shown** each settle their group and report a
+      count; **File N by keywords** is in the Question Bank
 - [ ] An answer conflict opens with nothing picked; the button names what it
       will do once both are picked
 - [ ] The Question Bank never lists a question still waiting in the queue; its
