@@ -2254,13 +2254,84 @@ const CISA_BLUEPRINT = [
   { id: 'D4', name: 'Information Systems Operations and Business Resilience', weight: 26 },
   { id: 'D5', name: 'Protection of Information Assets', weight: 26 }
 ];
-/** Keyword hints used only to *suggest* a domain; never to mark one verified. */
+/** Keyword hints used only to *suggest* a domain; never to mark one verified.
+    Matched at the start of a word (see suggestDomain), so a stem like
+    "prototyp" still covers prototype/prototyping while "rpo" can no longer
+    fire on "purpose". Hyphens are written as spaces, because normText()
+    turns them into spaces before anything is compared — "follow-up" as a
+    hint could never match. Checked against 1,013 classified CISA-style
+    questions: 74% filed, 86% of those under the right domain, against 13%
+    filed by the list this replaced. */
 const CISA_HINTS = {
-  D1: ['audit charter', 'sampling', 'audit evidence', 'audit risk', 'materiality', 'audit programme', 'audit program', 'caat', 'workpaper', 'irregularit', 'audit plan', 'follow-up', 'independence', 'isaca standard', 'engagement letter'],
-  D2: ['governance', 'it strategy', 'steering committee', 'balanced scorecard', 'enterprise architecture', 'policy', 'organisational structure', 'organizational structure', 'outsourc', 'sla', 'performance measurement', 'portfolio', 'risk management', 'maturity model', 'cobit', 'segregation of duties'],
-  D3: ['sdlc', 'project management', 'feasibility', 'requirements', 'testing', 'uat', 'implementation', 'post-implementation', 'agile', 'waterfall', 'prototyp', 'change control', 'migration', 'acquisition', 'rfp', 'benefits realisation', 'benefits realization'],
-  D4: ['backup', 'bcp', 'disaster recovery', 'rto', 'rpo', 'capacity', 'incident management', 'problem management', 'scheduling', 'help desk', 'service level', 'database administration', 'job scheduling', 'end-user computing', 'resilience', 'availability', 'data centre', 'data center'],
-  D5: ['encryption', 'firewall', 'access control', 'authentication', 'biometric', 'pki', 'certificate', 'malware', 'intrusion', 'penetration test', 'privacy', 'data classification', 'physical security', 'vpn', 'ids', 'ips', 'least privilege', 'siem', 'dlp']
+  D1: [
+    'audit charter', 'charter', 'sampling', 'sample size', 'population', 'substantive', 'compliance test',
+    'attribute sampling', 'variable sampling', 'discovery sampling', 'stratified', 'judgmental', 'judgemental',
+    'stop or go', 'audit evidence', 'evidence', 'audit risk', 'inherent risk', 'control risk', 'detection risk',
+    'materiality', 'material weakness', 'audit programme', 'audit program', 'audit plan', 'risk based audit', 'caat',
+    'computer assisted audit', 'generalized audit software', 'generalised audit software',
+    'integrated test facility', 'test facility', 'itf', 'parallel simulation', 'snapshot', 'embedded audit module',
+    'continuous audit', 'continuous online audit', 'audit hook', 'scarf', 'test data', 're performance', 'workpaper',
+    'working paper', 'irregularit', 'fraud', 'auditee', 'audit report', 'audit finding', 'follow up',
+    'exit interview', 'engagement letter', 'independence', 'due professional care', 'professional care',
+    'isaca standard', 'control self assessment', 'self assessment', 'csa'
+  ],
+  D2: [
+    'governance', 'it strategy', 'strategic plan', 'steering committee', 'balanced scorecard', 'scorecard',
+    'enterprise architecture', 'policy', 'policies', 'organisational structure', 'organizational structure',
+    'outsourc', 'service level agreement', 'sla', 'performance measurement', 'portfolio', 'risk management',
+    'risk appetite', 'risk tolerance', 'risk acceptance', 'risk avoidance', 'risk transfer', 'risk mitigation',
+    'risk treatment', 'risk register', 'maturity model', 'cobit', 'segregation of duties', 'job rotation',
+    'mandatory vacation', 'cross training', 'hiring', 'background check', 'benchmarking', 'corporate governance',
+    'board of directors', 'shareholder', 'stakeholder', 'value delivery', 'business objectives', 'investment',
+    'budget', 'chargeback', 'top management', 'quality management', 'total quality', 'regulatory', 'legislation',
+    'right to audit', 'vendor management', 'third party', 'key performance indicator', 'key risk indicator'
+  ],
+  D3: [
+    'sdlc', 'development life cycle', 'project management', 'project manager', 'feasibility', 'business case',
+    'requirements', 'user acceptance', 'acceptance testing', 'uat', 'unit testing', 'integration testing',
+    'system testing', 'regression testing', 'stress testing', 'white box', 'black box', 'pilot', 'parallel run',
+    'cutover', 'changeover', 'phased', 'implementation', 'post implementation', 'agile', 'scrum', 'waterfall',
+    'spiral model', 'prototyp', 'rapid application development', 'incremental development',
+    'evolutionary development', 'object oriented', 'reengineering', 'reverse engineering', 'change control',
+    'migration', 'data conversion', 'acquisition', 'rfp', 'request for proposal', 'escrow', 'function point', 'pert',
+    'gantt', 'critical path', 'earned value', 'timebox', 'capability maturity', 'cmm', 'benefits realisation',
+    'benefits realization', 'edit check', 'validity check', 'range check', 'limit check', 'reasonableness check',
+    'completeness check', 'existence check', 'check digit', 'control total', 'batch total', 'hash total',
+    'record count', 'input control', 'processing control', 'output control', 'run to run', 'data validation',
+    'electronic data interchange', 'edi', 'electronic commerce', 'e commerce', 'electronic fund transfer', 'eft',
+    'business application', 'decision support', 'expert system', 'erp', 'enterprise resource planning'
+  ],
+  D4: [
+    'backup', 'business continuity', 'bcp', 'continuity plan', 'disaster recovery', 'drp', 'recovery time', 'rto',
+    'recovery point', 'rpo', 'business impact analysis', 'bia', 'hot site', 'warm site', 'cold site', 'mirror site',
+    'reciprocal agreement', 'offsite', 'off site', 'restore', 'raid', 'redundan', 'fault toleran',
+    'high availability', 'downtime', 'capacity', 'performance monitoring', 'incident management',
+    'problem management', 'help desk', 'service desk', 'service level', 'job scheduling', 'scheduling', 'operations',
+    'operator', 'release management', 'patch management', 'configuration management', 'librar', 'database', 'dbms',
+    'data dictionary', 'schema', 'normali', 'referential integrity', 'atomicity', 'data warehouse', 'data mining',
+    'sql', 'structured query', 'relational', 'operating system', 'utility program', 'middleware', 'compiler',
+    'interpreter', 'assembler', 'firmware', 'memory', 'cache', 'cpu', 'processor', 'lan', 'wan', 'topology',
+    'router', 'switch', 'bridge', 'hub', 'repeater', 'modem', 'multiplexer', 'protocol', 'tcp ip', 'osi',
+    'transport layer', 'network layer', 'data link', 'physical layer', 'application layer', 'session layer', 'cable',
+    'fibre', 'fiber', 'twisted pair', 'coaxial', 'attenuation', 'crosstalk', 'bandwidth', 'throughput',
+    'client server', 'virtuali', 'end user computing', 'data centre', 'data center', 'resilience', 'availability'
+  ],
+  D5: [
+    'encryption', 'encrypt', 'decrypt', 'cryptograph', 'cipher', 'firewall', 'access control', 'logical access',
+    'physical access', 'authentication', 'password', 'passphrase', 'token', 'smart card', 'biometric',
+    'false acceptance', 'false rejection', 'pki', 'public key', 'private key', 'certificate', 'digital signature',
+    'message digest', 'non repudiation', 'malware', 'virus', 'worm', 'trojan', 'logic bomb', 'trap door', 'backdoor',
+    'back door', 'spyware', 'ransomware', 'phishing', 'spam', 'social engineering', 'piggybacking', 'tailgating',
+    'eavesdropping', 'sniff', 'spoof', 'masquerad', 'denial of service', 'dos attack', 'brute force',
+    'dictionary attack', 'man in the middle', 'salami', 'intrusion', 'ids', 'ips', 'honeypot', 'penetration test',
+    'vulnerabilit', 'hardening', 'least privilege', 'need to know', 'privilege', 'access control list', 'acl',
+    'single sign on', 'sso', 'kerberos', 'vpn', 'ssl', 'tls', 'ipsec', 'wireless', 'wep', 'wpa', 'dmz', 'proxy',
+    'packet filter', 'stateful', 'antivirus', 'security awareness', 'privacy', 'personal data',
+    'data classification', 'data owner', 'physical security', 'locks', 'badge', 'mantrap', 'cctv', 'security guard',
+    'fire suppression', 'fire detection', 'fire extinguish', 'halon', 'sprinkler', 'smoke detector', 'humidity',
+    'ups', 'uninterruptible', 'forensic', 'chain of custody', 'incident response', 'security incident', 'siem',
+    'dlp', 'data leakage', 'covert channel', 'inference', 'polyinstantiation', 'steganograph'
+  ]
 };
 
 /* DISA is examined against the same five domains, at the same weights, as
@@ -5674,16 +5745,35 @@ function autoLockOrder(stem, options) {
 function optionsPinned(q) {
   return !!q.lockOptionOrder || autoLockOrder(q.stem, q.options);
 }
+/** The hints a course files by. A template course (CISA, DISA) reads its
+    template's current list: nothing in the app edits hints, so a course's
+    stored copy is only ever the list it was created with, and a better list
+    should reach banks that already exist. Only domains the course actually
+    has are used, so a hint can never file a question under a domain the
+    blueprint does not contain. */
+function hintsFor(course) {
+  const t = courseTemplateFor(course && course.code);
+  const src = (t && t.opts && t.opts.hints) || (course && course.hints) || {};
+  const ids = new Set(((course && course.blueprint) || []).map(d => d.id));
+  const out = {};
+  Object.keys(src).forEach(k => { if (!ids.size || ids.has(k)) out[k] = src[k]; });
+  return out;
+}
+/** A domain suggestion from keyword hints, or none. Each hint found at the
+    start of a word scores 1 plus a little for length; the suggestion needs at
+    least one hit and a lead of a full point over the next domain, so a stem
+    that reads as two domains at once is left for a person rather than
+    guessed. */
 function suggestDomain(course, text) {
-  const hints = course.hints || {};
+  const hints = hintsFor(course);
   const t = ' ' + normText(text) + ' ';
-  let best = null, bestScore = 0;
-  for (const dom in hints) {
+  const scores = Object.keys(hints).map(dom => {
     let s = 0;
-    hints[dom].forEach(k => { if (t.indexOf(k) >= 0) s += 1 + k.length / 40; });
-    if (s > bestScore) { bestScore = s; best = dom; }
-  }
-  return bestScore >= 1.5 ? { domainId: best, score: bestScore } : { domainId: null, score: 0 };
+    hints[dom].forEach(k => { if (t.indexOf(' ' + k) >= 0) s += 1 + k.length / 40; });
+    return [dom, s];
+  }).sort((a, b) => b[1] - a[1]);
+  const best = scores[0], second = scores[1] ? scores[1][1] : 0;
+  return best && best[1] >= 1 && best[1] - second >= 1 ? { domainId: best[0], score: best[1] } : { domainId: null, score: 0 };
 }
 function resolveDomain(course, raw) {
   if (!raw) return null;
@@ -5707,7 +5797,9 @@ function resolveDomain(course, raw) {
    correct answer" or "Option A is incorrect". */
 const ANSWER_STATEMENTS = [
   /\b(?:option|choice|alternative|answer)\s*\(?([a-h])\)?\s*(?:is|was)\s+(?:the\s+|he\s+|a\s+)?(?:most\s+)?(?:correct|right|best|appropriate)(?:\s+(?:answer|option|choice|one))?\b/gi,
-  /\b(?:correct|right)\s+(?:answer|option|choice)\s*(?:is|:|-|–)\s*(?:option\s*|choice\s*)?\(?([a-h])\)?(?![a-z0-9])/gi,
+  // Lower-case "a" here is usually the article ("the correct answer is a
+  // combination of…"), so it counts only in brackets or ending the phrase.
+  /\b(?:[Cc]orrect|[Rr]ight)\s+(?:[Aa]nswer|[Oo]ption|[Cc]hoice)\s*(?:is|:|-|–)\s*(?:(?:[Oo]ption|[Cc]hoice)\s*)?(?:\(([a-hA-H])\)|([A-H])(?![A-Za-z0-9])|([b-h])(?![a-z0-9])|(a)(?=\s*(?:$|[.,;:!?)\]])))/g,
   /\b(?:hence|thus|therefore|so)\b,?\s+(?:option\s*|choice\s*)?\(?([a-h])\)?\s+is\s+(?:the\s+)?(?:correct\s+|right\s+)?answer\b/gi,
   /\(([a-h])\)\s+is\s+(?:the\s+)?(?:correct|right)\b/gi,
   // Case-sensitive on purpose: "Answer: B" is a statement, "answer: a user…" is prose.
@@ -5720,7 +5812,7 @@ function answerStatementsIn(text) {
   ANSWER_STATEMENTS.forEach(rx => {
     rx.lastIndex = 0;
     let m;
-    while ((m = rx.exec(t))) out.push({ letter: (m[1] || m[2]).toUpperCase(), index: m.index, quote: m[0].trim() });
+    while ((m = rx.exec(t))) out.push({ letter: m.slice(1).find(Boolean).toUpperCase(), index: m.index, quote: m[0].trim() });
   });
   return out.sort((a, b) => a.index - b.index);
 }
@@ -10231,6 +10323,7 @@ async function runSession(s) {
     if (q.imageId) shell.appendChild(h('div', { id: 'qimg', class: 'imgstage', style: 'margin-bottom:14px' }));
 
     const list = h('div', { class: 'opts' });
+    const srcLetters = revealed && sourceLettersNeeded(q, order);
     opts.forEach((o, i) => {
       const chosen = rec && rec.selectedOptionId === o.id;
       let cls = 'opt';
@@ -10241,7 +10334,8 @@ async function runSession(s) {
       list.appendChild(h('button', {
         class: cls, 'aria-pressed': String(!!chosen), disabled: revealed,
         onclick: () => choose(q, o.id)
-      }, [h('span', { class: 'lt', text: letterOf(i) }), h('span', { style: 'flex:1', text: o.text })]));
+      }, [h('span', { class: 'lt', text: letterOf(i) }), h('span', { style: 'flex:1', text: o.text }),
+        srcLetters ? h('span', { class: 'tiny dim', style: 'white-space:nowrap', title: 'The explanation uses the source’s letters', text: sourceLetterOf(q, o.id) + ' in source' }) : null].filter(Boolean)));
     });
     shell.appendChild(list);
 
@@ -10447,6 +10541,19 @@ async function runSession(s) {
     precomputed s.lastMile.reasons[q.uuid] — a mock never has one, and
     this function has no reason to know Session's shape to find out.
     Returns an array of nodes for the caller to place. */
+/* Explanations written by a source name options by the source's own letters —
+   "Option D is the correct answer", "Choice B is incorrect". A shuffle
+   re-letters the options on screen, so where an explanation cites letters and
+   the order on screen is not the source's, the reveal also shows each
+   option's letter as printed. The answer key is never at risk either way: it
+   is held by option, not by letter. */
+const CITES_LETTER_RX = /\b(?:options?|choices?|alternatives?)\s*\(?[a-h]\)?(?![a-z0-9])|\b(?:answer|ans)\s*(?:is|:)\s*(?:\([a-h]\)|[a-h](?=\s*(?:$|[.,;:!?)\]])))|\(\s*[a-h]\s*\)/i;
+function sourceLettersNeeded(q, order) {
+  if (!order || !q || order.every((id, i) => q.options[i] && q.options[i].id === id)) return false;
+  return [q.explanation || ''].concat((q.options || []).map(o => o.rationale || '')).some(t => CITES_LETTER_RX.test(t));
+}
+function sourceLetterOf(q, optionId) { return letterOf((q.options || []).findIndex(o => o.id === optionId)); }
+
 function revealPanel(q, rec, order, opts) {
   const cfg = opts || {};
   const nodes = [];
@@ -10460,7 +10567,7 @@ function revealPanel(q, rec, order, opts) {
         class: 'badge b-review', title: 'Why this question is in your last-mile list',
         text: (LASTMILE_REASONS.find(r => r[0] === cfg.lastMileReason) || [, 'On your list'])[1]
       }) : null,
-    h('span', { class: 'small muted', text: 'Answer: ' + letterOf(order.indexOf(q.correctOptionId)) + (rec ? ' · ' + fmtDur(rec.ms) : '') }),
+    h('span', { class: 'small muted', text: 'Answer: ' + letterOf(order.indexOf(q.correctOptionId)) + (sourceLettersNeeded(q, order) ? ' (' + sourceLetterOf(q, q.correctOptionId) + ' in the source)' : '') + (rec ? ' · ' + fmtDur(rec.ms) : '') }),
     q.srReason ? h('span', { class: 'small dim', text: '· ' + q.srReason }) : null
   ]));
   if (cfg.interactive && rec && !rec.correct) {
@@ -16289,7 +16396,7 @@ async function renderReviewQueue(root) {
     }
 
     if (show('needs_class')) {
-      const hinted = State.course.hints ? noClass.filter(q => suggestDomain(State.course, q.stem + ' ' + q.options.map(o => o.text).join(' ')).domainId) : [];
+      const hinted = Object.keys(hintsFor(State.course)).length ? noClass.filter(q => suggestDomain(State.course, q.stem + ' ' + q.options.map(o => o.text).join(' ')).domainId) : [];
       const fileBtns = (list) => {
         const pickDom = h('select', { class: 'sm', 'aria-label': 'Domain' }, State.course.blueprint.map(d => h('option', { value: d.id }, d.id + ' · ' + d.name)));
         return [pickDom, h('button', {
@@ -27289,6 +27396,9 @@ test('An answer the source states only in prose is read — and "not the correct
   eq(recoverStatedAnswer(mk('Option B is correct, but option C is the right answer.')).answerLetter, '', 'two statements that disagree name none');
   eq(recoverStatedAnswer(mk('Option E is the correct answer.')).answerLetter, '', 'a letter the question does not have is ignored');
   eq(recoverStatedAnswer(mk('The answer: a user must log in first.')).answerLetter, '', 'prose after "answer:" is not a letter');
+  eq(recoverStatedAnswer(mk('The correct answer is a combination of controls.')).answerLetter, '', 'nor is the article "a"');
+  eq(recoverStatedAnswer(mk('The correct answer is a.')).answerLetter, 'A', 'though "a" ending the phrase is the letter');
+  eq(recoverStatedAnswer(mk('The correct answer is b because Beta fits.')).answerLetter, 'B', 'and other letters need no such care');
   const g = recoverStatedAnswer(mk('', ['Special training', 'Annual conferences', 'Competitive salaries', 'Flexible work schedules Option D is the correct answer. Flexibility motivates most.']));
   eq(g.answerLetter, 'D', 'an answer run onto the last option is found there');
   eq(g.options[3].text, 'Flexible work schedules', 'and the explanation is split back off the option');
@@ -28809,6 +28919,16 @@ test('Unreliable domains are left unmapped rather than guessed', () => {
   eq(vague.domainId, null, 'a stem with no signal must stay unmapped');
   const clear = suggestDomain(c, 'The auditor reviews the firewall rule base and intrusion detection alerts for least privilege.');
   eq(clear.domainId, 'D5');
+});
+
+test('Keyword hints match at word starts, and a template course files by its template’s current list', () => {
+  const bare = (hints) => ({ blueprint: CISA_BLUEPRINT, hints });
+  eq(suggestDomain(bare({ D4: ['rpo', 'uat'] }), 'What is the purpose of an evaluation?').domainId, null, '"rpo" must not fire inside "purpose", nor "uat" inside "evaluation"');
+  eq(suggestDomain(bare({ D4: ['rpo'] }), 'The RPO is agreed with the business.').domainId, 'D4', 'but still fires on the word itself');
+  eq(suggestDomain({ code: 'CISA', blueprint: CISA_BLUEPRINT, hints: { D4: ['firewall'] } }, 'Which firewall rule should be reviewed first?').domainId, 'D5', 'a CISA course uses the current CISA hints, not the copy stored when it was made');
+  eq(suggestDomain({ code: 'DISA', blueprint: [{ id: 'GEN', name: 'General', weight: 100 }] }, 'Which firewall rule should be reviewed first?').domainId, null, 'and never files under a domain the course does not have');
+  eq(suggestDomain(bare({ D1: ['sampling'], D2: ['governance'] }), 'Sampling and governance both matter here.').domainId, null, 'two domains level with each other is left for a person');
+  assert(Object.keys(CISA_HINTS).every(d => CISA_HINTS[d].every(k => k.indexOf('-') < 0)), 'no hint contains a hyphen — normText turns hyphens into spaces, so it could never match');
 });
 
 /* ---- ids ---- */
@@ -31069,6 +31189,20 @@ test('The Question Bank lists only questions that are settled; pending ones are 
   assert(/const all = sideAll\.filter\(q => !isBlocked\(q\)\)/.test(src), 'blocked questions are kept out of the bank’s list');
   assert(!/bulkVerify|'Activate'|text: 'Verify answers'/.test(src), 'and the bank no longer offers to verify or activate');
   assert(/Select all ' \+ list\.length \+ ' matching'/.test(src), 'a selection can reach every match, not just the page');
+});
+test('At the reveal, options show their source letter only when the explanation cites letters and the order moved', () => {
+  const q = mkQ('Which is best?', ['Alpha', 'Beta', 'Gamma', 'Delta'], 3);
+  const src = q.options.map(o => o.id), moved = [src[3], src[0], src[1], src[2]];
+  q.explanation = 'Option D is the correct answer. Choice B is incorrect because…';
+  assert(sourceLettersNeeded(q, moved), 'cited letters plus a shuffled order: show them');
+  assert(!sourceLettersNeeded(q, src), 'the source’s own order needs no key');
+  eq(sourceLetterOf(q, moved[0]), 'D', 'the option shown first was D in the source');
+  q.explanation = 'Delta is the only one that fits.';
+  assert(!sourceLettersNeeded(q, moved), 'an explanation that names no letters needs no key');
+  q.options[1].rationale = 'Unlike option (c), this one…';
+  assert(sourceLettersNeeded(q, moved), 'a per-option reason citing a letter counts too');
+  q.options[1].rationale = 'The answer is a matter of scope.';
+  assert(!sourceLettersNeeded(q, moved), '"answer is a matter" is prose, not a letter');
 });
 test('Restoring a question asks the practice gate rather than a copy of it', () => {
   const base = () => { const q = mkQ('q', ['a', 'b'], 0); q.status = 'answer_conflict'; q.answerVerified = 'verified'; return q; };
