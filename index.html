@@ -2263,14 +2263,19 @@ const CISA_HINTS = {
   D5: ['encryption', 'firewall', 'access control', 'authentication', 'biometric', 'pki', 'certificate', 'malware', 'intrusion', 'penetration test', 'privacy', 'data classification', 'physical security', 'vpn', 'ids', 'ips', 'least privilege', 'siem', 'dlp']
 };
 
-const DISA_BLUEPRINT = [
-  { id: 'GEN', name: 'General', weight: 100 }
-];
+/* DISA is examined against the same five domains, at the same weights, as
+   CISA (the owner's ruling). It used to ship a single "General" placeholder at
+   100%, which meant no keyword hints, no domain drill and no weighted mock —
+   and every imported question landed unclassified for a student to file by
+   hand. Copied rather than shared, so editing one course's blueprint can never
+   reach into the other's. */
+const DISA_BLUEPRINT = CISA_BLUEPRINT.map(d => Object.assign({}, d));
 
 // Optional one-click starting points offered from the "Add a course" dialog.
 // Picking one creates and saves that course immediately — it's a shortcut,
 // not a default: any other course is still built from a blank form with no
-// CISA/DISA assumption.
+// CISA/DISA assumption. Typing one of these codes into that blank form fills
+// it in the same way (see courseDialog), since that is what people actually do.
 const COURSE_TEMPLATES = [
   {
     code: 'CISA', name: 'Certified Information Systems Auditor', blueprint: CISA_BLUEPRINT,
@@ -2279,12 +2284,61 @@ const COURSE_TEMPLATES = [
   },
   {
     code: 'DISA', name: 'DISA AT (Diploma in Information System Audit)', blueprint: DISA_BLUEPRINT,
-    opts: {
-      defaults: { mockCount: 200, mockMinutes: 240 },
-      notes: 'This course starts with a single placeholder domain because the source mock papers aren\u2019t organised by module. Edit the blueprint in Settings once you know the breakdown you want to track against.'
-    }
+    // 200 marks, 60% flat to pass
+    opts: { hints: CISA_HINTS, defaults: { mockCount: 200, mockMinutes: 240, passPct: 60 } }
   }
 ];
+/** The quick-add template a course code names, if any. */
+function courseTemplateFor(code) {
+  const c = String(code || '').trim().toUpperCase();
+  return c ? COURSE_TEMPLATES.find(t => t.code === c) || null : null;
+}
+/** A course still on the single "General" domain every DISA course was created
+    with before the template carried the real blueprint. */
+function onPlaceholderBlueprint(course) {
+  const bp = (course && course.blueprint) || [];
+  return bp.length === 1 && bp[0].id === 'GEN';
+}
+/** Put a course that is still on the old placeholder onto its template's real
+    blueprint, and re-file its questions under the new domains.
+
+    Everything filed under the placeholder was filed under a domain that
+    carried no information, so it is re-suggested from the keyword hints
+    exactly as a fresh import would be — marked as a suggestion, never as
+    verified. A question the hints cannot place becomes Unclassified, which
+    still practises. Nothing about answers, pairings or history is touched. */
+async function applyCourseTemplate(course) {
+  const t = courseTemplateFor(course.code);
+  if (!t) return null;
+  const before = { blueprint: course.blueprint, hints: !!course.hints };
+  course.blueprint = t.blueprint.map(d => Object.assign({}, d));
+  course.hints = (t.opts && t.opts.hints) || course.hints;
+  // A default the student already changed stays theirs.
+  course.defaults = Object.assign({}, (t.opts && t.opts.defaults) || {}, course.defaults || {});
+  if (course.notes && /placeholder domain/i.test(course.notes)) course.notes = '';
+  await DB.put('courses', course);
+  const ids = new Set(course.blueprint.map(d => d.id));
+  const mine = await Questions.byCourse(course.id);
+  let refiled = 0, unplaced = 0;
+  for (const q of mine) {
+    if (q.domainId && ids.has(q.domainId)) continue;
+    const sug = suggestDomain(course, q.stem + ' ' + (q.options || []).map(o => o.text).join(' '));
+    q.domainId = sug.domainId || null;
+    q.domainSuggested = !!sug.domainId;
+    q.classVerified = 'unverified';
+    if (q.domainId) refiled++; else unplaced++;
+    // Only the two statuses a domain decides move; a question held for its
+    // answer, a pairing or its wording keeps that reason.
+    if (q.status === 'active' || q.status === 'needs_class') q.status = deriveEntryStatus(q);
+    q.updatedAt = nowISO();
+    await DB.put('questions', q);
+  }
+  await audit('edit', 'course', course.id, before, { blueprint: course.blueprint, refiled, unplaced }, 'Standard ' + t.code + ' blueprint applied');
+  State.courses = await DB.all('courses');
+  if (State.course && State.course.id === course.id) State.course = State.courses.find(c => c.id === course.id) || State.course;
+  State.invalidate();
+  return { refiled, unplaced, code: t.code };
+}
 
 /* ---------- Question ID allocation register ----------
    Human-readable IDs are allocated only at admission, are never reused and
@@ -2783,10 +2837,46 @@ function classifyPair(a, b, sim) {
   if (sim.score >= 0.62) return 'possible';
   return 'distinct';
 }
+/* Whether two records mark the same option as correct, when that option is not
+   worded identically in both. A copy extracted from a different page carries a
+   trailing page number ("Optimize performance. 410 Mock Assessment Test
+   Paper-6"), or drops a word, and comparing the exact texts called every such
+   pair an answer conflict — 34 false ones in a single mock-paper import. So
+   the options are aligned the way a person would align them: each record's
+   correct option must be the other record's closest option, and uniquely so,
+   by word overlap measured against the shorter text. Digits and single letters
+   count as words, because an option can be "3 years" or "C"; that is also what
+   keeps "1 - 3 years" against "3 years" a disagreement — "3 years" is exactly
+   as close to "3 - 5 years", and a tie is never a match. */
+function optionWords(o) { return new Set(normOptText(o && o.text).split(' ').filter(Boolean)); }
+function closestOption(o, options) {
+  const a = optionWords(o);
+  // "Trap doors" and "Trapdoors" share no word, but they are one option.
+  const joined = (x) => normOptText(x && x.text).replace(/ /g, '');
+  const aj = joined(o);
+  let best = null, bestScore = 0, tie = false;
+  (options || []).forEach(p => {
+    const b = optionWords(p);
+    let inter = 0;
+    a.forEach(w => { if (b.has(w)) inter++; });
+    const s = aj && aj === joined(p) ? 1 : inter / Math.max(1, Math.min(a.size, b.size));
+    if (s > bestScore + 1e-9) { best = p; bestScore = s; tie = false; }
+    else if (s > 0 && Math.abs(s - bestScore) <= 1e-9) tie = true;
+  });
+  return !tie && bestScore >= 0.8 ? best : null;
+}
+function sameOptionMarked(a, b) {
+  const ca = (a.options || []).find(o => o.id === a.correctOptionId);
+  const cb = (b.options || []).find(o => o.id === b.correctOptionId);
+  if (!ca || !cb) return false;
+  const ab = closestOption(ca, b.options), ba = closestOption(cb, a.options);
+  return !!ab && !!ba && ab.id === cb.id && ba.id === ca.id;
+}
 function answersConflict(a, b) {
   const x = simParts(a).ansText, y = simParts(b).ansText;
   if (!x || !y) return false;
-  return x !== y;
+  if (x === y) return false;
+  return !sameOptionMarked(a, b);
 }
 
 /* ---------- blocking index so detection stays fast at scale ---------- */
@@ -5295,6 +5385,17 @@ const IMPORT_FIELDS = [
     note: 'A letter (B), or the full text of the right option. Without it the question is admitted needing answer verification and cannot be practised until you set it.',
     cols: ['answer', 'correct', 'correct answer', 'correctanswer', 'key', 'ans', 'correct option'],
     json: ['answer', 'correct'] },
+  /* A file can say which of its own answers it is unsure of. Such an answer is
+     kept and shown, but waits in the review queue for a person to confirm it,
+     whatever the batch's "trust printed answers" setting says — so one file
+     can carry both the answers its source printed and the ones somebody had
+     to work out, without the second kind being trusted along with the first. */
+  { f: 'checkAnswer',     label: 'Answer needs checking',
+    note: 'yes / true / 1 when this answer should be confirmed by a person before it is practised. It is kept and pre-selected, and waits in the review queue.',
+    cols: ['check answer', 'answer check', 'verify answer', 'needs checking'], json: ['checkAnswer', 'answerCheck'] },
+  { f: 'checkNote',       label: 'Why it needs checking',
+    note: 'Shown next to the answer in the review queue.',
+    cols: ['check note', 'answer note', 'why check'], json: ['checkNote', 'answerNote'] },
   { f: 'explanation',     label: 'Explanation',
     cols: ['explanation', 'rationale', 'reason', 'solution', 'justification'],
     json: ['explanation', 'rationale'] },
@@ -5464,6 +5565,7 @@ function rowsToCandidates(rows, opts) {
       srcModule: get('module'), srcChapter: get('chapter'), srcSection: get('section'),
       difficulty: (get('difficulty') || '').toLowerCase(), tags: get('tags'), marks: get('marks'),
       lockOptionOrder: /^(1|y|yes|true)$/i.test(get('lockOptionOrder')),
+      checkAnswer: /^(1|y|yes|true)$/i.test(get('checkAnswer')), checkNote: get('checkNote'),
       caseRef: caseRef || '', caseSeq: caseRef ? caseByRef.get(caseRef).seq : 0,
       conf: { stem: 1, options: opts.length >= 2 ? 1 : 0.2, answer: letter ? 1 : (ansRaw ? 0.5 : 0), explanation: get('explanation') ? 1 : 0 }
     });
@@ -5528,6 +5630,8 @@ function jsonToCandidates(json) {
       difficulty: pick('difficulty').toLowerCase(), marks: pick('marks'),
       tags: Array.isArray(tagsRaw) ? tagsRaw.join(',') : (tagsRaw == null ? '' : String(tagsRaw)),
       lockOptionOrder: !!jsonPick(o, 'lockOptionOrder'),
+      checkAnswer: /^(1|y|yes|true)$/i.test(String(jsonPick(o, 'checkAnswer') == null ? '' : jsonPick(o, 'checkAnswer'))),
+      checkNote: pick('checkNote'),
       caseRef: caseRef || '', caseSeq: caseSeq || 0,
       conf: { stem: 1, options: 1, answer: letter ? 1 : (ansRaw ? 0.5 : 0), explanation: pick('explanation') ? 1 : 0 }
     });
@@ -5595,7 +5699,79 @@ function resolveDomain(course, raw) {
   return d ? d.id : null;
 }
 
+/* A source that states its answer in prose rather than in a field of its own:
+   "Option D is the correct answer", "the correct answer is (b)", "Hence b is
+   answer" — inside the explanation, or run onto the end of the last option
+   when a PDF extraction glued the explanation to it (a whole mock paper can
+   arrive that way). None of these patterns can fire on "Option C is not the
+   correct answer" or "Option A is incorrect". */
+const ANSWER_STATEMENTS = [
+  /\b(?:option|choice|alternative|answer)\s*\(?([a-h])\)?\s*(?:is|was)\s+(?:the\s+|he\s+|a\s+)?(?:most\s+)?(?:correct|right|best|appropriate)(?:\s+(?:answer|option|choice|one))?\b/gi,
+  /\b(?:correct|right)\s+(?:answer|option|choice)\s*(?:is|:|-|–)\s*(?:option\s*|choice\s*)?\(?([a-h])\)?(?![a-z0-9])/gi,
+  /\b(?:hence|thus|therefore|so)\b,?\s+(?:option\s*|choice\s*)?\(?([a-h])\)?\s+is\s+(?:the\s+)?(?:correct\s+|right\s+)?answer\b/gi,
+  /\(([a-h])\)\s+is\s+(?:the\s+)?(?:correct|right)\b/gi,
+  // Case-sensitive on purpose: "Answer: B" is a statement, "answer: a user…" is prose.
+  /\b[Aa]ns(?:wer)?\s*[:\-–]\s*(?:\(([a-hA-H])\)|([A-H])(?![A-Za-z0-9]))/g
+];
+/** Every option letter the text states as the answer, with where it starts. */
+function answerStatementsIn(text) {
+  const out = [];
+  const t = String(text || '');
+  ANSWER_STATEMENTS.forEach(rx => {
+    rx.lastIndex = 0;
+    let m;
+    while ((m = rx.exec(t))) out.push({ letter: (m[1] || m[2]).toUpperCase(), index: m.index, quote: m[0].trim() });
+  });
+  return out.sort((a, b) => a.index - b.index);
+}
+/** Read an answer the source states in prose, when no answer was found any
+    other way. Only a statement that is unambiguous counts — every one found
+    must name the same option, and it must be one the question has. A letter
+    found this way is the source's own answer, so the trust setting still
+    decides whether it is taken as verified. Found glued to an option, the
+    explanation is split back off it when the split is plain (the option text
+    before the statement is no longer than an option should be); otherwise
+    the options are marked as needing a look. Records what it did on the
+    candidate, so the staging row can say where the answer came from. */
+function recoverStatedAnswer(c) {
+  if (!c || c._answerChecked) return c;
+  c._answerChecked = true;
+  const opts = c.options || [];
+  if (c.answerLetter || opts.length < 2) return c;
+  if (c.answerRaw && opts.some(o => normText(o.text) === normText(c.answerRaw))) return c;
+  const valid = (L) => opts.some(o => String(o.letter || '').toUpperCase() === L) || LETTERS.indexOf(L) < opts.length;
+  const inExpl = answerStatementsIn(c.explanation);
+  const inOpts = [];
+  opts.forEach((o, i) => answerStatementsIn(o.text).forEach(s => inOpts.push(Object.assign({ opt: i }, s))));
+  const all = inExpl.concat(inOpts);
+  const letters = Array.from(new Set(all.map(s => s.letter)));
+  if (letters.length !== 1 || !valid(letters[0])) return c;
+  c.answerLetter = letters[0];
+  c.conf = Object.assign({}, c.conf, { answer: 0.9 });
+  const first = (inOpts[0] || inExpl[0]);
+  c.answerQuote = first.quote;
+  c.answerFound = inOpts.length ? 'read from the text run onto an option' : 'read from the explanation';
+  if (inOpts.length) {
+    // Split an explanation glued onto an option back off it, when plain.
+    const s = inOpts[0], o = opts[s.opt];
+    const before = String(o.text).slice(0, s.index).trim();
+    const others = opts.filter((x, i) => i !== s.opt).map(x => String(x.text || '').length);
+    const limit = Math.max(40, (others.length ? Math.max.apply(null, others) : 60) * 2 + 20);
+    if (before && before.length <= limit) {
+      const glued = String(o.text).slice(s.index).trim();
+      o.text = before.replace(/[\s,;:–-]+$/, '');
+      c.explanation = glued + (String(c.explanation || '').trim() ? '\n\n' + c.explanation : '');
+      c.answerFound = 'read from an explanation that had run onto option ' + (o.letter || letterOf(s.opt)) + ', now split off it';
+    } else {
+      c.conf.options = Math.min(c.conf.options == null ? 1 : c.conf.options, 0.6);
+      c.optionsNote = 'Option ' + (o.letter || letterOf(s.opt)) + ' seems to have its explanation run onto it — check its wording.';
+    }
+  }
+  return c;
+}
+
 function candidateToQuestion(c, ctx) {
+  recoverStatedAnswer(c);
   const q = blankQuestion(ctx.courseId);
   q.stem = String(c.stem || '').trim();
   q.options = (c.options || []).map(o => makeOption(o.text, null, o.rationale));
@@ -5660,8 +5836,10 @@ function candidateToQuestion(c, ctx) {
   // nobody has confirmed is not that — and admitBatch only ever re-derives
   // 'draft', so deciding the status first left those records held out of
   // practice by the gate while every counter reported them as practising.
-  if (q.correctOptionId && c.conf && c.conf.answer >= 0.8 && ctx.trustSourceAnswers) {
-    q.answerVerified = 'verified'; q.verifiedAt = nowISO(); q.verifyNote = 'Answer stated by source';
+  if (q.correctOptionId && c.checkAnswer) {
+    q.verifyNote = String(c.checkNote || '').trim() || 'The file marked this answer for checking.';
+  } else if (q.correctOptionId && c.conf && c.conf.answer >= 0.8 && ctx.trustSourceAnswers) {
+    q.answerVerified = 'verified'; q.verifiedAt = nowISO(); q.verifyNote = c.answerFound ? 'Answer stated by source (' + c.answerFound + ')' : 'Answer stated by source';
   }
   if (q.options.length < 2) q.status = 'parsing';
   else if (!q.correctOptionId || q.answerVerified !== 'verified') q.status = 'needs_answer';
@@ -8048,7 +8226,24 @@ ROUTES.dashboard = async (root) => {
   // relevant while the blueprint really is just that placeholder — it goes
   // stale the moment real domains replace it, so it's shown only up to that
   // point, not forever.
-  if (State.course.notes && State.course.blueprint.length === 1) {
+  // A DISA course made before the template carried its real blueprint says
+  // so here, with the fix one click away rather than behind Settings.
+  if (onPlaceholderBlueprint(State.course) && courseTemplateFor(State.course.code)) {
+    const t = courseTemplateFor(State.course.code);
+    root.appendChild(h('div', { class: 'notice small row wrap', style: 'margin-bottom:16px;gap:10px;align-items:center' }, [
+      h('span', { style: 'flex:1;min-width:220px', text: 'This course is still on a single “General” domain, so domain drills and exam-weighted mocks cannot work. The standard ' + t.code + ' blueprint has five domains with their exam weights, and files your questions under them for you.' }),
+      h('button', {
+        class: 'btn sm primary', onclick: async (e) => {
+          e.currentTarget.disabled = true;
+          const r = await applyCourseTemplate(State.course);
+          if (!r) return;
+          renderShell();
+          toast('Now on the standard ' + r.code + ' domains. ' + r.refiled + ' question(s) filed under a domain' + (r.unplaced ? ', ' + r.unplaced + ' left Unclassified (still practising)' : '') + '.', 'ok', 8000);
+          go('dashboard');
+        }, text: 'Use the standard domains'
+      })
+    ]));
+  } else if (State.course.notes && State.course.blueprint.length === 1) {
     root.appendChild(h('div', { class: 'notice small', style: 'margin-bottom:16px' }, State.course.notes));
   }
 
@@ -13054,25 +13249,37 @@ async function sourceDialog(files) {
   let trustTouched = false;
   const trustHint = h('span', { class: 'dim tiny' });
   function previewTrustDefault() {
-    let total = 0, highConf = 0;
+    let total = 0, withAnswer = 0, highConf = 0, missing = 0;
     for (const f of files) {
       try {
         let out;
         if (f.kind === 'rows') out = rowsToCandidates(f.rows);
         else if (f.kind === 'json') out = jsonToCandidates(f.json);
         else out = parseText(f.text, { template: tmpl.value });
-        (out.candidates || []).forEach(c => { total++; if (c.conf && c.conf.answer >= 0.8) highConf++; });
+        (out.candidates || []).forEach(c => {
+          total++;
+          recoverStatedAnswer(c);
+          // A question with no answer at all has nothing for this setting to
+          // trust, and one the file flags for checking is never trusted — so
+          // neither can argue against ticking it for everything else. Counting
+          // them used to open this unticked for a file with 842 printed
+          // answers and 517 blanks, filing all 842 for checking by hand.
+          if (c.checkAnswer) return;
+          if (!c.answerLetter && !c.answerRaw) { missing++; return; }
+          withAnswer++;
+          if (c.conf && c.conf.answer >= 0.8) highConf++;
+        });
       } catch (e) { /* best-effort preview only — a file that fails here still gets a real attempt at "Extract questions" */ }
     }
-    return { total, highConf };
+    return { total, withAnswer, highConf, missing };
   }
   function refreshTrustDefault() {
     if (hasSavedTrust || trustTouched) return;
-    const { total, highConf } = previewTrustDefault();
-    trust.checked = total > 0 && highConf === total;
-    trustHint.textContent = total
-      ? (trust.checked ? ' — every detected answer looks confidently printed, so this opens ticked'
-        : ' — ' + (total - highConf) + ' of ' + total + ' detected answers had to be inferred, so this opens off')
+    const { withAnswer, highConf, missing } = previewTrustDefault();
+    trust.checked = withAnswer > 0 && highConf === withAnswer;
+    trustHint.textContent = withAnswer
+      ? (trust.checked ? ' — every answer in this file is confidently printed' + (missing ? '; the ' + missing + ' with no answer wait for you either way' : '')
+        : ' — ' + (withAnswer - highConf) + ' of ' + withAnswer + ' answers had to be inferred, so this starts off')
       : '';
   }
   const trust = h('input', {
@@ -13286,17 +13493,76 @@ async function columnMapDialog(rows, autoMap, filename) {
 }
 
 /** What a duplicate verdict from detectDuplicates() should be staged as.
-    A "definite" match can still have a null other.qid — the other side is
-    itself a staging candidate, not yet admitted, so neither has a real
-    Question ID yet (two identical questions imported in the same batch).
-    That match can never actually be merged: admitBatch()'s own merge
-    branch requires dup.other.qid. Routed to review instead of a decision
-    that would silently never fire, so the person sees the duplicate
-    rather than it slipping through unflagged. */
-function stagingDecisionFor(v) {
+
+    A definite match against a record already in the bank is merged into it.
+
+    A definite match against another candidate in this same batch — the same
+    question printed in two mock papers of one file — has no Question ID on
+    either side yet. It used to go to the review queue, which is how one
+    seven-paper file put 527 "possible duplicates" in front of a student, one
+    Compare at a time. When the two are the SAME question word for word
+    (after normalisation), folding the later copy into the earlier one loses
+    nothing: the one admitted carries both sources, and whichever copy had the
+    answer or the explanation. admitBatch() does the folding. Anything merely
+    close still goes to review, where a person can see the difference.
+
+    `q` is the candidate the verdict belongs to; without it (older callers)
+    an in-batch match can only be sent to review. */
+function stagingDecisionFor(v, q) {
   if (v.conflict) return 'conflict';
-  if (v.cls === 'definite') return v.other.qid ? 'merge' : 'review';
+  if (v.cls === 'definite' && v.other.qid) return 'merge';
+  if (v.cls === 'definite' && q && simParts(q).ckey === simParts(v.other).ckey) return 'merge';
   return 'review';
+}
+/** Whether a staged merge folds into another candidate of the same batch
+    rather than into a record already in the bank. */
+function mergesWithinBatch(it) {
+  return !!(it && it.decision === 'merge' && it.dup && it.dup.other && !it.dup.other.qid);
+}
+/** The staged item an in-file copy ultimately folds into: follow the chain of
+    in-file merges to the first item that is not itself one. null if the
+    chain is broken or loops back. */
+function batchMergeRoot(it, byUuid) {
+  let cur = it, hops = 0;
+  while (mergesWithinBatch(cur)) {
+    const next = byUuid.get(cur.dup.other.uuid);
+    if (!next || next === it || hops++ > byUuid.size) return null;
+    cur = next;
+  }
+  return cur === it ? null : cur;
+}
+/** Fold a word-for-word copy into the question being kept. Nothing the copy
+    knew is lost: its source reference joins the kept one's, and anything the
+    kept copy is missing — the answer (with whatever standing the copy's had),
+    an explanation, a topic, a domain, an option's reason — is taken from it.
+    Anything both carry stays as the kept copy has it. */
+function foldCopyInto(target, copy) {
+  target.sourceRefs = (target.sourceRefs || []).concat(copy.sourceRefs || []);
+  if (!String(target.explanation || '').trim() && copy.explanation) target.explanation = copy.explanation;
+  if (!String(target.learningPoint || '').trim() && copy.learningPoint) target.learningPoint = copy.learningPoint;
+  if (!target.topic && copy.topic) target.topic = copy.topic;
+  if (!target.subtopic && copy.subtopic) target.subtopic = copy.subtopic;
+  if (!target.domainId && copy.domainId) {
+    target.domainId = copy.domainId; target.domainSuggested = !!copy.domainSuggested; target.classVerified = copy.classVerified || 'unverified';
+    if (target.status === 'needs_class') target.status = 'draft';
+  }
+  target.tags = Array.from(new Set((target.tags || []).concat(copy.tags || [])));
+  (target.options || []).forEach(o => {
+    if (o.rationale) return;
+    const m = (copy.options || []).find(x => normOptText(x.text) === normOptText(o.text));
+    if (m && m.rationale) o.rationale = m.rationale;
+  });
+  if (!target.correctOptionId && copy.correctOptionId) {
+    const c = (copy.options || []).find(o => o.id === copy.correctOptionId);
+    const hit = c && (target.options || []).find(o => normOptText(o.text) === normOptText(c.text));
+    if (hit) {
+      target.correctOptionId = hit.id;
+      target.answerVerified = copy.answerVerified || 'unverified';
+      target.verifiedAt = copy.verifiedAt || null;
+      target.verifyNote = copy.verifyNote || '';
+      if (target.status === 'needs_answer' || target.status === 'needs_class') target.status = 'draft';
+    }
+  }
 }
 
 async function runParse(files, meta) {
@@ -13408,7 +13674,7 @@ async function runParse(files, meta) {
     const v = verdicts.get(it.q.uuid);
     it.dup = v || null;
     if (v) {
-      it.decision = stagingDecisionFor(v);
+      it.decision = stagingDecisionFor(v, it.q);
       if (it.decision === 'conflict') { it.q.status = 'answer_conflict'; it.q.conflict = true; }
       else if (it.decision === 'review') { it.q.status = 'possible_dup'; }
     }
@@ -13459,6 +13725,16 @@ const STAGING_DECISION_LABELS = {
   import: 'will import', reject: 'will reject',
   merge: 'will merge into existing', review: 'will go to review queue', conflict: 'will flag answer conflict'
 };
+/** The row badge, which has to say where a merge goes — and, for a copy
+    of a question earlier in the file, what becomes of it if that original is
+    rejected (it goes too; see admitBatch). */
+function stagingDecisionLabel(it, items) {
+  if (!mergesWithinBatch(it)) return STAGING_DECISION_LABELS[it.decision] || it.decision;
+  const root = batchMergeRoot(it, new Map((items || []).map(x => [x.q.uuid, x])));
+  if (root && root.decision === 'reject') return 'will be rejected with its copy above';
+  const n = root ? (items || []).indexOf(root) + 1 : 0;
+  return 'will merge with its copy' + (n ? ' #' + n : ' above');
+}
 function renderStaging(root) {
   const st = State.staging;
   if (!st.ui) st.ui = { filter: 'all', page: 0, size: 25, sel: new Set() };
@@ -13589,7 +13865,7 @@ function renderStaging(root) {
     const line2 = h('div', { class: 'card-b tight row wrap', style: 'border-top:1px solid var(--rule-soft)' }, [
       h('span', { class: 'eyebrow', text: 'Decide' }),
       act('Import', () => applyDecision('import')),
-      act('Merge into existing', () => applyDecision('merge'), '', 'merge'),
+      act('Merge duplicates', () => applyDecision('merge'), '', 'merge'),
       act('Send to review queue', () => applyDecision('review'), '', 'review'),
       act('Flag answer conflict', () => applyDecision('conflict'), '', 'conflict'),
       act('Reject', () => applyDecision('reject'))
@@ -13611,7 +13887,7 @@ function renderStaging(root) {
     let done = 0;
     target.forEach(it => { if (setStagingDecision(it, d)) done++; });
     const skipped = target.length - done;
-    const why = d === 'merge' || d === 'review' ? ' — they match nothing already in the bank'
+    const why = d === 'merge' || d === 'review' ? ' — they match nothing in the bank or earlier in this file'
       : d === 'conflict' ? ' — they raise no answer conflict' : '';
     toast(done + ' set to ' + d + (skipped ? ' · ' + skipped + ' unchanged' + why : ''), skipped ? 'warn' : 'ok');
     drawAll();
@@ -13693,7 +13969,7 @@ function renderStaging(root) {
       h('span', { class: 'docnum dim', text: '#' + (i + 1) }),
       h('span', { class: 'tick', dataset: { mark: markFor(q) }, style: 'border:0;width:auto', text: (STATUS[q.status] || {}).mark }),
       statusBadge(q),
-      h('span', { class: 'badge ' + (it.decision === 'reject' ? 'b-arch' : it.decision === 'import' ? 'b-active' : 'b-review'), text: STAGING_DECISION_LABELS[it.decision] || it.decision }),
+      h('span', { class: 'badge ' + (it.decision === 'reject' ? 'b-arch' : it.decision === 'import' ? 'b-active' : 'b-review'), text: stagingDecisionLabel(it, st.items) }),
       it.dup ? h('span', { class: 'badge ' + (it.dup.conflict ? 'b-conflict' : 'b-dup'), text: (it.dup.conflict ? 'answer conflict · ' : '') + it.dup.cls + ' duplicate · ' + Math.round(it.dup.sim.score * 100) + '%' }) : null,
       q.caseRef ? h('span', { class: 'badge b-info', title: 'Goes into the case study bank', text: '❐ ' + ((st.caseStudies.find(c => c.key === q.caseRef) || {}).title || q.caseRef.split('\u0000').pop()) + ' · Q' + (q.caseSeq || '?') }) : null,
       h('div', { class: 'spacer' }),
@@ -13746,7 +14022,7 @@ function renderStaging(root) {
     g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Difficulty' }), h('select', { onchange: e => q.difficulty = e.target.value }, DIFFICULTY.map(d => h('option', { value: d, selected: q.difficulty === d }, d)))]));
     g.appendChild(h('div', { class: 'field' }, [h('label', { text: 'Decision' }), h('select', {
       onchange: e => { setStagingDecision(it, e.target.value); drawAll(); }
-    }, [['import', 'Import'], ['reject', 'Reject'], it.dup && it.dup.other && it.dup.other.qid ? ['merge', 'Merge into existing'] : null, it.dup ? ['review', 'Send to review queue'] : null, it.dup && it.dup.conflict ? ['conflict', 'Record answer conflict'] : null].filter(Boolean).map(([v, l]) => h('option', { value: v, selected: it.decision === v }, l)))]));
+    }, [['import', 'Import'], ['reject', 'Reject'], it.dup && it.dup.other ? ['merge', it.dup.other.qid ? 'Merge into existing' : 'Merge with its copy above'] : null, it.dup ? ['review', 'Send to review queue'] : null, it.dup && it.dup.conflict ? ['conflict', 'Record answer conflict'] : null].filter(Boolean).map(([v, l]) => h('option', { value: v, selected: it.decision === v }, l)))]));
     body.appendChild(g);
     // Always rendered, not just when the source already had one — a person
     // reviewing a staged batch could otherwise never add the one thing the
@@ -13891,8 +14167,39 @@ async function admitBatch() {
     delete it.q.caseRef;
   });
 
+  /* Copies of a question earlier in this same file (see stagingDecisionFor)
+     are folded into the copy actually being kept, before any status is
+     settled — a copy may bring the answer or the explanation its partner
+     lacked, and that changes what the kept one earns. The kept copy is found
+     by following the chain (a third copy may point at the second, which
+     points at the first). If that is a record already in the bank, the copy
+     joins the ordinary bank merge below. A copy follows its original: reject
+     the original and its word-for-word copies go with it, which the staging
+     row says before anybody confirms. A copy whose answer disagrees with what
+     the kept one has by now (another copy may have supplied it) is not folded
+     at all — it is admitted as the answer conflict it is. */
+  const stagedByUuid = new Map(st.items.map(it => [it.q.uuid, it]));
+  const foldedAway = new Set();
+  let folded = 0;
+  st.items.forEach(it => {
+    if (!mergesWithinBatch(it)) return;
+    const root = batchMergeRoot(it, stagedByUuid);
+    if (!root) { it.decision = 'import'; return; }
+    if (root.decision === 'reject') { it.decision = 'reject'; return; }
+    if (root.decision === 'merge') { it.dup = Object.assign({}, it.dup, { other: root.dup.other }); return; }
+    if (answersConflict(root.q, it.q)) {
+      it.decision = 'conflict'; it.q.status = 'answer_conflict'; it.q.conflict = true;
+      it.dup = Object.assign({}, it.dup, { other: root.q, conflict: true });
+      return;
+    }
+    foldCopyInto(root.q, it.q);
+    foldedAway.add(it.q.uuid);
+    folded++;
+  });
+
   const toAdmit = [], toMerge = [], rejected = [], needsRecheck = [];
   st.items.forEach(it => {
+    if (foldedAway.has(it.q.uuid)) return;
     if (it.decision === 'reject') { rejected.push(it); return; }
     if (it.decision === 'merge' && it.dup && it.dup.other && it.dup.other.qid) { toMerge.push(it); return; }
     if (it.decision === 'conflict') { it.q.status = 'answer_conflict'; it.q.conflict = true; }
@@ -13923,7 +14230,8 @@ async function admitBatch() {
     // was ever set.
     if (it.dup || it.edited) needsRecheck.push(it.q);
   });
-  let merged = 0;
+  let merged = folded;
+  if (folded) await audit('merge', 'batch', st.batch.id, null, { folded }, folded + ' word-for-word copies within the file folded into the copy kept; every source retained');
   for (const it of toMerge) {
     const target = it.dup.other;
     const existing = await Questions.get(target.uuid);
@@ -14059,7 +14367,7 @@ async function showReconciliation(batch) {
       'This import ran before per-status breakdowns were recorded, so the remaining ' +
       (r.drafts - r.incomplete - r.possibleDup - r.conflicts) + ' aren’t itemised here — open the Review Queue for their current status.')]));
   }
-  row('Merged into existing records', r.merged, 'Both source references retained');
+  row('Merged as duplicates', r.merged, 'Copies of a question already in the bank, or earlier in this file — every source kept');
   row('Rejected during review', r.rejected, 'Logged in the audit trail');
   tb.appendChild(h('tr', { class: 'total' }, [h('td', { text: 'Total accounted for' }), h('td', { class: 'amt', text: String(r.accounted || 0) }), h('td', {})]));
   row('Unresolved text blocks (not question candidates)', r.unresolved, 'Reported separately — never counted as questions');
@@ -18382,22 +18690,71 @@ async function courseDialog(course) {
   const optCount = h('input', { type: 'number', min: '2', max: '8', style: 'width:90px', value: String(course && course.optionCount ? course.optionCount : 4) });
   const enforceOpts = h('input', { type: 'checkbox', checked: !!(course && course.enforceOptionCount) });
   const rows = h('div', { class: 'stack' });
-  let bp = course ? course.blueprint.map(d => Object.assign({}, d)) : [{ id: 'D1', name: '', weight: 100 }];
+  const BLANK_BP = [{ id: 'D1', name: '', weight: 100 }];
+  let bp = course ? course.blueprint.map(d => Object.assign({}, d)) : BLANK_BP.map(d => Object.assign({}, d));
+  // Once a row has been typed into, the rows are the student's, and a code
+  // that happens to match a template must never overwrite them.
+  let bpTouched = false;
+  const touched = () => { bpTouched = true; fillNote.textContent = ''; };
   const totalEl = h('span', { class: 'docnum' });
   const drawRows = () => {
     rows.textContent = '';
     bp.forEach((d, i) => {
       rows.appendChild(h('div', { class: 'row', style: 'gap:6px' }, [
-        h('input', { type: 'text', style: 'width:70px', value: d.id, oninput: e => d.id = e.target.value.trim().toUpperCase() }),
-        h('input', { type: 'text', value: d.name, placeholder: 'Domain name', oninput: e => d.name = e.target.value }),
-        h('input', { type: 'number', style: 'width:80px', min: '0', max: '100', value: String(d.weight), oninput: e => { d.weight = +e.target.value || 0; total(); } }),
-        h('button', { class: 'btn sm ghost', onclick: () => { bp.splice(i, 1); drawRows(); total(); }, text: '✕' })
+        h('input', { type: 'text', style: 'width:70px', value: d.id, oninput: e => { d.id = e.target.value.trim().toUpperCase(); touched(); } }),
+        h('input', { type: 'text', value: d.name, placeholder: 'Domain name', oninput: e => { d.name = e.target.value; touched(); } }),
+        h('input', { type: 'number', style: 'width:80px', min: '0', max: '100', value: String(d.weight), oninput: e => { d.weight = +e.target.value || 0; touched(); total(); } }),
+        h('button', { class: 'btn sm ghost', onclick: () => { bp.splice(i, 1); touched(); drawRows(); total(); }, text: '✕' })
       ]));
     });
-    rows.appendChild(h('button', { class: 'btn sm', onclick: () => { bp.push({ id: 'D' + (bp.length + 1), name: '', weight: 0 }); drawRows(); }, text: '+ Add domain' }));
+    rows.appendChild(h('button', { class: 'btn sm', onclick: () => { bp.push({ id: 'D' + (bp.length + 1), name: '', weight: 0 }); touched(); drawRows(); }, text: '+ Add domain' }));
   };
   const total = () => { const t = bp.reduce((s, d) => s + (+d.weight || 0), 0); totalEl.textContent = t + '%'; totalEl.style.color = t === 100 ? 'var(--green)' : 'var(--amber)'; };
   drawRows(); total();
+
+  /* Most people type the code rather than find the quick-add chips, and a
+     course typed as "DISA" used to be created with one empty domain — so
+     every question imported into it landed unclassified, and nothing ever
+     said the blueprint could have been filled in for them. Typing a
+     template's code now fills the form exactly as quick add would, until
+     the student types into the rows themselves. */
+  const fillNote = h('div', { class: 'tiny', style: 'color:var(--green)' });
+  let filledFrom = null;
+  if (isNew) code.addEventListener('input', () => {
+    if (bpTouched) return;
+    const t = courseTemplateFor(code.value);
+    if (t && t !== filledFrom) {
+      bp = t.blueprint.map(d => Object.assign({}, d));
+      if (!name.value.trim() || (filledFrom && name.value === filledFrom.name)) name.value = t.name;
+      if (!prefix.value.trim() || (filledFrom && prefix.value === filledFrom.code)) prefix.value = t.code;
+      filledFrom = t;
+      fillNote.textContent = 'Filled in with the standard ' + t.code + ' domains and exam weights. Change anything you like.';
+    } else if (!t && filledFrom) {
+      bp = BLANK_BP.map(d => Object.assign({}, d));
+      if (name.value === filledFrom.name) name.value = '';
+      if (prefix.value === filledFrom.code) prefix.value = '';
+      filledFrom = null;
+      fillNote.textContent = '';
+    } else return;
+    drawRows(); total();
+  });
+  // A course made before DISA carried its real blueprint is still on the
+  // single "General" domain; one click puts it on the standard one.
+  const upgradeBox = (!isNew && onPlaceholderBlueprint(course) && courseTemplateFor(course.code)) ? h('div', { class: 'notice small row wrap', style: 'gap:10px;align-items:center' }, [
+    h('span', { style: 'flex:1;min-width:220px', text: 'This course is still on the single “General” domain it was first created with. The standard ' + courseTemplateFor(course.code).code + ' blueprint has five domains with their exam weights, and files your questions under them for you.' }),
+    h('button', {
+      class: 'btn sm primary', onclick: async (e) => {
+        const box = e.currentTarget.closest('.modal');
+        quickAdded = true;
+        if (box && box._close) box._close(null);
+        const r = await applyCourseTemplate(course);
+        if (!r) return;
+        renderShell();
+        toast('Now on the standard ' + r.code + ' domains. ' + r.refiled + ' question(s) filed under a domain' + (r.unplaced ? ', ' + r.unplaced + ' left Unclassified (still practising)' : '') + '.', 'ok', 8000);
+        go('settings');
+      }, text: 'Use the standard domains'
+    })
+  ]) : null;
 
   // Escape/✕ close exactly like Cancel despite sticky, same gap as every
   // other editing dialog in the app — checked against a snapshot of these
@@ -18497,7 +18854,8 @@ async function courseDialog(course) {
         h('div', { class: 'field' }, [h('label', { text: 'Full name' }), name]),
         h('div', { class: 'field' }, [h('label', { text: 'Question ID prefix' }), prefix, h('div', { class: 'tiny dim', text: isNew ? 'Becomes e.g. DISA-Q-000001' : 'Changing this does not alter IDs already issued.' })])
       ]),
-      h('div', { class: 'field' }, [h('label', {}, ['Blueprint — domain code, name, exam weight  ', totalEl]), rows]),
+      upgradeBox,
+      h('div', { class: 'field' }, [h('label', {}, ['Blueprint — domain code, name, exam weight  ', totalEl]), fillNote, rows]),
       h('div', { class: 'row', style: 'gap:7px;align-items:center' }, [
         h('span', { class: 'tiny dim', text: 'Weights drive mock and mixed-revision selection' }),
         infoTip('Exam weights', 'They need not total 100 — selection is proportional either way — but a 100% total is easier to reason about, and the running total above turns green when it reaches it.')
@@ -18585,7 +18943,22 @@ async function courseDialog(course) {
   const optionCount = clamp(parseInt(optCount.value, 10) || 4, 2, 8);
   const enforceOptionCount = !!enforceOpts.checked;
   if (isNew) {
-    const c = makeCourse(code.value.trim(), name.value.trim(), bp, { qidPrefix: (prefix.value.trim() || code.value.trim()).toUpperCase().replace(/[^A-Z0-9]/g, ''), optionCount, enforceOptionCount });
+    // A course typed in under a template's code gets what quick add would
+    // have given it — the keyword hints that file questions under domains,
+    // and the mock defaults — limited to the domains it actually kept, so a
+    // hint can never file a question under a domain the student deleted.
+    const tpl = courseTemplateFor(code.value);
+    const extra = {};
+    if (tpl && tpl.opts) {
+      const keep = new Set(bp.map(d => d.id));
+      if (tpl.opts.hints) {
+        const hints = {};
+        Object.keys(tpl.opts.hints).forEach(k => { if (keep.has(k)) hints[k] = tpl.opts.hints[k]; });
+        if (Object.keys(hints).length) extra.hints = hints;
+      }
+      if (tpl.opts.defaults) extra.defaults = Object.assign({}, tpl.opts.defaults);
+    }
+    const c = makeCourse(code.value.trim(), name.value.trim(), bp, Object.assign(extra, { qidPrefix: (prefix.value.trim() || code.value.trim()).toUpperCase().replace(/[^A-Z0-9]/g, ''), optionCount, enforceOptionCount }));
     await DB.put('courses', c);
     await DB.put('idRegister', { courseId: c.id, lastSeq: 0, allocations: [] });
     await audit('create', 'course', c.id, null, { code: c.code, domains: bp.length }, '');
@@ -26522,7 +26895,60 @@ test('Conflicting correct answers are detected, not merged', async () => {
   const v = verdicts.get(b.uuid);
   assert(v && v.conflict, 'duplicate detection must surface the conflict');
 });
-test('An in-file duplicate — neither side admitted, so neither has a real Question ID — is routed to review, not a merge decision that could never fire', async () => {
+test('A trailing page number or a dropped word in the correct option is not an answer conflict', () => {
+  const stem = 'Which of the following is the PRIMARY objective of an IT performance measurement process?';
+  const opts = ['Minimize errors.', 'Gather performance data.', 'Establish performance baselines.', 'Optimize performance.'];
+  const a = mkQ(stem, opts, 3);
+  const b = mkQ(stem, opts.slice(0, 3).concat(['Optimize performance. 410 Mock Assessment Test Paper-6']), 3);
+  assert(!answersConflict(a, b), 'the same option with page junk after it is the same answer');
+  assert(answersConflict(a, mkQ(stem, opts, 1)), 'a different option is still a conflict');
+  const checks = ['Check digit', 'Existence check', 'Completeness check', 'Reasonableness check'];
+  const d = mkQ('Which edit check makes sure a field contains data, not zeros or blanks?', checks, 2);
+  const e = mkQ('Which edit check makes sure a field contains data, not zeros or blanks?', checks, 3);
+  assert(answersConflict(d, e), 'two different "… check" options are two different answers');
+});
+test('An answer the source states only in prose is read — and "not the correct answer" never is', () => {
+  const mk = (expl, opts) => ({
+    stem: 'Which is it?', options: (opts || ['Alpha', 'Beta', 'Gamma', 'Delta']).map((t, i) => ({ letter: letterOf(i), text: t })),
+    answerRaw: '', answerLetter: '', explanation: expl, conf: { stem: 1, options: 1, answer: 0 }
+  });
+  eq(recoverStatedAnswer(mk('Option D is the correct answer. Delta is why.')).answerLetter, 'D');
+  eq(recoverStatedAnswer(mk('Delta covers it. Hence b is answer.')).answerLetter, 'B');
+  eq(recoverStatedAnswer(mk('The correct answer is (c).')).answerLetter, 'C');
+  eq(recoverStatedAnswer(mk('Choice a is the most appropriate answer.')).answerLetter, 'A');
+  eq(recoverStatedAnswer(mk('Option C is not the correct answer. Option A is incorrect.')).answerLetter, '', 'a negation names no answer');
+  eq(recoverStatedAnswer(mk('Option B is correct, but option C is the right answer.')).answerLetter, '', 'two statements that disagree name none');
+  eq(recoverStatedAnswer(mk('Option E is the correct answer.')).answerLetter, '', 'a letter the question does not have is ignored');
+  eq(recoverStatedAnswer(mk('The answer: a user must log in first.')).answerLetter, '', 'prose after "answer:" is not a letter');
+  const g = recoverStatedAnswer(mk('', ['Special training', 'Annual conferences', 'Competitive salaries', 'Flexible work schedules Option D is the correct answer. Flexibility motivates most.']));
+  eq(g.answerLetter, 'D', 'an answer run onto the last option is found there');
+  eq(g.options[3].text, 'Flexible work schedules', 'and the explanation is split back off the option');
+  assert(/^Option D is the correct answer/.test(g.explanation), 'to become the explanation');
+  eq(g.conf.answer, 0.9, 'a stated answer is the source’s own, so the trust setting can apply to it');
+  const long = recoverStatedAnswer(mk('', ['A', 'B', 'C', 'Internetwork layer Application, Transport and Network are TCP/IP layers; Session is not a TCP/IP layer at all, so it cannot be. Hence b is answer.']));
+  eq(long.answerLetter, 'B', 'a statement at the end of a long run-on is still read');
+  eq(long.options[3].text.slice(0, 18), 'Internetwork layer', 'but where the option ends is unclear, so it is not cut');
+  assert(long.conf.options < 0.7, 'and the options are marked for a look instead');
+  const keyed = mk('Option D is the correct answer.'); keyed.answerLetter = 'B';
+  eq(recoverStatedAnswer(keyed).answerLetter, 'B', 'an answer the file gives directly always wins');
+});
+test('A file can mark one of its answers for checking: kept and pre-selected, never trusted', () => {
+  const out = jsonToCandidates({ questions: [
+    { stem: 'Which is right?', options: ['One', 'Two'], answer: 'B', checkAnswer: true, checkNote: 'Paper 6 says A.' },
+    { stem: 'Which is left?', options: ['One', 'Two'], answer: 'A' }
+  ] });
+  const ctx = { courseId: 'test-course', course: { blueprint: [{ id: 'D1', name: 'One', weight: 100 }], hints: {} }, sourceId: 's', sourceTitle: 't', filename: 'f', trustSourceAnswers: true, defaultDomainId: 'D1' };
+  const flagged = candidateToQuestion(out.candidates[0], ctx), plain = candidateToQuestion(out.candidates[1], ctx);
+  eq(flagged.correctOptionId, flagged.options[1].id, 'the answer is kept and pre-selected');
+  eq(flagged.answerVerified, 'unverified', 'but never trusted, whatever the batch setting says');
+  eq(flagged.status, 'needs_answer', 'so it waits in the review queue');
+  eq(flagged.verifyNote, 'Paper 6 says A.', 'with the file’s reason beside it');
+  eq(plain.answerVerified, 'verified', 'an unflagged answer in the same file is trusted as before');
+  const rows = rowsToCandidates([['Question', 'A', 'B', 'Answer', 'Check answer', 'Check note'], ['Which?', 'x', 'y', 'B', 'yes', 'Unsure']]);
+  assert(rows.candidates[0].checkAnswer, 'the same column works in a spreadsheet');
+  eq(rows.candidates[0].checkNote, 'Unsure');
+});
+test('An in-file word-for-word copy is merged into the copy before it, not queued for review', async () => {
   const qA = mkQ('The exact same question, twice in one file?', ['a', 'b', 'c', 'd'], 0);
   const qB = mkQ('The exact same question, twice in one file?', ['a', 'b', 'c', 'd'], 0);
   await recomputeFingerprint(qA); await recomputeFingerprint(qB);
@@ -26530,13 +26956,88 @@ test('An in-file duplicate — neither side admitted, so neither has a real Ques
   assert(v, 'the second copy must match the first');
   eq(v.cls, 'definite', 'two word-for-word identical questions are a definite match');
   eq(v.other.qid, null, 'neither side of an in-file duplicate has a real Question ID yet');
-  eq(stagingDecisionFor(v), 'review', 'so the decision must not be "merge" — admitBatch() would never act on it');
+  eq(stagingDecisionFor(v, qB), 'merge', 'so the later copy is merged into the earlier one, which admitBatch() now carries out');
+  eq(stagingDecisionFor(v), 'review', 'a caller that cannot say which candidate the verdict belongs to still gets review');
 });
 test('stagingDecisionFor() picks merge, conflict or review by what admitBatch() can actually act on', () => {
+  const same1 = mkQ('Which control is preventive?', ['Log review', 'Authorisation', 'Reconciliation', 'Audit trail'], 1);
+  const same2 = mkQ('Which control is preventive?', ['Log review', 'Authorisation', 'Reconciliation', 'Audit trail'], 1);
+  const near = mkQ('Which control is preventive?', ['Log review', 'Authorisation', 'Reconciliation', 'An audit trail'], 1);
   eq(stagingDecisionFor({ conflict: true, cls: 'definite', other: { qid: 'Q1' } }), 'conflict', 'a conflicting answer always wins, regardless of class');
   eq(stagingDecisionFor({ conflict: false, cls: 'definite', other: { qid: 'Q1' } }), 'merge', 'a definite match against an admitted record can be merged');
-  eq(stagingDecisionFor({ conflict: false, cls: 'definite', other: { qid: null } }), 'review', 'a definite match against an unadmitted record cannot');
+  eq(stagingDecisionFor({ conflict: false, cls: 'definite', other: same1 }, same2), 'merge', 'a word-for-word copy earlier in the same file is merged into');
+  eq(stagingDecisionFor({ conflict: false, cls: 'definite', other: near }, same2), 'review', 'but a merely close one in the same file goes to review, where the difference can be seen');
   eq(stagingDecisionFor({ conflict: false, cls: 'likely', other: { qid: 'Q1' } }), 'review', 'anything short of definite goes to review, whatever the other side has');
+});
+test('Admission folds in-file copies into the one kept: sources, answer and explanation travel; a disagreeing copy is a conflict', async () => {
+  const cid = 'test-admit-fold-' + Date.now();
+  const course = makeCourse('AFD', 'Admit fold course', [{ id: 'D1', name: 'One', weight: 100 }], { id: cid });
+  const was = { course: State.course, courses: State.courses, staging: State.staging };
+  const realShowRec = globalThis.showReconciliation, realGo = globalThis.go;
+  globalThis.showReconciliation = () => { };
+  globalThis.go = () => { };
+  const batchId = uuid();
+  const batch = { id: batchId, courseId: cid, startedAt: nowISO(), label: 'Fold batch', sourceIds: [], report: null };
+  const stem = 'Which of the following is the MOST effective control over a folded duplicate?';
+  const opts = ['Wording', 'Sourcing', 'Answering', 'Explaining'];
+  const mk = (ix, extra, ref) => {
+    const q = mkQ(stem, opts, ix, Object.assign({ courseId: cid, domainId: 'D1', batchId, status: 'draft' }, extra || {}));
+    q.sourceRefs = [{ sourceId: 's', sourceTitle: 'Fold batch', filename: 'f.json', locator: ref }];
+    q.locator = ref;
+    return q;
+  };
+  // The first copy has no answer and no explanation; the second has both,
+  // trusted; the third answers differently; the fourth is a bare copy.
+  const first = mk(null, { status: 'needs_answer' }, 'line 1');
+  const second = mk(1, { answerVerified: 'verified', explanation: 'Because sourcing.' }, 'line 2');
+  const third = mk(2, { answerVerified: 'verified' }, 'line 3');
+  const fourth = mk(null, { status: 'needs_answer' }, 'line 4');
+  // A rejected original takes its copy with it.
+  const other = mkQ('A different question entirely, rejected here?', ['p', 'q'], 0, { courseId: cid, batchId, status: 'draft', answerVerified: 'verified' });
+  const otherCopy = mkQ('A different question entirely, rejected here?', ['p', 'q'], 0, { courseId: cid, batchId, status: 'draft', answerVerified: 'verified' });
+  const all = [first, second, third, fourth, other, otherCopy];
+  for (const q of all) await recomputeFingerprint(q);
+  const dupOf = (q) => ({ other: q, cls: 'definite', sim: { score: 1 }, conflict: false });
+  const items = [
+    { q: first, dup: null, decision: 'import' },
+    { q: second, dup: dupOf(first), decision: 'merge' },
+    { q: third, dup: dupOf(second), decision: 'merge' },
+    { q: fourth, dup: dupOf(first), decision: 'merge' },
+    { q: other, dup: null, decision: 'reject' },
+    { q: otherCopy, dup: dupOf(other), decision: 'merge' }
+  ];
+  eq(stagingDecisionLabel(items[3], items), 'will merge with its copy #1', 'the row says which copy it merges with');
+  eq(stagingDecisionLabel(items[5], items), 'will be rejected with its copy above', 'and says so when that copy is being rejected');
+  State.staging = { batch, meta: { title: 'Fold batch' }, items, unresolved: [], sources: [], rejected: [], caseStudies: [] };
+  try {
+    await DB.put('courses', course);
+    State.course = course; State.courses = [course];
+    await admitBatch();
+    const kept = await DB.get('questions', first.uuid);
+    assert(kept && kept.qid, 'the first copy is admitted');
+    eq(kept.options.findIndex(o => o.id === kept.correctOptionId), 1, 'with the answer only the second copy carried');
+    eq(kept.answerVerified, 'verified', 'and that answer keeps the standing it had');
+    eq(kept.explanation, 'Because sourcing.', 'the explanation travels too');
+    eq(kept.sourceRefs.map(r => r.locator).join(','), 'line 1,line 2,line 4', 'every folded copy’s source is kept');
+    eq(kept.status, 'answer_conflict', 'it is paired against the copy that disagreed');
+    assert(!(await DB.get('questions', second.uuid)), 'the second copy is not admitted separately');
+    assert(!(await DB.get('questions', fourth.uuid)), 'nor is the fourth');
+    const odd = await DB.get('questions', third.uuid);
+    assert(odd, 'the copy that disagrees is admitted');
+    eq(odd.status, 'answer_conflict', 'as the conflict it is, not folded away');
+    assert(!(await DB.get('questions', other.uuid)) && !(await DB.get('questions', otherCopy.uuid)), 'a rejected original takes its copy with it');
+    const b = await DB.get('batches', batchId);
+    eq(b.report.merged, 2, 'two copies folded');
+    eq(b.report.rejected, 2, 'two rejected');
+    assert(b.report.balanced, 'and the reconciliation still accounts for every candidate');
+  } finally {
+    globalThis.showReconciliation = realShowRec; globalThis.go = realGo;
+    State.course = was.course; State.courses = was.courses; State.staging = was.staging;
+    for (const q of await DB.byIndex('questions', 'batchId', batchId)) await DB.del('questions', q.uuid);
+    await DB.del('batches', batchId);
+    await DB.del('courses', cid);
+    await DB.del('idRegister', cid);
+  }
 });
 test('An edited staging candidate is rechecked against the bank on admission, even though the parse-time check found nothing', async () => {
   const cid = 'test-admit-edited-' + Date.now();
@@ -32991,15 +33492,30 @@ test('sourceDialog defaults the trust tick from what the batch actually detected
     if (dlg && dlg._close) dlg._close(null);
     await opened;
 
-    const mixed = { filename: 'mixed.txt', ext: 'txt', size: 10, kind: 'text', text: [
+    // A question with no answer at all has nothing for this setting to trust,
+    // so it must not hold the tick back from the answers that ARE printed.
+    const missingOne = { filename: 'missing.txt', ext: 'txt', size: 10, kind: 'text', text: [
       '1. Which control is preventive?', 'A) Log review', 'B) Segregation of duties', 'Answer: B',
       '', '2. Which control is detective?', 'A) Log review', 'B) Segregation of duties'
     ].join('\n') };
-    opened = sourceDialog([mixed]);
+    opened = sourceDialog([missingOne]);
     dlg = await findModal();
     assert(dlg, 'the source dialog must open a second time');
     trustBox = dlg.querySelector('input[type=checkbox]');
-    assert(!trustBox.checked, 'one detected answer had to be inferred, so this opens off');
+    assert(trustBox.checked, 'a missing answer is not an inferred one, so this still opens ticked');
+    assert(/1 with no answer wait/.test(dlg.textContent), 'and says the unanswered one waits either way');
+    if (dlg && dlg._close) dlg._close(null);
+    await opened;
+
+    const inferred = { filename: 'inferred.txt', ext: 'txt', size: 10, kind: 'text', text: [
+      '1. Which control is preventive?', 'A) Log review', 'B) Segregation of duties', 'Answer: B',
+      '', '2. Which control is detective?', 'A) Log review', 'B) Segregation of duties', 'Answer: the first one'
+    ].join('\n') };
+    opened = sourceDialog([inferred]);
+    dlg = await findModal();
+    assert(dlg, 'the source dialog must open again');
+    trustBox = dlg.querySelector('input[type=checkbox]');
+    assert(!trustBox.checked, 'one answer had to be inferred, so this opens off');
     assert(/had to be inferred/.test(dlg.textContent), 'the checkbox says why it defaulted off');
     if (dlg && dlg._close) dlg._close(null);
     await opened;
@@ -34847,6 +35363,90 @@ test('Creating a course lands you straight on Add Questions, not back in Setting
     'the shared save tail must send a brand-new course to Add Questions, and an edited one back to Settings');
   assert(/go\('import'\)/.test(src),
     'the quick-add "create a new course" button must also land on Add Questions');
+});
+test('DISA quick add carries the five CISA domains, their weights and the keyword hints', () => {
+  const disa = courseTemplateFor('disa'), cisa = courseTemplateFor(' CISA ');
+  assert(disa && cisa, 'both templates are found by code, whatever the case or spacing');
+  eq(JSON.stringify(disa.blueprint), JSON.stringify(cisa.blueprint), 'DISA is examined against the same domains at the same weights');
+  eq(disa.blueprint.reduce((s, d) => s + d.weight, 0), 100, 'and the weights total 100');
+  assert(disa.blueprint !== cisa.blueprint && disa.blueprint[0] !== cisa.blueprint[0], 'copied, so editing one course can never edit the other');
+  assert(disa.opts.hints && disa.blueprint.every(d => (disa.opts.hints[d.id] || []).length), 'every domain has hints that can file a question under it');
+  assert(!onPlaceholderBlueprint({ blueprint: disa.blueprint }), 'and it is not the old single-domain placeholder');
+  eq(courseTemplateFor('CA Final'), null, 'a code with no template gets none');
+});
+test('Typing a template code into Add a course fills in its blueprint, and never over rows you typed', async () => {
+  const fieldByLabel = (label) => {
+    const field = Array.from(document.querySelectorAll('.modal-bg .field')).find(f => {
+      const lab = f.querySelector('label');
+      return lab && lab.textContent.trim() === label;
+    });
+    return field && field.querySelector('input');
+  };
+  const rowNames = () => Array.from(document.querySelectorAll('.modal-bg input[placeholder="Domain name"]')).map(i => i.value);
+  const type = (el, v) => { el.value = v; el.dispatchEvent(new Event('input')); };
+  const beforeCount = State.courses.length;
+  let p;
+  try {
+    p = courseDialog(null);
+    await new Promise(r => setTimeout(r, 50));
+    const code = fieldByLabel('Short code'), name = fieldByLabel('Full name');
+    assert(code && name, 'the form is on screen');
+    eq(rowNames().join('|'), '', 'a blank form starts with one empty domain');
+    type(code, 'disa');
+    eq(rowNames().length, 5, 'typing DISA fills in the five domains');
+    eq(name.value, courseTemplateFor('DISA').name, 'and the full name');
+    type(code, 'disax');
+    eq(rowNames().join('|'), '', 'typing on past the code takes the fill back out');
+    eq(name.value, '', 'including the name it put there');
+    type(code, 'CISA');
+    eq(rowNames().length, 5, 'CISA fills in the same way');
+    type(document.querySelector('.modal-bg input[placeholder="Domain name"]'), 'My own domain');
+    type(code, 'DISA');
+    eq(rowNames()[0], 'My own domain', 'once a row has been typed into, a matching code never overwrites it');
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise(r => setTimeout(r, 50));
+    const discard = Array.from(document.querySelectorAll('.modal-bg .modal-f button')).find(b => b.textContent === 'Discard');
+    assert(discard, 'leaving asks before throwing the form away');
+    discard.click();
+    await p;
+    eq(State.courses.length, beforeCount, 'nothing was created');
+  } finally {
+    document.querySelectorAll('.modal-bg').forEach(el => el.remove());
+  }
+});
+test('A course still on the old "General" placeholder moves onto its template, re-filing its questions', async () => {
+  const cid = 'test-course-tpl-' + Date.now();
+  const course = { id: cid, code: 'DISA', name: 'DISA', blueprint: [{ id: 'GEN', name: 'General', weight: 100 }], defaults: { mockCount: 50 }, notes: 'This course starts with a single placeholder domain because the source mock papers are not organised by module.' };
+  const placed = mkQ('Which firewall configuration best protects the perimeter using encryption?', ['a', 'b', 'c', 'd'], 0, { courseId: cid, status: 'active', answerVerified: 'verified', domainId: 'GEN', classVerified: 'verified' });
+  const vague = mkQ('Which of these is best?', ['w', 'x', 'y', 'z'], 1, { courseId: cid, status: 'active', answerVerified: 'verified', domainId: 'GEN' });
+  const held = mkQ('Which firewall rule should be checked first for encryption?', ['a', 'b', 'c', 'd'], null, { courseId: cid, status: 'needs_answer', domainId: 'GEN' });
+  const qs = [placed, vague, held];
+  const prevCourses = State.courses, prevCourse = State.course;
+  await DB.put('courses', course);
+  for (const q of qs) await DB.put('questions', q);
+  try {
+    assert(onPlaceholderBlueprint(course), 'the old DISA shape is recognised');
+    const r = await applyCourseTemplate(course);
+    eq(r.code, 'DISA');
+    const saved = await DB.get('courses', cid);
+    eq(saved.blueprint.map(d => d.id).join(','), 'D1,D2,D3,D4,D5', 'the five domains replace the placeholder');
+    assert(saved.hints && saved.hints.D5, 'the hints come with them');
+    eq(saved.defaults.mockCount, 50, 'a default the student had already changed stays theirs');
+    eq(saved.defaults.mockMinutes, 240, 'while the ones they never set are filled in');
+    eq(saved.notes, '', 'the placeholder note goes with the placeholder');
+    const a = await DB.get('questions', placed.uuid), b = await DB.get('questions', vague.uuid), c = await DB.get('questions', held.uuid);
+    eq(a.domainId, 'D5', 'a question the hints can place is filed');
+    eq(a.classVerified, 'unverified', 'as a suggestion, never as verified');
+    eq(a.status, 'active', 'and stays in practice');
+    eq(b.domainId, null, 'one the hints cannot place is left unfiled');
+    eq(b.status, 'needs_class', 'as Unclassified, which still practises');
+    eq(c.status, 'needs_answer', 'a question held for its answer keeps that reason');
+    eq(r.refiled, 2); eq(r.unplaced, 1);
+  } finally {
+    State.courses = prevCourses; State.course = prevCourse;
+    await DB.del('courses', cid);
+    for (const q of qs) await DB.del('questions', q.uuid);
+  }
 });
 test('The Question Bank mastery bar follows the course mastery target, not a hardcoded 75', () => {
   const src = ROUTES.bank.toString();
